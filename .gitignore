@@ -9,17 +9,10 @@ output/*
 .env.local
 !.env.example
 
-# Python cache and virtual environments
-__pycache__/
-*.py[cod]
-*$py.class
+# Virtual environments
 .venv/
 venv/
 .pytest_cache/
-
-# OS metadata
-.DS_Store
-Thumbs.db
 
 # Raw video footage and scripts (keep folder structure via .gitkeep)
 input/footage/*
@@ -35,3 +28,10 @@ tools/ffmpeg/ffprobe*
 !assets/**
 !models/face_detection_yunet_2023mar.onnx
 !scripts/**
+
+# Always ignore Python caches and OS metadata everywhere (must come last)
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+**/.DS_Store
+**/Thumbs.db
