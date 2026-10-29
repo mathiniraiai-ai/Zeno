@@ -1,0 +1,77 @@
+"""
+Korean (ko) Lexicon & Loanwords Dictionary for Kavioo Subtitle Engine
+"""
+
+LANGUAGE_CODE = "ko"
+LANGUAGE_NAME = "Korean"
+
+SUFFIXES = [
+]
+
+LOANWORDS = {
+    "리피트": "repeat",
+    "스테이트먼트": "statement",
+    "페이퍼": "paper",
+    "킹": "king",
+    "인치": "inch",
+    "퍼폼": "perform",
+    "쇼": "show",
+    "TV 쇼": "TV show",
+    "토픽": "topic",
+    "컨셉": "concept",
+    "레슨": "lesson",
+    "문법": "grammar",
+    "다이얼로그": "dialogue",
+    "레코드": "record",
+    "다웃": "doubt",
+    "펀": "fun",
+    "이지": "easy",
+    "가끔": "sometimes",
+    "코렉트": "correct",
+    "프리": "free",
+    "데이즈": "days",
+    "데이": "day",
+
+    "인터넷": "internet",
+    "와이파이": "wifi",
+    "오프라인": "offline",
+    "패스워드": "password",
+    "메시지": "message",
+    "노트북": "laptop",
+    "콘텐츠": "content",
+    "크리에이터": "creator",
+    "채널": "channel",
+    "업데이트": "update",
+    "테스트": "test",
+    "인터뷰": "interview",
+    "오피스": "office",
+    "프로젝트": "project",
+    "슈퍼": "super",
+    "텐션": "tension",
+    "해피": "happy",
+    "레디": "ready",
+    "스타트": "start",
+    "스톱": "stop",
+    "심플": "simple",
+    "오퍼": "offer",
+    "할인": "discount",
+    "배달": "delivery",
+    "오더": "order",
+    "페이먼트": "payment",
+    "캐시": "cash",
+    "취소": "cancel",
+    "환불": "refund",
+    "닥터": "doctor",
+    "태블릿": "tablet",
+    "스캔": "scan",
+    "리포트": "report",
+    "론": "loan",
+    "카드": "card",
+    "릴스": "reel",
+    "공유": "share",
+
+    "비디오": "video",
+    "카메라": "camera",
+    "온라인": "online",
+    "앱": "app",
+}

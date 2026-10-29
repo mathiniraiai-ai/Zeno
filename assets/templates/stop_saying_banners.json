@@ -1,0 +1,50 @@
+{
+  "source_project": "kannada/20228 X Stop saying this selfie style - with girl riding horse",
+  "layout": {
+    "x_norm": 0.69,
+    "y0_norm": 0.12,
+    "step_norm": 0.0635
+  },
+  "style": {
+    "font": "assets/fonts/Montserrat-ExtraBold.ttf",
+    "font_px": 60,
+    "box_h": 80,
+    "pad_x": 40,
+    "radius": 7,
+    "strike_overshoot": 36,
+    "strike_px": 5,
+    "gradient": [
+      [
+        150,
+        0,
+        0
+      ],
+      [
+        185,
+        0,
+        0
+      ],
+      [
+        62,
+        0,
+        0
+      ]
+    ],
+    "text_color": [
+      255,
+      255,
+      255
+    ],
+    "uppercase": true
+  },
+  "timing": {
+    "lead_sec": 0.05,
+    "hold_after_last_sec": 0.35
+  },
+  "flash": {
+    "asset": "assets/overlays/kn20228_red_flash.png",
+    "first_opacity": 0.9,
+    "other_opacity": 0.55,
+    "duration_sec": 0.35
+  }
+}

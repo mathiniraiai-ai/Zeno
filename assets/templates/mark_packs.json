@@ -1,0 +1,74 @@
+{
+  "_description": "Swappable Tick/Error Mark Packs & SFX Packs for Claude Editor. Set 'mark_style' or 'sfx_pack' at the plan root or override 'style' / 'asset' / 'sfx' per mark item. Editors can also drop any custom PNG into assets/marks/<custom_name>.png and reference it by name.",
+  "_how_to_add_custom_marks": [
+    "1. Drop your custom PNG files into assets/marks/ (e.g., assets/marks/neon_right.png and assets/marks/neon_wrong.png).",
+    "2. Either reference them directly in a mark entry via {\"type\": \"wrong\", \"style\": \"neon_wrong.png\"} (or \"asset\": \"neon_wrong.png\"),",
+    "3. Or name a pair <pack>_right.png and <pack>_wrong.png in assets/marks/ and set \"mark_style\": \"<pack>\" in plan.json — resolve_mark_asset() auto-discovers <style>_right.png / <style>_wrong.png!"
+  ],
+  "default_mark_style": "default",
+  "default_sfx_pack": "default",
+  "mark_packs": {
+    "default": {
+      "description": "Clean circular vector check/cross badges (360x360 RGBA with soft drop shadow)",
+      "right": "assets/marks/right.png",
+      "wrong": "assets/marks/wrong.png",
+      "recommended_position": "top-right",
+      "recommended_size": 0.22
+    },
+    "glossy": {
+      "description": "3D glossy check and cross badges from ScriptCut-AI overlays",
+      "right": "assets/marks/glossy_right.png",
+      "wrong": "assets/marks/glossy_wrong.png",
+      "recommended_position": "top-right",
+      "recommended_size": 0.22
+    },
+    "flash": {
+      "description": "Full-frame/corner red & green flash overlays (kn20228 'Stop Saying This' style)",
+      "right": "assets/marks/green_flash.png",
+      "wrong": "assets/marks/red_flash.png",
+      "recommended_position": "center",
+      "recommended_size": 1.0
+    },
+    "vignette": {
+      "description": "Full-frame red & green border vignette overlays (w42 style)",
+      "right": "assets/marks/w42_green_vignette.png",
+      "wrong": "assets/marks/w42_red_vignette.png",
+      "recommended_position": "center",
+      "recommended_size": 1.0
+    }
+  },
+  "sfx_packs": {
+    "default": {
+      "description": "Standard crisp ding & buzzer",
+      "right": "assets/sfx/correct_ding.wav",
+      "wrong": "assets/sfx/buzzer.wav",
+      "transition": "assets/sfx/whoosh.wav",
+      "pop": "assets/sfx/pop.wav",
+      "click": "assets/sfx/click.wav",
+      "riser": "assets/sfx/riser.wav"
+    },
+    "supernova": {
+      "description": "Supernova Studio energetic SFX pack",
+      "right": "assets/sfx/sn_correct.wav",
+      "wrong": "assets/sfx/sn_wrong.wav",
+      "transition": "assets/sfx/sn_swish_1.wav",
+      "pop": "assets/sfx/sn_punch_1.wav",
+      "click": "assets/sfx/sn_click.mp3",
+      "riser": "assets/sfx/sn_riser_1.wav"
+    },
+    "kn20228": {
+      "description": "Kannada 20228 'Stop Saying This' SFX pack",
+      "right": "assets/sfx/kn20228_correct.mp3",
+      "wrong": "assets/sfx/kn20228_wrong_core.mp3",
+      "transition": "assets/sfx/kn20228_swoosh.wav",
+      "click": "assets/sfx/kn20228_click.wav"
+    },
+    "w42": {
+      "description": "W42 Kannada SFX pack",
+      "right": "assets/sfx/w42_right.wav",
+      "wrong": "assets/sfx/w42_wrong.wav",
+      "transition": "assets/sfx/w42_transition.wav",
+      "swoosh": "assets/sfx/w42_swoosh.wav"
+    }
+  }
+}

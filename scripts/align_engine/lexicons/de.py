@@ -1,0 +1,72 @@
+"""
+German (de) Lexicon & Loanwords Dictionary for Kavioo Subtitle Engine
+"""
+
+LANGUAGE_CODE = "de"
+LANGUAGE_NAME = "German"
+
+SUFFIXES = [
+]
+
+LOANWORDS = {
+    "internet": "internet",
+    "wlan": "wifi",
+    "wifi": "wifi",
+    "online": "online",
+    "app": "app",
+    "passwort": "password",
+    "email": "email",
+    "laptop": "laptop",
+    "creator": "creator",
+    "kanal": "channel",
+    "viral": "viral",
+    "update": "update",
+    "studenten": "students",
+    "lehrer": "teacher",
+    "schule": "school",
+    "prüfung": "exam",
+    "resultat": "result",
+    "interview": "interview",
+    "job": "job",
+    "gehalt": "salary",
+    "büro": "office",
+    "projekt": "project",
+    "super": "super",
+    "spannung": "tension",
+    "sorry": "sorry",
+    "danke": "thanks",
+    "bitte": "please",
+    "happy": "happy",
+    "fertig": "ready",
+    "start": "start",
+    "stopp": "stop",
+    "simpel": "simple",
+    "ernst": "serious",
+    "problem": "problem",
+    "angebot": "offer",
+    "rabatt": "discount",
+    "lieferung": "delivery",
+    "bestellung": "order",
+    "zahlung": "payment",
+    "cash": "cash",
+    "doktor": "doctor",
+    "tablet": "tablet",
+    "scan": "scan",
+    "krankenhaus": "hospital",
+    "test": "test",
+    "blut": "blood",
+    "fieber": "fever",
+    "kredit": "loan",
+    "steuer": "tax",
+    "bank": "bank",
+    "konto": "account",
+    "kreditkarte": "credit",
+    "karte": "card",
+    "bro": "bro",
+    "vibe": "vibe",
+    "toxisch": "toxic",
+
+    "download": "download",
+    "computer": "computer",
+    "meeting": "meeting",
+}

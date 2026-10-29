@@ -1,0 +1,11 @@
+{
+  "source_project": "supernova-studio-main/packages/core/src/captions.ts",
+  "bg": "#5E30C7",
+  "fg": "#FFFFFF",
+  "font_px": 34,
+  "pad_x": 22,
+  "pad_y": 14,
+  "radius": 10,
+  "max_words_per_chunk": 6,
+  "karaoke_highlight_radius": 5
+}

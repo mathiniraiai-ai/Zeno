@@ -1,0 +1,167 @@
+{
+  "source_project": "supernova-studio-main/packages/core/src/composeSquare.ts",
+  "canvas": {
+    "w": 720,
+    "h": 1280
+  },
+  "layouts": {
+    "01": {
+      "name": "horizontal_split",
+      "type": "vstack",
+      "regions_h": [
+        640,
+        640
+      ],
+      "zoom": 1.18,
+      "bias": 0.28,
+      "caption_y": 640
+    },
+    "01b": {
+      "name": "horizontal_split_thirds",
+      "type": "vstack",
+      "regions_h": [
+        426,
+        854
+      ],
+      "zoom": 1.18,
+      "bias": 0.28,
+      "caption_y": 426
+    },
+    "02": {
+      "name": "horizontal_swap",
+      "type": "vstack",
+      "regions_h": [
+        640,
+        640
+      ],
+      "swap": true,
+      "zoom": 1.18,
+      "bias": 0.28,
+      "caption_y": 640
+    },
+    "03": {
+      "name": "vertical_split",
+      "type": "hstack",
+      "region": [
+        360,
+        1000
+      ],
+      "title_strip": {
+        "h": 210,
+        "png": [
+          700,
+          140
+        ],
+        "y": 30
+      },
+      "bias": 0.12,
+      "caption_y": 1180
+    },
+    "03b": {
+      "name": "vertical_split_full",
+      "type": "hstack",
+      "region": [
+        360,
+        1280
+      ],
+      "bias": 0.12,
+      "caption_y": 1180
+    },
+    "04b": {
+      "name": "gmeet_active",
+      "type": "pip",
+      "active": "full",
+      "bias": 0.12,
+      "caption_y": 880,
+      "pip": {
+        "shape": "rounded",
+        "w": 260,
+        "h": 330,
+        "radius": 24,
+        "border_px": 4,
+        "margin_right": 20,
+        "margin_top": 40
+      },
+      "bar": {
+        "w": 680,
+        "h": 96,
+        "x": 20,
+        "free_below": 210
+      }
+    },
+    "05b": {
+      "name": "gmeet_active_circle",
+      "type": "pip",
+      "active": "full",
+      "bias": 0.12,
+      "caption_y": 880,
+      "pip": {
+        "shape": "circle",
+        "d": 290,
+        "border_px": 4,
+        "margin_right": 20,
+        "margin_top": 40
+      },
+      "bar": {
+        "w": 680,
+        "h": 96,
+        "x": 20,
+        "free_below": 210
+      }
+    },
+    "07": {
+      "name": "square_ig",
+      "type": "hstack",
+      "canvas": [
+        720,
+        720
+      ],
+      "region": [
+        360,
+        720
+      ],
+      "bias": 0.12,
+      "caption_y": 640
+    },
+    "09": {
+      "name": "gmeet_grid",
+      "type": "grid",
+      "bg": "0x14161c",
+      "tiles": [
+        {
+          "x": 20,
+          "y": 14,
+          "w": 680,
+          "h": 470
+        },
+        {
+          "x": 20,
+          "y": 498,
+          "w": 680,
+          "h": 470
+        }
+      ],
+      "tile_radius": 24,
+      "border_px": 4,
+      "bias": 0.28,
+      "caption_y": 490,
+      "bar": {
+        "w": 680,
+        "h": 96,
+        "x": 20,
+        "free_below": 210
+      }
+    }
+  },
+  "gmeet_bar_buttons": [
+    "mic",
+    "volume",
+    "end_call_red",
+    "more"
+  ],
+  "gmeet_colors": {
+    "bar_bg": "rgba(32,33,36,.96)",
+    "button": "#3c4043",
+    "end_call": "#ea4335"
+  }
+}

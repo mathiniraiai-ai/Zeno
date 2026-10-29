@@ -1,0 +1,28 @@
+{
+  "musicDucking": {
+    "speechDuckingDb": -22.0,
+    "musicBedDefaultDb": -14.0,
+    "fadeInSeconds": 0.4,
+    "fadeOutSeconds": 0.6
+  },
+  "soundEffects": [
+    {
+      "trigger": "scene_cut",
+      "sfxName": "Fast Whoosh Transition",
+      "volumeOffsetDb": -8.0,
+      "preferredTrack": "A3"
+    },
+    {
+      "trigger": "text_callout_pop",
+      "sfxName": "Clean UI Pop",
+      "volumeOffsetDb": -6.0,
+      "preferredTrack": "A3"
+    },
+    {
+      "trigger": "hook_impact",
+      "sfxName": "Sub Bass Thud",
+      "volumeOffsetDb": -4.0,
+      "preferredTrack": "A3"
+    }
+  ]
+}

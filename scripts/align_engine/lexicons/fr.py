@@ -1,0 +1,71 @@
+"""
+French (fr) Lexicon & Loanwords Dictionary for Kavioo Subtitle Engine
+"""
+
+LANGUAGE_CODE = "fr"
+LANGUAGE_NAME = "French"
+
+SUFFIXES = [
+]
+
+LOANWORDS = {
+    "internet": "internet",
+    "wifi": "wifi",
+    "en ligne": "online",
+    "app": "app",
+    "mot de passe": "password",
+    "laptop": "laptop",
+    "créateur": "creator",
+    "chaîne": "channel",
+    "viral": "viral",
+    "mise à jour": "update",
+    "étudiants": "students",
+    "professeur": "teacher",
+    "école": "school",
+    "collège": "college",
+    "examen": "exam",
+    "résultat": "result",
+    "interview": "interview",
+    "job": "job",
+    "salaire": "salary",
+    "bureau": "office",
+    "projet": "project",
+    "super": "super",
+    "tension": "tension",
+    "merci": "thanks",
+    "s'il te plaît": "please",
+    "heureux": "happy",
+    "prêt": "loan",
+    "start": "start",
+    "stop": "stop",
+    "simple": "simple",
+    "sérieux": "serious",
+    "problème": "problem",
+    "offre": "offer",
+    "discount": "discount",
+    "livraison": "delivery",
+    "commande": "order",
+    "paiement": "payment",
+    "cash": "cash",
+    "docteur": "doctor",
+    "tablette": "tablet",
+    "scan": "scan",
+    "hôpital": "hospital",
+    "test": "test",
+    "sang": "blood",
+    "fièvre": "fever",
+    "taxe": "tax",
+    "banque": "bank",
+    "compte": "account",
+    "crédit": "credit",
+    "débit": "debit",
+    "carte": "card",
+    "bro": "bro",
+    "vibe": "vibe",
+    "toxique": "toxic",
+
+    "email": "email",
+    "weekend": "weekend",
+    "cool": "cool",
+    "boss": "boss",
+}

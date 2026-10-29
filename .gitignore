@@ -1,0 +1,37 @@
+# Working and output directories (keep folder structure via .gitkeep)
+work/*
+!work/.gitkeep
+output/*
+!output/.gitkeep
+
+# Environment variables and secrets
+.env
+.env.local
+!.env.example
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Raw video footage and scripts (keep folder structure via .gitkeep)
+input/footage/*
+!input/footage/.gitkeep
+input/script/*
+!input/script/.gitkeep
+
+# Large (>50MB) native binaries & model weights
+tools/ffmpeg/ffmpeg*
+tools/ffmpeg/ffprobe*
+
+# Explicitly keep reusable assets, lightweight ONNX face model, and scripts
+!assets/**
+!models/face_detection_yunet_2023mar.onnx
+!scripts/**
