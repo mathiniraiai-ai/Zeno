@@ -181,13 +181,13 @@ def check_env() -> None:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Bootstrap and verify Claude Editor cross-platform setup.")
+    ap = argparse.ArgumentParser(description="Bootstrap and verify Zeno cross-platform setup.")
     ap.add_argument("--init-venv", action="store_true", help="Create local .venv and install dependencies")
     ap.add_argument("--prewarm", action="store_true", help="Pre-download Wav2Vec2 checkpoint into torch hub cache")
     args = ap.parse_args()
 
     print("=" * 72)
-    print(f"Claude Editor Setup — {platform.system()} {platform.release()} ({platform.machine()})")
+    print(f"Zeno Setup — {platform.system()} {platform.release()} ({platform.machine()})")
     print(f"Workspace Root : {common.ROOT}")
     print("=" * 72)
 
@@ -198,7 +198,7 @@ def main():
 
     print("\n" + "=" * 72)
     if ff_ok and venv_ok and assets_ok:
-        print("READY: Claude Editor cross-platform environment and all asset packs verified!")
+        print("READY: Zeno cross-platform environment and all asset packs verified!")
     else:
         print("WARNING: Some checks reported missing components; review the output above.")
     print("=" * 72)

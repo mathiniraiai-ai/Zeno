@@ -1,9 +1,9 @@
-# Claude Editor — Low-Token Operational Manual
+# Zeno — Low-Token Operational Manual
 
-Script-led video editing pipeline (`1080x1920` MP4). Given raw clips in `input/footage/` and a script in `input/script/`, output best takes, pause-snapped cuts, dynamic speaker layouts, and `✓`/`✗` marks + SFX to `output/`.
+Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input/footage/` and a script in `input/script/`, output best takes, pause-snapped cuts, dynamic speaker layouts, and `✓`/`✗` marks + SFX to `output/`.
 
 ## 1. Hard Rules
-1. **Workspace Isolation**: Never modify any files outside `/Users/mathiniraiselvan/Documents/Office project/Claude Editor`. Never touch other projects in `Documents`.
+1. **Workspace Isolation**: Never modify any files outside `/Users/mathiniraiselvan/Documents/Office project/Zeno`. Never touch other projects in `Documents`.
 2. **Never Read Raw JSONs or Python Source**:
    - **Never** read `work/*/words.json`, `work/*/silences.json`, or `work/*/align.json` unless debugging a specific word timing.
    - **Never** read `scripts/*.py` during normal edits. Use the 3-step CLI workflow and `plan.edl` syntax below.

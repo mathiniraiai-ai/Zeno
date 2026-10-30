@@ -3,14 +3,14 @@ description: Run the low-token 3-step video editing workflow (prepare -> review 
 argument-hint: "[optional: --lang <lang> --preset <auto|single|split_v|split_h|chat_bar|video_call|hybrid> --mark-pack <default|glossy|flash|vignette>]"
 ---
 
-# `/edit` — Automated Low-Token Video Edit Command
+# `/edit` — Zeno Automated Low-Token Video Edit Command
 
-Execute the complete 3-step **Claude Editor** pipeline within the **`12k–18k tokens / min`** budget (strict ceiling: **`20k tokens / min`**).
+Execute the complete 3-step **Zeno** pipeline within the **`12k–18k tokens / min`** budget (strict ceiling: **`20k tokens / min`**).
 
 User arguments (if provided): `$ARGUMENTS`
 
 ## Strict Guardrails
-- **NEVER** modify files outside `/Users/mathiniraiselvan/Documents/Office project/Claude Editor`.
+- **NEVER** modify files outside `/Users/mathiniraiselvan/Documents/Office project/Zeno`.
 - **NEVER** read `work/*/words.json`, `work/*/silences.json`, `work/*/align.json`, or `scripts/*.py`.
 - Read **only** `work/<project>/brief.txt`, `work/<project>/plan.edl`, and the final `work/<project>/marks_contact_sheet.jpg`.
 

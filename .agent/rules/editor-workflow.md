@@ -1,12 +1,12 @@
 ---
 trigger: always_on
-description: Low-token 3-step video editing workflow, hard boundaries, layout presets, and mandatory token reporting for Claude Editor.
+description: Low-token 3-step video editing workflow, hard boundaries, layout presets, and mandatory token reporting for Zeno.
 ---
 
-# Claude Editor — Always-On Workspace Rule (Antigravity / Gemini 4 Argon)
+# Zeno — Always-On Workspace Rule (Antigravity / Gemini 4 Argon)
 
 ## 1. Hard Rules
-- **Workspace Isolation**: Never modify any files outside `/Users/mathiniraiselvan/Documents/Office project/Claude Editor`. Never touch other projects in `Documents`.
+- **Workspace Isolation**: Never modify any files outside `/Users/mathiniraiselvan/Documents/Office project/Zeno`. Never touch other projects in `Documents`.
 - **Token Conservation**: Never read `work/S*/words.json`, `work/S*/silences.json`, or `scripts/*.py` unless debugging a specific word boundary or script exception.
 - **Fresh Sessions**: Always run edits in a fresh session per video with unused MCP servers disabled.
 

@@ -1,17 +1,17 @@
 ---
 name: video-edit
-description: End-to-end low-token script-led video editing workflow for Claude Editor. Use whenever editing raw footage in input/footage/ against a script in input/script/, selecting takes, applying dynamic speaker layouts (single, split_v, split_h, chat_bar, video_call, hybrid), placing right/wrong (✓/✗) marks and SFX, or rendering and verifying final MP4 outputs.
+description: End-to-end low-token script-led video editing workflow for Zeno. Use whenever editing raw footage in input/footage/ against a script in input/script/, selecting takes, applying dynamic speaker layouts (single, split_v, split_h, chat_bar, video_call, hybrid), placing right/wrong (✓/✗) marks and SFX, or rendering and verifying final MP4 outputs.
 ---
 
-# Video Edit Skill (`video-edit`)
+# Zeno Video Edit Skill (`video-edit`)
 
-Complete reference for executing a script-led video edit inside `/Users/mathiniraiselvan/Documents/Office project/Claude Editor` under the **12k–18k tokens/min** target budget (strict ceiling: **20k tokens/min**).
+Complete reference for executing a script-led video edit inside `/Users/mathiniraiselvan/Documents/Office project/Zeno` under the **12k–18k tokens/min** target budget (strict ceiling: **20k tokens/min**).
 
 ---
 
 ## 1. Non-Negotiable Guardrails
 
-1. **Workspace Isolation**: Only read and write files inside `/Users/mathiniraiselvan/Documents/Office project/Claude Editor`. Never modify any other project in `Documents`.
+1. **Workspace Isolation**: Only read and write files inside `/Users/mathiniraiselvan/Documents/Office project/Zeno`. Never modify any other project in `Documents`.
 2. **Zero Raw Telemetry Reads**:
    - **NEVER** read `work/*/words.json`, `work/*/silences.json`, or `work/*/align.json`.
    - **NEVER** read `scripts/*.py` to discover flags or schema fields—everything is documented in this skill.

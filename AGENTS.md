@@ -1,12 +1,12 @@
-# AGENTS.md — Antigravity (Gemini 4 Argon) & Dual-Agent Instructions
+# AGENTS.md — Zeno (Antigravity Gemini 4 Argon & Dual-Agent Instructions)
 
-Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Code (Opus 4.5 / 5.5)** inside `/Users/mathiniraiselvan/Documents/Office project/Claude Editor`.
+Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Code (Opus 4.5 / 5.5)** inside `/Users/mathiniraiselvan/Documents/Office project/Zeno`.
 
 ---
 
 ## 1. Hard Rules
 
-1. **Strict Workspace Boundary**: Never modify, move, or delete any file outside `/Users/mathiniraiselvan/Documents/Office project/Claude Editor`. Other projects in `Documents` are strictly off-limits.
+1. **Strict Workspace Boundary**: Never modify, move, or delete any file outside `/Users/mathiniraiselvan/Documents/Office project/Zeno`. Other projects in `Documents` are strictly off-limits.
 2. **Never Read Raw Word JSONs or Python Source**:
    - **Never** read `work/*/words.json`, `work/*/silences.json`, or `work/*/align.json` unless isolating a single word boundary defect.
    - **Never** read `scripts/*.py` during normal editing jobs. Use the 3-step CLI workflow and `plan.edl` schema below.

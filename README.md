@@ -1,6 +1,6 @@
-# Claude Editor
+# Zeno
 
-A clean, script-led, ultra-low-token video editing workflow for **Claude Code (Opus 4.5 / 5.5)** and **Antigravity (Gemini 4 Argon)**. Give it raw footage and a script, and it returns a finished `1080×1920` MP4:
+**Zeno** is an AI Video Editing Harness for **Claude Code (Opus 4.5 / 5.5)** and **Antigravity (Gemini 4 Argon)**. Give it raw footage and a script, and it returns a finished `1080×1920` MP4:
 - **Best takes only** — retakes, false starts, stutters, dead air, and trailing AI clip babble removed
 - **Sub-word pause-snapped cuts** — powered by Meta Wav2Vec2 (`95M`) forced alignment + `uroman` + Indic G2P (`<0.25s/clip` on Apple Silicon M2 Air)
 - **5 Dynamic Speaker Layouts (+ `hybrid`)** — `single`, `split_v`, `split_h`, `chat_bar`, `video_call`, and `hybrid`
@@ -118,3 +118,4 @@ Measured with the Claude desktop app's usage reading before and after each task:
 |---|---|---|---|---|---|
 | 2026-10-29 | Workspace setup: tools, SFX, ✓/✗ badges, transcribe + render scripts, test render, this README | 115,913 → 156,611 | ~40,700 | 22% → 22% | 14% → 14% |
 | 2026-10-29 | **Kannada – "I am hungry"** (17 clips, 21 script lines): 2:09 final, 4 ✓/✗ marks → `output/Kannada_I_am_hungry.mp4` | 159,619 → 232,685 | ~73,100 | 23% → limit reset mid-job → 0% | 14% → 14% |
+| 2026-10-30 | **Zeno Harness Upgrade & GitHub Release (`github.com/mathiniraiai-ai/Zeno`)**: 5-agent build of Meta Wav2Vec2 + `uroman` aligner, 5 layout modes, swappable mark packs, `prepare.py` + `verify.py` (`<20k` token workflow), Whisper removal, and rebrand to **Zeno** | — | — | — | — |
