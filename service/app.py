@@ -192,7 +192,7 @@ def health() -> Dict[str, Any]:
     except Exception:
         backend, db_ok = "none", False
     return {"ok": True, "gemini_configured": bool(_gemini_keys()), "key_store": backend, "key_store_ok": db_ok,
-            "signup_code_required": bool(os.getenv("ZENO_SIGNUP_CODE")), "admin_enabled": bool(os.getenv("ZENO_ADMIN_PASSWORD"))}
+            "signup_code_required": bool(os.getenv("ZENO_SIGNUP_CODE")), "email_domain": os.getenv("ZENO_ALLOWED_EMAIL_DOMAIN", "gosupernova.live").strip().lstrip("@"), "admin_enabled": bool(os.getenv("ZENO_ADMIN_PASSWORD"))}
 
 
 @app.post("/v1/transcribe")
@@ -246,7 +246,7 @@ _signup_hits: Dict[str, deque] = defaultdict(deque)
 
 class SignupBody(BaseModel):
     name: str
-    email: str
+    email: str = ""   # optional: when empty it is built from the name (the page only asks for the name)
     code: str = ""
 
 
@@ -283,13 +283,17 @@ def create_key(body: SignupBody, request: Request) -> JSONResponse:
     if code and not hmac.compare_digest(body.code.encode(), code.encode()):
         _check_signup_rate(ip, record=True)
         raise HTTPException(403, "Wrong team code")
-    name = body.name.strip()
+    domain = os.getenv("ZENO_ALLOWED_EMAIL_DOMAIN", "gosupernova.live").strip().lower().lstrip("@")
+    name = re.sub(r"\s*@" + re.escape(domain) + r"\s*$", "", body.name.strip(), flags=re.I)   # people may type the whole address
     if not re.fullmatch(r"[^\W\d_][\w .'-]{0,39}", name):
         raise HTTPException(400, "Enter your name (letters, spaces, . ' - only, up to 40)")
-    email = body.email.strip().lower()
-    domain = os.getenv("ZENO_ALLOWED_EMAIL_DOMAIN", "gosupernova.live").strip().lower().lstrip("@")
+    if body.email.strip():
+        email = body.email.strip().lower()
+    else:   # "Mathinirai Selvan" -> mathinirai.selvan@gosupernova.live
+        local = re.sub(r"[^a-z0-9._-]", "", re.sub(r"\s+", ".", name.lower()))
+        email = f"{local}@{domain}"
     if not re.fullmatch(r"[a-z0-9._%+-]{1,64}@" + re.escape(domain), email):
-        raise HTTPException(400, f"Use your company email (name@{domain})")
+        raise HTTPException(400, f"Type your name the way it appears in your company email (name@{domain})")
     try:
         key = store().create(name, email)
     except ValueError as exc:
@@ -299,7 +303,7 @@ def create_key(body: SignupBody, request: Request) -> JSONResponse:
         raise HTTPException(503, "Could not create a key right now, try again shortly")
     _check_signup_rate(ip, record=True)
     log.info("key created for %s <%s>", name, email)
-    return JSONResponse({"key": key}, headers=NO_STORE)
+    return JSONResponse({"key": key, "email": email}, headers=NO_STORE)
 
 
 def require_admin(authorization: Optional[str]) -> None:

@@ -12,6 +12,9 @@ _STYLE = """
   .card { background: #fff; border: 1px solid #e6e6ee; border-radius: 14px; padding: 22px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(15,16,32,.04); }
   label { display: block; font-size: 13px; color: #62647a; margin: 12px 0 4px; }
   input { width: 100%; padding: 10px 12px; border-radius: 9px; border: 1px solid #d9d9e4; background: #fff; color: inherit; font: inherit; }
+  .field { position: relative; margin-top: 16px; } .field input { padding-right: 150px; }
+  .suffix { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); color: #9c9eb2; pointer-events: none; }
+  input::placeholder { color: #a8aabd; }
   button { width: 100%; margin-top: 18px; padding: 12px 16px; border-radius: 10px; border: 0; background: linear-gradient(90deg, #0f1020, #24245c); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
   button.small { width: auto; margin: 0; padding: 4px 10px; font-size: 13px; background: #fdecee; color: #c0263d; }
   button.ghost { background: #eeeef5; color: #0f1020; margin-top: 10px; }
@@ -28,8 +31,7 @@ SIGNUP_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><met
 <div class="card" id="form">
   <h1>Generate your Zeno key</h1>
   <p class="sub">One personal key lets your local Zeno use Gemini. The Gemini key itself stays hidden on our server.</p>
-  <label for="name">Your name</label><input id="name" autocomplete="name" maxlength="40">
-  <label for="email">Company email</label><input id="email" type="email" autocomplete="email" maxlength="100" placeholder="you@gosupernova.live">
+  <div class="field"><input id="name" autocomplete="name" maxlength="40" placeholder="Your name" aria-label="Your name"><span class="suffix" id="suffix">@gosupernova.live</span></div>
   <div id="codebox" hidden><label for="code">Team code (ask the Zeno owner)</label><input id="code" type="password" autocomplete="off"></div>
   <button id="go">Generate</button><div class="err" id="err"></div>
 </div>
@@ -43,12 +45,12 @@ SIGNUP_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><met
 </div>
 <script>
 const $ = id => document.getElementById(id);
-fetch('/health').then(r => r.json()).then(h => { $('codebox').hidden = !h.signup_code_required; }).catch(() => {});
+fetch('/health').then(r => r.json()).then(h => { $('codebox').hidden = !h.signup_code_required; if (h.email_domain) $('suffix').textContent = '@' + h.email_domain; }).catch(() => {});
 $('go').onclick = async () => {
   $('err').textContent = ''; $('go').disabled = true;
   try {
     const r = await fetch('/api/keys', {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name: $('name').value, email: $('email').value, code: $('code').value})});
+      body: JSON.stringify({name: $('name').value, code: $('code').value})});
     const d = await r.json();
     if (!r.ok) throw new Error(d.detail || 'Something went wrong');
     $('key').textContent = d.key;
