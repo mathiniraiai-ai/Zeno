@@ -46,6 +46,10 @@ Zeno transcribes every clip. Clips that say the same thing are treated as takes 
 
 If the script names the speakers (`L2 Robot: ...`), Zeno checks every line is spoken by the right character. A line spoken by the wrong one is cut, and the same line is taken from another clip where the right character says it. Optional: put a 10 to 30 second sample of each character in `input/voices/` (`Man.wav`, `Robot.wav`) so it works reliably even with few clips.
 
+**No clips yet?** Zeno can write the Veo shot JSON and first-frame prompt for every script line (`scripts/preproduce.py`, see `agent/concepts/08_preproduction`). Save the generated clips as `<reel-code>_D-1.mp4`, `_D-2.mp4`, ... and run the normal edit.
+
+**Silent moments in the script:** write them as `(Man takes out his phone)` or note a reaction on a line, `L4 Man (laughs mockingly): ...`. Zeno keeps those moments instead of trimming them.
+
 ## 3. What works today
 - General editing: best takes, pause-snapped cuts, layouts (`single`, `split_v`, `split_h`, `chat_bar`, `video_call`, `hybrid`), ✓/✗ marks, loudness.
 - Learned style **micronarrative** (`styles/micronarrative/`): the look and transitions are built and checked against the reference. Arranging raw clips into this style is **not built yet**; it needs one real raw set to finish.

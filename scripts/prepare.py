@@ -333,15 +333,26 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, str], List[Dict[str,
             rest = rest[: m_mark.start()].strip()
 
         speaker = ""
-        m_spk = re.match(r"^([A-Za-z][A-Za-z0-9_ ]{0,20})(?:\([^)]*\))?\s*:\s*(.*)$", rest)
-        if m_spk:
-            speaker = m_spk.group(1).strip()
-            text = m_spk.group(2).strip()
+        note = ""
+        beat = False
+        m_beat = re.match(r"^(?:(?:beat|action)\s*:\s*(.+)|\((.+)\)|\[(.+)\]|\*(.+)\*)$", rest, re.I)
+        if m_beat:   # a moment with no dialogue: "(he takes out the phone)", "[passes the phone]", "*shocked*", "Beat: ..."
+            beat = True
+            note = next(g for g in m_beat.groups() if g).strip()
+            text = note
         else:
-            text = rest
+            m_spk = re.match(r"^([A-Za-z][A-Za-z0-9_ ]{0,20})(?:\(([^)]*)\))?\s*:\s*(.*)$", rest)
+            if m_spk:
+                speaker = m_spk.group(1).strip()
+                note = (m_spk.group(2) or "").strip()
+                text = m_spk.group(3).strip()
+            else:
+                text = rest
 
         quoted = re.findall(r'"([^"]+)"', text)
         tokens = [_clean_token(w) for w in re.findall(r"[\w\u0900-\u0D7F']+", text.lower()) if _clean_token(w)]
+        if beat:
+            tokens = []          # nothing to hear: a beat is matched to a silent clip, not to speech
         phonetic_tokens = [_phonetic_token(w) for w in tokens if _phonetic_token(w)]
 
         lines.append({
@@ -353,6 +364,8 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, str], List[Dict[str,
             "quoted": quoted,
             "tokens": tokens,
             "phonetic_tokens": phonetic_tokens,
+            "note": note,
+            "beat": beat,
         })
 
     meta["header"] = " | ".join(header_lines)
@@ -520,6 +533,24 @@ def match_clips_to_script_lines(
 ) -> None:
     """Group takes by content, then map the distinct groups, in order, to script lines L1..LM.
     Every take in a group gets the group's script lines; select_best_takes() later keeps only the best one."""
+    if not clips_data:
+        return
+    beat_lines = [l for l in script_lines if l.get("beat")]
+    speech_lines = [l for l in script_lines if not l.get("beat")]
+    # clips with (almost) no speech carry the script's silent beats, in order
+    def _is_silent(c: Dict[str, Any]) -> bool:
+        ws = c.get("hq_words") or []
+        return not ws or (len(ws) <= 2 and sum(float(w["end"]) - float(w["start"]) for w in ws) < 0.8)
+    silent = [c for c in clips_data if _is_silent(c)] if beat_lines else []
+    for c, bl in zip(silent, beat_lines):
+        c["matched_lines"] = [bl]
+        c["is_beat"] = True
+        c["take_group"] = id(c)
+    for bl in beat_lines[len(silent):]:
+        if clips_data:
+            clips_data[0]["anomalies"].append(f"[BEAT_NO_CLIP] {bl['id']} ({bl['text'][:40]}): no silent clip for this beat; add the clip or accept the gap")
+    clips_data = [c for c in clips_data if not c.get("is_beat")]
+    script_lines = speech_lines
     if not clips_data:
         return
     group_takes(clips_data)
@@ -903,6 +934,37 @@ def fill_lines_lost_to_wrong_speaker(
     return used
 
 
+REACTION_RE = re.compile(r"laugh|chuckl|giggl|smirk|cry|cries|crying|sob|tears|sigh|gasp|shock|smile|grin|react|scream|hug|cheer", re.I)
+EMOTION_RE = re.compile(r"cry|cries|crying|sob|tears|sad|heartbroken|emotional|overwhelm|longing|lost in thought|hurt|embarrass|hides? (?:his|her|their)? ?face|looks? down", re.I)
+PAUSE_NOTE_RE = re.compile(r"pause|silen|stare|staring|awkward", re.I)
+
+
+def _beat_segment(clip: Dict[str, Any]) -> Dict[str, Any]:
+    """Pick the part of a silent clip that carries the script's beat: the most active stretch by picture movement.
+    Emotional moments keep only their peak (about 2 s) with a slow push-in; other beats keep up to 3 s."""
+    line = (clip.get("matched_lines") or [{}])[0]
+    note = line.get("note") or line.get("text") or ""
+    dur = float(clip["info"].get("duration") or 3.0)
+    emotional = bool(EMOTION_RE.search(note))
+    length = 2.0 if emotional else 3.0
+    try:
+        import motion
+        src = resolve(clip["src"])
+        curve = motion.motion_curve(src) if src.is_file() else []
+        start, end = motion.best_window(curve, length, dur)
+    except Exception:
+        start, end = 0.0, round(min(dur, length), 2)
+    clip["anomalies"].append(
+        f"[BEAT] {line.get('id', '?')} '{note[:36]}': kept {start:.2f}-{end:.2f}s of {dur:.1f}s (most movement)"
+        + (", slow push-in" if emotional else "")
+    )
+    seg = {"clip": clip, "src": clip["src"], "stem": clip["stem"], "start": start, "end": end,
+           "words": [], "zoom": 1.0, "reason": "beat"}
+    if emotional:
+        seg["zoom_to"] = 1.08
+    return seg
+
+
 def detect_clip_anomalies_and_cuts(
     clips_data: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -944,6 +1006,10 @@ def detect_clip_anomalies_and_cuts(
         dup_until = float(clip.get("boundary_dup_until") or 0.0)
         if dup_until > 0.0:
             words = [w for w in words if w["start"] >= dup_until - 0.05]
+
+        if clip.get("is_beat"):
+            raw_segments.append(_beat_segment(clip))
+            continue
 
         if not words:
             continue
@@ -1096,6 +1162,14 @@ def detect_clip_anomalies_and_cuts(
                 else:
                     clip_end = round(min(dur, last_word_end + 0.12), 2)
 
+        # A note like "(laughs mockingly)" or "(cries)" on this line: keep the reaction after the last word (up to 1.2 s)
+        note_text = " ".join(str(l.get("note") or "") for l in matched_lines)
+        if note_text and REACTION_RE.search(note_text) and phrase_repeat_cut is None and word_repeat_cut is None:
+            held = round(min(dur, last_word_end + 1.2), 2)
+            if held > clip_end + 0.05:
+                clip["anomalies"].append(f"[BEAT_HOLD] '{note_text.strip()[:30]}': kept {held - clip_end:.1f}s of reaction after the last word")
+                clip_end = held
+
         # Check for Intra-Clip Mid-Sentence Retake ([RETAKE] e.g. S1 "Almost" take 1 vs take 2)
         retake_split_done = False
         for wi in range(1, len(words) - 1):
@@ -1162,6 +1236,8 @@ def detect_clip_anomalies_and_cuts(
         num_speakers_in_clip = len({l["speaker"] for l in matched_lines if l.get("speaker")})
         pause_thresh = PAUSE_SPLIT_MONOLOGUE_SEC if num_speakers_in_clip <= 1 else PAUSE_SPLIT_ABSOLUTE_SEC
 
+        if note_text and PAUSE_NOTE_RE.search(note_text):
+            pause_thresh = 99.0        # the script asks for this pause (stare, silence, awkward pause): leave it
         internal_pauses = [
             s for s in silences
             if s["start"] >= clip_start + 0.60

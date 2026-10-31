@@ -21,4 +21,6 @@ L1 Teacher: spoken text [RIGHT]
 L2 Student: spoken text [WRONG]
 ```
 - `.txt`, `.md` and `.docx` files are accepted and normalised (NFC).
+- **Note on a line**: `L4 Man (laughs mockingly): text`. The text in brackets is the line's note. A reaction note (laugh, cry, sigh, smirk, shock...) keeps up to 1.2 s of the reaction after the last word instead of trimming it. A note with *pause*, *silence*, *stare* or *awkward* keeps the pause instead of tightening it.
+- **Silent beat** (a moment with no dialogue): a line that is only a description, written as `(Man takes out his phone)`, `[passes the phone]`, `*shocked*` or `Beat: he walks in`. Zeno matches it, in order, to a clip with no speech and keeps the most active stretch by picture movement (`scripts/motion.py` shows where): up to 3 s, or about 2 s with a slow push-in for emotional moments (crying, sadness, embarrassment). A beat with no silent clip is reported as `[BEAT_NO_CLIP]`.
 - On-screen text cues: **format not defined yet.** The user will give the exact format. Do not guess it.

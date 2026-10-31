@@ -6,6 +6,7 @@
 
 ## The loop
 
+0. **Pre-production (only if the user has a script but no clips yet)** — write the Veo shots and first-frame prompts. → `concepts/08_preproduction`
 1. **Script in** — get one script, one language, one tab. → `concepts/01_script_intake`
 2. **Footage in** — transcribe + align, read the brief only. → `concepts/02_footage_intake`
 3. **Pick the style** — from the user's words, else from the script's header and format. Load `styles/<name>/SKILL.md`. No match: ask the user, or learn it from a reference. → `concepts/03_style_library`, `concepts/04_reference_learning`
