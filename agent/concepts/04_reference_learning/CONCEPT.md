@@ -24,9 +24,18 @@ python3 scripts/learn_reference.py align  input/reference/<video>.mp4 --name <st
 python3 scripts/learn_reference.py frames input/reference/<video>.mp4 --name <style> --start 37.5 --end 93 --step 3 --tag scene3
 ```
 - Output goes to `work/<style>_ref/`. Copy the keepers into `styles/<style>/refs/`.
-- `align` splits the audio at scene transitions, so a scene in another language (English scene, Malayalam scene) gets its own transcript.
+- `align` transcribes the whole audio in one pass. English and native words are handled word by word (`02_footage_intake`, "Mixed languages").
 - Reference videos live in `input/reference/` (not committed).
 - Burned-in subtitles in the reference are ignored (`02_footage_intake`).
+
+## Proving the style without raw footage
+When the raw clips are not available, cut stand-in clips from the reference and rebuild it:
+```bash
+python3 scripts/learn_reference.py standins input/reference/<video>.mp4 --name <style>      # cuts into input/standins/<style>/
+python3 scripts/style_plan.py <style> input/standins/<style>/manifest.json --out work/<style>_rebuild/plan.json --canvas 720x1280@24
+python3 scripts/render.py work/<style>_rebuild/plan.json --draft
+```
+Then compare frame by frame with the reference. Clean frames should differ by only a few levels (of 255). This proves the render side only, not take selection on real footage. Flash-covered frames are replaced by holding the nearest clean frame (`STANDIN_PIECES` is specific to the micronarrative reference).
 
 ## Checks that caught mistakes on the first reference
 - Whole-frame cut detection missed clip swaps inside split-screen panels. Check each half separately before writing "no cuts".

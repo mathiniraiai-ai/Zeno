@@ -194,27 +194,11 @@ def align(video: Path, name: str, script: Path, lang: str):
     ffmpeg("-loglevel", "error", "-i", str(video), "-vn", "-ac", "1", "-ar", "16000", str(wav))
 
     lines = dialogue(read_script_text(script))
-    scan_json = json.loads((out_dir / "scan.json").read_text(encoding="utf-8"))
-    duration = scan_json["duration"]
-    scene_ids = sorted({l["scene"] for l in lines})
-    edges = [0.0] + [t["center"] for t in scan_json["transitions"]][: len(scene_ids) - 1] + [duration]
-    import soundfile as sf
-    audio, sr = sf.read(str(wav), dtype="float32")
+    # One pass over the whole audio. The prompt tells Gemini the audio is mixed, so English scenes are not skipped.
     from align_engine import transcribe_and_align_clip
-    words = []
-    for i, sc in enumerate(scene_ids):
-        t0, t1 = edges[i], edges[i + 1]
-        seg = out_dir / f"scene{sc}.wav"
-        sf.write(str(seg), audio[int(t0 * sr):int(t1 * sr)], sr)
-        sc_lines = [l for l in lines if l["scene"] == sc]
-        has_ml = any(re.search(r"[\u0D00-\u0D7F]", l["text"]) for l in sc_lines)
-        sc_lang = lang if has_ml else "en"
-        res = transcribe_and_align_clip(seg, lang=sc_lang, script_lines=[l["text"] for l in sc_lines], work_dir=out_dir)
-        for w in res.get("words", []):
-            w["start"], w["end"] = round(w["start"] + t0, 3), round(w["end"] + t0, 3)
-            w["scene"] = sc
-            words.append(w)
-    (out_dir / "words.json").write_text(json.dumps({"words": words, "scene_edges": edges}, ensure_ascii=False), encoding="utf-8")
+    res = transcribe_and_align_clip(wav, lang=lang, script_lines=[l["text"] for l in lines], work_dir=out_dir)
+    words = res.get("words", [])
+    (out_dir / "words.json").write_text(json.dumps({"words": words}, ensure_ascii=False), encoding="utf-8")
 
     # Match script tokens to transcript tokens in order, then take each line's first/last matched word time.
     s_tok, s_line = [], []
@@ -246,6 +230,52 @@ def align(video: Path, name: str, script: Path, lang: str):
         print(f"  {l['id']:>3} S{l['scene']} {l['speaker'][:12]:<12} {l['start']}-{l['end']}  match={l['match']}")
 
 
+# Stand-in clips: the reference cut into the pieces the editor probably started from. Frame numbers at 24 fps,
+# measured on the W42 reference (scene transitions start at frames 492 and 883; their swap frames are 6 and 4).
+# Flash-covered frames are replaced by holding the nearest clean frame, so the rebuild can draw its own flash.
+STANDIN_PIECES = [
+    # name, output frames [a, b), clean source frames [sa, sb), hold-before, hold-after, crop
+    ("s1_wide",      0,   53,   0,   53,  0, 0, None),
+    ("s1_counter",   53,  113,  53,  113, 0, 0, None),
+    ("s1_cowork3",   113, 175,  113, 175, 0, 0, None),
+    ("s1_cowork1",   175, 292,  175, 292, 0, 0, None),
+    ("s1_cowork2",   292, 456,  292, 456, 0, 0, None),
+    ("s1_friend",    456, 498,  456, 492, 0, 6, None),
+    ("s2_twoshot",   498, 887,  501, 883, 3, 4, None),
+    ("s3_left",      887, 2238, 892, 2238, 5, 0, "356:1280:0:0"),
+    ("s3_right",     887, 2238, 892, 2238, 5, 0, "360:1280:360:0"),
+]
+
+
+def standins(video: Path, name: str):
+    """Cut the reference into stand-in clips under input/standins/<name>/ (video, plus audio for all but the right panel)."""
+    from common import ROOT
+    out_dir = ROOT / "input" / "standins" / name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fps = 24.0
+    manifest = []
+    for (nm, a, b, sa, sb, pre, post, crop) in STANDIN_PIECES:
+        v = f"[0:v]trim=start_frame={sa}:end_frame={sb},setpts=PTS-STARTPTS,fps=24"
+        if pre or post:
+            v += f",tpad=start={pre}:start_mode=clone:stop={post}:stop_mode=clone"
+        if crop:
+            v += f",crop={crop}"
+        v += ",setsar=1[v]"
+        fc = [v]
+        maps = ["-map", "[v]"]
+        if nm != "s3_right":
+            fc.append(f"[0:a]atrim=start={a / fps:.6f}:end={b / fps:.6f},asetpts=PTS-STARTPTS[a]")
+            maps += ["-map", "[a]"]
+        out = out_dir / f"{nm}.mp4"
+        ffmpeg("-loglevel", "error", "-i", str(video), "-filter_complex", ";".join(fc), *maps,
+               "-t", f"{(b - a) / fps:.6f}", "-c:v", "libx264", "-crf", "10", "-preset", "fast", "-pix_fmt", "yuv420p",
+               "-c:a", "aac", "-b:a", "256k", str(out))
+        manifest.append({"name": nm, "file": str(out.relative_to(ROOT)), "out_start": round(a / fps, 4),
+                         "out_end": round(b / fps, 4), "frames": b - a})
+    (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8")
+    print(f"{len(manifest)} stand-in clips -> {out_dir}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Measure a reference video")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -253,6 +283,9 @@ def main():
     p.add_argument("video")
     p.add_argument("--name", required=True)
     p.add_argument("--cut-threshold", type=float, default=25.0)
+    st = sub.add_parser("standins")
+    st.add_argument("video")
+    st.add_argument("--name", required=True)
     a = sub.add_parser("align")
     a.add_argument("video")
     a.add_argument("--name", required=True)
@@ -267,7 +300,9 @@ def main():
     f.add_argument("--tag", required=True)
     f.add_argument("--cols", type=int, default=8)
     args = ap.parse_args()
-    if args.cmd == "align":
+    if args.cmd == "standins":
+        standins(Path(args.video), args.name)
+    elif args.cmd == "align":
         align(Path(args.video), args.name, Path(args.script), args.lang)
     elif args.cmd == "frames":
         frames(Path(args.video), args.name, args.start, args.end, args.step, args.tag, args.cols)

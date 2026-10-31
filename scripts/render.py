@@ -49,6 +49,26 @@ except Exception:
     verify = None
 
 EDGE_FADE = 0.012  # tiny audio fade at every cut to avoid clicks
+TRANSITIONS_DIR = Path(__file__).resolve().parent.parent / "assets" / "transitions"
+
+
+def load_overlay_transition(name: str) -> Optional[Dict[str, Any]]:
+    """Measured overlay transitions live in assets/transitions/<name>.json (hard cut + a colour flash on top)."""
+    path = TRANSITIONS_DIR / f"{name}.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+
+def flash_filters(spec: Dict[str, Any], join_t: float, swap_frame: int) -> List[str]:
+    """Screen-blend flash around a hard cut at `join_t`: one lutrgb per flash frame, switched on by time."""
+    fps = float(spec.get("fps", 24))
+    out = []
+    for k, fr in enumerate(spec["frames"]):
+        t0 = join_t + (k - swap_frame) / fps
+        t1 = t0 + 1.0 / fps - 0.0005
+        r, g, b = fr["screen_rgb"]
+        expr = lambda c: f"val+(255-val)*{c}/255"
+        out.append(f"lutrgb=r='{expr(r)}':g='{expr(g)}':b='{expr(b)}':enable='between(t,{t0:.4f},{t1:.4f})'")
+    return out
 
 
 def even(x: float) -> int:
@@ -256,8 +276,14 @@ def main() -> None:
     total = 0.0
     for i, s in enumerate(segs):
         tr = s.get("transition", "cut") if i else "cut"
+        s.pop("_flash", None)
+        if tr != "cut" and load_overlay_transition(tr) is not None:
+            s["_flash"] = tr          # hard cut; the flash is drawn over it later
+            tr = "cut"
         d = min(float(s.get("transition_duration", 0.3)), durs[i] / 2, durs[i - 1] / 2) if tr != "cut" else 0.0
         s["_tr"], s["_d"] = tr, d
+        if s.get("_flash"):
+            s["_flash_at"] = total
         starts.append(total - d)
         total += durs[i] - d
     seg_start = {s["id"]: starts[i] for i, s in enumerate(segs)}
@@ -285,6 +311,17 @@ def main() -> None:
             fc.append(f"{au}[sa{i}]acrossfade=d={s['_d']:.3f}{na}")
             acc += durs[i] - s["_d"]
         v, au = nv, na
+
+    # 2b) overlay transitions (warm flash) on top of the hard cuts
+    flash_chain: List[str] = []
+    for s in segs:
+        if s.get("_flash"):
+            spec = load_overlay_transition(s["_flash"])
+            swap = int(s.get("transition_swap", spec.get("swap_frame", 5)))
+            flash_chain += flash_filters(spec, s["_flash_at"], swap)
+    if flash_chain:
+        fc.append(f"{v}{','.join(flash_chain)}[vflash]")
+        v = "[vflash]"
 
     # 3) marks (✓ / ✗) and sound effects
     n = len(files)
@@ -383,7 +420,7 @@ def main() -> None:
     for i, s in enumerate(segs):
         z = s.get("zoom", 1.0)
         zt = f" zoom {z}" + (f"->{s['zoom_to']}" if "zoom_to" in s else "") if z != 1.0 or "zoom_to" in s else ""
-        trn = f" [{s['_tr']} {s['_d']:.2f}s]" if s["_tr"] != "cut" else ""
+        trn = f" [{s['_tr']} {s['_d']:.2f}s]" if s["_tr"] != "cut" else (f" [{s['_flash']}]" if s.get("_flash") else "")
         lines.append(
             f"{tc(starts[i])}-{tc(starts[i] + durs[i])}  {s['id']:<5} {Path(str(s['src'])).name} "
             f"{float(s['start']):.2f}-{float(s['end']):.2f}{zt}{trn}  {s.get('note', '')}".rstrip()

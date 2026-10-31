@@ -19,8 +19,9 @@ No B-roll, no unrequested captions, no CTA, no extra visual clutter. Everything 
 | `input/script/` | Script files (`.txt`, `.md`, or `.docx` — read with the standard library, tables supported; converted to `work/_script_cache/<name>.txt`), or saved from chat | Tracked or ignored per project |
 | `output/` | Rendered final MP4 videos (`*.mp4`) + `*.timeline.txt` cut/effect logs | Ignored (`*.mp4`), `*.timeline.txt` optional |
 | `work/` | Per-clip intermediate JSONs (`words.json`, `silences.json`, `info.json`), render cache, plus compact `brief.txt`, `plan.edl`, `plan.json`, and `marks_contact_sheet.jpg`. Safe to delete anytime. | **Ignored** (ephemeral local scratch) |
-| `scripts/` | Python pipeline tools (`setup.py`, `prepare.py`, `align_engine/`, `layouts.py`, `ui_generator.py`, `vision_tracker.py`, `edl_parser.py`, `render.py`, `verify.py`, `transcribe.py`, `script_intake.py`, `common.py`) | **Committed** |
+| `scripts/` | Python pipeline tools (`setup.py`, `prepare.py`, `align_engine/`, `layouts.py`, `ui_generator.py`, `vision_tracker.py`, `edl_parser.py`, `render.py`, `verify.py`, `transcribe.py`, `script_intake.py`, `learn_reference.py`, `style_plan.py`, `common.py`) | **Committed** |
 | `assets/sfx/` | Sound effects — Right: `correct_ding.wav`, `sn_correct.wav`, `w42_right.wav`; Wrong: `buzzer.wav`, `sn_wrong.wav`, `w42_wrong.wav`; Transitions: `whoosh.wav`, `pop.wav` | **Committed** |
+| `assets/transitions/` | Measured overlay transitions (`warm_flash.json`), applied over a hard cut by `render.py` | **Committed** |
 | `assets/marks/` | Swappable `✓` / `✗` badge packs (`default`, `glossy`, `flash`, `vignette`) | **Committed** |
 | `tools/` | Local FFmpeg / FFprobe binaries (`tools/ffmpeg/`) | **Ignored** (populated by `scripts/setup.py`) |
 | `agent/` | The Director (`DIRECTOR.md`, the one decision-making agent) and one `concepts/<topic>/CONCEPT.md` per topic | **Committed** |

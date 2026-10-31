@@ -1,0 +1,19 @@
+{
+  "name": "warm_flash",
+  "source": "measured from the W42 Malayalam micronarrative reference, two scene changes (screen-blend fit)",
+  "fps": 24,
+  "blend": "screen",
+  "swap_frame": 5,
+  "note": "frame 0 is the first flash frame; the new scene starts at swap_frame. The reference used 6 for scene 1 to 2 and 4 for scene 2 to 3. Frames 4 and 5 are from the first transition only.",
+  "frames": [
+    {"screen_rgb": [253, 169, 47]},
+    {"screen_rgb": [255, 199, 59]},
+    {"screen_rgb": [255, 199, 60]},
+    {"screen_rgb": [251, 200, 62]},
+    {"screen_rgb": [246, 156, 59]},
+    {"screen_rgb": [238, 66, 54]},
+    {"screen_rgb": [233, 73, 48]},
+    {"screen_rgb": [215, 65, 44]},
+    {"screen_rgb": [139, 19, 27]}
+  ]
+}

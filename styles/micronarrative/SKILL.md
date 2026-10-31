@@ -20,11 +20,11 @@ A short story skit (about 60–95 s): a problem scene, a friend's tip, then an A
 - Faces sit about 35% from the top in every close-up and split panel.
 - No music and no SFX. Normalise loudness to -14 LUFS (the reference is -19.3).
 - No on-screen text beyond what the script asks for. Burned-in subtitles are ignored for now.
-- Split divider: thin light line, no active-speaker border, no dimming of the listener. Zeno's built-in `split_h` adds both, so they must be switched off for this style.
+- Split divider: thin light line (about 3 px of 720) on the left panel's right edge, no active-speaker border, no dimming of the listener. Both panels play live video.
 
 ## Engine status
-- Ready: `single`, `split_h` layout geometry, cuts from `plan.edl`, loudness, script-to-time mapping (`learn_reference.py align`).
-- Not built: `warm_flash` transition, a plain `split_h` without highlight or dimming, per-panel clip swaps, reaction-shot selection.
+- Built and checked against the reference: `single` and `split_h` (live panels, exact framing, measured divider), the `warm_flash` transition, plan building from this spec (`scripts/style_plan.py`), loudness. Rebuilding the reference from stand-in clips matches it frame by frame (clean frames differ by 2-3 of 255; flash frames by 10-18).
+- Not built or not tested: take selection and clip-to-line matching on real raw footage, per-panel clip swaps, reaction-shot selection, a style router.
 
 ## Open questions (see `spec.json` "unknowns")
 Format of the future raw clips (one per line, or one per scene?), and what the listening panel shows in scene 3.

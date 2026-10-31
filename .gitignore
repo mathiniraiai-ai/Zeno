@@ -40,3 +40,4 @@ models/torch/
 # Reference videos learned from (large; frames and measurements live in styles/<name>/refs/)
 input/reference/*
 !input/reference/.gitkeep
+input/standins/*

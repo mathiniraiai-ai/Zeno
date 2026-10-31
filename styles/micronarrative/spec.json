@@ -149,18 +149,12 @@
    20.5,
    36.79
   ],
-  "duration_frames_24fps": 10,
-  "duration_sec": 0.42,
-  "envelope_frames": [
-   "f0 yellow-orange onset mean RGB ~(239,185,114)",
-   "f1-f3 hold ~(243,202,121)",
-   "f4-f7 shift to coral ~(241,141,125)",
-   "f8 fade ~(197,113,114)",
-   "f9 clean"
-  ],
-  "content_swap": "at frame 5 (0.21 s after start), hidden under the flash",
+  "duration_frames_24fps": 9,
+  "duration_sec": 0.375,
+  "envelope_frames": "9 flash frames, screen-blended colours in assets/transitions/warm_flash.json: yellow (255,199,60) for frames 1-3, shifting to red (238,66,54) by frame 5, then dark red (139,19,27) fading out",
+  "content_swap": "frame 6 after the flash starts for scene 1 to 2, frame 4 for scene 2 to 3 (the swap is hidden under the flash)",
   "audio": "no whoosh; scene-boundary audio dips to near silence (0.05-0.2 s)",
-  "implementation": "NOT built. Needs an overlay (yellow to coral gradient, screen/add blend) tuned side by side against refs/transition_warm_flash.jpg and transition_rgb.json",
+  "implementation": "BUILT: assets/transitions/warm_flash.json (screen-blend colours per frame), applied by scripts/render.py as lutrgb filters over a hard cut. Uniform colour per frame, so the reference's slight colour gradient across the frame is not reproduced.",
   "same_in_both_transitions": true
  },
  "timing": {
@@ -191,5 +185,47 @@
   "how Zeno should choose a reaction shot (scene 1 shot 6) from raw clips",
   "whether a Malayalam scene-1 version uses the same English shot order",
   "subtitle style (parked)"
- ]
+ ],
+ "engine": {
+  "note": "read by scripts/style_plan.py; everything else in this file is for people and the Director",
+  "scene_layouts": {
+   "1": "single",
+   "2": "single",
+   "3": "split_h"
+  },
+  "scene_transition": {
+   "name": "warm_flash",
+   "swap_frames": [
+    6,
+    4
+   ]
+  },
+  "split": {
+   "left": "Miss Nova",
+   "right": "Woman",
+   "mode": "live",
+   "divider": {
+    "x_frac": 0.49583,
+    "w_frac": 0.00417,
+    "color": "E1DBE1",
+    "alpha": 1.0
+   }
+  },
+  "canvas_default": {
+   "width": 1080,
+   "height": 1920,
+   "fps": 30
+  }
+ },
+ "rebuild_check": {
+  "date": "2026-10-31",
+  "method": "stand-in clips cut from the reference (input/standins/, not committed), rebuilt with style_plan.py + render.py at 720x1280@24, compared frame by frame (mean absolute pixel difference, 0-255, at 180x320)",
+  "frames": "2238 vs 2238",
+  "scene1_clean_mean_diff": 1.8,
+  "scene2_clean_mean_diff": 1.9,
+  "scene3_clean_mean_diff": 3.3,
+  "flash_frames_mean_diff": "10-18 (a flash wash baked into the reference's subtitle pill and a colour gradient are not reproduced)",
+  "audio": "in sync (lag 0), -13.9 LUFS after normalisation",
+  "caveat": "stand-ins come from the reference itself, so this proves the render side only; it does not test take selection or clip-to-line matching on real raw footage"
+ }
 }

@@ -126,7 +126,12 @@ def build_transcribe_prompt(target_script_lines: Optional[List[str]] = None, lan
                 f"{joined_script}\n"
             )
 
-    lang_note = f"Language hint: {language_hint}\n" if language_hint and language_hint != "auto" else ""
+    lang_note = (
+        f"Main native language: {language_hint}. The audio is MIXED: it can switch to English for single words, "
+        "phrases, whole sentences or whole scenes. Transcribe EVERY spoken word, in whichever language it is actually spoken. "
+        "Never skip English because a native language was named.\n"
+        if language_hint and language_hint != "auto" else ""
+    )
     return f"""You are a precision multilingual speech-to-text transcription engine for video editing.
 Transcribe ONLY the intelligible words actually spoken aloud in this audio clip 100% verbatim.
 {lang_note}{script_context}
@@ -134,7 +139,7 @@ Rules:
 1. Include ALL spoken words verbatim, including retakes, repeated words (e.g. "Almost... Almost"), false starts, and fumbles.
 2. NEVER auto-complete a sentence from the Target Script Reference if the speaker stops mid-sentence or does not speak it in this clip!
 3. If the clip ends with unintelligible AI gibberish/babble after the real sentence concludes, DO NOT transcribe the unintelligible gibberish.
-4. STRICT BILINGUAL CODE-SWITCHING LAW: Keep spoken English words/loanwords in standard Latin alphabet (A-Z). Keep native Indic speech in its native script.
+4. STRICT BILINGUAL CODE-SWITCHING LAW: Decide language word by word. A spoken English word stays English, in the Latin alphabet (A-Z), even inside a native sentence. A native word stays native, in its own script. Never transliterate English into native script or native words into Latin.
 5. Attach punctuation (.,?!) to the end of the spoken word.
 6. Return ONLY valid JSON with this exact structure:
 {{

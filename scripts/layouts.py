@@ -375,11 +375,15 @@ def _build_slot_video_chain(
     z0: float = 1.0,
     z1: float = 1.0,
     bbox_norm: Optional[Sequence[float]] = None,
+    exact: bool = False,
 ) -> str:
     """Build an FFmpeg video filter chain that scales and crops `input_label` into
     `(slot_w, slot_h)` with eye-anchored headroom (`14%`) and optional zoom (`z0 -> z1`).
     """
     slot_w, slot_h = even(slot_w), even(slot_h)
+    if exact and abs((src_w / src_h) / (slot_w / slot_h) - 1.0) < 0.03:
+        # Source already has the slot's shape (within 3%): fit it as is, no headroom re-framing or crop.
+        return f"{input_label}scale={slot_w}:{slot_h},setsar=1,fps={fps},format=yuv420p{output_label}"
     fx = max(0.05, min(0.95, float(focus[0]) if len(focus) >= 1 else 0.5))
     fy = max(0.08, min(0.85, float(focus[1]) if len(focus) >= 2 else 0.38))
 
@@ -504,7 +508,10 @@ def build_segment_ffmpeg_args(
         # Use clean mouth-closed idle loop if peer clip exists and idle_span >= 0.45s, else still PNG
         peer_idx = next_idx
         next_idx += 1
-        if (
+        if peer_src.is_file() and peer.get("mode") == "live":
+            # Both panels play their own clip in sync (micronarrative scene 3); audio still comes from the main clip.
+            inputs.extend(["-ss", f"{float(peer.get('start', 0.0)):.3f}", "-t", f"{dur + 0.5:.3f}", "-i", peer_src])
+        elif (
             peer_src.is_file()
             and isinstance(idle_span, (list, tuple))
             and len(idle_span) >= 2
@@ -545,15 +552,19 @@ def build_segment_ffmpeg_args(
             live_w = slot_w_left if active_left else slot_w_right
             peer_w_slot = slot_w_right if active_left else slot_w_left
 
-            fc.append(_build_slot_video_chain("[0:v]", "[live_slot]", src_w, src_h, live_w, slot_h, fps, exact, [fx, fy], z0, z1))
-            fc.append(_build_slot_video_chain(f"[{peer_idx}:v]", "[peer_slot]", peer_w, peer_h, peer_w_slot, slot_h, fps, exact, peer_focus, 1.0, 1.0))
+            exact_fit = str(seg.get("framing") or "").lower() == "exact"
+            fc.append(_build_slot_video_chain("[0:v]", "[live_slot]", src_w, src_h, live_w, slot_h, fps, exact, [fx, fy], z0, z1, exact=exact_fit))
+            fc.append(_build_slot_video_chain(f"[{peer_idx}:v]", "[peer_slot]", peer_w, peer_h, peer_w_slot, slot_h, fps, exact, peer_focus, 1.0, 1.0, exact=exact_fit))
 
             stack_order = "[live_slot][peer_slot]" if active_left else "[peer_slot][live_slot]"
-            fc.append(
-                f"{stack_order}hstack=inputs=2,"
-                f"drawbox=x={slot_w_left - 2}:y=0:w=4:h={H}:color=white@0.85:t=fill,"
-                f"format=yuv420p{v_curr}"
-            )
+            dv = seg.get("divider")
+            if isinstance(dv, dict):   # measured divider: thin line on the left slot's right edge
+                dw = max(2, round(W * float(dv.get("w_frac", 0.004))))
+                dx = round(W * float(dv.get("x_frac", 0.5)))
+                divider = f"drawbox=x={dx}:y=0:w={dw}:h={H}:color=0x{dv.get('color', 'FFFFFF')}@{dv.get('alpha', 1.0)}:t=fill,"
+            else:
+                divider = f"drawbox=x={slot_w_left - 2}:y=0:w=4:h={H}:color=white@0.85:t=fill,"
+            fc.append(f"{stack_order}hstack=inputs=2,{divider}format=yuv420p{v_curr}")
 
     # ------------------------------------------------------------------
     # Layout 4: CHAT_BAR / TEXTING (floating_overlay or docked)
@@ -694,7 +705,8 @@ def build_segment_ffmpeg_args(
             v_curr = v_next
 
     # Final video label -> [vout]
-    fc.append(f"{v_curr}null[vout]")
+    # scale->fps can lose the last frame of a clip; hold it for up to 3 frames so -frames:v always reaches the exact count
+    fc.append(f"{v_curr}tpad=stop_mode=clone:stop=3[vout]")
 
     # Audio input & chain (always from active segment, or anullsrc if clip has no audio)
     if not has_audio:
