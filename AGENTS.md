@@ -66,3 +66,6 @@ Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Co
 - **Mark Packs (`--mark-pack` or `# mark_pack:` in `plan.edl`)**:
   - `default` (flat circle badge), `glossy` (3D glass pill/badge), `flash` (badge + green/red border flash), `vignette` (soft corner radial glow + badge), or custom PNGs in `assets/marks/<pack>/`.
 - **Skill Reference**: Activate `.agent/skills/video-edit/SKILL.md` for full `plan.edl` / `plan.json` schema details and troubleshooting.
+
+## Secrets (all agents)
+Never open, print, quote or paste `.env` or any key in a chat or log. It holds the user's personal Zeno key (or a Gemini key). To check setup, run `python3 scripts/setup.py --smoke`; it reports [OK]/[FAIL] without showing keys. Read `.env.example` instead if you need the variable names.

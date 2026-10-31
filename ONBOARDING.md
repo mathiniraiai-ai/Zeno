@@ -5,7 +5,7 @@ Zeno turns raw clips and a script into a finished vertical video. An AI agent (C
 ## What you need
 - A Mac (Apple Silicon) or a Windows PC (an NVIDIA GPU is optional; CPU works)
 - Git, Python 3.12, FFmpeg
-- Transcription access: normally your personal service key from the Zeno owner (two lines in `.env`, see below); alternatively a Gemini API key
+- Transcription access: normally your personal key: open https://zeno-production-bef7.up.railway.app (or the Zeno card in the hub), type your name, click Generate, and paste the key into `.env` (two lines, see below); alternatively your own Gemini API key
 - One AI agent set up on your machine (Claude Code, Antigravity, or OpenAI)
 
 ## 1. Install (once, about 15 minutes, plus a 360 MB download)

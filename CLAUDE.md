@@ -81,3 +81,6 @@ right | L3 | 2.10 | 1.3 | top-right | 0.22 | correct_ding.wav | -4
 whoosh.wav | L3 | 0.0 | -10
 ```
 - **SFX (`assets/sfx/`)**: Right: `correct_ding.wav`, `sn_correct.wav`, `w42_right.wav` | Wrong: `buzzer.wav`, `sn_wrong.wav`, `w42_wrong.wav` | Transitions: `whoosh.wav`, `pop.wav`.
+
+## Secrets (all agents)
+Never open, print, quote or paste `.env` or any key in a chat or log. It holds the user's personal Zeno key (or a Gemini key). To check setup, run `python3 scripts/setup.py --smoke`; it reports [OK]/[FAIL] without showing keys. Read `.env.example` instead if you need the variable names.

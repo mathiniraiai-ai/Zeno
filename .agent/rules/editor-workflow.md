@@ -28,3 +28,6 @@ description: Low-token 3-step video editing workflow, hard boundaries, layout pr
 ## 4. Dynamic Layouts & Swappable Mark Packs
 - **Layouts**: `single` (full-frame + subtle zoom), `split_v` (top/bottom 50/50 split), `split_h` (left/right 50/50 split), `chat_bar` (speaker + floating prompt bar), `video_call` (speaker + rounded PiP card), and `hybrid` (`auto` mix of `single` for monologues and split/PiP/chat_bar for dialogues).
 - **Mark Packs**: `default`, `glossy`, `flash`, `vignette`, or custom `right.png`/`wrong.png` inside `assets/marks/<pack>/`.
+
+## Secrets (all agents)
+Never open, print, quote or paste `.env` or any key in a chat or log. It holds the user's personal Zeno key (or a Gemini key). To check setup, run `python3 scripts/setup.py --smoke`; it reports [OK]/[FAIL] without showing keys. Read `.env.example` instead if you need the variable names.
