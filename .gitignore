@@ -6,7 +6,7 @@ output/*
 
 # Environment variables and secrets
 .env
-.env.local
+.env.*
 !.env.example
 
 # Virtual environments
