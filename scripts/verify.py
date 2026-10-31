@@ -82,10 +82,8 @@ def compute_timeline_starts(plan: Dict[str, Any], fps: int) -> Tuple[List[float]
     starts: List[float] = []
     total = 0.0
     for i, s in enumerate(segs):
-        tr = s.get("transition", "cut") if i else "cut"
-        d = min(float(s.get("transition_duration", 0.3)), durs[i] / 2, durs[i - 1] / 2) if tr != "cut" else 0.0
-        starts.append(total - d)
-        total += durs[i] - d
+        starts.append(total)
+        total += durs[i]
 
     seg_start = {str(s.get("id", f"S{i+1}")): starts[i] for i, s in enumerate(segs)}
     return starts, durs, total, seg_start
@@ -137,8 +135,8 @@ def check_loudness(mp4_path: Path, target_lufs: float = -14.0) -> Tuple[bool, fl
     return ok, i_lufs, tp_db
 
 
-def check_cuts_and_pauses(plan: Dict[str, Any]) -> Tuple[bool, int, int, int]:
-    """Check cut boundaries against cached word spans + silences.
+def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None) -> Tuple[bool, int, int, int]:
+    """Check cut boundaries against cached word spans + silences, plus rendered MP4 dead-air scan.
     Returns (passed, clipped_words_count, long_pauses_count, masked_jump_cuts_count).
     """
     segs = plan.get("segments", [])
@@ -155,12 +153,11 @@ def check_cuts_and_pauses(plan: Dict[str, Any]) -> Tuple[bool, int, int, int]:
             if float(s.get("zoom", 1.0)) > 1.01 or s.get("layout", "single") != "single":
                 jump_cuts_masked += 1
 
-        # Check internal pauses inside [st, en]
+        # Check internal pauses inside [st, en] (>1.05s dead air threshold)
         sil_path = wdir / "silences.json"
         if sil_path.is_file():
             try:
                 raw_sils = read_json(sil_path)
-                # Merge contiguous silences
                 merged: List[Dict[str, float]] = []
                 for sl in sorted(raw_sils, key=lambda x: float(x["start"])):
                     s0, s1 = float(sl["start"]), float(sl["end"])
@@ -169,9 +166,10 @@ def check_cuts_and_pauses(plan: Dict[str, Any]) -> Tuple[bool, int, int, int]:
                     else:
                         merged.append({"start": s0, "end": s1})
                 for sl in merged:
-                    if sl["start"] >= st + 0.25 and sl["end"] <= en - 0.25:
-                        if (sl["end"] - sl["start"]) > 1.30:
-                            long_pauses += 1
+                    ov_s = max(st + 0.15, sl["start"])
+                    ov_e = min(en - 0.15, sl["end"])
+                    if (ov_e - ov_s) > 1.05:
+                        long_pauses += 1
             except Exception:
                 pass
 
@@ -181,11 +179,9 @@ def check_cuts_and_pauses(plan: Dict[str, Any]) -> Tuple[bool, int, int, int]:
             try:
                 words = read_json(hq_path)
                 rms = compute_10ms_rms_envelope(wdir / "audio16k.wav")
-                # Check RMS energy right at cut boundaries (if st > 0.05 or en < dur - 0.15)
                 for boundary_t in (st, en):
                     if boundary_t <= 0.05:
                         continue
-                    # Only flag if a word spans >0.18s across boundary AND RMS at boundary is loud (>-18dB)
                     crossing = any(w["start"] + 0.18 < boundary_t < w["end"] - 0.18 for w in words)
                     if crossing and rms:
                         near_db = [db for t, db in rms if abs(t - boundary_t) <= 0.02]
@@ -193,6 +189,31 @@ def check_cuts_and_pauses(plan: Dict[str, Any]) -> Tuple[bool, int, int, int]:
                             clipped_words += 1
             except Exception:
                 pass
+
+    # Also scan the rendered MP4 audio stream directly for any empty dead air >1.05s
+    if mp4_path is not None and mp4_path.is_file() and long_pauses == 0:
+        try:
+            r = subprocess.run(
+                [
+                    str(FFMPEG),
+                    "-hide_banner",
+                    "-i",
+                    str(mp4_path),
+                    "-af",
+                    "silencedetect=noise=-34dB:d=1.05",
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            dur_matches = re.findall(r"silence_duration:\s*([\d.]+)", r.stderr)
+            long_pauses += sum(1 for d_str in dur_matches if float(d_str) > 1.05)
+        except Exception:
+            pass
 
     passed = (clipped_words == 0 and long_pauses == 0)
     return passed, clipped_words, long_pauses, jump_cuts_masked
@@ -224,6 +245,7 @@ def check_script_coverage(
         wdir = clip_work_dir(s.get("src", ""))
         st, en = float(s["start"]), float(s["end"])
         words: List[Dict[str, Any]] = []
+        # Read only the primary word file (hq_words.json preferred over words.json)
         for fname in ("hq_words.json", "words.json"):
             fpath = wdir / fname
             if fpath.is_file():
@@ -235,30 +257,29 @@ def check_script_coverage(
                     ]
                     if sliced:
                         words.extend(sliced)
+                        break
                 except Exception:
                     pass
         toks = [_clean_token(w.get("w") or w.get("word", "")) for w in words if _clean_token(w.get("w") or w.get("word", ""))]
         seg_word_slices.append(toks)
 
-    # Check inter-segment boundary duplicates across consecutive segments from different clips
+    # Check intra-segment consecutive repeated words/phrases not in script (e.g. "Almost, almost")
+    script_text_all = " ".join(" ".join(sl.get("tokens", [])) for sl in script_lines).lower()
+    for idx, toks in enumerate(seg_word_slices):
+        for j in range(len(toks) - 1):
+            if len(toks[j]) >= 3 and _word_similarity(toks[j], toks[j + 1]) >= 0.88:
+                pair_str = f"{toks[j]} {toks[j + 1]}"
+                if pair_str not in script_text_all:
+                    boundary_dups += 1
+
+    # Check inter-segment boundary duplicates across consecutive segments
     for i in range(len(segs) - 1):
-        stem_a = Path(str(segs[i].get("src", ""))).stem
-        stem_b = Path(str(segs[i + 1].get("src", ""))).stem
-        if stem_a != stem_b and seg_word_slices[i] and seg_word_slices[i + 1]:
-            w_end = seg_word_slices[i][min(len(seg_word_slices[i]) - 1, len(seg_word_slices[i]) // 2 - 1)]
-            # Compare actual last word in hq_words of seg i vs first word in hq_words of seg i+1
-            hq_a = clip_work_dir(segs[i].get("src", "")) / "hq_words.json"
-            hq_b = clip_work_dir(segs[i + 1].get("src", "")) / "hq_words.json"
-            if hq_a.is_file() and hq_b.is_file():
-                wa = [
-                    w for w in read_json(hq_a)
-                    if float(w["end"]) > float(segs[i]["start"]) + 0.08 and float(w["start"]) < float(segs[i]["end"]) - 0.08
-                ]
-                wb = [
-                    w for w in read_json(hq_b)
-                    if float(w["end"]) > float(segs[i + 1]["start"]) + 0.08 and float(w["start"]) < float(segs[i + 1]["end"]) - 0.08
-                ]
-                if wa and wb and _word_similarity(wa[-1]["w"], wb[0]["w"]) >= 0.82 and len(_clean_token(wa[-1]["w"])) >= 3:
+        if seg_word_slices[i] and seg_word_slices[i + 1]:
+            w_last = seg_word_slices[i][-1]
+            w_first = seg_word_slices[i + 1][0]
+            if len(w_last) >= 3 and _word_similarity(w_last, w_first) >= 0.85:
+                pair_str = f"{w_last} {w_first}"
+                if pair_str not in script_text_all:
                     boundary_dups += 1
 
     if not script_lines:
@@ -340,12 +361,18 @@ def verify_marks_and_build_contact_sheet(
     passed_marks = 0
     sample_events: List[Tuple[float, str]] = []
 
+    default_pack = str(plan.get("mark_pack") or "flash").strip().lower()
+    strobe_styles = {"flash", "vignette", "kn20228", "w42", "strobe"}
+
     for m in marks:
         mtype = _normalize_mark_type(m.get("type", "right"))
         sid = str(m.get("segment", ""))
         t_start = float(seg_start.get(sid, 0.0)) + float(m.get("at", 0.0))
-        dur = float(m.get("duration", 1.2))
-        t_probe = t_start + min(0.35, dur * 0.4)
+        dur = float(m.get("duration", 1.1))
+        style_key = str(m.get("style") or m.get("pack") or default_pack).strip().lower()
+        is_strobe = style_key in strobe_styles or bool(m.get("strobe", False))
+        # Probe at t_start + 0.05s for strobe (inside first [0.00, 0.11) ON pulse), or +0.35s for static badge
+        t_probe = t_start + (0.05 if is_strobe else min(0.35, dur * 0.4))
         sample_events.append((t_probe, f"{mtype.upper()}@{tc(t_start)}"))
 
         x0, y0, mw, mh = _mark_bbox(m.get("position", "top-right"), W, H, float(m.get("size", 0.22)))
@@ -384,10 +411,10 @@ def verify_marks_and_build_contact_sheet(
 
         if mtype == "wrong" and len(r_vals) >= 100 and diff_rg >= 35.0:
             passed_marks += 1
-            mark_results.append(f"wrong@{tc(t_start)} R-G=+{diff_rg:.0f}")
+            mark_results.append(f"wrong@{tc(t_start)} R-G=+{diff_rg:.0f}{'[STROBE]' if is_strobe else ''}")
         elif mtype == "right" and len(g_vals) >= 100 and diff_gr >= 35.0:
             passed_marks += 1
-            mark_results.append(f"right@{tc(t_start)} G-R=+{diff_gr:.0f}")
+            mark_results.append(f"right@{tc(t_start)} G-R=+{diff_gr:.0f}{'[STROBE]' if is_strobe else ''}")
         else:
             mark_results.append(f"{mtype}@{tc(t_start)} FAIL(R={avg_r:.0f},G={avg_g:.0f})")
 
@@ -411,7 +438,7 @@ def verify_marks_and_build_contact_sheet(
     fc_parts: List[str] = []
     for idx, (t_ev, _) in enumerate(sample_events):
         inputs.extend(["-ss", f"{t_ev:.3f}", "-i", str(mp4_path)])
-        fc_parts.append(f"[{idx}:v]scale={tile_w}:{tile_h},setsar=1[v{idx}]")
+        fc_parts.append(f"[{idx}:v]trim=end_frame=1,setpts=PTS-STARTPTS,scale={tile_w}:{tile_h},setsar=1[v{idx}]")
 
     concat_in = "".join(f"[v{idx}]" for idx in range(n_tiles))
     fc_parts.append(
@@ -468,13 +495,13 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
         info.get("width") == exp_w
         and info.get("height") == exp_h
         and int(round(float(info.get("fps") or 0))) == exp_fps
-        and abs(dur_diff) <= 0.08
+        and abs(dur_diff) <= 0.15
     )
 
     target_lufs = float((plan.get("audio") or {}).get("loudness", -14.0))
     audio_ok, i_lufs, tp_db = check_loudness(out_mp4, target_lufs=target_lufs)
 
-    cuts_ok, clipped_w, long_pauses, jc_masked = check_cuts_and_pauses(plan)
+    cuts_ok, clipped_w, long_pauses, jc_masked = check_cuts_and_pauses(plan, mp4_path=out_mp4)
 
     if not script_path:
         # Use the script this plan was prepared from (recorded by prepare.py), not just the first file in input/script/

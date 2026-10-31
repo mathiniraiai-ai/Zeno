@@ -28,9 +28,10 @@ description: Low-token 3-step video editing workflow, hard boundaries, layout pr
    `python3 scripts/render.py work/<project>/plan.edl --verify`
    Renders the final MP4 to `~/Downloads/Zeno Outputs/`, runs deterministic script coverage & `-14 LUFS` loudness verification, and generates `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` marks).
 
-## 4. Dynamic Layouts & Swappable Mark Packs
-- **Layouts**: `single` (full-frame + subtle zoom), `split_v` (top/bottom 50/50 split), `split_h` (left/right 50/50 split), `chat_bar` (speaker + floating prompt bar), `video_call` (speaker + rounded PiP card), and `hybrid` (`auto` mix of `single` for monologues and split/PiP/chat_bar for dialogues).
-- **Mark Packs**: `default`, `glossy`, `flash`, `vignette`, or custom `right.png`/`wrong.png` inside `assets/marks/<pack>/`.
+## 4. Dynamic Layouts, Rapid-Strobe Overlays & 5-Agent Workflow
+- **Layouts**: `single` (full-frame + dynamic zoom-in/zoom-out), `split_v` (top/bottom 50/50 split), `split_h` (left/right 50/50 split), `chat_bar` (speaker + floating prompt bar), `video_call` (speaker + rounded PiP card), and `hybrid` (`auto` mix of `single` for monologues and split/PiP/chat_bar for dialogues).
+- **Mark Packs**: `flash` (**default** — full-frame `red_flash.png` / `green_flash.png` flashing rapidly ON/OFF at ~5 Hz + strong `+4 dB` error buzzer & `+2.5 dB` right ding), `vignette` (`w42_red_vignette.png` / `w42_green_vignette.png` rapid strobe), `default`, `glossy`, or custom PNGs inside `assets/marks/<pack>/`.
+- **5-Agent Parallel Workflow & Agent 5 Deep Analyzer**: Assign at least 5 agents per task (defaulting to Antigravity or Claude Code). **Agent 5** is the mandatory **Post-Render Deep Video Analyzer & Auto-Fixer**: once the output MP4 is generated, Agent 5 analyzes the complete video locally using Python (`verify.py`, `words.json` timestamps, FFmpeg `silencedetect`, WAV RMS energy, and RGB frame inspection) to verify zero repeated dialogues, zero empty silences (`>1.05s`), active transitions + `whoosh.wav` SFX, and rapid-strobe Red/Green PNG overlays, fixing and re-rendering automatically if any issue is found.
 
 ## Secrets (all agents)
 Never open, print, quote or paste `.env` or any key in a chat or log. It holds the user's personal Zeno key (or a Gemini key). To check setup, run `python3 scripts/setup.py --smoke`; it reports [OK]/[FAIL] without showing keys. Read `.env.example` instead if you need the variable names.

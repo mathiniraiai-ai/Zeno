@@ -56,13 +56,22 @@ Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input
 | `hybrid` | Mixes `single` on teaching monologues with `split_v`/`video_call`/`chat_bar` on dialogue turns. | **Default (`auto`)** — best retention. |
 
 **Swappable `✓`/`✗` Mark Packs (`--mark-pack` or `# mark_pack:`)**:
+- `flash` (**default**): Full-frame `1080×1920` green/red border overlay (`assets/marks/green_flash.png`, `red_flash.png`) that **flashes rapidly ON and OFF (~5 Hz strobe)** with strong `+4 dB` error buzzer (`buzzer.wav` + `kn20228_wrong_core.mp3`) and `+2.5 dB` right ding (`correct_ding.wav` + `sn_correct.wav`).
+- `vignette`: Full-frame radial glow (`assets/marks/w42_green_vignette.png`, `w42_red_vignette.png`) with rapid strobe ON/OFF.
 - `default`: Flat circle badge (`assets/marks/right.png`, `wrong.png`)
-- `glossy`: 3D glass gradient badge with shadow (`assets/marks/glossy/`)
-- `flash`: Badge + subtle green/red edge flash (`assets/marks/flash/`)
-- `vignette`: Soft corner radial glow + badge (`assets/marks/vignette/`)
+- `glossy`: 3D glass gradient badge (`assets/marks/glossy_right.png`, `glossy_wrong.png`)
 - Custom: Place `right.png` & `wrong.png` in `assets/marks/<pack>/`.
 
-## 5. `plan.edl` Quick Syntax
+## 5. Mandatory 5-Agent Parallel Workflow & Agent 5 Deep Post-Render Analyzer
+
+Assign at least **5 specialized agents** per editing task (defaulting to **Antigravity** or **Claude Code**):
+1. **Agent 1 (`Script Coverage & Take Auditor`)**: Audits 100% script coverage, speaker identity, and best takes.
+2. **Agent 2 (`Pause-Cut & De-Duplication Specialist`)**: Removes repeated dialogues/words/false starts and cuts internal silences (`>0.85s`).
+3. **Agent 3 (`Dynamic Zoom & Layout Choreographer`)**: Applies punch-ins (`z=1.08`), push-ins (`z=1.0->1.06`), pull-outs (`z=1.08->1.0`), and layouts.
+4. **Agent 4 (`Transitions, Rapid-Strobe Overlays & SFX Designer`)**: Applies transitions (`smoothleft`, `smoothright`, `warm_flash`, `fade`) + `whoosh.wav` (`-2 dB`) and rapid-strobe full-frame Red/Green PNG overlays + strong error/right SFX.
+5. **Agent 5 (`Post-Render Deep Video Analyzer & Auto-Fixer`)**: After `render.py` completes, inspects the complete rendered video locally via Python (`verify.py`, `words.json` timestamps, FFmpeg `silencedetect`, WAV RMS energy, and RGB frame checks — without external API calls) to catch and fix any repeated dialogues, empty silences, or missing transitions/SFX/overlays.
+
+## 6. `plan.edl` Quick Syntax
 
 ```text
 # output: output/Kannada_I_am_hungry.mp4

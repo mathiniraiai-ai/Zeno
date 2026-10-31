@@ -256,12 +256,29 @@ class GeminiTranscriber:
         data: Dict[str, Any],
         language_hint: str,
         model_used: str,
+        clip_duration_sec: Optional[float] = None,
     ) -> Dict[str, Any]:
         norm_hint = normalize_lang_code(language_hint)
         fallback_lang = norm_hint if norm_hint != "auto" else "en"
         lang_code = normalize_lang_code(data.get("detected_language_code") or fallback_lang)
         if lang_code == "auto":
             lang_code = fallback_lang
+
+        # Strip hallucinated cues whose start timestamp is at or past the physical clip duration
+        raw_cues = data.get("cues") or []
+        if clip_duration_sec and clip_duration_sec > 1.0 and isinstance(raw_cues, list) and raw_cues:
+            valid_cues = [
+                c for c in raw_cues
+                if isinstance(c, dict) and float(c.get("start") or 0.0) < (clip_duration_sec - 0.15)
+            ]
+            if valid_cues and len(valid_cues) < len(raw_cues):
+                raw_cues = valid_cues
+                cue_words = [w for c in valid_cues for w in (c.get("words") or str(c.get("text") or "").split()) if str(w).strip()]
+                if cue_words:
+                    data = dict(data)
+                    data["cues"] = valid_cues
+                    data["words"] = cue_words
+                    data["full_transcript"] = " ".join(str(c.get("text") or "").strip() for c in valid_cues if str(c.get("text") or "").strip())
 
         raw_words = data.get("words") or []
         if not raw_words and data.get("full_transcript"):
@@ -280,7 +297,7 @@ class GeminiTranscriber:
             "language": lang_code,
             "full_transcript": audit.healed_text or " ".join(healed_words),
             "words": healed_words,
-            "cues": data.get("cues") or [],
+            "cues": raw_cues,
             "usage": {
                 "input_tokens": int(usage.get("input_tokens") or 0),
                 "output_tokens": int(usage.get("output_tokens") or 0),
@@ -314,7 +331,8 @@ class GeminiTranscriber:
         data = resp.json()
         if data.get("warning"):
             print(f"[transcribe] WARNING from service: {data['warning']}", file=sys.stderr)
-        return self._heal_result(data, language_hint, model_used=str(data.get("model_used") or "cloud"))
+        dur_sec = (Path(wav_path).stat().st_size / 32000.0) if Path(wav_path).is_file() else None
+        return self._heal_result(data, language_hint, model_used=str(data.get("model_used") or "cloud"), clip_duration_sec=dur_sec)
 
     def transcribe(
         self,
@@ -331,6 +349,7 @@ class GeminiTranscriber:
         wav_p = Path(wav_path)
         wdir = Path(work_dir) if work_dir else wav_p.parent
         cache_file = wdir / "gemini_transcript.json"
+        dur_sec = (wav_p.stat().st_size / 32000.0) if wav_p.is_file() else None
 
         if use_cache and cache_file.is_file() and wav_p.is_file():
             try:
@@ -347,6 +366,7 @@ class GeminiTranscriber:
                         },
                         language_hint=language_hint,
                         model_used=cached.get("model_used", "cached_gemini"),
+                        clip_duration_sec=dur_sec,
                     )
             except Exception:
                 pass
@@ -402,7 +422,7 @@ class GeminiTranscriber:
                     out_tok = int(getattr(um, "candidates_token_count", 0) or 0) + int(getattr(um, "thoughts_token_count", 0) or 0)
                     tot_tok = int(getattr(um, "total_token_count", 0) or (in_tok + out_tok))
                     data["usage"] = {"input_tokens": in_tok, "output_tokens": out_tok, "total_tokens": tot_tok}
-                res = self._heal_result(data, language_hint, model_used=model_name)
+                res = self._heal_result(data, language_hint, model_used=model_name, clip_duration_sec=dur_sec)
                 if res.get("words"):
                     self._save_cache(cache_file, wav_p, res)
                     return res

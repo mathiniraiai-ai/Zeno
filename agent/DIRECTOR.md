@@ -11,8 +11,8 @@
 2. **Footage in** — transcribe + align, read the brief only. → `concepts/02_footage_intake`
 3. **Pick the style** — from the user's words, else from the script's header and format. Load `styles/<name>/SKILL.md`. No match: ask the user, or learn it from a reference. → `concepts/03_style_library`, `concepts/04_reference_learning`
 4. **On-screen text** — only what the script document asks for. → `concepts/05_onscreen_text`
-5. **Edit** — `prepare.py` → read `brief.txt` + `plan.edl` → fix → `render.py --verify` (CLAUDE.md §3).
-6. **Report** — token table + README row. → `concepts/06_token_budget`
+5. **Edit (5-Agent Parallel Workflow)** — `prepare.py` → assign 5 agents (`1: Script/Take Auditor`, `2: Pause-Cut & De-Duplication Specialist`, `3: Dynamic Zoom & Layout Choreographer`, `4: Transitions, Strobe Overlays & SFX Designer`, `5: Post-Render Deep Video Analyzer & Auto-Fixer`) → refine `plan.edl` → `render.py --verify` → **Agent 5** performs local Python deep post-render inspection (checking timestamps + script + WAV RMS + RGB frames for zero repeated dialogues, zero empty silences `>1.05s`, active transitions/whoosh SFX, and rapid-strobe Red/Green overlays) and auto-fixes if needed.
+6. **Report** — separated Agent vs. Gemini transcription token table + `TOKEN_LEDGER.md` & `README.md` rows. → `concepts/06_token_budget`
 7. **Timing looks wrong?** → `concepts/07_alignment_accuracy`
 
 Read only the concept file for the step you are on.

@@ -319,6 +319,180 @@ def _file_mtime_sig(path_like: Any) -> str:
     return str(path_like)
 
 
+_STATIC_MOTION_CACHE: Dict[str, float] = {}
+
+
+def detect_static_camera_motion(
+    video_path: Union[str, Path],
+    start_sec: float,
+    end_sec: float,
+) -> float:
+    """Measure peripheral background camera motion (0-255 grayscale delta) using OpenCV.
+
+    Masks out the center speaker region (`x in [0.22..0.78], y in [0.12..0.88]`) so a talking
+    speaker on a locked tripod still registers as a static camera (`score < 2.8`).
+    """
+    resolved = resolve(video_path)
+    key = f"{resolved}:{start_sec:.2f}-{end_sec:.2f}"
+    if key in _STATIC_MOTION_CACHE:
+        return _STATIC_MOTION_CACHE[key]
+
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        _STATIC_MOTION_CACHE[key] = 0.0
+        return 0.0
+
+    if not resolved.is_file():
+        _STATIC_MOTION_CACHE[key] = 0.0
+        return 0.0
+
+    cap = cv2.VideoCapture(str(resolved))
+    if not cap.isOpened():
+        _STATIC_MOTION_CACHE[key] = 0.0
+        return 0.0
+
+    dur = max(0.2, float(end_sec) - float(start_sec))
+    n_samples = min(6, max(3, int(dur * 2.0)))
+    deltas: List[float] = []
+    prev_bg = None
+
+    for k in range(n_samples):
+        t = float(start_sec) + (k + 0.5) / n_samples * dur
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            continue
+        small = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (96, 96)).astype("float32")
+        if prev_bg is not None:
+            diff = np.abs(small - prev_bg)
+            mask = np.ones_like(diff, dtype=bool)
+            mask[12:84, 21:75] = False
+            deltas.append(float(np.mean(diff[mask])))
+        prev_bg = small
+
+    cap.release()
+    score = round(float(sum(deltas) / len(deltas)), 3) if deltas else 0.0
+    _STATIC_MOTION_CACHE[key] = score
+    return score
+
+
+def resolve_segment_zoom_spec(
+    seg: Dict[str, Any],
+    exact_dur: float,
+) -> Tuple[float, float, str, float, float]:
+    """Return `(z0, z1, zoom_style, zoom_at, zoom_dur)` for `seg`, applying OpenCV
+    static-shot auto-zoom when a clip has no camera movement and no explicit zoom.
+    """
+    z0_raw = seg.get("zoom")
+    z1_raw = seg.get("zoom_to")
+    style = str(seg.get("zoom_style") or "").strip().lower()
+    zoom_at = float(seg.get("zoom_at") or 0.0)
+    zoom_dur = float(seg.get("zoom_dur") or 0.0)
+
+    if style in ("sudden_in", "punch_in"):
+        z0 = float(z0_raw if z0_raw is not None else 1.0)
+        z1 = float(z1_raw if z1_raw is not None else (z0 if z0 > 1.01 else 1.10))
+        if abs(z1 - z0) < 0.005:
+            z0, z1 = 1.0, max(1.08, z1)
+        return z0, z1, "sudden_in", max(0.0, zoom_at), (zoom_dur if zoom_dur > 0.02 else 0.18)
+
+    if style in ("sudden_out", "punch_out"):
+        z0 = float(z0_raw if z0_raw is not None else 1.10)
+        z1 = float(z1_raw if z1_raw is not None else 1.0)
+        if abs(z0 - z1) < 0.005:
+            z0, z1 = max(1.08, z0), 1.0
+        return z0, z1, "sudden_out", max(0.0, zoom_at), (zoom_dur if zoom_dur > 0.02 else 0.20)
+
+    if style == "flash_zoom":
+        z0 = float(z0_raw if z0_raw is not None else 1.0)
+        z1 = float(z1_raw if z1_raw is not None else (z0 if z0 > 1.01 else 1.12))
+        if abs(z1 - z0) < 0.005:
+            z0, z1 = 1.0, max(1.10, z1)
+        return z0, z1, "flash_zoom", max(0.0, zoom_at), (zoom_dur if zoom_dur > 0.02 else 0.16)
+
+    z0 = float(z0_raw if z0_raw is not None else 1.0)
+    z1 = float(z1_raw if z1_raw is not None else z0)
+
+    if seg.get("zoom_at") is not None and abs(z1 - z0) >= 0.005:
+        inferred_style = "sudden_out" if z1 < z0 else "sudden_in"
+        return z0, z1, inferred_style, max(0.0, zoom_at), (zoom_dur if zoom_dur > 0.02 else 0.18)
+
+    if abs(z1 - z0) < 0.005 and z0 > 1.005:
+        drift = min(1.30, round(z0 + 0.015, 4))
+        return z0, drift, "smooth", 0.0, exact_dur
+
+    if abs(z1 - z0) >= 0.005:
+        return z0, z1, "smooth", 0.0, exact_dur
+
+    if exact_dur >= 1.8 and seg.get("auto_zoom", True) is not False:
+        bg_motion = detect_static_camera_motion(
+            seg["src"],
+            float(seg.get("start", 0.0)),
+            float(seg.get("end", exact_dur)),
+        )
+        if bg_motion < 2.8:
+            sid_str = str(seg.get("id") or "S1")
+            parity = sum(ord(c) for c in sid_str) % 2
+            if exact_dur >= 4.0 or parity == 0:
+                return 1.0, 1.05, "smooth", 0.0, exact_dur
+            else:
+                return 1.05, 1.0, "smooth", 0.0, exact_dur
+
+    return 1.0, 1.0, "none", 0.0, exact_dur
+
+
+def _build_subpixel_zoom_filter(
+    slot_w: int,
+    slot_h: int,
+    fps: int,
+    exact_dur: float,
+    fx: float,
+    fy: float,
+    z0: float,
+    z1: float,
+    zoom_style: str = "smooth",
+    zoom_at: float = 0.0,
+    zoom_dur: float = 0.18,
+) -> List[str]:
+    """Build a supersampled sub-pixel `zoompan` filter chain free of 2px stair-stepping jitter."""
+    if abs(z0 - 1.0) <= 0.004 and abs(z1 - 1.0) <= 0.004 and zoom_style == "none":
+        return []
+
+    total_frames = max(2, int(round(exact_dur * fps)))
+    n_minus_1 = max(1, total_frames - 1)
+
+    ss_factor = 3 if max(slot_w, slot_h) <= 1280 else 2
+    sw_super = even(slot_w * ss_factor)
+    sh_super = even(slot_h * ss_factor)
+
+    if zoom_style in ("sudden_in", "sudden_out", "flash_zoom"):
+        t0 = max(0.0, min(exact_dur - 0.05, float(zoom_at)))
+        d_snap = max(0.08, min(1.20, float(zoom_dur or 0.18)))
+        u_expr = f"clip((on/{fps:.4f}-{t0:.4f})/{d_snap:.4f},0,1)"
+        ease_expr = f"(1-pow(1-{u_expr},3))"
+        drift_sign = "+" if z1 >= z0 else "-"
+        post_u = f"clip((on/{fps:.4f}-{t0 + d_snap:.4f})/{max(0.2, exact_dur - t0 - d_snap):.4f},0,1)"
+        z_expr = f"({z0:.4f}+({z1 - z0:+.4f})*{ease_expr}{drift_sign}0.015*{post_u})"
+    else:
+        p_expr = f"(1-cos(PI*min(on/{n_minus_1},1)))/2"
+        z_expr = f"({z0:.4f}+({z1 - z0:+.4f})*{p_expr})"
+
+    x_expr = f"(iw-iw/zoom)*{fx:.4f}"
+    y_expr = f"(ih-ih/zoom)*{fy:.4f}"
+
+    filters = [
+        f"scale={sw_super}:{sh_super}:flags=bicubic",
+        f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={slot_w}x{slot_h}:fps={fps}",
+    ]
+    if zoom_style == "flash_zoom":
+        t0 = max(0.0, float(zoom_at))
+        pulse = f"max(0,1-abs((t-{t0 + 0.04:.4f})/0.09))"
+        filters.append(f"eq=brightness='0.12*{pulse}':contrast='1+0.08*{pulse}':eval=frame")
+    return filters
+
+
 def build_segment_cache_key(
     seg: Dict[str, Any],
     plan: Optional[Dict[str, Any]],
@@ -341,7 +515,7 @@ def build_segment_cache_key(
         }
 
     payload = {
-        "v": 2,
+        "v": 4,
         "src": _file_mtime_sig(seg["src"]),
         "start": round(float(seg["start"]), 4),
         "end": round(float(seg["end"]), 4),
@@ -349,6 +523,9 @@ def build_segment_cache_key(
         "slot": seg.get("slot"),
         "zoom": seg.get("zoom"),
         "zoom_to": seg.get("zoom_to"),
+        "zoom_style": seg.get("zoom_style"),
+        "zoom_at": seg.get("zoom_at"),
+        "zoom_dur": seg.get("zoom_dur"),
         "focus": seg.get("focus"),
         "peer": peer_sig,
         "chat": seg.get("chat"),
@@ -376,18 +553,20 @@ def _build_slot_video_chain(
     z1: float = 1.0,
     bbox_norm: Optional[Sequence[float]] = None,
     exact: bool = False,
+    zoom_style: str = "smooth",
+    zoom_at: float = 0.0,
+    zoom_dur: float = 0.18,
 ) -> str:
     """Build an FFmpeg video filter chain that scales and crops `input_label` into
-    `(slot_w, slot_h)` with eye-anchored headroom (`14%`) and optional zoom (`z0 -> z1`).
+    `(slot_w, slot_h)` with eye-anchored headroom (`14%`) and sub-pixel supersampled zoom.
     """
     slot_w, slot_h = even(slot_w), even(slot_h)
     if exact and abs((src_w / src_h) / (slot_w / slot_h) - 1.0) < 0.03:
-        # Source already has the slot's shape (within 3%): fit it as is, no headroom re-framing or crop.
-        return f"{input_label}scale={slot_w}:{slot_h},setsar=1,fps={fps},format=yuv420p{output_label}"
+        return f"{input_label}setpts=PTS-STARTPTS,fps={fps},scale={slot_w}:{slot_h}:flags=lanczos,setsar=1,format=yuv420p{output_label}"
     fx = max(0.05, min(0.95, float(focus[0]) if len(focus) >= 1 else 0.5))
     fy = max(0.08, min(0.85, float(focus[1]) if len(focus) >= 2 else 0.38))
 
-    # Compute headroom-locked base scale & crop for this slot
+    chain = ["setpts=PTS-STARTPTS", f"fps={fps}"]
     crop_info = compute_slot_crop_filter(
         src_w=src_w,
         src_h=src_h,
@@ -397,18 +576,23 @@ def _build_slot_video_chain(
         focus=[fx, fy],
         headroom_pct=TARGET_HEADROOM_PCT,
     )
-    chain = [crop_info["filter"]]
-
-    if abs(z0 - 1.0) > 0.005 or abs(z1 - 1.0) > 0.005:
-        if abs(z1 - z0) < 0.005:
-            chain.append(f"scale={even(slot_w * z0)}:{even(slot_h * z0)}")
-        else:
-            p = f"(1-cos(PI*min(t/{exact_dur:.4f},1)))/2"
-            z = f"({z0}+({z1}-{z0})*{p})"
-            chain.append(f"scale=w='trunc({slot_w}*{z}/2)*2':h='trunc({slot_h}*{z}/2)*2':eval=frame")
-        chain.append(f"crop={slot_w}:{slot_h}:x='(iw-{slot_w})*{fx:.4f}':y='(ih-{slot_h})*{fy:.4f}'")
-
-    chain.extend(["setsar=1", f"fps={fps}", "format=yuv420p"])
+    chain.append(crop_info["filter"])
+    chain.extend(
+        _build_subpixel_zoom_filter(
+            slot_w=slot_w,
+            slot_h=slot_h,
+            fps=fps,
+            exact_dur=exact_dur,
+            fx=fx,
+            fy=fy,
+            z0=z0,
+            z1=z1,
+            zoom_style=zoom_style,
+            zoom_at=zoom_at,
+            zoom_dur=zoom_dur,
+        )
+    )
+    chain.extend(["setsar=1", "format=yuv420p"])
     return f"{input_label}{','.join(chain)}{output_label}"
 
 
@@ -449,8 +633,7 @@ def build_segment_ffmpeg_args(
     exact = frames / float(fps)
 
     lay = normalize_layout_name(seg.get("layout"))
-    z0 = float(seg.get("zoom", 1.0) or 1.0)
-    z1 = float(seg.get("zoom_to", z0) or z0)
+    z0, z1, zoom_style, zoom_at, zoom_dur = resolve_segment_zoom_spec(seg, exact)
     focus = list(seg.get("focus") or [0.5, 0.38])
     fx, fy = float(focus[0]), float(focus[1])
 
@@ -463,8 +646,10 @@ def build_segment_ffmpeg_args(
     af_chain = ",".join([
         "aresample=48000",
         "aformat=channel_layouts=stereo",
+        "asetpts=PTS-STARTPTS",
         "apad",
         f"atrim=0:{exact:.6f}",
+        "asetpts=PTS-STARTPTS",
         f"afade=t=in:d={EDGE_FADE}",
         f"afade=t=out:st={max(0.0, exact - EDGE_FADE):.6f}:d={EDGE_FADE}",
     ])
@@ -480,16 +665,28 @@ def build_segment_ffmpeg_args(
     # Layout 1: SINGLE (Full-screen)
     # ------------------------------------------------------------------
     if lay == "single":
-        vf = [f"scale={W}:{H}:force_original_aspect_ratio=increase", f"crop={W}:{H}"]
-        if abs(z0 - 1.0) > 0.005 or abs(z1 - 1.0) > 0.005:
-            if abs(z1 - z0) < 0.005:
-                vf.append(f"scale={even(W * z0)}:{even(H * z0)}")
-            else:
-                p = f"(1-cos(PI*min(t/{exact:.4f},1)))/2"
-                z = f"({z0}+({z1}-{z0})*{p})"
-                vf.append(f"scale=w='trunc({W}*{z}/2)*2':h='trunc({H}*{z}/2)*2':eval=frame")
-            vf.append(f"crop={W}:{H}:x='(iw-{W})*{fx:.4f}':y='(ih-{H})*{fy:.4f}'")
-        vf.extend(["setsar=1", f"fps={fps}", "format=yuv420p"])
+        vf = [
+            "setpts=PTS-STARTPTS",
+            f"fps={fps}",
+            f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos",
+            f"crop={W}:{H}:x='(iw-{W})*{fx:.4f}':y='(ih-{H})*{fy:.4f}'",
+        ]
+        vf.extend(
+            _build_subpixel_zoom_filter(
+                slot_w=W,
+                slot_h=H,
+                fps=fps,
+                exact_dur=exact,
+                fx=fx,
+                fy=fy,
+                z0=z0,
+                z1=z1,
+                zoom_style=zoom_style,
+                zoom_at=zoom_at,
+                zoom_dur=zoom_dur,
+            )
+        )
+        vf.extend(["setsar=1", "format=yuv420p"])
         fc.append(f"[0:v]{','.join(vf)}{v_curr}")
 
     # ------------------------------------------------------------------

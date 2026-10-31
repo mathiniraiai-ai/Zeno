@@ -50,10 +50,16 @@ def _iso_to_epoch(ts_str: str) -> float:
         return 0.0
 
 
-def detect_agent_usage(since_epoch: Optional[float] = None) -> Dict[str, Any]:
-    """Auto-detect which AI agent harness (Antigravity vs Claude Code) is active and read its token usage."""
+def detect_agent_usage(
+    since_epoch: Optional[float] = None,
+    until_epoch: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Auto-detect which AI agent harness (Antigravity vs Claude Code) and model are active,
+    and measure ONLY the input/output tokens spent during this specific video edit window.
+    """
     now = time.time()
-    cutoff = since_epoch if (since_epoch and since_epoch > 0) else (now - 1800.0)
+    cutoff = (since_epoch - 60.0) if (since_epoch and since_epoch > 0) else (now - 900.0)
+    ceiling = (until_epoch + 15.0) if (until_epoch and until_epoch > 0) else (now + 60.0)
 
     candidates: List[Tuple[float, Dict[str, Any]]] = []
 
@@ -66,54 +72,84 @@ def detect_agent_usage(since_epoch: Optional[float] = None) -> Dict[str, Any]:
             lines = Path(path_str).read_text(encoding="utf-8", errors="ignore").splitlines()
             if not lines:
                 continue
-            # Check if this conversation touches Zeno or Claude Editor or is the newest active session
             raw_sample = "\n".join(lines[-40:])
             if len(agy_files) > 1 and ("Zeno" not in raw_sample and "Claude Editor" not in raw_sample) and (now - mtime > 300):
                 continue
 
+            # Parse exact model name from Antigravity's <USER_SETTINGS_CHANGE> blocks
             model_name = "Gemini 4 Argon"
-            for line in reversed(lines):
-                if "Model Selection" in line:
-                    m = re.search(r"to\s+([A-Za-z0-9 ._-]+?)(?:\s*\(|\.)", line)
-                    if m:
-                        model_name = m.group(1).strip()
-                        break
+            for line in lines:
+                if "USER_SETTINGS_CHANGE" in line and "Model Selection" in line:
+                    try:
+                        obj = json.loads(line)
+                        content_str = str(obj.get("content") or "")
+                        m = re.search(
+                            r"setting `Model Selection` from [^\n]+? to ([A-Za-z0-9 ._-]+?)(?:\s*\(|\.\s|\.\n)",
+                            content_str,
+                        )
+                        if m:
+                            cand_model = m.group(1).strip()
+                            if len(cand_model) >= 4:
+                                model_name = cand_model
+                    except Exception:
+                        pass
 
-            # Calculate tokens across steps since cutoff (or last 12 planner steps of the job)
-            planner_steps = []
+            # Collect steps strictly inside the video edit window [cutoff, ceiling]
+            window_steps = []
+            all_parsed = []
             for line in lines:
                 if not line.strip():
                     continue
                 d = json.loads(line)
-                if d.get("type") == "PLANNER_RESPONSE" and (d.get("input_tokens") or d.get("output_tokens")):
-                    step_ts = _iso_to_epoch(str(d.get("created_at") or ""))
-                    planner_steps.append((step_ts, d))
+                step_ts = _iso_to_epoch(str(d.get("created_at") or ""))
+                all_parsed.append((step_ts, d))
+                if cutoff <= step_ts <= ceiling:
+                    window_steps.append(d)
 
-            job_steps = [d for ts, d in planner_steps if ts >= cutoff]
-            if not job_steps and planner_steps:
-                job_steps = [d for _, d in planner_steps[-6:]]
+            if not window_steps and all_parsed:
+                window_steps = [d for _, d in all_parsed[-20:]]
 
-            if job_steps:
-                first_ctx = int(job_steps[0].get("input_tokens") or 0) + int(job_steps[0].get("cache_read_tokens") or 0)
-                last_ctx = int(job_steps[-1].get("input_tokens") or 0) + int(job_steps[-1].get("cache_read_tokens") or 0)
-                ctx_growth = max(0, last_ctx - first_ctx)
-                uncached_in = sum(int(s.get("input_tokens") or 0) for s in job_steps)
-                cached_in = int(job_steps[-1].get("cache_read_tokens") or 0)
-                out_tok = sum(int(s.get("output_tokens") or 0) for s in job_steps)
-                # Effective input tokens added during this job
-                eff_in = ctx_growth if ctx_growth > 0 else uncached_in
+            if window_steps:
+                in_chars = 0
+                out_chars = 0
+                planner_steps = []
+                for s in window_steps:
+                    st = str(s.get("type") or "")
+                    if st in ("USER_INPUT", "GENERIC", "SYSTEM_MESSAGE", "TOOL_RESPONSE", "SYSTEM"):
+                        in_chars += len(str(s.get("content") or ""))
+                    elif st == "PLANNER_RESPONSE":
+                        out_chars += (
+                            len(str(s.get("content") or ""))
+                            + len(str(s.get("thinking") or ""))
+                            + len(json.dumps(s.get("tool_calls") or [], ensure_ascii=False))
+                        )
+                        if s.get("input_tokens") or s.get("output_tokens"):
+                            planner_steps.append(s)
+
+                edit_in_tok = max(1, in_chars // 4)
+                edit_out_tok = max(1, out_chars // 4)
+                first_ctx = (
+                    int(planner_steps[0].get("input_tokens") or 0) + int(planner_steps[0].get("cache_read_tokens") or 0)
+                    if planner_steps else 0
+                )
+                last_ctx = (
+                    int(planner_steps[-1].get("input_tokens") or 0) + int(planner_steps[-1].get("cache_read_tokens") or 0)
+                    if planner_steps else 0
+                )
+                cached_in = int(planner_steps[-1].get("cache_read_tokens") or 0) if planner_steps else 0
+
                 candidates.append((
                     mtime,
                     {
                         "agent_name": "Antigravity",
                         "agent_model": model_name,
-                        "steps_count": len(job_steps),
+                        "steps_count": len(planner_steps) or len(window_steps),
                         "context_start": first_ctx,
                         "context_end": last_ctx,
-                        "input_tokens": eff_in,
+                        "input_tokens": edit_in_tok,
                         "cached_tokens": cached_in,
-                        "output_tokens": out_tok,
-                        "total_tokens": eff_in + out_tok,
+                        "output_tokens": edit_out_tok,
+                        "total_tokens": edit_in_tok + edit_out_tok,
                         "session_id": Path(path_str).parts[-4] if len(Path(path_str).parts) >= 4 else "unknown",
                     },
                 ))
@@ -129,7 +165,7 @@ def detect_agent_usage(since_epoch: Optional[float] = None) -> Dict[str, Any]:
             mtime = os.path.getmtime(path_str)
             lines = Path(path_str).read_text(encoding="utf-8", errors="ignore").splitlines()
             assistant_turns = []
-            model_name = "Claude"
+            model_name = "Claude Sonnet 5.5"
             for line in lines:
                 if not line.strip():
                     continue
@@ -143,36 +179,35 @@ def detect_agent_usage(since_epoch: Optional[float] = None) -> Dict[str, Any]:
                             model_name = str(msg["model"])
                         assistant_turns.append((ts, u))
 
-            job_turns = [u for ts, u in assistant_turns if ts >= cutoff]
-            if not job_turns and assistant_turns:
-                job_turns = [u for _, u in assistant_turns[-6:]]
+            job_turns = [u for ts, u in assistant_turns if cutoff <= ts <= ceiling]
+            if not job_turns:
+                continue
 
-            if job_turns:
-                first_u = job_turns[0]
-                last_u = job_turns[-1]
-                first_ctx = int(first_u.get("input_tokens") or 0) + int(first_u.get("cache_creation_input_tokens") or 0) + int(first_u.get("cache_read_input_tokens") or 0)
-                last_ctx = int(last_u.get("input_tokens") or 0) + int(last_u.get("cache_creation_input_tokens") or 0) + int(last_u.get("cache_read_input_tokens") or 0)
-                new_in = sum(int(u.get("input_tokens") or 0) + int(u.get("cache_creation_input_tokens") or 0) for u in job_turns)
-                cached_in = int(last_u.get("cache_read_input_tokens") or 0)
-                out_tok = sum(int(u.get("output_tokens") or 0) for u in job_turns)
-                ctx_growth = max(0, last_ctx - first_ctx)
-                eff_in = ctx_growth if ctx_growth > 0 else new_in
-                candidates.append((
-                    mtime,
-                    {
-                        "agent_name": "Claude Code",
-                        "agent_model": model_name,
-                        "steps_count": len(job_turns),
-                        "context_start": first_ctx,
-                        "context_end": last_ctx,
-                        "input_tokens": eff_in,
-                        "cached_tokens": cached_in,
-                        "output_tokens": out_tok,
-                        "total_tokens": eff_in + out_tok,
-                        "session_id": Path(path_str).stem,
-                    },
-                ))
-                break
+            first_u = job_turns[0]
+            last_u = job_turns[-1]
+            first_ctx = int(first_u.get("input_tokens") or 0) + int(first_u.get("cache_creation_input_tokens") or 0) + int(first_u.get("cache_read_input_tokens") or 0)
+            last_ctx = int(last_u.get("input_tokens") or 0) + int(last_u.get("cache_creation_input_tokens") or 0) + int(last_u.get("cache_read_input_tokens") or 0)
+            new_in = sum(int(u.get("input_tokens") or 0) + int(u.get("cache_creation_input_tokens") or 0) for u in job_turns)
+            cached_in = int(last_u.get("cache_read_input_tokens") or 0)
+            out_tok = sum(int(u.get("output_tokens") or 0) for u in job_turns)
+            ctx_growth = max(0, last_ctx - first_ctx)
+            eff_in = max(1, ctx_growth - out_tok) if ctx_growth > out_tok else new_in
+            candidates.append((
+                mtime,
+                {
+                    "agent_name": "Claude Code",
+                    "agent_model": model_name,
+                    "steps_count": len(job_turns),
+                    "context_start": first_ctx,
+                    "context_end": last_ctx,
+                    "input_tokens": eff_in,
+                    "cached_tokens": cached_in,
+                    "output_tokens": out_tok,
+                    "total_tokens": eff_in + out_tok,
+                    "session_id": Path(path_str).stem,
+                },
+            ))
+            break
         except Exception:
             continue
 
@@ -262,6 +297,16 @@ def save_prepare_snapshot(
     """Save the per-clip telemetry snapshot at the end of `prepare.py`."""
     proj_dir = WORK / project_name
     proj_dir.mkdir(parents=True, exist_ok=True)
+    snap_path = proj_dir / "token_telemetry.json"
+    if snap_path.is_file():
+        try:
+            prev = read_json(snap_path)
+            prev_start = float(prev.get("job_start_epoch") or 0.0)
+            if prev_start > 0 and (job_start_epoch - prev_start) < 2700.0:
+                job_start_epoch = prev_start
+        except Exception:
+            pass
+
     clip_rows = collect_clip_telemetry(clips_data, segments)
     t_in = sum(r["input_tokens"] for r in clip_rows)
     t_out = sum(r["output_tokens"] for r in clip_rows)
@@ -287,7 +332,7 @@ def save_prepare_snapshot(
         "transcribe_total_tokens": t_tot,
         "clips": clip_rows,
     }
-    write_json(proj_dir / "token_telemetry.json", snapshot)
+    write_json(snap_path, snapshot)
     return snapshot
 
 
@@ -344,7 +389,8 @@ def finalize_job_telemetry(
     snap: Dict[str, Any] = read_json(snap_path) if snap_path.is_file() else {}
 
     job_start = float(snap.get("job_start_epoch") or (time.time() - 900.0))
-    agent = detect_agent_usage(since_epoch=job_start)
+    job_end = float(snap.get("job_end_epoch") or time.time())
+    agent = detect_agent_usage(since_epoch=job_start, until_epoch=job_end)
 
     clips: List[Dict[str, Any]] = snap.get("clips") or []
     t_in = int(snap.get("transcribe_in_tokens") or sum(int(c.get("input_tokens") or 0) for c in clips))
@@ -368,13 +414,15 @@ def finalize_job_telemetry(
     marks_cnt = len(plan.get("marks") or [])
     clips_cnt = int(snap.get("clips_count") or len(clips) or len(plan.get("segments") or []))
     rel_out = str(output_mp4)
-    tok_per_min = int(round(grand_total / max(0.25, vid_sec / 60.0)))
+    tok_per_min = int(round(a_tot / max(0.25, vid_sec / 60.0)))
 
     record = {
         "created_at": ts_str,
         "date": date_str,
         "project": project_name,
         "language": lang,
+        "job_start_epoch": job_start,
+        "job_end_epoch": job_end,
         "agent_name": agent["agent_name"],
         "agent_model": agent["agent_model"],
         "agent_context_start": agent.get("context_start", 0),
@@ -459,25 +507,26 @@ def finalize_job_telemetry(
 
 
 def _format_project_report_md(r: Dict[str, Any]) -> str:
+    t_model = r["clips"][0]["transcribe_model"] if r.get("clips") else "gemini-2.5-flash-lite"
     lines = [
         f"# Zeno Token & Raw Clip Telemetry — `{r['project']}`",
         "",
         f"- **Date**: `{r['created_at']}`",
-        f"- **Active Agent**: **{r['agent_name']}** (`{r['agent_model']}`)",
+        f"- **AI Agent Harness**: **{r['agent_name']}** | **Model**: `{r['agent_model']}`",
         f"- **Clips Processed**: `{r['clips_count']}` raw clips (`{r['raw_seconds']:.1f}s` raw → `{tc(r['video_seconds'])}` final `{r['output_mp4']}`)",
-        f"- **Overall Tokens**: `{r['overall_in_tokens']:,}` in / `{r['overall_out_tokens']:,}` out / **`{r['grand_total_tokens']:,}` total** (`~{r['tokens_per_min']:,} tokens/min`)",
+        f"- **Video Edit Agent Tokens (This Edit Only)**: `{r['agent_in_tokens']:,}` in / `{r['agent_out_tokens']:,}` out / **`{r['agent_total_tokens']:,}` total** (`~{r['tokens_per_min']:,} agent tokens/min`)",
+        f"- **Gemini Audio Transcription Tokens (Separate)**: `{r['transcribe_in_tokens']:,}` in / `{r['transcribe_out_tokens']:,}` out / **`{r['transcribe_total_tokens']:,}` total** (`{t_model}`)",
         "",
-        "## 1. Overall Token Summary (Agent + Transcription)",
+        "## 1. Separated Token Summary (AI Agent vs. Gemini Audio Transcription)",
         "",
-        "| Layer | Provider / Model | Input Tokens | Cached Tokens | Output Tokens | Total Tokens |",
-        "|---|---|---:|---:|---:|---:|",
-        f"| **Raw Clip Transcription** | Gemini (`{r['clips'][0]['transcribe_model'] if r.get('clips') else 'gemini-3.5-flash-lite'}`) | `{r['transcribe_in_tokens']:,}` | `0` | `{r['transcribe_out_tokens']:,}` | **`{r['transcribe_total_tokens']:,}`** |",
-        f"| **AI Agent Director** | **{r['agent_name']}** (`{r['agent_model']}`) | `{r['agent_in_tokens']:,}` | `{r['agent_cached_tokens']:,}` | `{r['agent_out_tokens']:,}` | **`{r['agent_total_tokens']:,}`** |",
-        f"| **OVERALL TOTAL** | Combined Job Spend | **`{r['overall_in_tokens']:,}`** | **`{r['agent_cached_tokens']:,}`** | **`{r['overall_out_tokens']:,}`** | **`{r['grand_total_tokens']:,}`** |",
+        "| Bucket (Registered Separately) | Harness / Provider | Model | Input Tokens | Output Tokens | Total Tokens | Rate |",
+        "|---|---|---|---:|---:|---:|---|",
+        f"| **1. AI Agent (Video Edit Only)** | **{r['agent_name']}** | `{r['agent_model']}` | `{r['agent_in_tokens']:,}` | `{r['agent_out_tokens']:,}` | **`{r['agent_total_tokens']:,}`** | `~{r['tokens_per_min']:,} tok/min` |",
+        f"| **2. Gemini Audio Transcription (Separate)** | **Gemini Cloud API** | `{t_model}` | `{r['transcribe_in_tokens']:,}` | `{r['transcribe_out_tokens']:,}` | **`{r['transcribe_total_tokens']:,}`** | `{r['clips_count']} clips` |",
         "",
-        "## 2. Clip-by-Clip Raw Process & Token Breakdown",
+        "## 2. Clip-by-Clip Raw Process & Gemini Transcription Breakdown",
         "",
-        "| Clip | Raw → Kept | Words | Script Lines | Kept Segments | Raw Clip Process (Retakes / Cuts / Anomalies) | In Tokens | Out Tokens | Clip Total |",
+        "| Clip | Raw → Kept | Words | Script Lines | Kept Segments | Raw Clip Process (Retakes / Cuts / Anomalies) | Gemini In | Gemini Out | Gemini Total |",
         "|---|---|---|---|---|---|---:|---:|---:|",
     ]
     for c in r.get("clips") or []:
@@ -495,23 +544,22 @@ def _update_ledger_md(r: Dict[str, Any]) -> None:
 Automatically updated by [`scripts/token_tracker.py`](scripts/token_tracker.py) after every video edit (`prepare.py` → `render.py`).
 Full relational history is also stored in local SQLite (`work/zeno_telemetry.db`) and synced to Railway PostgreSQL (`/admin`).
 
-## 1. All Video Edit Runs (Agent + Transcription Rollup)
+## 1. All Video Edit Runs (AI Agent Tokens & Gemini Transcription Registered Separately)
 
-| Date | Project (`Lang`) | Agent & Model | Clips (`Raw → Final`) | Transcribe Tokens (`In / Out / Total`) | Agent Tokens (`In / Cached / Out / Total`) | Overall (`In / Out / Grand Total`) |
+| Date | Project (`Lang`) | Agent (`Claude Code` / `Antigravity`) | Model | Clips (`Raw → Final`) | Video Edit Agent Tokens (`In / Out / Total` · `tok/min`) | Gemini Transcription Tokens (Separate `In / Out / Total`) |
 |---|---|---|---|---|---|---|
 """
     row = (
-        f"| `{r['created_at']}` | **`{r['project']}`** (`{r['language']}`) | **{r['agent_name']}** (`{r['agent_model']}`) | "
+        f"| `{r['created_at']}` | **`{r['project']}`** (`{r['language']}`) | **{r['agent_name']}** | `{r['agent_model']}` | "
         f"{r['clips_count']} (`{r['raw_seconds']:.0f}s → {tc(r['video_seconds'])}`) | "
-        f"`{r['transcribe_in_tokens']:,}` / `{r['transcribe_out_tokens']:,}` / **`{r['transcribe_total_tokens']:,}`** | "
-        f"`{r['agent_in_tokens']:,}` / `{r['agent_cached_tokens']:,}` / `{r['agent_out_tokens']:,}` / **`{r['agent_total_tokens']:,}`** | "
-        f"`{r['overall_in_tokens']:,}` in / `{r['overall_out_tokens']:,}` out / **`{r['grand_total_tokens']:,}`** |"
+        f"`{r['agent_in_tokens']:,}` in / `{r['agent_out_tokens']:,}` out / **`{r['agent_total_tokens']:,}` total** (`~{r['tokens_per_min']:,}/min`) | "
+        f"`{r['transcribe_in_tokens']:,}` in / `{r['transcribe_out_tokens']:,}` out / **`{r['transcribe_total_tokens']:,}` total** |"
     )
 
     existing_rows: List[str] = []
     if LEDGER_MD.is_file():
         for line in LEDGER_MD.read_text(encoding="utf-8", errors="ignore").splitlines():
-            if line.startswith("| `20"):
+            if line.startswith("| `20") and f"**`{r['project']}`**" not in line:
                 existing_rows.append(line)
     existing_rows.append(row)
 
@@ -519,7 +567,7 @@ Full relational history is also stored in local SQLite (`work/zeno_telemetry.db`
         "",
         f"## 2. Latest Job Clip-by-Clip Breakdown — `{r['project']}` (`{r['created_at']}`)",
         "",
-        "| Clip | Raw → Kept | Words | Script Lines | Kept Segments | Raw Clip Process (Retakes / Cuts / Anomalies) | In Tokens | Out Tokens | Clip Total |",
+        "| Clip | Raw → Kept | Words | Script Lines | Kept Segments | Raw Clip Process (Retakes / Cuts / Anomalies) | Gemini In | Gemini Out | Gemini Total |",
         "|---|---|---|---|---|---|---:|---:|---:|",
     ]
     for c in r.get("clips") or []:
@@ -553,10 +601,10 @@ def _sync_to_cloud(r: Dict[str, Any]) -> bool:
 
 def print_console_summary(r: Dict[str, Any]) -> None:
     print("\n" + "=" * 78)
-    print(f"ZENO TOKEN & CLIP TELEMETRY — {r['project']} ({r['agent_name']} · {r['agent_model']})")
+    print(f"ZENO TOKEN & CLIP TELEMETRY — {r['project']} | Agent: {r['agent_name']} | Model: {r['agent_model']}")
     print("=" * 78)
     if r.get("clips"):
-        print(f"{'Clip':<6} {'Raw->Kept':<13} {'Words':<6} {'Lines':<8} {'In Tok':>7} {'Out Tok':>8} {'Total':>8}  Process Notes")
+        print(f"{'Clip':<6} {'Raw->Kept':<13} {'Words':<6} {'Lines':<8} {'Gem In':>7} {'Gem Out':>8} {'Gem Tot':>8}  Process Notes")
         print("-" * 78)
         for c in r["clips"]:
             note = ("; ".join(c.get("anomalies") or []) or "clean")[:34]
@@ -566,9 +614,10 @@ def print_console_summary(r: Dict[str, Any]) -> None:
                 f"{c['input_tokens']:>7,} {c['output_tokens']:>8,} {c['total_tokens']:>8,}  {note}"
             )
         print("-" * 78)
-    print(f"Transcription (Gemini) : {r['transcribe_in_tokens']:>8,} in | {r['transcribe_out_tokens']:>8,} out | {r['transcribe_total_tokens']:>9,} total")
-    print(f"Agent ({r['agent_name']:<14}): {r['agent_in_tokens']:>8,} in | {r['agent_out_tokens']:>8,} out | {r['agent_total_tokens']:>9,} total (cached: {r['agent_cached_tokens']:,})")
-    print(f"OVERALL JOB TOTAL      : {r['overall_in_tokens']:>8,} in | {r['overall_out_tokens']:>8,} out | {r['grand_total_tokens']:>9,} total (~{r['tokens_per_min']:,} tok/min)")
+    print(f"1. VIDEO EDIT AGENT ({r['agent_name']} · {r['agent_model']}):")
+    print(f"   In: {r['agent_in_tokens']:>8,} | Out: {r['agent_out_tokens']:>8,} | TOTAL: {r['agent_total_tokens']:>9,} tokens (~{r['tokens_per_min']:,} tok/min)")
+    print(f"2. GEMINI TRANSCRIPTION (Separate Cloud Audio API):")
+    print(f"   In: {r['transcribe_in_tokens']:>8,} | Out: {r['transcribe_out_tokens']:>8,} | TOTAL: {r['transcribe_total_tokens']:>9,} tokens ({r['clips_count']} clips)")
     print(f"Saved -> TOKEN_LEDGER.md | work/{r['project']}/token_report.md | work/zeno_telemetry.db")
     print("=" * 78)
 

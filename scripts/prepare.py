@@ -295,12 +295,25 @@ def find_rms_minimum(
     return round(best_t, 2), best_db
 
 
-def parse_script_file(script_path: Path) -> Tuple[Dict[str, str], List[Dict[str, Any]]]:
-    """Parse script file into metadata header and structured script lines L1..LN."""
+def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Parse script file into metadata header (concept_ref, visual_ref, characters, scenes) and structured script lines L1..LN."""
     raw = read_script_text(script_path)
-    meta: Dict[str, str] = {"title": script_path.stem, "language": "auto", "header": ""}
+    meta: Dict[str, Any] = {
+        "title": script_path.stem,
+        "language": "auto",
+        "header": "",
+        "concept_brief": "",
+        "characters": {},
+        "scenes": [],
+    }
     header_lines: List[str] = []
     lines: List[Dict[str, Any]] = []
+
+    in_characters_block = False
+    current_scene = "Scene 1"
+    current_visual = ""
+    pending_speaker = ""
+    pending_note = ""
 
     for raw_line in raw.splitlines():
         s = raw_line.strip()
@@ -308,7 +321,6 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, str], List[Dict[str,
             continue
         if s.startswith("#"):
             header_lines.append(s.lstrip("#").strip())
-            # Extract e.g. "# Grammar correction with Miss Nova on phone - I am hungry (Kannada)"
             m_title = re.search(r"-\s*([^(]+)\(([^)]+)\)", s)
             if m_title:
                 title_part = re.sub(r"[^A-Za-z0-9]+", "_", m_title.group(1).strip()).strip("_")
@@ -316,10 +328,62 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, str], List[Dict[str,
                 if lang_part and title_part:
                     meta["project_name"] = f"{lang_part}_{title_part}"
                     meta["language"] = lang_part.lower()
+            m_cbrief = re.match(r"^#\s*concept_brief\s*:\s*(.+)$", s, re.I)
+            if m_cbrief:
+                meta["concept_brief"] = m_cbrief.group(1).strip()
             continue
 
-        # Match L1 Speaker (optional note): text [WRONG|RIGHT]
-        m_id = re.match(r"^(L\d+)\s+(.*)$", s)
+        # 1. Ignore external Concept Reference / Visual Reference video URLs; only keep text concept descriptions
+        m_concept = re.match(r"^(?:Concept|Visual)\s+(?:Reference|Brief)(?:\s+link)?[^:]*:\s*(.+)$", s, re.I)
+        if m_concept:
+            val_c = m_concept.group(1).strip()
+            if not re.search(r"https?://", val_c, re.I):
+                meta["concept_brief"] = (meta["concept_brief"] + " | " + val_c).strip(" |")
+            continue
+
+        # 2. Characters heading & character definitions (-- Name -- Description)
+        if re.match(r"^Characters?\s*:?\s*$", s, re.I):
+            in_characters_block = True
+            continue
+        m_char = re.match(r"^--\s*([^-]+?)\s*--\s*(.+)$", s)
+        if m_char:
+            cname = m_char.group(1).strip()
+            cdesc = m_char.group(2).strip()
+            meta["characters"][cname] = cdesc
+            continue
+
+        # 3. Scene heading (e.g. "Scene 1", "SCENE 2 - Canteen")
+        m_scene = re.match(r"^(Scene\s+\d+(?:\s*[-:]\s*.*)?)$", s, re.I)
+        if m_scene:
+            in_characters_block = False
+            current_scene = m_scene.group(1).strip()
+            current_visual = ""
+            meta["scenes"].append({"scene": current_scene, "visual": ""})
+            continue
+
+        # 4. Scene visual / camera direction block: "[Visual: ...]"
+        m_vis_dir = re.match(r"^\[?\s*Visual\s*:\s*(.+?)\]?\s*$", s, re.I)
+        if m_vis_dir:
+            in_characters_block = False
+            current_visual = m_vis_dir.group(1).strip()
+            if meta["scenes"]:
+                meta["scenes"][-1]["visual"] = current_visual
+            else:
+                meta["scenes"].append({"scene": current_scene, "visual": current_visual})
+            continue
+
+        # 5. Standalone speaker line (e.g. "Miss Nova:" or "Ravi (He's speaking in pauses...):")
+        m_standalone_spk = re.match(r"^([A-Za-z][A-Za-z0-9_ .]{0,24}?)\s*(?:\(([^)]*)\))?\s*:\s*$", s)
+        if m_standalone_spk:
+            in_characters_block = False
+            pending_speaker = m_standalone_spk.group(1).strip()
+            pending_note = (m_standalone_spk.group(2) or "").strip()
+            continue
+
+        in_characters_block = False
+
+        # 6. Match L1 Speaker (optional note): text [WRONG|RIGHT]
+        m_id = re.match(r"^(L\d+)\s*(?::\s*|\s+)(.*)$", s)
         if m_id:
             lid, rest = m_id.group(1), m_id.group(2).strip()
         else:
@@ -331,34 +395,44 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, str], List[Dict[str,
         if m_mark:
             mark = m_mark.group(1).lower()
             rest = rest[: m_mark.start()].strip()
+        else:
+            # Also check inline [WRONG] or [RIGHT] inside a composite line
+            m_inline = re.search(r"\[(WRONG|RIGHT)\]", rest, re.I)
+            if m_inline:
+                mark = m_inline.group(1).lower()
 
-        speaker = ""
-        note = ""
+        speaker = pending_speaker
+        note = pending_note
+        pending_speaker = ""
+        pending_note = ""
         beat = False
+
         m_beat = re.match(r"^(?:(?:beat|action)\s*:\s*(.+)|\((.+)\)|\[(.+)\]|\*(.+)\*)$", rest, re.I)
-        if m_beat:   # a moment with no dialogue: "(he takes out the phone)", "[passes the phone]", "*shocked*", "Beat: ..."
+        if m_beat and not speaker:
             beat = True
             note = next(g for g in m_beat.groups() if g).strip()
             text = note
         else:
-            m_spk = re.match(r"^([A-Za-z][A-Za-z0-9_ ]{0,20})(?:\(([^)]*)\))?\s*:\s*(.*)$", rest)
-            if m_spk:
+            m_spk = re.match(r"^([A-Za-z][A-Za-z0-9_ ]{0,22}?)\s*(?:\(([^)]*)\))?\s*:\s*(.+)$", rest)
+            if m_spk and not m_spk.group(1).lower().startswith(("http", "concept", "visual", "scene")):
                 speaker = m_spk.group(1).strip()
-                note = (m_spk.group(2) or "").strip()
+                note = (m_spk.group(2) or note or "").strip()
                 text = m_spk.group(3).strip()
             else:
                 text = rest
 
-        quoted = re.findall(r'"([^"]+)"', text)
+        quoted = re.findall(r'["“”]([^"“”]+)["“”]', text)
         tokens = [_clean_token(w) for w in re.findall(r"[\w\u0900-\u0D7F']+", text.lower()) if _clean_token(w)]
         if beat:
-            tokens = []          # nothing to hear: a beat is matched to a silent clip, not to speech
+            tokens = []
         phonetic_tokens = [_phonetic_token(w) for w in tokens if _phonetic_token(w)]
 
         lines.append({
             "id": lid,
             "index": len(lines) + 1,
             "speaker": speaker,
+            "scene": current_scene,
+            "scene_visual": current_visual,
             "text": text,
             "mark": mark,
             "quoted": quoted,
@@ -368,6 +442,26 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, str], List[Dict[str,
             "beat": beat,
         })
 
+    # Auto-infer [WRONG] / [RIGHT] on student lines when followed by teacher feedback ("Almost", "Perfect!", "Nice!", "ನೀವು ಸಿಂಪಲ್ಲಾಗಿ")
+    for idx in range(len(lines) - 1):
+        curr_l = lines[idx]
+        next_l = lines[idx + 1]
+        if curr_l.get("mark") or len(curr_l.get("tokens", [])) > 12:
+            continue
+        if curr_l.get("speaker") and next_l.get("speaker") and curr_l["speaker"] != next_l["speaker"]:
+            nxt_txt = next_l["text"].strip().lower()
+            if nxt_txt.startswith(("almost", "ನೀವು ಸಿಂಪಲ್ಲಾಗಿ", "ಹೀಗೆ ಹೇಳಿ", "no,", "not quite")):
+                curr_l["mark"] = "wrong"
+            elif nxt_txt.startswith(("perfect", "nice", "great", "correct", "ನಿಜ", "ಸರಿ")):
+                curr_l["mark"] = "right"
+
+    brief_parts: List[str] = []
+    if meta["characters"]:
+        brief_parts.append("Characters: " + "; ".join(f"{k} ({v})" for k, v in meta["characters"].items()))
+    if meta["scenes"]:
+        brief_parts.append(" | ".join(f"{sc['scene']}: {sc['visual']}" if sc.get("visual") else sc["scene"] for sc in meta["scenes"]))
+    if brief_parts and not meta["concept_brief"]:
+        meta["concept_brief"] = " — ".join(brief_parts)
     meta["header"] = " | ".join(header_lines)
     return meta, lines
 
@@ -1364,13 +1458,20 @@ def assign_segment_ids_marks_and_layouts(
         dur = round(seg["end"] - seg["start"], 2)
         zoom = float(seg.get("zoom", 1.0))
 
-        # Concise editorial note summarizing covered script lines & auto-cuts
+        # Concise editorial note summarizing covered script lines, speaker & scene
+        spk_list = []
+        scene_name = ""
         if lines:
             line_summaries = []
             for l in lines:
+                if l.get("speaker") and l["speaker"] not in spk_list:
+                    spk_list.append(l["speaker"])
+                if l.get("scene") and not scene_name:
+                    scene_name = l["scene"]
                 q_str = f" '{l['quoted'][0]}'" if l.get("quoted") else ""
                 snippet = l["text"][:32].strip()
-                line_summaries.append(f"{l['id']} {l['speaker']}{q_str}: {snippet}")
+                spk_prefix = f"[{l['speaker']}] " if l.get("speaker") else ""
+                line_summaries.append(f"{l['id']} {spk_prefix}{q_str}: {snippet}".replace("  ", " "))
             note = " / ".join(line_summaries)
         else:
             note = f"{seg['stem']} {seg['start']:.2f}-{seg['end']:.2f}"
@@ -1382,6 +1483,10 @@ def assign_segment_ids_marks_and_layouts(
             "end": seg["end"],
             "note": note,
         }
+        if spk_list:
+            seg_dict["speaker"] = " / ".join(spk_list)
+        if scene_name:
+            seg_dict["scene"] = scene_name
 
         layout_mode = seg_layout_map.get(base_lid, resolved_preset if resolved_preset != "auto" else "single")
         if layout_mode and layout_mode != "single":
@@ -1398,32 +1503,23 @@ def assign_segment_ids_marks_and_layouts(
 
         segments_out.append(seg_dict)
 
-        # Auto-place [WRONG] / [RIGHT] marks for script lines in this segment
+        # Auto-place [WRONG] / [RIGHT] marks at the END of the marked sentence (2-pulse flash = 0.56s)
         for l in lines:
             mtype = l.get("mark")
             if mtype not in ("wrong", "right"):
                 continue
 
-            # Find when the marked line / phrase starts inside this segment
             seg_words = seg.get("words", [])
-            at_offset = 0.30
-            if len(lines) > 1 and l is lines[-1] and seg_words:
-                # Multi-line segment where second line has the mark (e.g. S1 L2 'I hunger' after silence 3.85-4.31s)
-                c_sils = seg["clip"].get("macro_silences", [])
-                turn_sils = [s for s in c_sils if seg["start"] + 1.0 <= s["end"] <= seg["end"] - 0.5]
-                if turn_sils:
-                    at_offset = round(turn_sils[-1]["end"] - seg["start"] + 0.04, 2)
-                else:
-                    turn_start = seg_words[-2]["start"] if len(seg_words) >= 2 else seg_words[-1]["start"]
-                    at_offset = round(max(0.15, turn_start - seg["start"] + 0.17), 2)
-            elif len(lines) > 1 and l is lines[0] and seg_words:
-                # Multi-line segment where first line has the mark (e.g. S3 L6 'Yes, Please! I want.' at 1.25s)
-                at_offset = 1.25
+            m_dur = 0.56
+            if seg_words:
+                sentence_end_rel = round(max(0.25, float(seg_words[-1]["end"]) - float(seg["start"])), 2)
+                # Ensure segment has enough tail padding so the 0.56s 2-pulse flash completes cleanly
+                if float(seg["end"]) < float(seg["start"]) + sentence_end_rel + m_dur:
+                    seg_dict["end"] = round(float(seg["start"]) + sentence_end_rel + m_dur + 0.04, 2)
+                at_offset = sentence_end_rel
             else:
-                # Single-line marked segment (e.g. L4 'I am hungry.' at 0.25s, L8 'Yes, I do...' at 0.30s)
-                at_offset = 0.25 if dur < 2.5 else 0.30
+                at_offset = round(max(0.25, dur - m_dur), 2)
 
-            m_dur = 1.4 if dur >= 4.5 and mtype == "right" else 1.2
             mark_entry: Dict[str, Any] = {
                 "type": mtype,
                 "segment": seg_id,
@@ -1516,25 +1612,42 @@ def format_brief_txt(
     script_lines: List[Dict[str, Any]],
     preset: str,
     mark_pack: str,
+    meta: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Build compact `work/<project>/brief.txt` strictly < 1,100 tokens (1-2 lines per clip)."""
+    """Build compact `work/<project>/brief.txt` strictly < 1,100 tokens (with Concept/Visual Refs, Characters & Scene Framing)."""
     total_dur = sum(round(s["end"] - s["start"], 2) for s in segments)
     anomaly_count = sum(len(c.get("anomalies", [])) for c in clips_data)
+    meta = meta or {}
 
     out_lines = [
         f"# BRIEF: {project_name} | Script: {script_path.name} ({len(script_lines)} lines) | Clips: {len(clips_data)} -> {len(segments)} segs ({tc(total_dur)})",
         f"# Preset: {preset} | Mark Pack: {mark_pack} | Auto-Marks: {len(marks)} | Anomalies Fixed: {anomaly_count}",
+    ]
+    if meta.get("concept_brief"):
+        out_lines.append(f"# Concept Brief    : {meta['concept_brief']}")
+    if meta.get("characters"):
+        chars_str = " | ".join(f"{k}: {v[:80]}" for k, v in meta["characters"].items())
+        out_lines.append(f"# Characters       : {chars_str}")
+    if meta.get("scenes"):
+        for sc in meta["scenes"]:
+            out_lines.append(f"# {sc['scene']:<17}: {sc.get('visual', '')}")
+
+    out_lines += [
         "",
-        "## CLIPS & AUTO-CUTS (1-2 lines/clip)",
+        "## CLIPS, CHARACTER SPEAKERS & AUTO-CUTS",
     ]
 
     for c in clips_data:
         stem = c["stem"]
         dur = float(c["info"].get("duration") or 0.0)
-        l_ids = ",".join(l["id"] for l in c.get("matched_lines", [])) or "-"
+        l_ids = ",".join(
+            f"{l['id']}({l['speaker']})" if l.get("speaker") else l["id"]
+            for l in c.get("matched_lines", [])
+        ) or "-"
         c_segs = [s for s in segments if str(s["src"]) == str(c["src"])]
         cuts_str = " + ".join(
             f"{s['id']}[{s['start']:.2f}-{s['end']:.2f}s"
+            + (f" {s['speaker']}" if s.get("speaker") else "")
             + (f" z={s['zoom']}" if s.get("zoom", 1.0) != 1.0 else (f" z->{s['zoom_to']}" if "zoom_to" in s else ""))
             + "]"
             for s in c_segs
@@ -1545,7 +1658,7 @@ def format_brief_txt(
         first_w = hq_w[0]["w"] if hq_w else ""
         last_w = hq_w[-1]["w"] if hq_w else ""
         out_lines.append(
-            f"{stem:<3} ({dur:4.1f}s) -> {l_ids:<7} | keep: {cuts_str:<34} | sil: {sil_str} | \"{first_w} ... {last_w}\""
+            f"{stem:<3} ({dur:4.1f}s) -> {l_ids:<18} | keep: {cuts_str:<34} | sil: {sil_str} | \"{first_w} ... {last_w}\""
         )
         for anom in c.get("anomalies", []):
             out_lines.append(f"  ! {anom}")
@@ -1622,7 +1735,7 @@ def main() -> None:
         choices=["auto", "single", "split_v", "split_h", "chat_bar", "video_call", "hybrid"],
         help="Layout preset mode",
     )
-    ap.add_argument("--mark-pack", default="default", help="Swappable ✓/✗ mark badge pack")
+    ap.add_argument("--mark-pack", default="flash", help="Swappable ✓/✗ mark overlay pack (flash, vignette, default, glossy)")
     ap.add_argument(
         "--clean-raw-json",
         action=argparse.BooleanOptionalAction,
@@ -1711,6 +1824,9 @@ def main() -> None:
     plan: Dict[str, Any] = {
         "output": output_mp4,
         "script": str(script_path.relative_to(ROOT)) if script_path.is_relative_to(ROOT) else str(script_path),
+        "concept_brief": meta.get("concept_brief", ""),
+        "characters": meta.get("characters", {}),
+        "scenes": meta.get("scenes", []),
         "canvas": canvas,
         "preset": resolved_preset,
         "mark_pack": args.mark_pack,
@@ -1729,6 +1845,7 @@ def main() -> None:
         script_lines=script_lines,
         preset=resolved_preset,
         mark_pack=args.mark_pack,
+        meta=meta,
     )
 
     # Write to work/<project>/

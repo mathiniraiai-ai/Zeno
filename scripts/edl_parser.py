@@ -195,18 +195,27 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
 
         # 1. Check Header Directives
         if line.startswith("#"):
-            m_dir = re.match(r"^#(output|script|src_dir|canvas|speakers|audio)\b\s*:?\s*(.*)$", line, re.I)
+            m_dir = re.match(r"^#\s*(output|script|src_dir|canvas|speakers|audio|preset|mark_pack|sfx_pack|concept_brief|characters|scene_\d+)\b\s*:?\s*(.*)$", line, re.I)
             if not m_dir:
                 continue
             directive = m_dir.group(1).lower()
             rest = m_dir.group(2).strip()
 
             if directive == "output":
-                plan["output"] = _unquote(rest)
+                plan["output"] = _unquote(rest.split("|")[0].strip())
             elif directive == "script":
-                plan["script"] = _unquote(rest)
+                plan["script"] = _unquote(rest.split("|")[0].strip())
             elif directive == "src_dir":
-                src_dir = _unquote(rest)
+                src_dir = _unquote(rest.split("|")[0].strip())
+            elif directive in ("concept_brief", "characters") or directive.startswith("scene_"):
+                plan[directive] = rest
+            elif directive in ("preset", "mark_pack", "sfx_pack"):
+                for part in rest.split("|"):
+                    m_sub = re.match(r"^(preset|mark_pack|sfx_pack)\b\s*:?\s*(.*)$", part.strip(), re.I)
+                    if m_sub:
+                        plan[m_sub.group(1).lower()] = _unquote(m_sub.group(2).strip())
+                    elif part.strip() == rest.split("|")[0].strip():
+                        plan[directive] = _unquote(part.strip())
             elif directive == "canvas":
                 for tok in _tokenize_line(rest):
                     m_res = re.match(r"^(\d+)x(\d+)(?:@([\d.]+))?$", tok, re.I)
@@ -258,6 +267,26 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                             speakers[k.strip()] = _unquote(v.strip())
             continue
 
+        # 1b. Standalone SFX line: `sfx whoosh.wav seg=L5 at=0.0 gain=-8` or `whoosh.wav | L5 | 0.0 | -8`
+        if line.lower().startswith("sfx ") and "|" not in line:
+            stoks = _tokenize_line(line)
+            if len(stoks) >= 2:
+                s_entry: Dict[str, Any] = {"file": _unquote(stoks[1]), "segment": "", "at": 0.0}
+                for st in stoks[2:]:
+                    if "=" in st:
+                        sk, sv = st.split("=", 1)
+                        sk, sv = sk.strip().lower(), _unquote(sv.strip())
+                        if sk in ("seg", "segment"):
+                            s_entry["segment"] = sv
+                        elif sk == "at":
+                            s_entry["at"] = round(float(sv), 4)
+                        elif sk in ("gain", "gain_db"):
+                            gv = float(sv.rstrip("dB"))
+                            s_entry["gain_db"] = int(gv) if gv.is_integer() else gv
+                if s_entry["segment"]:
+                    sfx_list.append(s_entry)
+            continue
+
         # 2. Segment Line
         body, note = _split_line_and_note(line)
         if not body:
@@ -305,28 +334,92 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                     else:
                         seg["layout"] = v_unq
                 elif k in ("z", "zoom"):
-                    if "->" in v_unq:
-                        z0_s, z1_s = v_unq.split("->", 1)
-                        if z0_s.strip():
-                            z0_v = float(z0_s.strip())
-                            if not (abs(z0_v - 1.0) < 1e-6 and seg.get("zoom") is None and z0_s.strip() == "1.0" and seg.get("_explicit_z0") is False):
-                                seg["zoom"] = round(z0_v, 4)
-                        if z1_s.strip():
-                            seg["zoom_to"] = round(float(z1_s.strip()), 4)
-                    else:
-                        seg["zoom"] = round(float(v_unq), 4)
+                    raw_z = v_unq.strip()
+                    at_part = None
+                    if "@" in raw_z:
+                        raw_z, at_part = raw_z.split("@", 1)
+                    style_part = None
+                    low_z = raw_z.lower()
+                    for st_name in ("sudden_in", "punch_in", "sudden_out", "punch_out", "flash_zoom", "smooth", "mild_in", "mild_out"):
+                        if low_z == st_name or low_z.startswith(st_name + ":") or low_z.endswith(":" + st_name):
+                            if st_name in ("punch_in", "sudden_in"):
+                                style_part = "sudden_in"
+                            elif st_name in ("punch_out", "sudden_out"):
+                                style_part = "sudden_out"
+                            elif st_name in ("mild_in", "mild_out"):
+                                style_part = "smooth"
+                            else:
+                                style_part = st_name
+                            raw_z = re.sub(rf"(^|:){re.escape(st_name)}(:|$)", "", raw_z, flags=re.I).strip(":")
+                            break
+                    if style_part:
+                        seg["zoom_style"] = style_part
+                        if not raw_z:
+                            if style_part == "sudden_out":
+                                seg["zoom"], seg["zoom_to"] = 1.10, 1.0
+                                seg.setdefault("zoom_dur", 0.20)
+                            elif style_part == "flash_zoom":
+                                seg["zoom"], seg["zoom_to"] = 1.0, 1.12
+                                seg.setdefault("zoom_dur", 0.16)
+                            else:
+                                seg["zoom"], seg["zoom_to"] = 1.0, 1.10
+                                seg.setdefault("zoom_dur", 0.18)
+                    if raw_z:
+                        if "->" in raw_z:
+                            z0_s, z1_s = raw_z.split("->", 1)
+                            if z0_s.strip():
+                                z0_v = float(z0_s.strip())
+                                if not (abs(z0_v - 1.0) < 1e-6 and seg.get("zoom") is None and z0_s.strip() == "1.0" and seg.get("_explicit_z0") is False):
+                                    seg["zoom"] = round(z0_v, 4)
+                            if z1_s.strip():
+                                seg["zoom_to"] = round(float(z1_s.strip()), 4)
+                        else:
+                            val = round(float(raw_z), 4)
+                            if style_part in ("sudden_in", "flash_zoom"):
+                                seg["zoom"] = 1.0
+                                seg["zoom_to"] = val
+                            elif style_part == "sudden_out":
+                                seg["zoom"] = val
+                                seg["zoom_to"] = 1.0
+                            else:
+                                seg["zoom"] = val
+                    if at_part:
+                        if "/" in at_part:
+                            at_s, dur_s = at_part.split("/", 1)
+                            if at_s.strip():
+                                seg["zoom_at"] = round(float(at_s.strip()), 4)
+                            if dur_s.strip():
+                                seg["zoom_dur"] = round(float(dur_s.strip()), 4)
+                        else:
+                            seg["zoom_at"] = round(float(at_part.strip()), 4)
+                        if "zoom_style" not in seg:
+                            z0_c = float(seg.get("zoom", 1.0) or 1.0)
+                            z1_c = float(seg.get("zoom_to", z0_c) or z0_c)
+                            seg["zoom_style"] = "sudden_out" if z1_c < z0_c else "sudden_in"
+                            seg.setdefault("zoom_dur", 0.18)
                 elif k == "zoom_to":
                     seg["zoom_to"] = round(float(v_unq), 4)
+                elif k == "zoom_at":
+                    seg["zoom_at"] = round(float(v_unq), 4)
+                elif k in ("zoom_dur", "zoom_duration"):
+                    seg["zoom_dur"] = round(float(v_unq), 4)
+                elif k in ("zoom_style", "z_style"):
+                    seg["zoom_style"] = v_unq.strip().lower()
                 elif k == "focus":
                     parts = [float(x) for x in v_unq.strip("[]()").split(",") if x.strip()]
                     if len(parts) >= 2:
                         seg["focus"] = [round(parts[0], 4), round(parts[1], 4)]
                 elif k in ("sp", "speaker"):
-                    seg["speaker"] = v_unq
+                    seg["speaker"] = v_unq.replace("_", " ")
+                elif k == "scene":
+                    seg["scene"] = v_unq.replace("_", " ")
+                elif k in ("shot", "angle"):
+                    seg["shot"] = v_unq.replace("_", " ")
                 elif k == "slot":
                     seg["slot"] = v_unq
-                elif k in ("tr", "transition"):
-                    tr_parts = _split_top_level(v_unq, "@")
+                elif k in ("tr", "trans", "transition"):
+                    sep_ch = "@" if "@" in v_unq else (":" if ":" in v_unq else "@")
+                    tr_parts = _split_top_level(v_unq, sep_ch)
                     seg["transition"] = tr_parts[0]
                     if len(tr_parts) > 1 and tr_parts[1]:
                         seg["transition_duration"] = round(float(tr_parts[1]), 4)

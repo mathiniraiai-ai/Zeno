@@ -105,22 +105,38 @@ Choose the layout preset via `--preset` or per-segment in `plan.edl`:
 
 ---
 
-## 4. Swappable `✓` / `✗` Mark Packs
+## 4. Swappable `✓` / `✗` Mark Packs & Rapid-Strobe Full-Frame Overlays
 
 Configure via `--mark-pack <pack>` on `prepare.py` or `# mark_pack: <pack>` in `plan.edl`:
 
 | Pack Name | Visual Style | Asset Path |
 |---|---|---|
-| `default` | Classic high-contrast flat green circle `✓` and red circle `✗` | `assets/marks/right.png`, `assets/marks/wrong.png` |
-| `glossy` | 3D glassmorphic pill/circle badge with specular highlight & drop shadow | `assets/marks/glossy/right.png`, `assets/marks/glossy/wrong.png` |
-| `flash` | Crisp badge paired with a subtle green/red screen-edge flash | `assets/marks/flash/right.png`, `assets/marks/flash/wrong.png` |
-| `vignette` | Soft radial corner glow vignette behind a floating `✓` / `✗` icon | `assets/marks/vignette/right.png`, `assets/marks/vignette/wrong.png` |
+| `flash` (**default**) | Full-frame `1080×1920` green/red border overlay that **flashes rapidly ON and OFF (~5 Hz strobe)** | `assets/marks/green_flash.png`, `assets/marks/red_flash.png` |
+| `vignette` | Full-frame `1080×1920` radial edge glow that **flashes rapidly ON and OFF (~5 Hz strobe)** | `assets/marks/w42_green_vignette.png`, `assets/marks/w42_red_vignette.png` |
+| `default` | Classic high-contrast flat green circle `✓` and red circle `✗` badge | `assets/marks/right.png`, `assets/marks/wrong.png` |
+| `glossy` | 3D glassmorphic pill/circle badge with specular highlight & drop shadow | `assets/marks/glossy_right.png`, `assets/marks/glossy_wrong.png` |
 | `<custom>` | Any user-supplied `right.png` & `wrong.png` placed in `assets/marks/<custom>/` | `assets/marks/<custom>/right.png`, `wrong.png` |
 
 **Available SFX (`assets/sfx/`)**:
-- **Right (`✓`)**: `correct_ding.wav` (default), `sn_correct.wav`, `w42_right.wav`
-- **Wrong (`✗`)**: `buzzer.wav` (default), `sn_wrong.wav`, `w42_wrong.wav`
-- **Transitions / Accents**: `whoosh.wav`, `pop.wav`
+- **Wrong (`✗`, strong double-layered error sound at `+4 dB`)**: `buzzer.wav` + `kn20228_wrong_core.mp3` (auto-layered on strobe marks), `sn_wrong.wav`, `w42_wrong.wav`
+- **Right (`✓`, crisp double-layered ding at `+2.5 dB`)**: `correct_ding.wav` + `sn_correct.wav` (auto-layered on strobe marks), `w42_right.wav`
+- **Transitions / Accents (`-2 dB`)**: `whoosh.wav` (custom Whoosh SFX, auto-triggered on visual transitions or via `sfx whoosh.wav seg=<id> at=0.0 gain=-2`), `pop.wav`
+
+---
+
+## 4B. Mandatory 5-Agent Parallel Workflow & Agent 5 Deep Post-Render Analyzer
+
+For every video edit (defaulting to **Antigravity** or **Claude Code**), assign at least **5 specialized agents**:
+
+1. **Agent 1 — Script Coverage & Take Auditor**: Verifies 100% verbatim script coverage in order, speaker identity, and best-take selection across all clips.
+2. **Agent 2 — Pause-Cut & De-Duplication Specialist**: Eliminates repeated dialogues/words/false starts (both intra-clip retakes like `"Almost, almost"` or 3x repeated words, and inter-clip boundary overlaps) and tightens empty internal silences (`>0.85s` dead air) using 10ms WAV RMS energy boundaries.
+3. **Agent 3 — Dynamic Zoom & Layout Choreographer**: Assigns punch-ins (`z=1.08`) on same-clip jump cuts, slow push-ins (`z=1.0->1.06`), pull-outs (`z=1.08->1.0`), and speaker layouts.
+4. **Agent 4 — Transitions, Rapid-Strobe Overlays & SFX Designer**: Places scene transitions (`smoothleft`, `smoothright`, `warm_flash`, `fade`) + custom `whoosh.wav` SFX (`-2 dB`), and configures full-frame rapid-strobe Red/Green PNG overlays (`mark_pack: flash`) with strong `+4 dB` error buzzer and `+2.5 dB` right ding SFX.
+5. **Agent 5 — Post-Render Deep Video Analyzer & Auto-Fixer (Mandatory Post-Render Gate)**:
+   - Runs **after** `render.py` generates the final MP4.
+   - Uses local Python dependencies (`scripts/verify.py`, cached `words.json`/`hq_words.json` timestamps, FFmpeg `silencedetect`, 10ms WAV RMS energy, and RGB frame inspection — **without** sending the video to external APIs) to inspect the complete output video.
+   - Verifies: (a) **0 repeated words/dialogues** inside or across segments, (b) **0 empty silences `>1.05s`** in the rendered audio stream, (c) **active transitions & `whoosh.wav` SFX**, and (d) **full-frame rapid-strobe Red/Green PNG overlays + strong error/right SFX**.
+   - If any defect is detected, Agent 5 pinpoints the exact segment/timestamp, fixes `plan.edl`, and re-renders before delivery.
 
 ---
 

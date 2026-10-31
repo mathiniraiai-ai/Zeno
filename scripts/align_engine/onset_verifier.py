@@ -187,11 +187,11 @@ class AcousticOnsetVerifier:
                         continue
                     if seg[k] > level - deep_db:
                         continue
-                    thresh = seg[k] + rise_frac * (level - seg[k])
+                    thresh = seg[k] + min(0.12, rise_frac) * (level - seg[k])
                     j = k
                     while lo + j < len(db) - 1 and j < (hi - lo) + 30 and db[lo + j] < thresh:
                         j += 1
-                    onset = (lo + j) * hop
+                    onset = max(0.0, (lo + j) * hop - 0.035)
                     if out and onset < out[-1]["end"] - 0.05:
                         continue   # would start inside the previous word (CTC word ends run early, so allow 50 ms)
                     if best is None or abs(onset - s) < abs(best - s):
@@ -212,13 +212,13 @@ class AcousticOnsetVerifier:
         self,
         words: List[Dict[str, Any]],
         waveform: np.ndarray,
-        max_extend_sec: float = 0.25,
-        drop_db: float = 15.0,
+        max_extend_sec: float = 0.35,
+        drop_db: float = 24.0,
     ) -> List[Dict[str, Any]]:
         """
-        CTC marks a word's end at its last emitting frame, which is about 60 ms before the sound really stops
-        (measured on isolated test words). Extend each end forward while the energy stays within `drop_db` of the word's
-        own level, up to `max_extend_sec`, and never into the next word. Ends are only extended, never shortened.
+        CTC marks a word's end at its last emitting frame, which is 80-160 ms before the syllable coda really stops.
+        Extend each end forward while the energy stays within `drop_db` of the word's own level, up to `max_extend_sec`,
+        plus a +45 ms coda release guard, and never into the next word. Ends are only extended, never shortened.
         """
         if not words or len(waveform) == 0:
             return words
@@ -241,9 +241,9 @@ class AcousticOnsetVerifier:
             limit = min(len(db) - 1, int((e + max_extend_sec) / hop))
             while k < limit and db[k + 1] >= level - drop_db:
                 k += 1
-            target = max(e, k * hop)
+            target = max(e, k * hop + 0.045)
             # extend, but never run into the next word; also trim any overlap CTC left between neighbours
-            end = min(target, nxt) if nxt - target < 0.01 else min(target, nxt - 0.01)
+            end = min(target, nxt) if nxt - target < 0.015 else min(target, nxt - 0.015)
             out.append({**w, "end": round(max(float(w["start"]) + 0.05, end), 3)})
         return out
 

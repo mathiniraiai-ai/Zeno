@@ -60,15 +60,35 @@ Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Co
 ## 4. Layout Modes & Swappable Mark Packs
 
 - **Layouts (`--preset` or per-segment in `plan.edl`)**:
-  - `single` — Full-frame speaker (`1080×1920`), `zoom=1.08` punch-in for jump cuts, `zoom=1.0->1.06` slow push.
+  - `single` — Full-frame speaker (`1080×1920`), `zoom=1.08` punch-in for jump cuts, `zoom=1.0->1.06` slow push, `zoom=1.08->1.0` pull-out.
   - `split_v` — Top/bottom 50/50 split (`1080×960` each) with divider & active speaker focus.
   - `split_h` — Left/right 50/50 vertical split (`540×1920` each) for rapid exchanges.
   - `chat_bar` — Main speaker + glassmorphic prompt bar displaying the target phrase/question.
   - `video_call` — Main speaker + rounded Picture-in-Picture (PiP) card for the second speaker.
   - `hybrid` (`auto`) — Dynamically combines `single` for teaching monologues with `split_v` / `video_call` / `chat_bar` for dialogue turns.
 - **Mark Packs (`--mark-pack` or `# mark_pack:` in `plan.edl`)**:
-  - `default` (flat circle badge), `glossy` (3D glass pill/badge), `flash` (badge + green/red border flash), `vignette` (soft corner radial glow + badge), or custom PNGs in `assets/marks/<pack>/`.
+  - `flash` (**default**): Full-frame `1080×1920` Red/Green PNG border overlays (`assets/marks/red_flash.png` & `green_flash.png`) that **strobe/flash rapidly ON and OFF (~5 Hz)** with strong double-layered error SFX (`+4 dB` `buzzer.wav` + `kn20228_wrong_core.mp3`) and crisp right SFX (`+2.5 dB` `correct_ding.wav` + `sn_correct.wav`).
+  - `vignette`: Full-frame radial glow (`assets/marks/w42_red_vignette.png` & `w42_green_vignette.png`) with rapid strobe ON/OFF.
+  - `default` (flat circle badge), `glossy` (3D glass pill/badge), or custom PNGs in `assets/marks/<pack>/`.
+- **Transitions & Custom Whoosh SFX**:
+  - Use `tr=smoothleft@0.28`, `tr=smoothright@0.28`, `tr=warm_flash@0.35`, `tr=fade@0.28` at scene/topic turns, paired with `sfx whoosh.wav seg=<id> at=0.0 gain=-2` (or auto-triggered on visual transitions).
 - **Skill Reference**: Activate `.agent/skills/video-edit/SKILL.md` for full `plan.edl` / `plan.json` schema details and troubleshooting.
+
+---
+
+## 5. Mandatory 5-Agent Parallel Workflow & Post-Render Deep Analyzer (Agent 5)
+
+For every editing task (running on **Antigravity** by default or **Claude Code**), assign at least **5 specialized agents**:
+
+1. **Agent 1 — Script Coverage & Take Auditor**: Verifies 100% verbatim script coverage in order, speaker identity, and best-take selection across all raw clips.
+2. **Agent 2 — Pause-Cut & De-Duplication Specialist**: Eliminates all repeated dialogues/words/false starts (both intra-clip retakes like `"Almost, almost"` and inter-clip boundary repeats) and tightens empty internal silences (`>0.85s` dead air) using 10ms WAV RMS energy boundaries.
+3. **Agent 3 — Dynamic Zoom & Layout Choreographer**: Assigns punch-ins (`z=1.08`) on same-clip jump cuts to mask splices, slow push-ins (`z=1.0->1.06`), pull-outs (`z=1.08->1.0`), and speaker layouts.
+4. **Agent 4 — Transitions, Rapid-Strobe Overlays & SFX Designer**: Places scene transitions (`smoothleft`, `smoothright`, `warm_flash`, `fade`) + custom `whoosh.wav` SFX (`-2 dB`), and configures full-frame rapid-strobe Red/Green PNG overlays (`mark_pack: flash` / `vignette`) with strong `+4 dB` error buzzer and `+2.5 dB` right ding SFX.
+5. **Agent 5 — Post-Render Deep Video Analyzer & Auto-Fixer (Mandatory Post-Render Gate)**:
+   - Runs **after** `render.py` generates the final MP4.
+   - Uses local Python dependencies (`scripts/verify.py`, cached `words.json`/`hq_words.json` timestamps, FFmpeg `silencedetect`, 10ms WAV RMS energy, and RGB frame inspection — **without** sending the video to external APIs) to inspect the complete output video.
+   - Verifies: (a) **0 repeated words/dialogues** inside or across segments, (b) **0 empty silences `>1.05s`** in the rendered audio stream, (c) **active transitions & `whoosh.wav` SFX**, and (d) **full-frame rapid-strobe Red/Green PNG overlays + strong error/right SFX**.
+   - If any defect is detected, Agent 5 pinpoints the exact segment/timestamp, fixes `plan.edl`, and re-renders before delivery.
 
 ## Secrets (all agents)
 Never open, print, quote or paste `.env` or any key in a chat or log. It holds the user's personal Zeno key (or a Gemini key). To check setup, run `python3 scripts/setup.py --smoke`; it reports [OK]/[FAIL] without showing keys. Read `.env.example` instead if you need the variable names.

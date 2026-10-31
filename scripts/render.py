@@ -73,35 +73,101 @@ def flash_filters(spec: Dict[str, Any], join_t: float, swap_frame: int) -> List[
     return out
 
 
+_META_TRANSITIONS: Dict[str, Dict[str, Any]] = {
+    "whip_left": {
+        "xfade": "smoothleft",
+        "default_dur": 0.22,
+        "post": lambda jt, fps=24: [f"dblur=angle=0:radius=28:enable='between(t,{max(0.0, jt - 0.08):.4f},{jt + 0.08:.4f})'"],
+    },
+    "whip_right": {
+        "xfade": "smoothright",
+        "default_dur": 0.22,
+        "post": lambda jt, fps=24: [f"dblur=angle=0:radius=28:enable='between(t,{max(0.0, jt - 0.08):.4f},{jt + 0.08:.4f})'"],
+    },
+    "zoom_burst": {
+        "xfade": "zoomin",
+        "default_dur": 0.25,
+        "post": lambda jt, fps=24: [
+            f"dblur=angle=45:radius=18:enable='between(t,{max(0.0, jt - 0.06):.4f},{jt + 0.06:.4f})'",
+            f"rgbashift=rh=-6:bh=6:rv=-3:bv=3:edge=smear:enable='between(t,{max(0.0, jt - 0.06):.4f},{jt + 0.06:.4f})'",
+        ],
+    },
+    "flash_zoom": {
+        "xfade": "zoomin",
+        "default_dur": 0.25,
+        "post": lambda jt, fps=24: flash_filters(
+            {
+                "fps": fps,
+                "frames": [
+                    {"screen_rgb": [60, 70, 85]},
+                    {"screen_rgb": [150, 165, 185]},
+                    {"screen_rgb": [230, 240, 255]},
+                    {"screen_rgb": [140, 155, 175]},
+                    {"screen_rgb": [50, 60, 75]},
+                ],
+            },
+            jt,
+            swap_frame=2,
+        ),
+    },
+    "slide_up": {
+        "xfade": "smoothup",
+        "default_dur": 0.25,
+        "post": lambda jt, fps=24: [f"dblur=angle=90:radius=24:enable='between(t,{max(0.0, jt - 0.08):.4f},{jt + 0.08:.4f})'"],
+    },
+}
+
+
 def even(x: float) -> int:
     return int(round(x / 2)) * 2
 
 
 def render_segment(seg: Dict[str, Any], W: int, H: int, fps: int, out: Path, draft: bool) -> float:
-    """Fallback single-layout segment renderer."""
-    dur = float(seg["end"]) - float(seg["start"])
+    """Fallback single-layout segment renderer with sub-pixel supersampled zoompan and PTS-safe audio."""
+    dur = max(0.08, float(seg["end"]) - float(seg["start"]))
     frames = max(1, round(dur * fps))
     exact = frames / fps
-    z0 = float(seg.get("zoom", 1.0))
-    z1 = float(seg.get("zoom_to", z0))
-    fx, fy = seg.get("focus", [0.5, 0.5])
-    vf = [f"scale={W}:{H}:force_original_aspect_ratio=increase", f"crop={W}:{H}"]
-    if z0 != 1.0 or z1 != 1.0:
-        if z1 == z0:
-            vf.append(f"scale={even(W * z0)}:{even(H * z0)}")
-        else:  # eased push-in, evaluated per frame
-            p = f"(1-cos(PI*min(t/{exact:.4f},1)))/2"
-            z = f"({z0}+({z1}-{z0})*{p})"
-            vf.append(f"scale=w='trunc({W}*{z}/2)*2':h='trunc({H}*{z}/2)*2':eval=frame")
-        vf.append(f"crop={W}:{H}:x='(iw-{W})*{fx}':y='(ih-{H})*{fy}'")
-    vf += ["setsar=1", f"fps={fps}", "format=yuv420p"]
+    if layouts is not None and hasattr(layouts, "resolve_segment_zoom_spec"):
+        z0, z1, zoom_style, zoom_at, zoom_dur = layouts.resolve_segment_zoom_spec(seg, exact)
+    else:
+        z0 = float(seg.get("zoom", 1.0) or 1.0)
+        z1 = float(seg.get("zoom_to", z0) or z0)
+        zoom_style = str(seg.get("zoom_style") or ("smooth" if abs(z1 - z0) >= 0.005 else "none"))
+        zoom_at = float(seg.get("zoom_at") or 0.0)
+        zoom_dur = float(seg.get("zoom_dur") or 0.18)
+    fx, fy = seg.get("focus", [0.5, 0.38])
+    vf = [
+        "setpts=PTS-STARTPTS",
+        f"fps={fps}",
+        f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos",
+        f"crop={W}:{H}:x='(iw-{W})*{fx:.4f}':y='(ih-{H})*{fy:.4f}'",
+    ]
+    if layouts is not None and hasattr(layouts, "_build_subpixel_zoom_filter"):
+        vf.extend(
+            layouts._build_subpixel_zoom_filter(
+                slot_w=W,
+                slot_h=H,
+                fps=fps,
+                exact_dur=exact,
+                fx=float(fx),
+                fy=float(fy),
+                z0=z0,
+                z1=z1,
+                zoom_style=zoom_style,
+                zoom_at=zoom_at,
+                zoom_dur=zoom_dur,
+            )
+        )
+    vf += ["setsar=1", "format=yuv420p", "tpad=stop_mode=clone:stop=3"]
     af = [
         "aresample=48000",
         "aformat=channel_layouts=stereo",
+        "asetpts=PTS-STARTPTS",
         "apad",
         f"atrim=0:{exact:.6f}",
+        "asetpts=PTS-STARTPTS",
         f"afade=t=in:d={EDGE_FADE}",
-        f"afade=t=out:st={exact - EDGE_FADE:.6f}:d={EDGE_FADE}",
+        f"afade=t=out:st={max(0.0, exact - EDGE_FADE):.6f}:d={EDGE_FADE}",
     ]
     src = resolve(seg["src"])
     has_audio = probe(src)["has_audio"]
@@ -247,17 +313,21 @@ def main() -> None:
     durs: List[float] = []
     for i, s in enumerate(segs):
         s.setdefault("id", f"S{i + 1}")
-        src_resolved = resolve(s["src"])
-        mtime = src_resolved.stat().st_mtime if src_resolved.is_file() else 0.0
         lay = s.get("layout", "single")
-        key_items = [
-            s["src"], s["start"], s["end"], s.get("zoom"), s.get("zoom_to"), s.get("focus"),
-            W, H, fps, a.draft, mtime,
-        ]
-        if lay and lay != "single":
-            key_items.extend([lay, s.get("peer"), s.get("chat"), s.get("slot")])
-        key = json.dumps(key_items, sort_keys=True)
-        f = cache / f"{hashlib.md5(key.encode()).hexdigest()[:16]}.mkv"
+        if layouts is not None and hasattr(layouts, "build_segment_cache_key"):
+            cache_hex = layouts.build_segment_cache_key(s, plan, W, H, fps, a.draft)
+        else:
+            src_resolved = resolve(s["src"])
+            mtime = src_resolved.stat().st_mtime if src_resolved.is_file() else 0.0
+            key_items = [
+                s["src"], s["start"], s["end"], s.get("zoom"), s.get("zoom_to"),
+                s.get("zoom_style"), s.get("zoom_at"), s.get("zoom_dur"), s.get("focus"),
+                W, H, fps, a.draft, mtime,
+            ]
+            if lay and lay != "single":
+                key_items.extend([lay, s.get("peer"), s.get("chat"), s.get("slot")])
+            cache_hex = hashlib.md5(json.dumps(key_items, sort_keys=True).encode()).hexdigest()[:16]
+        f = cache / f"{cache_hex}.mkv"
 
         if offline_matched is not None and not f.exists():
             f = offline_matched[i]
@@ -272,21 +342,27 @@ def main() -> None:
                 durs.append(render_segment(s, W, H, fps, f, a.draft))
         files.append(f)
 
-    # 2) output timeline (transitions overlap neighbouring segments)
+    # 2) output timeline (Zero-Audio-Loss transitions: video uses tpad+xfade+optical polish; audio uses concat=0.00s overlap!)
     starts: List[float] = []
     total = 0.0
     for i, s in enumerate(segs):
         tr = s.get("transition", "cut") if i else "cut"
         s.pop("_flash", None)
+        s.pop("_meta_post", None)
         if tr != "cut" and load_overlay_transition(tr) is not None:
             s["_flash"] = tr          # hard cut; the flash is drawn over it later
             tr = "cut"
-        d = min(float(s.get("transition_duration", 0.3)), durs[i] / 2, durs[i - 1] / 2) if tr != "cut" else 0.0
+        meta_spec = _META_TRANSITIONS.get(tr)
+        def_tr_dur = meta_spec["default_dur"] if meta_spec else 0.25
+        d = min(float(s.get("transition_duration", def_tr_dur)), durs[i] / 2, durs[i - 1] / 2) if tr != "cut" else 0.0
         s["_tr"], s["_d"] = tr, d
+        if s.get("_flash") or tr != "cut":
+            s["_join_at"] = total
         if s.get("_flash"):
             s["_flash_at"] = total
-        starts.append(total - d)
-        total += durs[i] - d
+        # Zero-audio-loss: tpad clones k frames on video for xfade while audio is joined via concat with 0.00s overlap!
+        starts.append(total)
+        total += durs[i]
     seg_start = {s["id"]: starts[i] for i, s in enumerate(segs)}
     seg_by_id = {s["id"]: s for s in segs}
 
@@ -305,70 +381,141 @@ def main() -> None:
             fc.append(f"{v}{au}[sv{i}][sa{i}]concat=n=2:v=1:a=1{nv}{na}")
             acc += durs[i]
         else:
-            fc.append(f"{v}fps={fps}[xa{i}]")
-            fc.append(f"[sv{i}]fps={fps}[xb{i}]")
-            v = f"[xa{i}]"
-            fc.append(f"{v}[xb{i}]xfade=transition={s['_tr']}:duration={s['_d']:.3f}:offset={acc - s['_d']:.4f}{nv}")
-            fc.append(f"{au}[sa{i}]acrossfade=d={s['_d']:.3f}{na}")
-            acc += durs[i] - s["_d"]
+            tr_name = s["_tr"]
+            meta_spec = _META_TRANSITIONS.get(tr_name)
+            xfade_tr = meta_spec["xfade"] if meta_spec else tr_name
+            k_half = max(2, round(s["_d"] * fps / 2.0))
+            d_xfade = (2 * k_half) / float(fps)
+            offset_xfade = max(0.0, acc - (k_half / float(fps)))
+            fc.append(f"{v}tpad=stop_mode=clone:stop={k_half},fps={fps}[xa{i}]")
+            fc.append(f"[sv{i}]tpad=start_mode=clone:start={k_half + 1},fps={fps}[xb{i}]")
+            fc.append(f"[xa{i}][xb{i}]xfade=transition={xfade_tr}:duration={d_xfade:.4f}:offset={offset_xfade:.4f}{nv}")
+            fc.append(f"{au}[sa{i}]concat=n=2:v=0:a=1{na}")
+            acc += durs[i]
         v, au = nv, na
 
-    # 2b) overlay transitions (warm flash) on top of the hard cuts
+    # 2b) overlay transitions (warm flash) and Meta Creative optical motion/flash polish around join_t
     flash_chain: List[str] = []
     for s in segs:
         if s.get("_flash"):
             spec = load_overlay_transition(s["_flash"])
             swap = int(s.get("transition_swap", spec.get("swap_frame", 5)))
             flash_chain += flash_filters(spec, s["_flash_at"], swap)
+        elif s.get("_tr") in _META_TRANSITIONS:
+            meta_spec = _META_TRANSITIONS[s["_tr"]]
+            post_fn = meta_spec.get("post")
+            if callable(post_fn):
+                flash_chain += post_fn(float(s.get("_join_at", 0.0)), fps)
     if flash_chain:
         fc.append(f"{v}{','.join(flash_chain)}[vflash]")
         v = "[vflash]"
 
-    # 3) marks (✓ / ✗) and sound effects
+    # 3) marks (✓ / ✗ or minimal 2-pulse end-of-sentence red/green overlays) and sound effects
     n = len(files)
     sfx_list: List[Tuple[Path, float, float]] = []
     log_fx: List[Tuple[float, str]] = []
-    default_pack = plan.get("mark_pack") or "default"
+    default_pack = plan.get("mark_pack") or "flash"
     sfx_pack = plan.get("sfx_pack") or "default"
+
+    fullframe_names = {
+        "red_flash.png",
+        "green_flash.png",
+        "w42_red_vignette.png",
+        "w42_green_vignette.png",
+    }
+    strobe_styles = {"flash", "vignette", "kn20228", "w42", "strobe"}
 
     for k, m in enumerate(plan.get("marks", [])):
         mtype = _normalize_mark_type(m.get("type", "right"))
         t = seg_start[m["segment"]] + float(m.get("at", 0.0))
-        dur = float(m.get("duration", 1.3))
-        size = even(min(W, H) * float(m.get("size", 0.22)))
-        target_seg = seg_by_id.get(m["segment"])
-
-        if layouts is not None and hasattr(layouts, "place_mark_for_segment"):
-            x, y = layouts.place_mark_for_segment(m, target_seg, W, H, size)
-        else:
-            x, y = place(m.get("position", "center"), W, H, size)
-
-        style_key = m.get("style") or m.get("pack") or default_pack
+        dur = float(m.get("duration", 0.56))
+        style_key = str(m.get("style") or m.get("pack") or default_pack).strip()
         png = resolve_mark_asset(mtype, style=style_key)
         if not png.is_file():
-            png = MARKS_DIR / f"{mtype}.png"
+            png = MARKS_DIR / ("red_flash.png" if mtype == "wrong" else "green_flash.png")
+            if not png.is_file():
+                png = MARKS_DIR / f"{mtype}.png"
 
-        inputs += ["-loop", "1", "-framerate", str(fps), "-t", f"{dur:.3f}", "-i", png]
-        fc.append(
-            f"[{n}:v]scale={size}:{size},format=rgba,fade=in:st=0:d=0.12:alpha=1,"
-            f"fade=out:st={dur - 0.2:.3f}:d=0.2:alpha=1,setpts=PTS-STARTPTS+{t:.4f}/TB[mk{k}]"
+        is_fullframe_strobe = (
+            style_key.lower() in strobe_styles
+            or png.name.lower() in fullframe_names
+            or bool(m.get("strobe", False))
         )
-        fc.append(f"{v}[mk{k}]overlay=x={x}:y={y}:eof_action=pass:enable='between(t,{t:.4f},{t + dur:.4f})'[vm{k}]")
+
+        if is_fullframe_strobe:
+            # Minimal, smooth "coming and going" 2-pulse flash (~0.56s total, 0.50 max opacity)
+            dur = min(dur, 0.60)
+            pulse_dur = max(0.24, min(0.30, dur / 2.0))
+            pulse_frames = max(5, round(pulse_dur * fps))
+            total_2pulse_dur = (2 * pulse_frames) / float(fps)
+            ccm = "aa=0.50" if mtype == "wrong" else "rr=0.30:aa=0.50"
+            inputs += ["-loop", "1", "-framerate", str(fps), "-t", f"{pulse_frames / float(fps):.4f}", "-i", png]
+            fc.append(
+                f"[{n}:v]scale={W}:{H},format=rgba,colorchannelmixer={ccm},"
+                f"fade=t=in:st=0:d=0.04:alpha=1,fade=t=out:st=0.11:d=0.10:alpha=1,"
+                f"loop=loop=1:size={pulse_frames}:start=0,"
+                f"setpts=N/({fps}*TB)+{t:.4f}/TB[mk{k}]"
+            )
+            fc.append(
+                f"{v}[mk{k}]overlay=x=0:y=0:eof_action=pass:"
+                f"enable='between(t,{t:.4f},{t + total_2pulse_dur:.4f})'[vm{k}]"
+            )
+            pos_desc = f"minimal-2pulse:{png.name}"
+        else:
+            inputs += ["-loop", "1", "-framerate", str(fps), "-t", f"{dur:.3f}", "-i", png]
+            size = even(min(W, H) * float(m.get("size", 0.22)))
+            target_seg = seg_by_id.get(m["segment"])
+            if layouts is not None and hasattr(layouts, "place_mark_for_segment"):
+                x, y = layouts.place_mark_for_segment(m, target_seg, W, H, size)
+            else:
+                x, y = place(m.get("position", "center"), W, H, size)
+            fc.append(
+                f"[{n}:v]scale={size}:{size},format=rgba,fade=in:st=0:d=0.12:alpha=1,"
+                f"fade=out:st={max(0.05, dur - 0.2):.3f}:d=0.2:alpha=1,setpts=PTS-STARTPTS+{t:.4f}/TB[mk{k}]"
+            )
+            fc.append(f"{v}[mk{k}]overlay=x={x}:y={y}:eof_action=pass:enable='between(t,{t:.4f},{t + dur:.4f})'[vm{k}]")
+            pos_desc = str(m.get("position", "center"))
         v = f"[vm{k}]"
         n += 1
 
         if m.get("sfx", "default") is not None and str(m.get("sfx", "default")).lower() != "none":
             sfx_path = resolve_mark_sfx(mtype, sfx=m.get("sfx", "default"), pack=sfx_pack)
+            default_gain = 4.0 if mtype == "wrong" else 2.5
+            raw_gain = m.get("sfx_gain_db")
+            gain_db = float(raw_gain) if (raw_gain is not None and float(raw_gain) > -3.5) else default_gain
             if sfx_path and sfx_path.is_file():
-                sfx_list.append((sfx_path, t, float(m.get("sfx_gain_db", -4))))
-        log_fx.append((t, f"{mtype.upper()} mark ({m.get('position', 'center')}, {dur:.1f}s)"))
+                sfx_list.append((sfx_path, t, gain_db))
+            # Layer a second punchy SFX for strong error/right feedback when using strobe overlays
+            if is_fullframe_strobe:
+                extra_sfx = SFX_DIR / ("kn20228_wrong_core.mp3" if mtype == "wrong" else "sn_correct.wav")
+                if extra_sfx.is_file() and (not sfx_path or extra_sfx.resolve() != sfx_path.resolve()):
+                    sfx_list.append((extra_sfx, t, 4.0 if mtype == "wrong" else 1.5))
+        log_fx.append((t, f"{mtype.upper()} mark ({pos_desc}, {dur:.2f}s)"))
 
     for e in plan.get("sfx", []):
         t = seg_start[e["segment"]] + float(e.get("at", 0.0))
         sfx_path = resolve_sfx_asset(e["file"], pack=sfx_pack)
         if sfx_path.is_file():
-            sfx_list.append((sfx_path, t, float(e.get("gain_db", -8))))
-            log_fx.append((t, f"SFX {sfx_path.name}"))
+            raw_g = float(e.get("gain_db", -2.0))
+            if "whoosh" in sfx_path.name.lower() and raw_g <= -6.0:
+                raw_g = -2.0
+            sfx_list.append((sfx_path, t, raw_g))
+            log_fx.append((t, f"SFX {sfx_path.name} ({raw_g:+.1f}dB)"))
+
+    # Auto-attach custom whoosh.wav to visual transitions if not already scheduled at that cut
+    whoosh_asset = resolve_sfx_asset("whoosh.wav", pack=sfx_pack)
+    if whoosh_asset.is_file():
+        for i in range(1, len(segs)):
+            s = segs[i]
+            if s.get("_tr", "cut") != "cut" or s.get("_flash"):
+                t_tr = float(starts[i])
+                already_has_whoosh = any(
+                    abs(existing_t - t_tr) <= 0.35 and ("whoosh" in existing_p.name.lower() or "swish" in existing_p.name.lower() or "swoosh" in existing_p.name.lower())
+                    for existing_p, existing_t, _ in sfx_list
+                )
+                if not already_has_whoosh:
+                    sfx_list.append((whoosh_asset, t_tr, -2.0))
+                    log_fx.append((t_tr, f"SFX {whoosh_asset.name} (-2.0dB, transition)"))
 
     if layouts is not None and hasattr(layouts, "collect_layout_auto_sfx"):
         for fname, t_auto, g_auto in layouts.collect_layout_auto_sfx(plan, seg_start):
@@ -411,20 +558,34 @@ def main() -> None:
     ln = (
         f"loudnorm=I={loud}:TP=-1.5:LRA=11:measured_I={meas['input_i']}:measured_TP={meas['input_tp']}:"
         f"measured_LRA={meas['input_lra']}:measured_thresh={meas['input_thresh']}:"
-        f"offset={meas['target_offset']}:linear=true,aresample=48000"
+        f"offset={meas['target_offset']}:linear=true,alimiter=limit=-1.2dB:level=false,aresample=48000"
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     ffmpeg("-i", mix, "-c:v", "copy", "-af", ln, "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_path)
 
-    # 5) human-readable timeline
-    lines = [f"{out_path.name}  {W}x{H} @ {fps} fps  length {tc(total)}", "", "CUTS"]
+    # 5) human-readable timeline (with mapped Concept Brief, Scene & Character Speakers)
+    lines = [f"{out_path.name}  {W}x{H} @ {fps} fps  length {tc(total)}"]
+    if plan.get("concept_brief"):
+        lines.append(f"Concept Brief    : {plan['concept_brief']}")
+    if plan.get("characters"):
+        lines.append(f"Characters       : {plan['characters']}")
+    for k_sc in sorted(k for k in plan.keys() if str(k).startswith("scene_")):
+        lines.append(f"{k_sc.upper().replace('_', ' '):<17}: {plan[k_sc]}")
+    lines += ["", "CUTS (Timecode | Seg | Clip | In-Out | Scene & Shot | Speaker | Zoom/Trans | Dialogue)"]
     for i, s in enumerate(segs):
         z = s.get("zoom", 1.0)
-        zt = f" zoom {z}" + (f"->{s['zoom_to']}" if "zoom_to" in s else "") if z != 1.0 or "zoom_to" in s else ""
+        z_st = f":{s['zoom_style']}" if s.get("zoom_style") else ""
+        z_at = f"@{s['zoom_at']}s" if s.get("zoom_at") is not None else ""
+        zt = f" zoom {z}" + (f"->{s['zoom_to']}" if "zoom_to" in s else "") + z_st + z_at if z != 1.0 or "zoom_to" in s or z_st else ""
         trn = f" [{s['_tr']} {s['_d']:.2f}s]" if s["_tr"] != "cut" else (f" [{s['_flash']}]" if s.get("_flash") else "")
+        sc_tag = s.get("scene") or ""
+        sh_tag = s.get("shot") or ""
+        sp_tag = s.get("speaker") or ""
+        meta_parts = [p for p in (sc_tag, sh_tag, f"Speaker: {sp_tag}" if sp_tag else "") if p]
+        meta_str = f"  [{', '.join(meta_parts)}]" if meta_parts else ""
         lines.append(
             f"{tc(starts[i])}-{tc(starts[i] + durs[i])}  {s['id']:<5} {Path(str(s['src'])).name} "
-            f"{float(s['start']):.2f}-{float(s['end']):.2f}{zt}{trn}  {s.get('note', '')}".rstrip()
+            f"{float(s['start']):.2f}-{float(s['end']):.2f}{meta_str}{zt}{trn}  {s.get('note', '')}".rstrip()
         )
     if log_fx:
         lines += ["", "EFFECTS"] + [f"{tc(t)}  {txt}" for t, txt in sorted(log_fx)]
