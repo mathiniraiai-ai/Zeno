@@ -227,7 +227,13 @@ def smoke_test() -> bool:
     common.load_dotenv()
     via_service = bool(os.environ.get("SCRIPTCUT_CLOUD_URL") and os.environ.get("SCRIPTCUT_CLOUD_TOKEN"))
     has_key = bool(os.environ.get("GEMINI_API_KEY")) or via_service
-    print(f"  [{'OK' if has_key else 'FAIL'}] Transcription access: " + ("team service address and key set" if via_service and not os.environ.get("GEMINI_API_KEY") else "Gemini key set in .env") + " (not called)")
+    if via_service and not os.environ.get("GEMINI_API_KEY"):
+        detail = "team service address and key set (not called)"
+    elif os.environ.get("GEMINI_API_KEY"):
+        detail = "Gemini key set in .env (not called)"
+    else:
+        detail = "no key yet. Generate one at the Zeno key page and paste it after SCRIPTCUT_CLOUD_TOKEN= in .env"
+    print(f"  [{'OK' if has_key else 'FAIL'}] Transcription access: {detail}")
     ok = ok and has_key
     return ok
 

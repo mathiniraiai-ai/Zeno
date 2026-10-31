@@ -4,36 +4,25 @@ Zeno turns raw clips and a script into a finished vertical video. An AI agent (C
 
 ## What you need
 - A Mac (Apple Silicon) or a Windows PC (an NVIDIA GPU is optional; CPU works)
-- Git, Python 3.12, FFmpeg
 - Transcription access: normally your personal key: open https://zeno-production-bef7.up.railway.app (or the Zeno card in the hub), type your name, click Generate, and paste the key into `.env` (two lines, see below); alternatively your own Gemini API key
 - One AI agent set up on your machine (Claude Code, Antigravity, or OpenAI)
 
-## 1. Install (once, about 15 minutes, plus a 360 MB download)
+## 1. Install (once, one double-click, about 5 minutes)
 
-**Mac**
-```bash
-git clone <repo-url> Zeno && cd Zeno
-brew install ffmpeg uv
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -r requirements.txt
-```
+1. Get the Zeno folder (from the owner) and put it anywhere, for example `Documents/Zeno`.
+2. Double-click the installer:
+   - **Mac:** `install.command`. The first time, macOS may block it: right-click it, choose **Open**, then **Open** again.
+   - **Windows:** `install.bat`.
+3. Wait for "Done" or "Almost done". The installer, with no admin password and no Homebrew:
+   - installs `uv`, which brings Python 3.12,
+   - uses FFmpeg if the PC already has it, otherwise downloads it into `tools/ffmpeg/`,
+   - creates `.venv` and installs everything in `requirements.txt`,
+   - creates `.env` from the template,
+   - downloads the alignment model (Meta wav2vec2, about 360 MB, into `models/torch`) and runs the real checks.
+4. Open https://zeno-production-bef7.up.railway.app (or the Zeno card in the hub), type your name, click **Generate**, and paste the key after `SCRIPTCUT_CLOUD_TOKEN=` in `.env`.
+5. Double-click the installer again. Every line should say `[OK]`.
 
-**Windows (PowerShell)**
-```powershell
-git clone <repo-url> Zeno; cd Zeno
-winget install Gyan.FFmpeg
-py -3.12 -m venv .venv
-.venv\Scripts\python -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/<cuda-tag>   # pick <cuda-tag> at pytorch.org; use the cpu index if you have no NVIDIA GPU
-.venv\Scripts\python -m pip install -r requirements.txt
-```
-
-Then, on both (use `.venv\Scripts\python` on Windows):
-```bash
-cp .env.example .env          # open .env; fill SCRIPTCUT_CLOUD_URL and SCRIPTCUT_CLOUD_TOKEN (your personal key), or GEMINI_API_KEY
-.venv/bin/python scripts/setup.py --prewarm   # downloads the alignment model into models/torch (360 MB)
-.venv/bin/python scripts/setup.py --smoke     # real checks; every line should say [OK]
-```
-Never commit `.env`. It is git-ignored; keep it that way.
+Running the installer again is always safe; it skips what is already there. Never commit or share `.env`.
 
 ## 2. Make a video
 
@@ -74,7 +63,7 @@ python scripts/clean.py --apply    # deletes it
 It removes the render cache and old work files. It never touches `output/`, `styles/`, your raw footage or scripts.
 
 ## 6. Stay up to date
-`git pull` for new styles and fixes. Do not edit `styles/`, `agent/` or `scripts/` yourself; tell the owner what you need.
+Double-click `update.command` (Mac) or `update.bat` (Windows). It pulls the latest Zeno and refreshes packages; your `.env`, clips, `work/` and `output/` are never touched. Do not edit `styles/`, `agent/` or `scripts/` yourself; tell the owner what you need.
 
 ## Licences
 - Alignment model: Meta wav2vec2 base (95M), MIT licence, commercial use allowed.
