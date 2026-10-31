@@ -6,6 +6,9 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
+import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 # Windows consoles default to cp1252, which can't print Kannada/Tamil notes
@@ -467,6 +470,56 @@ def probe(path):
 def write_json(path, data):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _docx_to_text(path: Path) -> str:
+    """Plain text from a .docx (paragraphs and table rows, in order) using only the standard library."""
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+    def para_text(p) -> str:
+        out = []
+        for el in p.iter():
+            if el.tag == w + "t":
+                out.append(el.text or "")
+            elif el.tag == w + "tab":
+                out.append(" ")
+            elif el.tag in (w + "br", w + "cr"):
+                out.append("\n")
+        return "".join(out)
+
+    def walk(parent, lines):
+        for child in parent:
+            if child.tag == w + "p":
+                lines.append(para_text(child))
+            elif child.tag == w + "tbl":
+                for tr in child.iter(w + "tr"):
+                    cells = [" ".join(para_text(p).strip() for p in tc.iter(w + "p")).strip() for tc in tr.findall(w + "tc")]
+                    cells = [c for c in cells if c]
+                    if len(cells) >= 3 and re.fullmatch(r"L\d+", cells[0]):   # id | speaker | line
+                        lines.append(f"{cells[0]} {cells[1]}: {' '.join(cells[2:])}")
+                    elif len(cells) == 2:                                      # speaker | line
+                        lines.append(f"{cells[0]}: {cells[1]}")
+                    else:
+                        lines.append(" ".join(cells))
+            elif child.tag == w + "sdt":
+                content = child.find(w + "sdtContent")
+                if content is not None:
+                    walk(content, lines)
+
+    with zipfile.ZipFile(path) as zf:
+        root = ET.fromstring(zf.read("word/document.xml"))
+    body = root.find(w + "body")
+    lines: list = []
+    if body is not None:
+        walk(body, lines)
+    return "\n".join(lines)
+
+
+def read_script_text(path) -> str:
+    """Read a script (.txt/.md/.docx) as NFC-normalised text so Indic spellings compare equal across editors."""
+    p = Path(path)
+    raw = _docx_to_text(p) if p.suffix.lower() == ".docx" else p.read_text(encoding="utf-8-sig", errors="replace")
+    return unicodedata.normalize("NFC", raw).replace("\u00a0", " ")
 
 
 def read_json(path):

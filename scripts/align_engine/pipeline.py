@@ -7,15 +7,33 @@ and Acoustic Onset Verification.
 
 import os
 import re
+import sys
 import time
 import subprocess
+import unicodedata
 from typing import Dict, Any, List, Optional
 import numpy as np
 
 from .acoustic import AcousticModel
 from .viterbi import ViterbiAligner
 from .onset_verifier import AcousticOnsetVerifier
-from .phonetics.indic_phonemes import IndicPhoneticMapper
+from .phonetics.indic_phonemes import IndicPhoneticMapper, INVISIBLE_CHARS
+
+# Typographic symbols that Word/Google Docs/Gemini insert; map to plain ASCII before romanizing.
+_SYMBOL_MAP = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u2032": "'",
+    "\u201c": '"', "\u201d": '"', "\u201e": '"',
+    "\u2013": "-", "\u2014": "-", "\u2212": "-",
+    "\u2026": "...", "\u00a0": " ",
+})
+
+
+def _clean_symbols(word: str) -> str:
+    """NFC-normalise and drop invisible joiners/typographic symbols so only real letters reach the romanizer."""
+    w = unicodedata.normalize("NFC", word).translate(_SYMBOL_MAP)
+    for ch in INVISIBLE_CHARS:
+        w = w.replace(ch, "")
+    return w or word
 
 
 class KaviooAcousticPipeline:
@@ -33,6 +51,14 @@ class KaviooAcousticPipeline:
         if self.acoustic_model is not None:
             self.acoustic_model.unload_model()
 
+    def _warn_unromanized(self, words: List[str], reason: str) -> None:
+        """Tell the user once per run that some words could not be converted to Latin sounds."""
+        if getattr(self, "_warned_unromanized", False):
+            return
+        self._warned_unromanized = True
+        sample = ", ".join(words[:5])
+        print(f"[align] WARNING: {len(words)} word(s) left unromanized ({reason}): {sample}", file=sys.stderr)
+
     def batch_romanize_words(self, words: List[str]) -> List[str]:
         """Runs uroman in a single batch process for high performance, with in-memory caching and Indic G2P fast-path."""
         if not words:
@@ -45,6 +71,7 @@ class KaviooAcousticPipeline:
         to_query_words: List[str] = []
 
         for idx, w in enumerate(words):
+            w = _clean_symbols(w)
             if all(ord(c) < 128 for c in w):
                 results[idx] = w
             elif w in self._uroman_cache:
@@ -77,6 +104,7 @@ class KaviooAcousticPipeline:
                 break
 
         if not uroman_script:
+            self._warn_unromanized(to_query_words, "uroman.pl not found")
             return [r if r is not None else words[i] for i, r in enumerate(results)]
 
         uroman_dir = os.path.dirname(uroman_script)
@@ -101,7 +129,8 @@ class KaviooAcousticPipeline:
                 rom_val = romanized_lines[q_i].strip() if q_i < len(romanized_lines) else to_query_words[q_i]
                 results[orig_idx] = rom_val
                 self._uroman_cache[to_query_words[q_i]] = rom_val
-        except Exception:
+        except Exception as exc:
+            self._warn_unromanized(to_query_words, f"perl/uroman failed: {type(exc).__name__}")
             for q_i, orig_idx in enumerate(to_query_indices):
                 results[orig_idx] = to_query_words[q_i]
 

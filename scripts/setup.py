@@ -2,9 +2,9 @@
 """One-command cross-platform bootstrap & health check for Claude Editor (macOS & Windows).
 
 Usage:
-    python3 scripts/setup.py              # Verify FFmpeg, venv, Wav2Vec2 cache, and all asset packs
+    python3 scripts/setup.py              # Verify FFmpeg, venv, MMS_FA cache, and all asset packs
     python3 scripts/setup.py --init-venv  # Create local .venv and install ML/audio dependencies
-    python3 scripts/setup.py --prewarm    # Pre-download torchaudio WAV2VEC2_ASR_BASE_960H checkpoint
+    python3 scripts/setup.py --prewarm    # Pre-download torchaudio MMS_FA checkpoint
 """
 import argparse
 import os
@@ -121,19 +121,19 @@ def check_or_setup_venv(init_venv: bool = False, prewarm: bool = False) -> bool:
     except Exception as exc:
         print(f"  [!] Could not inspect packages in {venv_py}: {exc}")
 
-    print("\n[3/5] Checking Wav2Vec2 CTC Alignment Checkpoint Cache...")
+    print("\n[3/5] Checking Meta MMS_FA Alignment Checkpoint Cache...")
     ckpt_dir = Path(__file__).resolve().parents[1] / "models" / "torch" / "hub" / "checkpoints"
-    wav2vec_ckpts = list(ckpt_dir.glob("*wav2vec2*")) if ckpt_dir.is_dir() else []
+    wav2vec_ckpts = [c for c in ckpt_dir.glob("model.pt")] if ckpt_dir.is_dir() else []
     if wav2vec_ckpts:
         for ckpt in wav2vec_ckpts:
             mb = ckpt.stat().st_size / (1024 * 1024)
             print(f"  [OK] Cached checkpoint: {ckpt} ({mb:.1f} MB)")
     elif prewarm:
-        print("  + Pre-warming torchaudio WAV2VEC2_ASR_BASE_960H checkpoint...")
-        prewarm_code = "import torchaudio; torchaudio.pipelines.WAV2VEC2_ASR_BASE_960H.get_model()"
+        print("  + Pre-warming torchaudio MMS_FA checkpoint (~1.26 GB)...")
+        prewarm_code = "import sys; sys.path.insert(0, r'%s'); from align_engine.acoustic import AcousticModel; AcousticModel()._ensure_model_loaded()" % (Path(__file__).resolve().parent)
         subprocess.run([str(venv_py), "-c", prewarm_code], check=False)
     else:
-        print(f"  [i] Wav2Vec2 checkpoint not yet cached in {ckpt_dir} (will auto-download on first CTC alignment or run with --prewarm).")
+        print(f"  [i] MMS_FA checkpoint not yet cached in {ckpt_dir} (will auto-download on first CTC alignment or run with --prewarm).")
 
     return True
 
@@ -183,7 +183,7 @@ def check_env() -> None:
 def main():
     ap = argparse.ArgumentParser(description="Bootstrap and verify Zeno cross-platform setup.")
     ap.add_argument("--init-venv", action="store_true", help="Create local .venv and install dependencies")
-    ap.add_argument("--prewarm", action="store_true", help="Pre-download Wav2Vec2 checkpoint into torch hub cache")
+    ap.add_argument("--prewarm", action="store_true", help="Pre-download MMS_FA checkpoint into models/torch")
     args = ap.parse_args()
 
     print("=" * 72)

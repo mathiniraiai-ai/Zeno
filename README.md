@@ -2,7 +2,7 @@
 
 **Zeno** is an AI Video Editing Harness for **Claude Code (Opus 4.5 / 5.5)** and **Antigravity (Gemini 4 Argon)**. Give it raw footage and a script, and it returns a finished `1080×1920` MP4:
 - **Best takes only** — retakes, false starts, stutters, dead air, and trailing AI clip babble removed
-- **Sub-word pause-snapped cuts** — powered by Meta Wav2Vec2 (`95M`) forced alignment + `uroman` + Indic G2P (`<0.25s/clip` on Apple Silicon M2 Air)
+- **Sub-word pause-snapped cuts** — powered by Meta MMS_FA (`300M`, 1,100+ languages) forced alignment + Indic G2P + `uroman` fallback
 - **5 Dynamic Speaker Layouts (+ `hybrid`)** — `single`, `split_v`, `split_h`, `chat_bar`, `video_call`, and `hybrid`
 - **Swappable `✓` / `✗` mark packs + SFX** — placed automatically wherever the script indicates a phrase is right or wrong
 - **75% Lower Token Footprint** — targets **`12k–18k tokens` per minute of finished video** (strict ceiling: `20k tokens / min`, or `~20k–30k tokens` total for a typical 1.5-min edit)
@@ -16,7 +16,7 @@ No B-roll, no unrequested captions, no CTA, no extra visual clutter. Everything 
 | Folder / File | What's in it | Committed to GitHub? |
 |---|---|---|
 | `input/footage/` | Raw input video clips (`S1.mp4`, `S2.mp4`, …) | Ignored (`*.mp4`, `.gitkeep` only) |
-| `input/script/` | Script files (`.txt`, `.md`, or `.docx`), or saved from chat | Tracked or ignored per project |
+| `input/script/` | Script files (`.txt`, `.md`, or `.docx` — read with the standard library, tables supported; converted to `work/_script_cache/<name>.txt`), or saved from chat | Tracked or ignored per project |
 | `output/` | Rendered final MP4 videos (`*.mp4`) + `*.timeline.txt` cut/effect logs | Ignored (`*.mp4`), `*.timeline.txt` optional |
 | `work/` | Per-clip intermediate JSONs (`words.json`, `silences.json`, `info.json`), render cache, plus compact `brief.txt`, `plan.edl`, `plan.json`, and `marks_contact_sheet.jpg`. Safe to delete anytime. | **Ignored** (ephemeral local scratch) |
 | `scripts/` | Python pipeline tools (`setup.py`, `prepare.py`, `align_engine/`, `layouts.py`, `ui_generator.py`, `vision_tracker.py`, `edl_parser.py`, `render.py`, `verify.py`, `transcribe.py`, `common.py`) | **Committed** |
@@ -42,7 +42,7 @@ No B-roll, no unrequested captions, no CTA, no extra visual clutter. Everything 
    ```
    - Verifies/links native `ffmpeg` + `ffprobe` (ARM64 on Apple Silicon M2 Air or `tools/ffmpeg/`).
    - Generates all swappable `✓`/`✗` mark packs in `assets/marks/` (`default`, `glossy`, `flash`, `vignette`).
-   - Prepares the lightweight forced-alignment environment (`uroman`, Indic G2P, and Meta `Wav2Vec2` / `MMS` `95M` forced aligner).
+   - Prepares the forced-alignment environment (Indic G2P, `uroman` fallback, and the Meta MMS_FA aligner).
 
 ### Windows (NVIDIA GPU)
 
@@ -53,7 +53,7 @@ winget install Gyan.FFmpeg
 py -3.12 -m venv .venv
 .venv\Scripts\python -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/<cuda-tag>   # pick <cuda-tag> (e.g. cu126) at pytorch.org
 .venv\Scripts\python -m pip install -r requirements.txt
-.venv\Scripts\python scripts\setup.py --prewarm   # downloads the wav2vec2 weights into models/torch/ (~360 MB, not committed)
+.venv\Scripts\python scripts\setup.py --prewarm   # downloads the MMS_FA weights into models/torch/ (Meta MMS_FA, ~1.26 GB, not committed)
 ```
 Run the pipeline with `.venv\Scripts\python scripts\prepare.py ...` (the scripts also auto-detect `.venv\Scripts\python.exe`).
 
@@ -91,10 +91,10 @@ python3 scripts/render.py work/<project>/plan.edl --verify
 
 ---
 
-## Alignment Engine: Meta Wav2Vec2 (`95M`) + `uroman` + Indic G2P
+## Alignment Engine: Meta MMS_FA (`300M`) + Indic G2P + `uroman` fallback
 
 - **Transcript + Script Matching**: Uses the script text paired with Gemini Flash-Lite verbatim transcription (`scripts/align_engine/gemini_transcriber.py`) + `TranscriptionGuardian` loanword healing across Kannada, Tamil, Hindi, Telugu, Malayalam, and English.
-- **Sub-Word Forced Alignment**: Normalizes Indic scripts via **Indic G2P + `uroman`** into Roman phonemes and runs **Meta's `95M` Wav2Vec2 Forced Aligner** (`scripts/align_engine/`) on Apple Silicon in **`<0.25s per clip`** with `±8.5ms` boundary accuracy, keeping the M2 Air completely cool.
+- **Sub-Word Forced Alignment**: Normalizes Indic scripts via **Indic G2P + `uroman`** into Roman phonemes and runs **Meta's MMS_FA multilingual forced aligner** (`scripts/align_engine/`). Speed and boundary accuracy on MMS_FA have not been measured yet.
 - **Pause Snapping**: Every word boundary is cross-checked against detected acoustic silences and 10ms RMS energy minima so cuts always land naturally inside breath pauses.
 
 ---

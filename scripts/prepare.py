@@ -45,6 +45,7 @@ from common import (  # noqa: E402
     WORK,
     ffmpeg,
     find_venv_python,
+    read_script_text,
     probe,
     read_json,
     resolve,
@@ -293,7 +294,7 @@ def find_rms_minimum(
 
 def parse_script_file(script_path: Path) -> Tuple[Dict[str, str], List[Dict[str, Any]]]:
     """Parse script file into metadata header and structured script lines L1..LN."""
-    raw = script_path.read_text(encoding="utf-8")
+    raw = read_script_text(script_path)
     meta: Dict[str, str] = {"title": script_path.stem, "language": "auto", "header": ""}
     header_lines: List[str] = []
     lines: List[Dict[str, Any]] = []
@@ -1202,6 +1203,15 @@ def main() -> None:
         if not scripts_found:
             raise SystemExit("No script file specified and none found in input/script/*.txt")
         script_path = scripts_found[0]
+
+    # Downstream tools (transcribe.py, aligner) read plain text, so hand them a normalised .txt copy of non-text scripts.
+    if script_path.suffix.lower() not in (".txt", ".md"):
+        cache_dir = WORK / "_script_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        converted = cache_dir / f"{script_path.stem}.txt"
+        converted.write_text(read_script_text(script_path), encoding="utf-8")
+        print(f"  Script: converted {script_path.name} -> {converted.relative_to(ROOT)}")
+        script_path = converted
 
     meta, script_lines = parse_script_file(script_path)
     project_name = args.project or meta.get("project_name") or script_path.stem

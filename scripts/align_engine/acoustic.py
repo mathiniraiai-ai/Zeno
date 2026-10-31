@@ -5,7 +5,7 @@ import gc
 import ctypes
 from pathlib import Path
 
-# Keep the wav2vec2 weights inside the project (models/torch/hub/checkpoints) instead of ~/.cache.
+# Keep the MMS forced-alignment weights inside the project (models/torch/hub/checkpoints) instead of ~/.cache.
 os.environ.setdefault("TORCH_HOME", str(Path(__file__).resolve().parents[2] / "models" / "torch"))
 
 import numpy as np
@@ -14,7 +14,7 @@ from typing import Tuple, Dict, Optional, List, Any
 import ssl
 import torch
 import torchaudio
-from torchaudio.pipelines import WAV2VEC2_ASR_BASE_960H as bundle
+from torchaudio.pipelines import MMS_FA as bundle  # Meta MMS (300M, 1,100+ languages), CTC over romanized a-z
 
 
 
@@ -30,7 +30,7 @@ def _certifi_ssl_context():
 
 class AcousticModel:
     """
-    Dedicated High-Precision Acoustic Emission Extractor using PyTorch Wav2Vec2.
+    Dedicated High-Precision Acoustic Emission Extractor using Meta MMS_FA (wav2vec2 architecture, multilingual).
     """
     def __init__(self, device: Optional[str] = None, use_fp16: bool = False):
         self.sample_rate = 16000
@@ -39,6 +39,8 @@ class AcousticModel:
         self.use_fp16 = use_fp16 and ("cuda" in str(self.device))
         labels = bundle.get_labels()
         self.dictionary: Dict[str, int] = {c: i for i, c in enumerate(labels)}
+        # MMS labels are lowercase; the phonetic mapper emits uppercase A-Z, so accept both.
+        self.dictionary.update({c.upper(): i for c, i in list(self.dictionary.items()) if c.isalpha()})
         self.blank_id = self.dictionary.get("-", 0)
 
     def _ensure_model_loaded(self):
@@ -48,7 +50,7 @@ class AcousticModel:
                     torch.set_num_threads(2)
                 except Exception:
                     pass
-            print(f"[Kavioo Acoustic Engine] Loading PyTorch Wav2Vec2 neural model (Device: {self.device})...")
+            print(f"[Kavioo Acoustic Engine] Loading Meta MMS_FA neural model (Device: {self.device})...")
             dtype = torch.float16 if self.use_fp16 else torch.float32
             dev = torch.device(self.device)
             _prev_ctx = ssl._create_default_https_context
@@ -77,7 +79,7 @@ class AcousticModel:
                 libc.malloc_trim(0)
             except Exception:
                 pass
-            print("[EditFlow Acoustic Engine] Idle sleep: Wav2Vec2 model unloaded and RAM trimmed to <200MB.")
+            print("[EditFlow Acoustic Engine] Idle sleep: MMS model unloaded and RAM trimmed to <200MB.")
 
     def extract_emissions(self, audio_path: str) -> Tuple[np.ndarray, np.ndarray, float, float]:
         self._ensure_model_loaded()

@@ -5,6 +5,7 @@ Telugu (te), Tamil (ta), Hindi (hi), Malayalam (ml), Kannada (kn), and English (
 """
 
 import re
+import unicodedata
 from typing import Dict, List, Tuple
 
 # Common Indic phonetic substitutions to align Romanized Indian spellings
@@ -97,6 +98,13 @@ INDIC_PHONETIC_RULES: Dict[str, List[Tuple[str, str]]] = {
     ]
 }
 
+# Languages sharing a sound system reuse the closest measured rule set.
+INDIC_PHONETIC_RULES["mr"] = INDIC_PHONETIC_RULES["hi"]
+INDIC_PHONETIC_RULES["gu"] = INDIC_PHONETIC_RULES["hi"]
+INDIC_PHONETIC_RULES["pa"] = INDIC_PHONETIC_RULES["hi"]
+INDIC_PHONETIC_RULES["or"] = INDIC_PHONETIC_RULES["hi"]
+INDIC_PHONETIC_RULES["as"] = INDIC_PHONETIC_RULES["bn"]
+
 # Unicode offset mapping for all major Indic scripts
 INDIC_CONSONANTS: Dict[int, str] = {
     0x15: 'k',  0x16: 'kh', 0x17: 'g',  0x18: 'gh', 0x19: 'ng',
@@ -118,6 +126,30 @@ INDIC_VOWELS: Dict[int, str] = {
     0x55: 'e',  0x56: 'ai', 0x57: 'au',
     0x7A: 'n',  0x7B: 'n',  0x7C: 'r',  0x7D: 'l',  0x7E: 'l',  0x7F: 'k'
 }
+
+# Script blocks handled by the transliterator (Devanagari, Bengali/Assamese, Gurmukhi, Gujarati, Odia, Tamil, Telugu, Kannada, Malayalam).
+INDIC_BASES = (0x0900, 0x0980, 0x0A00, 0x0A80, 0x0B00, 0x0B80, 0x0C00, 0x0C80, 0x0D00)
+
+# Letters that exist only in one script (offset within its block).
+BASE_EXTRA_CONSONANTS: Dict[int, Dict[int, str]] = {
+    0x0900: {0x58: 'k', 0x59: 'kh', 0x5A: 'g', 0x5B: 'z', 0x5E: 'f'},   # Devanagari precomposed nukta letters
+    0x0980: {0x70: 'r', 0x71: 'w'},                                        # Assamese ra / wa
+    0x0A00: {0x59: 'kh', 0x5A: 'g', 0x5B: 'z', 0x5E: 'f'},                # Gurmukhi precomposed nukta letters
+    0x0B00: {0x71: 'w'},                                                   # Odia wa
+}
+BASE_EXTRA_VOWELS: Dict[int, Dict[int, str]] = {
+    0x0900: {0x0D: 'e', 0x11: 'o', 0x45: 'e', 0x49: 'o', 0x72: 'a'},      # candra e / o (English loanwords), Marathi candra a
+    0x0A00: {0x70: 'n', 0x72: 'i', 0x73: 'u'},                             # tippi, iri, ura
+    0x0A80: {0x0D: 'e', 0x11: 'o', 0x45: 'e', 0x49: 'o'},                 # Gujarati candra e / o
+}
+# Consonant + nukta (0x3C) sounds, by the consonant's offset.
+NUKTA_CONSONANTS: Dict[int, str] = {
+    0x15: 'k', 0x16: 'kh', 0x17: 'g', 0x1C: 'z', 0x21: 'r', 0x22: 'rh',
+    0x2B: 'f', 0x2F: 'y', 0x32: 'l', 0x38: 'sh',
+}
+# Marks that carry no sound: nukta, avagraha, danda, double danda, addak, and invisible joiners.
+SILENT_OFFSETS = {0x3C, 0x3D, 0x64, 0x65}
+INVISIBLE_CHARS = "\u200b\u200c\u200d\u2060\ufeff"
 
 
 DIGIT_MAP = {
@@ -198,41 +230,59 @@ class IndicPhoneticMapper:
     @staticmethod
     def transliterate_indic_script(text: str) -> str:
         """
-        Pure-Python G2P transliterator for all Indic Unicode blocks (Bengali, Telugu, Tamil, Devanagari, Kannada, Malayalam, Gujarati).
+        Pure-Python G2P transliterator for the Indic Unicode blocks (Devanagari, Bengali/Assamese, Gurmukhi,
+        Gujarati, Odia, Tamil, Telugu, Kannada, Malayalam). Input is NFC-normalised and invisible joiners dropped.
         """
+        text = unicodedata.normalize("NFC", text)
+        for ch in INVISIBLE_CHARS:
+            text = text.replace(ch, "")
+        n = len(text)
+
+        def block(code: int):
+            for b in INDIC_BASES:
+                if b <= code <= b + 0x7F:
+                    return b
+            return None
+
         res = []
         i = 0
-        while i < len(text):
+        while i < n:
             c = text[i]
             code = ord(c)
-            base = None
-            for b in [0x0900, 0x0980, 0x0A80, 0x0B00, 0x0B80, 0x0C00, 0x0C80, 0x0D00]:
-                if b <= code <= b + 0x7F:
-                    base = b
-                    break
-            
-            if base is not None:
-                offset = code - base
-                if offset in INDIC_CONSONANTS:
-                    cons = INDIC_CONSONANTS[offset]
-                    if i + 1 < len(text):
-                        next_code = ord(text[i + 1])
-                        next_offset = next_code - base if base <= next_code <= base + 0x7F else -1
-                        if next_offset == 0x4D: # Virama / Halant
-                            res.append(cons)
-                            i += 2
-                            continue
-                        elif next_offset in INDIC_VOWELS:
-                            res.append(cons + INDIC_VOWELS[next_offset])
-                            i += 2
-                            continue
-                    res.append(cons + 'a')
-                elif offset in INDIC_VOWELS:
-                    res.append(INDIC_VOWELS[offset])
-                elif offset == 0x4D:
-                    pass
-                else:
-                    res.append(c)
+            base = block(code)
+            if base is None:
+                res.append(c)
+                i += 1
+                continue
+
+            offset = code - base
+            cons = BASE_EXTRA_CONSONANTS.get(base, {}).get(offset) or INDIC_CONSONANTS.get(offset)
+            if cons is not None:
+                j = i + 1
+                if j < n and ord(text[j]) - base == 0x3C:       # consonant + nukta (z, f, r, y, ...)
+                    cons = NUKTA_CONSONANTS.get(offset, cons)
+                    j += 1
+                if j < n:
+                    next_offset = ord(text[j]) - base if base <= ord(text[j]) <= base + 0x7F else -1
+                    is_chillu = base == 0x0D00 and 0x7A <= next_offset <= 0x7F
+                    extra_v = BASE_EXTRA_VOWELS.get(base, {}).get(next_offset)
+                    if next_offset == 0x4D:                      # virama / halant: bare consonant
+                        res.append(cons)
+                        i = j + 1
+                        continue
+                    if not is_chillu and (extra_v or next_offset in INDIC_VOWELS):
+                        res.append(cons + (extra_v or INDIC_VOWELS[next_offset]))
+                        i = j + 1
+                        continue
+                res.append(cons + 'a')
+                i = j
+                continue
+
+            vowel = BASE_EXTRA_VOWELS.get(base, {}).get(offset) or INDIC_VOWELS.get(offset)
+            if vowel is not None:
+                res.append(vowel)
+            elif offset == 0x4D or offset in SILENT_OFFSETS or (base == 0x0A00 and offset == 0x71):
+                pass
             else:
                 res.append(c)
             i += 1
