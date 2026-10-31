@@ -4,8 +4,28 @@
 # Safe to run again: it skips anything already installed. No admin password, no Homebrew needed.
 set -e
 cd "$(dirname "$0")"
+
+# 0. Team rule: Zeno lives in ~/Downloads/Office Project/Zeno and finished videos go to ~/Downloads/Zeno Outputs.
+#    If this folder is somewhere else, move it there first. (The owner's dev copy has a .zeno-dev file and stays put.)
+TARGET="$HOME/Downloads/Office Project/Zeno"
+HERE="$(pwd -P)"
+if [ ! -f .zeno-dev ] && [ "$HERE" != "$(cd "$TARGET" 2>/dev/null && pwd -P)" ]; then
+  if [ -e "$TARGET" ]; then
+    echo "Zeno is already installed at: $TARGET"
+    echo "Open that folder and double-click install.command there (or delete it first to install this copy)."
+    exit 1
+  fi
+  echo "Moving Zeno to $TARGET ..."
+  mkdir -p "$(dirname "$TARGET")"
+  mv "$HERE" "$TARGET"
+  exec bash "$TARGET/install.command"
+fi
+mkdir -p "$HOME/Downloads/Zeno Outputs"
+
 echo "=============================================="
 echo " Zeno installer (macOS)"
+echo " Folder : $(pwd)"
+echo " Videos : $HOME/Downloads/Zeno Outputs"
 echo "=============================================="
 
 # 1. uv: installs Python 3.12 and the packages (user folder only, no admin)

@@ -1,6 +1,6 @@
 # AGENTS.md — Zeno (Antigravity Gemini 4 Argon & Dual-Agent Instructions)
 
-Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Code (Opus 4.5 / 5.5)** inside `/Users/mathiniraiselvan/Documents/Office project/Zeno`.
+Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Code (Opus 4.5 / 5.5)** inside this Zeno folder (team PCs: `~/Downloads/Office Project/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`).
 
 **Agent entry point** (Antigravity, OpenAI and any other agent, not only Claude): read `agent/DIRECTOR.md` first. It sets the decision loop and points to one concept file per topic in `agent/concepts/`. Learned styles live in `styles/<name>/`. A style may allow captions or extra graphics only if its own `SKILL.md` says so; otherwise rule 4 below applies.
 
@@ -8,12 +8,14 @@ Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Co
 
 ## 1. Hard Rules
 
-1. **Strict Workspace Boundary**: Never modify, move, or delete any file outside `/Users/mathiniraiselvan/Documents/Office project/Zeno`. Other projects in `Documents` are strictly off-limits.
-2. **Never Read Raw Word JSONs or Python Source**:
+1. **Strict Workspace Boundary**: Never modify, move, or delete any file outside this Zeno folder (team PCs: `~/Downloads/Office Project/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`). Other projects in `Documents` are strictly off-limits.
+2. **Folders**: Zeno runs from `~/Downloads/Office Project/Zeno` on team PCs (the installer puts it there). Every finished video (`.mp4` + `.timeline.txt`) goes to `~/Downloads/Zeno Outputs/`, never inside the repo. Raw clips can stay in any local folder: pass their path to `prepare.py`.
+3. **Takes**: When two or more clips are takes of the same script line, all of them are transcribed and scored; `prepare.py` keeps the best (`[BEST_TAKE]`) and lists the others as `[ALT_TAKE]` with their scores in `brief.txt`. Never assume the last take is right: check the scores and swap a take in `plan.edl` if needed.
+4. **Never Read Raw Word JSONs or Python Source**:
    - **Never** read `work/*/words.json`, `work/*/silences.json`, or `work/*/align.json` unless isolating a single word boundary defect.
    - **Never** read `scripts/*.py` during normal editing jobs. Use the 3-step CLI workflow and `plan.edl` schema below.
-3. **Fresh Context Per Video**: Start each new video edit in a fresh conversation with unused MCP connectors turned off.
-4. **Clean Editorial Style**: No B-roll, no unrequested captions, no CTAs, no decorative clutter. Only best takes, pause-snapped cuts, dynamic speaker layouts, and script-driven `✓` / `✗` marks + SFX.
+5. **Fresh Context Per Video**: Start each new video edit in a fresh conversation with unused MCP connectors turned off.
+6. **Clean Editorial Style**: No B-roll, no unrequested captions, no CTAs, no decorative clutter. Only best takes, pause-snapped cuts, dynamic speaker layouts, and script-driven `✓` / `✗` marks + SFX.
 
 ---
 
@@ -27,7 +29,7 @@ Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Co
 ```markdown
 | Date | Task | Context tokens (start → end) | Tokens used | 5-hour limit | Weekly limit |
 |---|---|---|---|---|---|
-| YYYY-MM-DD | **<Language> – "<Title>"** (<N> clips, <M> script lines): <MM:SS> final, <K> ✓/✗ marks → `output/<name>.mp4` | <start> → <end> | ~<delta> | <start>% → <end>% | <start>% → <end>% |
+| YYYY-MM-DD | **<Language> – "<Title>"** (<N> clips, <M> script lines): <MM:SS> final, <K> ✓/✗ marks → `~/Downloads/Zeno Outputs/<name>.mp4` | <start> → <end> | ~<delta> | <start>% → <end>% | <start>% → <end>% |
 ```
 
 ---
@@ -50,7 +52,7 @@ Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Co
    ```bash
    python3 scripts/render.py work/<project>/plan.edl --verify
    ```
-   - Renders `output/<name>.mp4` and `output/<name>.timeline.txt`, runs deterministic script coverage & `-14 LUFS` loudness verification, and outputs `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` overlays).
+   - Renders `~/Downloads/Zeno Outputs/<name>.mp4` and `~/Downloads/Zeno Outputs/<name>.timeline.txt`, runs deterministic script coverage & `-14 LUFS` loudness verification, and outputs `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` overlays).
 
 ---
 

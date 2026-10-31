@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
     FFMPEG,
     ROOT,
+    OUTPUT,
     WORK,
     clip_work_dir,
     _normalize_mark_type,
@@ -449,7 +450,7 @@ def verify_marks_and_build_contact_sheet(
 def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = None) -> bool:
     """Run all 5 deterministic verification checks and print the 5-line QA report."""
     p_file, plan = load_plan(plan_path)
-    out_mp4 = resolve(plan.get("output", f"output/{p_file.parent.name}.mp4"))
+    out_mp4 = resolve(plan.get("output") or (OUTPUT / f"{p_file.parent.name}.mp4"))
     if not out_mp4.is_file():
         print(f"[VERIFY FAIL] Output MP4 missing: {out_mp4}")
         return False
@@ -496,7 +497,7 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
             (alt_proj_dir / "marks_contact_sheet.jpg").write_bytes(sheet_path.read_bytes())
 
     pct = int(round(100.0 * cov_lines / max(1, tot_lines)))
-    rel_out = f"output/{out_mp4.name}"
+    rel_out = str(out_mp4)
     rel_sheet = f"work/{p_file.parent.name}/marks_contact_sheet.jpg"
 
     # Strict 5-line deterministic QA output

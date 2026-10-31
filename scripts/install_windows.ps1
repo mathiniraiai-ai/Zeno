@@ -3,8 +3,31 @@
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 Set-Location (Split-Path -Parent $PSScriptRoot)
+
+# 0. Team rule: Zeno lives in Downloads\Office Project\Zeno and finished videos go to Downloads\Zeno Outputs.
+#    If this folder is somewhere else, copy it there and continue from the new copy.
+#    (Windows can't move a folder a script is running from. The owner's dev copy has a .zeno-dev file and stays put.)
+$downloads = Join-Path $env:USERPROFILE "Downloads"
+$target = Join-Path $downloads "Office Project\Zeno"
+$here = (Get-Location).Path
+if (-not (Test-Path ".zeno-dev") -and ($here.TrimEnd('\') -ne $target.TrimEnd('\'))) {
+    if (Test-Path $target) {
+        Write-Host "Zeno is already installed at: $target"
+        Write-Host "Open that folder and double-click install.bat there (or delete it first to install this copy)."
+        exit 1
+    }
+    Write-Host "Copying Zeno to $target ..."
+    New-Item -ItemType Directory -Force -Path $target | Out-Null
+    robocopy $here $target /E /XD ".venv" /NFL /NDL /NJH /NJS /NP | Out-Null
+    Write-Host "Zeno is now in $target. Continuing the install there; you can delete this old folder afterwards."
+    Set-Location $target
+}
+New-Item -ItemType Directory -Force -Path (Join-Path $downloads "Zeno Outputs") | Out-Null
+
 Write-Host "=============================================="
 Write-Host " Zeno installer (Windows)"
+Write-Host " Folder : $(Get-Location)"
+Write-Host " Videos : $(Join-Path $downloads 'Zeno Outputs')"
 Write-Host "=============================================="
 
 # 1. uv: installs Python 3.12 and the packages (user folder only)

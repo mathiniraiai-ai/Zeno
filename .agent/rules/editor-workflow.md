@@ -6,7 +6,9 @@ description: Low-token 3-step video editing workflow, hard boundaries, layout pr
 # Zeno — Always-On Workspace Rule (Antigravity / Gemini 4 Argon)
 
 ## 1. Hard Rules
-- **Workspace Isolation**: Never modify any files outside `/Users/mathiniraiselvan/Documents/Office project/Zeno`. Never touch other projects in `Documents`.
+- **Workspace Isolation**: Never modify any files outside this Zeno folder (team PCs: `~/Downloads/Office Project/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`). Never touch other projects in `Documents`.
+- **Folders**: Zeno runs from `~/Downloads/Office Project/Zeno` on team PCs (the installer puts it there). Every finished video (`.mp4` + `.timeline.txt`) goes to `~/Downloads/Zeno Outputs/`, never inside the repo. Raw clips can stay in any local folder: pass their path to `prepare.py`.
+- **Takes**: When two or more clips are takes of the same script line, all of them are transcribed and scored; `prepare.py` keeps the best (`[BEST_TAKE]`) and lists the others as `[ALT_TAKE]` with their scores in `brief.txt`. Never assume the last take is right: check the scores and swap a take in `plan.edl` if needed.
 - **Token Conservation**: Never read `work/S*/words.json`, `work/S*/silences.json`, or `scripts/*.py` unless debugging a specific word boundary or script exception.
 - **Fresh Sessions**: Always run edits in a fresh session per video with unused MCP servers disabled.
 
@@ -23,7 +25,7 @@ description: Low-token 3-step video editing workflow, hard boundaries, layout pr
    Read ONLY `work/<project>/brief.txt` (`~900 tokens`) and `work/<project>/plan.edl` (`~240 tokens`). Verify the layout mode (`single`, `split_v`, `split_h`, `chat_bar`, `video_call`, or `hybrid`), retakes, and `✓`/`✗` marks. Edit `plan.edl` (or `plan.json`) only where adjustments are needed.
 3. **Render & Verify (`1 command`)**:
    `python3 scripts/render.py work/<project>/plan.edl --verify`
-   Renders the final MP4 to `output/`, runs deterministic script coverage & `-14 LUFS` loudness verification, and generates `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` marks).
+   Renders the final MP4 to `~/Downloads/Zeno Outputs/`, runs deterministic script coverage & `-14 LUFS` loudness verification, and generates `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` marks).
 
 ## 4. Dynamic Layouts & Swappable Mark Packs
 - **Layouts**: `single` (full-frame + subtle zoom), `split_v` (top/bottom 50/50 split), `split_h` (left/right 50/50 split), `chat_bar` (speaker + floating prompt bar), `video_call` (speaker + rounded PiP card), and `hybrid` (`auto` mix of `single` for monologues and split/PiP/chat_bar for dialogues).

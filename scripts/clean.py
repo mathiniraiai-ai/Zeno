@@ -14,7 +14,7 @@ What it removes (all can be rebuilt):
   4. input/standins/        with --standins   (stand-in clips cut from a reference)
   5. input/reference/       with --references (reference videos used to learn a style)
 
-It never touches: output/, styles/, assets/, models/, scripts/, input/footage/, input/script/, .env.
+It never touches: Downloads/Zeno Outputs/, output/, styles/, assets/, models/, scripts/, input/footage/, input/script/, .env.
 """
 import argparse
 import shutil
@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import ROOT  # noqa: E402
+from common import OUTPUT, ROOT  # noqa: E402
 
 HEAVY_EXT = {".wav", ".mkv", ".mp4", ".mov", ".jpg", ".jpeg", ".png", ".npy", ".aiff"}
 
@@ -109,9 +109,9 @@ def main():
     for label, (count, n) in totals.items():
         print(f"  {label:<42} {count:>5} item(s)  {human(n):>9}")
     print(f"  {'total':<42} {len(items):>5} item(s)  {human(total):>9}")
-    out = root / "output"
-    if out.is_dir():
-        print(f"\noutput/ holds {human(size_of(out))}. This tool never deletes it: move finished videos to the shared drive.")
+    for out in (OUTPUT, root / "output"):
+        if out.is_dir() and any(out.iterdir()):
+            print(f"\n{out} holds {human(size_of(out))}. This tool never deletes it: move finished videos to the shared drive.")
     if not a.apply:
         print("\nRun again with --apply to delete.")
         return

@@ -20,6 +20,7 @@ from common import (  # noqa: E402
     DEFAULT_SFX,
     MARKS_DIR,
     SFX_DIR,
+    OUTPUT,
     WORK,
     clip_work_dir,
     _normalize_mark_type,
@@ -232,7 +233,7 @@ def main() -> None:
     W = even(canvas.get("width", first.get("width") or 720))
     H = even(canvas.get("height", first.get("height") or 1280))
     fps = int(canvas.get("fps", round(first.get("fps") or 24)))
-    out_path = resolve(plan.get("output", f"output/{plan_path.parent.name}.mp4"))
+    out_path = resolve(plan.get("output") or (OUTPUT / f"{plan_path.parent.name}.mp4"))
     cache = WORK / "_segments"
     cache.mkdir(parents=True, exist_ok=True)
 

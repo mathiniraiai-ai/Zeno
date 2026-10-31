@@ -207,7 +207,8 @@ TEMPLATES_DIR = ROOT / "assets" / "templates"
 MODELS_DIR = ROOT / "models"
 YUNET_MODEL = MODELS_DIR / "face_detection_yunet_2023mar.onnx"
 WORK = ROOT / "work"
-OUTPUT = ROOT / "output"
+# Finished videos go to Downloads/Zeno Outputs on every PC (team rule); ZENO_OUTPUT_DIR in .env overrides it.
+OUTPUT = Path(os.environ.get("ZENO_OUTPUT_DIR", "").strip() or (Path.home() / "Downloads" / "Zeno Outputs")).expanduser()
 
 DEFAULT_SFX = {"right": "correct_ding.wav", "wrong": "buzzer.wav"}
 

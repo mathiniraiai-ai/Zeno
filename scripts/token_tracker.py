@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import ROOT, WORK, read_json, tc, write_json  # noqa: E402
+from common import OUTPUT, ROOT, WORK, read_json, tc, write_json  # noqa: E402
 
 LEDGER_MD = ROOT / "TOKEN_LEDGER.md"
 LOCAL_DB = WORK / "zeno_telemetry.db"
@@ -205,11 +205,11 @@ def collect_clip_telemetry(
         wdir = Path(c.get("work_dir") or (WORK / stem))
         info = c.get("info") or {}
         raw_dur = round(float(info.get("duration") or 0.0), 2)
-        c_segs = [s for s in segments if Path(str(s.get("src", ""))).stem == stem]
+        c_segs = [s for s in segments if str(s.get("src", "")) == str(c.get("src", ""))]
         kept_dur = round(sum(max(0.0, float(s.get("end", 0.0)) - float(s.get("start", 0.0))) for s in c_segs), 2)
         words = c.get("hq_words") or []
         l_ids = ",".join(l["id"] for l in c.get("matched_lines", [])) or "-"
-        segs_str = " + ".join(f"{s['id']}[{float(s['start']):.2f}-{float(s['end']):.2f}s]" for s in c_segs) or "dropped"
+        segs_str = " + ".join(f"{s['id']}[{float(s['start']):.2f}-{float(s['end']):.2f}s]" for s in c_segs) or ("unused take" if c.get("dropped_take") else "dropped")
         anoms = list(c.get("anomalies") or [])
 
         # Read Gemini transcription token usage from work/<stem>/gemini_transcript.json
@@ -367,7 +367,7 @@ def finalize_job_telemetry(
     vid_sec = round(float(video_seconds or snap.get("video_seconds") or 0.0), 2)
     marks_cnt = len(plan.get("marks") or [])
     clips_cnt = int(snap.get("clips_count") or len(clips) or len(plan.get("segments") or []))
-    rel_out = f"output/{output_mp4.name}"
+    rel_out = str(output_mp4)
     tok_per_min = int(round(grand_total / max(0.25, vid_sec / 60.0)))
 
     record = {
@@ -601,7 +601,8 @@ def main() -> None:
         plan = read_json(plan_path)
         segs = plan.get("segments") or []
         vid_sec = sum(max(0.0, float(s.get("end", 0.0)) - float(s.get("start", 0.0))) for s in segs)
-        out_mp4 = ROOT / str(plan.get("output") or f"output/{args.project}.mp4")
+        out_mp4 = Path(str(plan.get("output") or (OUTPUT / f"{args.project}.mp4")))
+        out_mp4 = out_mp4 if out_mp4.is_absolute() else ROOT / out_mp4
         rec = finalize_job_telemetry(plan_path, plan, vid_sec, out_mp4, sync_cloud=not args.no_cloud)
         print_console_summary(rec)
     else:

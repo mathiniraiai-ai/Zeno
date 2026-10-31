@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
     DEFAULT_SFX,
     FFMPEG,
+    OUTPUT,
     ROOT,
     WORK,
     clip_work_dir,
@@ -473,6 +474,13 @@ def match_clips_to_script_lines(
     remaining_tokens: Dict[int, List[str]] = {
         idx: list(sline["tokens"]) for idx, sline in enumerate(script_lines)
     }
+    # Clips that cover the same script line(s) share a take group; select_best_takes() then keeps the best one.
+    take_group_of: Dict[int, int] = {}
+    take_group_lines: Dict[int, List[Dict[str, Any]]] = {}
+
+    def _new_group(c_idx: int, lines: List[Dict[str, Any]]) -> None:
+        take_group_of[c_idx] = c_idx
+        take_group_lines[c_idx] = list(lines)
 
     for c_idx, clip in enumerate(clips_data):
         words = clip["hq_words"]
@@ -487,6 +495,19 @@ def match_clips_to_script_lines(
         all_clip_tokens = clip_tokens + [t for t in base_tokens if t not in clip_tokens]
 
         matched_lines: List[Dict[str, Any]] = []
+
+        # 0. Another take of the line(s) the previous clip covered? (e.g. S3 and S4 both say L3)
+        #    A retake starts from the beginning of the line again; a continuation clip does not.
+        prev_group = take_group_lines.get(take_group_of.get(c_idx - 1, -1)) if c_idx > 0 else None
+        if prev_group:
+            g_tokens = [t for l in prev_group for t in l["tokens"]]
+            g_recall = _token_recall(g_tokens, all_clip_tokens)
+            g_head = _token_recall(g_tokens[: min(4, len(g_tokens))], all_clip_tokens, threshold=0.65)
+            next_recall = _token_recall(script_lines[line_ptr]["tokens"], all_clip_tokens) if line_ptr < n_lines else 0.0
+            if g_recall >= 0.55 and g_head >= 0.5 and g_recall >= next_recall + 0.10:
+                clip["matched_lines"] = list(prev_group)
+                take_group_of[c_idx] = take_group_of[c_idx - 1]
+                continue
 
         # 1. Check if previous multi-clip line still has significant unconsumed tail tokens in this clip
         if line_ptr > 0:
@@ -503,6 +524,7 @@ def match_clips_to_script_lines(
                     ]
                     remaining_tokens[prev_idx] = new_rem
                     clip["matched_lines"] = matched_lines
+                    _new_group(c_idx, matched_lines)
                     continue
 
         # 2. Match one or more script lines starting at line_ptr
@@ -551,6 +573,63 @@ def match_clips_to_script_lines(
             line_ptr += 1
 
         clip["matched_lines"] = matched_lines
+        _new_group(c_idx, matched_lines)
+
+    for c_idx, clip in enumerate(clips_data):
+        clip["take_group"] = take_group_of.get(c_idx, c_idx)
+
+
+def _token_recall(script_tokens: List[str], clip_tokens: List[str], threshold: float = 0.64) -> float:
+    """Share of script tokens heard in the clip (similarity-weighted)."""
+    if not script_tokens:
+        return 0.0
+    total = 0.0
+    for st in script_tokens:
+        best = max((_word_similarity(st, ct) for ct in clip_tokens), default=0.0)
+        if best >= threshold:
+            total += best
+    return total / len(script_tokens)
+
+
+def _take_score(clip: Dict[str, Any]) -> Tuple[float, float, float]:
+    """(score, recall, precision) of one take against its script line(s).
+    recall    = how much of the script line was said
+    precision = how much of what was said belongs to the script (fumbles, ad-libs and extra words lower it)."""
+    script_tokens = [t for l in clip.get("matched_lines", []) for t in l["tokens"]]
+    clip_tokens = [_clean_token(w["w"]) for w in clip.get("hq_words", []) if _clean_token(w["w"])]
+    if not script_tokens or not clip_tokens:
+        return 0.0, 0.0, 0.0
+    recall = _token_recall(script_tokens, clip_tokens)
+    precision = _token_recall(clip_tokens, script_tokens)
+    return round(recall + 0.35 * precision, 4), recall, precision
+
+
+def select_best_takes(clips_data: List[Dict[str, Any]]) -> None:
+    """When two or more clips are takes of the same script line(s), analyse every take and keep the best one.
+    Every take is transcribed and scored; the later take wins only on a near tie (people usually redo after a slip).
+    Dropped takes stay in the brief with their scores, so the agent can swap them in plan.edl."""
+    groups: Dict[int, List[Dict[str, Any]]] = {}
+    for c in clips_data:
+        groups.setdefault(c.get("take_group", id(c)), []).append(c)
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        scored = [(c, *_take_score(c)) for c in members]
+        best = scored[0]
+        for cand in scored[1:]:
+            if cand[1] >= best[1] - 0.02:   # later take wins ties
+                best = cand
+        lines = ",".join(l["id"] for l in best[0].get("matched_lines", [])) or "-"
+        summary = ", ".join(f"{c['stem']} {r * 100:.0f}% said/{p * 100:.0f}% on-script" for c, _, r, p in scored)
+        for c, sc, r, p in scored:
+            if c is best[0]:
+                c["anomalies"].append(f"[BEST_TAKE] {lines}: kept {c['stem']} of {len(scored)} takes ({summary})")
+            else:
+                c["dropped_take"] = True
+                c["anomalies"].append(
+                    f"[ALT_TAKE] {lines}: not used, {best[0]['stem']} scored higher ({summary}). "
+                    f"To use this take instead, put {c['stem']} in that line's segment in plan.edl"
+                )
 
 
 def detect_clip_anomalies_and_cuts(
@@ -1104,7 +1183,7 @@ def format_brief_txt(
         stem = c["stem"]
         dur = float(c["info"].get("duration") or 0.0)
         l_ids = ",".join(l["id"] for l in c.get("matched_lines", [])) or "-"
-        c_segs = [s for s in segments if Path(str(s["src"])).stem == stem]
+        c_segs = [s for s in segments if str(s["src"]) == str(c["src"])]
         cuts_str = " + ".join(
             f"{s['id']}[{s['start']:.2f}-{s['end']:.2f}s"
             + (f" z={s['zoom']}" if s.get("zoom", 1.0) != 1.0 else (f" z->{s['zoom_to']}" if "zoom_to" in s else ""))
@@ -1173,7 +1252,13 @@ def discover_clips(raw_args: List[str]) -> List[Tuple[str, str, Path]]:
                 src_str = str(info.get("path") or f"input/footage/{wd.name}.mp4").replace("\\", "/")
                 items.append((wd.name, src_str, wd))
 
-    return items
+    # Two different clips with the same file name (S1.mp4 from two folders) both stay in the job under distinct names
+    seen: Dict[str, int] = {}
+    unique: List[Tuple[str, str, Path]] = []
+    for stem, src_str, wdir in items:
+        seen[stem] = seen.get(stem, 0) + 1
+        unique.append((stem if seen[stem] == 1 else f"{stem}_{seen[stem]}", src_str, wdir))
+    return unique
 
 
 def main() -> None:
@@ -1247,11 +1332,18 @@ def main() -> None:
 
     # Align clips to script lines & run deterministic anomaly detection + auto-cutting
     match_clips_to_script_lines(clips_data, script_lines)
-    raw_segments = detect_clip_anomalies_and_cuts(clips_data)
+    select_best_takes(clips_data)
+    kept_clips = [c for c in clips_data if not c.get("dropped_take")]
+    raw_segments = detect_clip_anomalies_and_cuts(kept_clips)
+    for c in clips_data:
+        if c.get("dropped_take"):   # trims for the unused take, so swapping it in is a one-line edit
+            alt = detect_clip_anomalies_and_cuts([c])
+            if alt:
+                c["anomalies"].append(f"  unused take would keep {alt[0]['start']:.2f}-{alt[-1]['end']:.2f}s of {c['src']}")
     segments, marks, resolved_preset = assign_segment_ids_marks_and_layouts(
         raw_segments,
         script_lines,
-        clips_data,
+        kept_clips,
         preset=args.preset,
         mark_pack=args.mark_pack,
     )
@@ -1263,7 +1355,7 @@ def main() -> None:
         "fps": int(round(float(first_info.get("fps") or 24))),
     }
 
-    output_mp4 = f"output/{project_name}.mp4"
+    output_mp4 = (OUTPUT / f"{project_name}.mp4").as_posix()
     plan: Dict[str, Any] = {
         "output": output_mp4,
         "script": str(script_path.relative_to(ROOT)) if script_path.is_relative_to(ROOT) else str(script_path),

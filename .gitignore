@@ -45,3 +45,6 @@ input/standins/*
 # Generated on first run from scripts/align_engine/lexicons/*.py and data/lexicon_db.json (row ids change every run)
 scripts/align_engine/kavioo_lexicon.db
 zeno_keys.db*
+
+# Owner dev copy marker: installers never move this folder
+.zeno-dev

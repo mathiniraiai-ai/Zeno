@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import ROOT  # noqa: E402
+from common import OUTPUT, ROOT  # noqa: E402
 
 
 def build(style: str, manifest: list, canvas: dict, output: str, fps_src: float = 24.0) -> dict:
@@ -71,7 +71,7 @@ def main():
         m = re.match(r"(\d+)x(\d+)@(\d+)", a.canvas)
         cv = {"width": int(m.group(1)), "height": int(m.group(2)), "fps": int(m.group(3))}
     manifest = json.loads(Path(a.manifest).read_text(encoding="utf-8"))
-    plan = build(a.style, manifest, cv, a.output or f"output/{a.style}_rebuild.mp4")
+    plan = build(a.style, manifest, cv, a.output or (OUTPUT / f"{a.style}_rebuild.mp4").as_posix())
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(plan, indent=1), encoding="utf-8")

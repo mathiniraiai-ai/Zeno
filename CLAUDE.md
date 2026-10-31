@@ -1,16 +1,18 @@
 # Zeno — Low-Token Operational Manual
 
-Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input/footage/` and a script in `input/script/`, output best takes, pause-snapped cuts, dynamic speaker layouts, and `✓`/`✗` marks + SFX to `output/`.
+Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input/footage/` and a script in `input/script/`, output best takes, pause-snapped cuts, dynamic speaker layouts, and `✓`/`✗` marks + SFX to `~/Downloads/Zeno Outputs/`.
 
 **Agent entry point**: read `agent/DIRECTOR.md` first. It sets the decision loop and points to one concept file per topic in `agent/concepts/` (script intake, footage intake, style library, reference learning, on-screen text, token budget). Learned styles live in `styles/<name>/`. A style may allow captions or extra graphics only if its own `SKILL.md` says so; otherwise rule 4 below applies.
 
 ## 1. Hard Rules
-1. **Workspace Isolation**: Never modify any files outside `/Users/mathiniraiselvan/Documents/Office project/Zeno`. Never touch other projects in `Documents`.
-2. **Never Read Raw JSONs or Python Source**:
+1. **Workspace Isolation**: Never modify any files outside this Zeno folder (team PCs: `~/Downloads/Office Project/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`). Never touch other projects in `Documents`.
+2. **Folders**: Zeno runs from `~/Downloads/Office Project/Zeno` on team PCs (the installer puts it there). Every finished video (`.mp4` + `.timeline.txt`) goes to `~/Downloads/Zeno Outputs/`, never inside the repo. Raw clips can stay in any local folder: pass their path to `prepare.py`.
+3. **Takes**: When two or more clips are takes of the same script line, all of them are transcribed and scored; `prepare.py` keeps the best (`[BEST_TAKE]`) and lists the others as `[ALT_TAKE]` with their scores in `brief.txt`. Never assume the last take is right: check the scores and swap a take in `plan.edl` if needed.
+4. **Never Read Raw JSONs or Python Source**:
    - **Never** read `work/*/words.json`, `work/*/silences.json`, or `work/*/align.json` unless debugging a specific word timing.
    - **Never** read `scripts/*.py` during normal edits. Use the 3-step CLI workflow and `plan.edl` syntax below.
-3. **Fresh Session**: Start every video in a fresh session (`/clear` or new chat) with unused MCP connectors disabled.
-4. **Clean Editorial Style**: No B-roll, no unrequested captions, no CTAs, no extra graphics.
+5. **Fresh Session**: Start every video in a fresh session (`/clear` or new chat) with unused MCP connectors disabled.
+6. **Clean Editorial Style**: No B-roll, no unrequested captions, no CTAs, no extra graphics.
 
 ## 2. Token Budget & Mandatory Reporting
 - **Target**: **`12k–18k tokens` per minute of finished video** (`~20k–30k total` for a typical 1.5-min edit).
@@ -21,7 +23,7 @@ Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input
 ```markdown
 | Date | Task | Context tokens (start → end) | Tokens used | 5-hour limit | Weekly limit |
 |---|---|---|---|---|---|
-| YYYY-MM-DD | **<Language> – "<Title>"** (<N> clips, <M> script lines): <MM:SS> final, <K> ✓/✗ marks → `output/<name>.mp4` | <start> → <end> | ~<delta> | <start>% → <end>% | <start>% → <end>% |
+| YYYY-MM-DD | **<Language> – "<Title>"** (<N> clips, <M> script lines): <MM:SS> final, <K> ✓/✗ marks → `~/Downloads/Zeno Outputs/<name>.mp4` | <start> → <end> | ~<delta> | <start>% → <end>% | <start>% → <end>% |
 ```
 
 ## 3. The 3-Step Workflow
@@ -39,7 +41,7 @@ Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input
    ```bash
    python3 scripts/render.py work/<project>/plan.edl --verify
    ```
-   - Renders `output/<name>.mp4` + `output/<name>.timeline.txt`, runs deterministic script coverage & `-14 LUFS` loudness check, and generates `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` marks).
+   - Renders `~/Downloads/Zeno Outputs/<name>.mp4` + `~/Downloads/Zeno Outputs/<name>.timeline.txt`, runs deterministic script coverage & `-14 LUFS` loudness check, and generates `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` marks).
 
 ## 4. The 5 Dynamic Layout Modes & Swappable Mark Packs
 

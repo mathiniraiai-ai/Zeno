@@ -9,7 +9,7 @@ Zeno turns raw clips and a script into a finished vertical video. An AI agent (C
 
 ## 1. Install (once, one double-click, about 5 minutes)
 
-1. Get the Zeno folder (from the owner) and put it anywhere, for example `Documents/Zeno`.
+1. Get the Zeno folder from the owner. You can unzip or clone it anywhere: the installer moves it to **`Downloads/Office Project/Zeno`**, where Zeno always runs, and creates **`Downloads/Zeno Outputs`** for finished videos.
 2. Double-click the installer:
    - **Mac:** `install.command`. The first time, macOS may block it: right-click it, choose **Open**, then **Open** again.
    - **Windows:** `install.bat`.
@@ -36,9 +36,13 @@ Start a **fresh agent session for each video** (it keeps token use low), open th
 2. **Put the raw clips** in `input/footage/`.
 3. **Analyse and plan:** `python scripts/prepare.py input/footage/*.mp4 --script input/script/<project>.txt --lang <lang>`
 4. **Review** `work/<project>/brief.txt` and `plan.edl`; the agent fixes anything off.
-5. **Render:** `python scripts/render.py work/<project>/plan.edl --verify` → `output/<name>.mp4`
+5. **Render:** `python scripts/render.py work/<project>/plan.edl --verify` → `Downloads/Zeno Outputs/<name>.mp4`
 
 Languages are mixed freely: native words stay native, English words stay English. `--lang` names the main native language.
+
+Clips can stay where they are: give the agent the folder path (for example `~/Desktop/shoot_31oct/`) instead of copying them into `input/footage/`.
+
+If two or more clips are takes of the same line, Zeno transcribes and scores every take and keeps the best one. The others are listed as `[ALT_TAKE]` in the brief with their scores, so the agent (or you) can swap one in.
 
 ## 3. What works today
 - General editing: best takes, pause-snapped cuts, layouts (`single`, `split_v`, `split_h`, `chat_bar`, `video_call`, `hybrid`), ✓/✗ marks, loudness.
@@ -51,7 +55,7 @@ Languages are mixed freely: native words stay native, English words stay English
 |---|---|---|
 | `input/footage/`, `input/script/` | your raw clips and script | no (local) |
 | `work/<project>/` | transcript, plan, analysis | no (local, deletable) |
-| `output/` | finished videos | **move finished videos to the shared drive** |
+| `Downloads/Zeno Outputs/` | finished videos (outside the Zeno folder) | **move finished videos to the shared drive** |
 | `styles/` | learned styles | owner changes these; you just `git pull` |
 
 ## 5. Keep your disk small
@@ -60,10 +64,10 @@ Each 90-second video leaves about 330 MB of intermediates. Clean up weekly:
 python scripts/clean.py            # shows what would go
 python scripts/clean.py --apply    # deletes it
 ```
-It removes the render cache and old work files. It never touches `output/`, `styles/`, your raw footage or scripts.
+It removes the render cache and old work files. It never touches `Downloads/Zeno Outputs/`, `styles/`, your raw footage or scripts.
 
 ## 6. Stay up to date
-Double-click `update.command` (Mac) or `update.bat` (Windows). It pulls the latest Zeno and refreshes packages; your `.env`, clips, `work/` and `output/` are never touched. Do not edit `styles/`, `agent/` or `scripts/` yourself; tell the owner what you need.
+Double-click `update.command` (Mac) or `update.bat` (Windows). It pulls the latest Zeno and refreshes packages; your `.env`, clips, `work/` and `Downloads/Zeno Outputs/` are never touched. Do not edit `styles/`, `agent/` or `scripts/` yourself; tell the owner what you need.
 
 ## Licences
 - Alignment model: Meta wav2vec2 base (95M), MIT licence, commercial use allowed.

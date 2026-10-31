@@ -5,18 +5,20 @@ description: End-to-end low-token script-led video editing workflow for Zeno. Us
 
 # Zeno Video Edit Skill (`video-edit`)
 
-Complete reference for executing a script-led video edit inside `/Users/mathiniraiselvan/Documents/Office project/Zeno` under the **12k–18k tokens/min** target budget (strict ceiling: **20k tokens/min**).
+Complete reference for executing a script-led video edit inside this Zeno folder (team PCs: `~/Downloads/Office Project/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`) under the **12k–18k tokens/min** target budget (strict ceiling: **20k tokens/min**).
 
 ---
 
 ## 1. Non-Negotiable Guardrails
 
-1. **Workspace Isolation**: Only read and write files inside `/Users/mathiniraiselvan/Documents/Office project/Zeno`. Never modify any other project in `Documents`.
-2. **Zero Raw Telemetry Reads**:
+1. **Workspace Isolation**: Only read and write files inside this Zeno folder (team PCs: `~/Downloads/Office Project/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`). Never modify any other project in `Documents`.
+2. **Folders**: Zeno runs from `~/Downloads/Office Project/Zeno` on team PCs (the installer puts it there). Every finished video (`.mp4` + `.timeline.txt`) goes to `~/Downloads/Zeno Outputs/`, never inside the repo. Raw clips can stay in any local folder: pass their path to `prepare.py`.
+3. **Takes**: When two or more clips are takes of the same script line, all of them are transcribed and scored; `prepare.py` keeps the best (`[BEST_TAKE]`) and lists the others as `[ALT_TAKE]` with their scores in `brief.txt`. Never assume the last take is right: check the scores and swap a take in `plan.edl` if needed.
+4. **Zero Raw Telemetry Reads**:
    - **NEVER** read `work/*/words.json`, `work/*/silences.json`, or `work/*/align.json`.
    - **NEVER** read `scripts/*.py` to discover flags or schema fields—everything is documented in this skill.
    - Only read `work/<project>/brief.txt` (`~900 tokens`) and `work/<project>/plan.edl` (`~240 tokens`).
-3. **Editorial Minimalism**:
+5. **Editorial Minimalism**:
    - Best takes only; all retakes, false starts, stutters, dead air, and end-of-clip AI babble removed.
    - Hard cuts by default, snapped into natural pauses (`0.08–0.15s` breath padding).
    - `0.3s` `fade` only at major topic changes.
@@ -77,7 +79,7 @@ python3 scripts/render.py work/<project>/plan.edl --verify
 **What `render.py --verify` does**:
 1. Parses `plan.edl` (and syncs `plan.json`).
 2. Renders each segment with exact frame rounding, `12ms` edge audio fades (zero clicks), dynamic layout compositing, and two-pass `-14 LUFS` EBU R128 loudness normalization.
-3. Writes `output/<name>.mp4` (H.264 CRF 18, AAC 192 kbps) and `output/<name>.timeline.txt`.
+3. Writes `~/Downloads/Zeno Outputs/<name>.mp4` (H.264 CRF 18, AAC 192 kbps) and `~/Downloads/Zeno Outputs/<name>.timeline.txt`.
 4. **Deterministic Verification**:
    - Checks that all scripted lines are present and in order without re-running expensive LLM loops.
    - Verifies audio loudness and absence of clipping/dropouts.
@@ -219,11 +221,11 @@ At the conclusion of every video edit:
 
 ```markdown
 ### Edit Summary & Token Usage
-- **Output Video**: `output/<name>.mp4` (`<MM:SS>`, `<N>` segments, `<K>` ✓/✗ marks)
+- **Output Video**: `~/Downloads/Zeno Outputs/<name>.mp4` (`<MM:SS>`, `<N>` segments, `<K>` ✓/✗ marks)
 - **Layout & Marks**: Preset `<preset>`, Mark Pack `<mark_pack>`
-- **Timeline & Verification**: `output/<name>.timeline.txt` | `work/<project>/marks_contact_sheet.jpg`
+- **Timeline & Verification**: `~/Downloads/Zeno Outputs/<name>.timeline.txt` | `work/<project>/marks_contact_sheet.jpg`
 
 | Date | Task | Context tokens (start → end) | Tokens used | 5-hour limit | Weekly limit |
 |---|---|---|---|---|---|
-| YYYY-MM-DD | **<Language> – "<Title>"** (<N> clips, <M> script lines): <MM:SS> final, <K> ✓/✗ marks → `output/<name>.mp4` | <start> → <end> | ~<delta> | <start>% → <end>% | <start>% → <end>% |
+| YYYY-MM-DD | **<Language> – "<Title>"** (<N> clips, <M> script lines): <MM:SS> final, <K> ✓/✗ marks → `~/Downloads/Zeno Outputs/<name>.mp4` | <start> → <end> | ~<delta> | <start>% → <end>% | <start>% → <end>% |
 ```
