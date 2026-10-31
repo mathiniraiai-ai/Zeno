@@ -296,7 +296,7 @@ class GeminiTranscriber:
             "language_hint": language_hint or "auto",
             "target_script_lines": json.dumps(list(target_script_lines or [])[:40], ensure_ascii=False),
         }
-        with httpx.Client(timeout=60.0) as http:
+        with httpx.Client(timeout=240.0) as http:
             with open(wav_path, "rb") as fh:
                 resp = http.post(
                     url,
@@ -306,6 +306,8 @@ class GeminiTranscriber:
                 )
         resp.raise_for_status()
         data = resp.json()
+        if data.get("warning"):
+            print(f"[transcribe] WARNING from service: {data['warning']}", file=sys.stderr)
         return self._heal_result(data, language_hint, model_used=str(data.get("model_used") or "cloud"))
 
     def transcribe(
@@ -357,6 +359,8 @@ class GeminiTranscriber:
                 return res
             except Exception as e:
                 logger.warning("Cloud transcription failed, falling back to offline: %s", e)
+                print(f"[transcribe] WARNING: transcription service failed ({type(e).__name__}); using the OFFLINE script-based fallback, "
+                      "which cannot hear retakes or ad-libs. Check SCRIPTCUT_CLOUD_URL / SCRIPTCUT_CLOUD_TOKEN.", file=sys.stderr)
                 return transcribe_offline_fallback(
                     wav_path=str(wav_p),
                     lang=language_hint,
@@ -397,6 +401,8 @@ class GeminiTranscriber:
                 else:
                     time.sleep(0.2)
 
+        print("[transcribe] WARNING: Gemini failed on every attempt; using the OFFLINE script-based fallback, "
+              "which cannot hear retakes or ad-libs.", file=sys.stderr)
         return transcribe_offline_fallback(
             wav_path=str(wav_p),
             lang=language_hint,

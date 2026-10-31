@@ -219,8 +219,9 @@ def smoke_test() -> bool:
     ok = ok and good
 
     common.load_dotenv()
-    has_key = bool(os.environ.get("GEMINI_API_KEY"))
-    print(f"  [{'OK' if has_key else 'FAIL'}] Gemini key set in .env (key not tested live)")
+    via_service = bool(os.environ.get("SCRIPTCUT_CLOUD_URL") and os.environ.get("SCRIPTCUT_CLOUD_TOKEN"))
+    has_key = bool(os.environ.get("GEMINI_API_KEY")) or via_service
+    print(f"  [{'OK' if has_key else 'FAIL'}] Transcription access: " + ("team service address and key set" if via_service and not os.environ.get("GEMINI_API_KEY") else "Gemini key set in .env") + " (not called)")
     ok = ok and has_key
     return ok
 

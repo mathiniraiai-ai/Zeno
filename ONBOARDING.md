@@ -5,7 +5,7 @@ Zeno turns raw clips and a script into a finished vertical video. An AI agent (C
 ## What you need
 - A Mac (Apple Silicon) or a Windows PC (an NVIDIA GPU is optional; CPU works)
 - Git, Python 3.12, FFmpeg
-- A Gemini API key (ask the Zeno owner for the shared key)
+- Transcription access: normally your personal service key from the Zeno owner (two lines in `.env`, see below); alternatively a Gemini API key
 - One AI agent set up on your machine (Claude Code, Antigravity, or OpenAI)
 
 ## 1. Install (once, about 15 minutes, plus a 360 MB download)
@@ -29,7 +29,7 @@ py -3.12 -m venv .venv
 
 Then, on both (use `.venv\Scripts\python` on Windows):
 ```bash
-cp .env.example .env          # open .env and paste your GEMINI_API_KEY
+cp .env.example .env          # open .env; fill SCRIPTCUT_CLOUD_URL and SCRIPTCUT_CLOUD_TOKEN (your personal key), or GEMINI_API_KEY
 .venv/bin/python scripts/setup.py --prewarm   # downloads the alignment model into models/torch (360 MB)
 .venv/bin/python scripts/setup.py --smoke     # real checks; every line should say [OK]
 ```

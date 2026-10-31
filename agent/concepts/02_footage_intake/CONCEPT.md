@@ -13,6 +13,8 @@ The Engine analyses raw clips. You never read its raw JSON.
 
 You read only `work/<project>/brief.txt` and `plan.edl`.
 
+Transcription runs through the team service in `service/` when `SCRIPTCUT_CLOUD_URL` is set (no Gemini key on the PC), otherwise straight to Gemini. If it fails, Zeno prints a WARNING and falls back to a script-only transcript that cannot hear retakes: tell the user.
+
 ## Mixed languages
 Native language and English are mixed almost every time: single words, phrases, or whole scenes.
 - Decide the language **word by word**. An English word stays English (Latin letters), even inside a native sentence. A native word stays native (its own script). Never transliterate one into the other.
