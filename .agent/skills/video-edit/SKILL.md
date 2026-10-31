@@ -13,7 +13,7 @@ Complete reference for executing a script-led video edit inside this Zeno folder
 
 1. **Workspace Isolation**: Only read and write files inside this Zeno folder (team PCs: `~/Downloads/Office Project/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`). Never modify any other project in `Documents`.
 2. **Folders**: Zeno runs from `~/Downloads/Office Project/Zeno` on team PCs (the installer puts it there). Every finished video (`.mp4` + `.timeline.txt`) goes to `~/Downloads/Zeno Outputs/`, never inside the repo. Raw clips can stay in any local folder: pass their path to `prepare.py`.
-3. **Takes**: When two or more clips are takes of the same script line, all of them are transcribed and scored; `prepare.py` keeps the best (`[BEST_TAKE]`) and lists the others as `[ALT_TAKE]` with their scores in `brief.txt`. Never assume the last take is right: check the scores and swap a take in `plan.edl` if needed.
+3. **Takes**: Every clip is transcribed. Clips that say the same thing are takes of one line, whatever their file names, their order, or even if the audio or video is identical (2, 3 or 5 copies): `prepare.py` scores all of them and keeps exactly ONE (`[BEST_TAKE]`); the others are listed as `[ALT_TAKE]` with scores in `brief.txt`. Never assume the first, middle or last take is right: check the scores and swap a take in `plan.edl` if needed.
 4. **Zero Raw Telemetry Reads**:
    - **NEVER** read `work/*/words.json`, `work/*/silences.json`, or `work/*/align.json`.
    - **NEVER** read `scripts/*.py` to discover flags or schema fields—everything is documented in this skill.

@@ -8,7 +8,7 @@ description: Low-token 3-step video editing workflow, hard boundaries, layout pr
 ## 1. Hard Rules
 - **Workspace Isolation**: Never modify any files outside this Zeno folder (team PCs: `~/Downloads/Office Project/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`). Never touch other projects in `Documents`.
 - **Folders**: Zeno runs from `~/Downloads/Office Project/Zeno` on team PCs (the installer puts it there). Every finished video (`.mp4` + `.timeline.txt`) goes to `~/Downloads/Zeno Outputs/`, never inside the repo. Raw clips can stay in any local folder: pass their path to `prepare.py`.
-- **Takes**: When two or more clips are takes of the same script line, all of them are transcribed and scored; `prepare.py` keeps the best (`[BEST_TAKE]`) and lists the others as `[ALT_TAKE]` with their scores in `brief.txt`. Never assume the last take is right: check the scores and swap a take in `plan.edl` if needed.
+- **Takes**: Every clip is transcribed. Clips that say the same thing are takes of one line, whatever their file names, their order, or even if the audio or video is identical (2, 3 or 5 copies): `prepare.py` scores all of them and keeps exactly ONE (`[BEST_TAKE]`); the others are listed as `[ALT_TAKE]` with scores in `brief.txt`. Never assume the first, middle or last take is right: check the scores and swap a take in `plan.edl` if needed.
 - **Token Conservation**: Never read `work/S*/words.json`, `work/S*/silences.json`, or `scripts/*.py` unless debugging a specific word boundary or script exception.
 - **Fresh Sessions**: Always run edits in a fresh session per video with unused MCP servers disabled.
 

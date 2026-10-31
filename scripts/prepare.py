@@ -460,11 +460,82 @@ def ensure_clip_transcribed(
     return info, hq_words, base_words
 
 
+def _clip_tokens(clip: Dict[str, Any]) -> List[str]:
+    return [_clean_token(w["w"]) for w in clip.get("hq_words", []) if _clean_token(w["w"])]
+
+
+def _same_content(a: List[str], b: List[str]) -> float:
+    """How much of the shorter clip's speech is also in the longer one (0..1), whatever the files are called.
+    Two takes of one line, a partial take plus a full take, or the same audio in two files all score high.
+    Two clips that say different things (or the two halves of one line) score low."""
+    if not a or not b:
+        return 0.0
+    short, long_ = (a, b) if len(a) <= len(b) else (b, a)
+    return _token_recall(short, long_, threshold=0.70)
+
+
+SAME_TAKE_THRESHOLD = 0.72
+
+
+def group_takes(clips_data: List[Dict[str, Any]]) -> None:
+    """Group clips that say the same thing, in any order and under any file names, so only the best one is used.
+    Every clip is compared with every other clip (not just its neighbour). Sets clip["take_group"] to the index of
+    the first clip of its group."""
+    n = len(clips_data)
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    toks = [_clip_tokens(c) for c in clips_data]
+    for i in range(n):
+        for j in range(i + 1, n):
+            if min(len(toks[i]), len(toks[j])) >= 2 and _same_content(toks[i], toks[j]) >= SAME_TAKE_THRESHOLD:
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[max(ri, rj)] = min(ri, rj)
+    for i, c in enumerate(clips_data):
+        c["take_group"] = find(i)
+
+
 def match_clips_to_script_lines(
     clips_data: List[Dict[str, Any]],
     script_lines: List[Dict[str, Any]],
 ) -> None:
-    """Deterministically map ordered clips S1..SN to ordered script lines L1..LM."""
+    """Group takes by content, then map the distinct groups, in order, to script lines L1..LM.
+    Every take in a group gets the group's script lines; select_best_takes() later keeps only the best one."""
+    if not clips_data:
+        return
+    group_takes(clips_data)
+    if not script_lines:
+        for c in clips_data:
+            c["matched_lines"] = []
+        return
+    groups: Dict[int, List[Dict[str, Any]]] = {}
+    for c in clips_data:
+        groups.setdefault(c["take_group"], []).append(c)
+    # One stand-in per group, placed where the group first appears. The most complete take stands in for it,
+    # because the fullest transcript shows best which script lines the group covers.
+    stand_ins = []
+    for gid in sorted(groups):
+        members = groups[gid]
+        best = max(members, key=lambda m: len(_clip_tokens(m)))
+        stand_ins.append(best)
+    _match_sequence(stand_ins, script_lines)
+    for gid, members in groups.items():
+        rep = next(m for m in members if m in stand_ins)
+        for m in members:
+            m["matched_lines"] = list(rep.get("matched_lines", []))
+
+
+def _match_sequence(
+    clips_data: List[Dict[str, Any]],
+    script_lines: List[Dict[str, Any]],
+) -> None:
+    """Deterministically map ordered clips (one per distinct take group) to ordered script lines L1..LM."""
     if not script_lines or not clips_data:
         return
 
@@ -474,14 +545,6 @@ def match_clips_to_script_lines(
     remaining_tokens: Dict[int, List[str]] = {
         idx: list(sline["tokens"]) for idx, sline in enumerate(script_lines)
     }
-    # Clips that cover the same script line(s) share a take group; select_best_takes() then keeps the best one.
-    take_group_of: Dict[int, int] = {}
-    take_group_lines: Dict[int, List[Dict[str, Any]]] = {}
-
-    def _new_group(c_idx: int, lines: List[Dict[str, Any]]) -> None:
-        take_group_of[c_idx] = c_idx
-        take_group_lines[c_idx] = list(lines)
-
     for c_idx, clip in enumerate(clips_data):
         words = clip["hq_words"]
         bwords = clip["base_words"]
@@ -495,19 +558,6 @@ def match_clips_to_script_lines(
         all_clip_tokens = clip_tokens + [t for t in base_tokens if t not in clip_tokens]
 
         matched_lines: List[Dict[str, Any]] = []
-
-        # 0. Another take of the line(s) the previous clip covered? (e.g. S3 and S4 both say L3)
-        #    A retake starts from the beginning of the line again; a continuation clip does not.
-        prev_group = take_group_lines.get(take_group_of.get(c_idx - 1, -1)) if c_idx > 0 else None
-        if prev_group:
-            g_tokens = [t for l in prev_group for t in l["tokens"]]
-            g_recall = _token_recall(g_tokens, all_clip_tokens)
-            g_head = _token_recall(g_tokens[: min(4, len(g_tokens))], all_clip_tokens, threshold=0.65)
-            next_recall = _token_recall(script_lines[line_ptr]["tokens"], all_clip_tokens) if line_ptr < n_lines else 0.0
-            if g_recall >= 0.55 and g_head >= 0.5 and g_recall >= next_recall + 0.10:
-                clip["matched_lines"] = list(prev_group)
-                take_group_of[c_idx] = take_group_of[c_idx - 1]
-                continue
 
         # 1. Check if previous multi-clip line still has significant unconsumed tail tokens in this clip
         if line_ptr > 0:
@@ -524,7 +574,6 @@ def match_clips_to_script_lines(
                     ]
                     remaining_tokens[prev_idx] = new_rem
                     clip["matched_lines"] = matched_lines
-                    _new_group(c_idx, matched_lines)
                     continue
 
         # 2. Match one or more script lines starting at line_ptr
@@ -567,16 +616,25 @@ def match_clips_to_script_lines(
             else:
                 break
 
+        if not matched_lines:
+            # Clips may not be in script order (any file names): look for the best-matching line anywhere in the script
+            best_i, best_r = -1, 0.0
+            for li, sl in enumerate(script_lines):
+                r = _token_recall(sl["tokens"], all_clip_tokens)
+                if r > best_r:
+                    best_i, best_r = li, r
+            if best_i >= 0 and best_r >= 0.45:
+                matched_lines = [script_lines[best_i]]
+                remaining_tokens[best_i] = []
+                if best_i >= line_ptr:
+                    line_ptr = best_i + 1
         if not matched_lines and line_ptr < n_lines:
             matched_lines = [script_lines[line_ptr]]
             remaining_tokens[line_ptr] = []
             line_ptr += 1
 
         clip["matched_lines"] = matched_lines
-        _new_group(c_idx, matched_lines)
 
-    for c_idx, clip in enumerate(clips_data):
-        clip["take_group"] = take_group_of.get(c_idx, c_idx)
 
 
 def _token_recall(script_tokens: List[str], clip_tokens: List[str], threshold: float = 0.64) -> float:
@@ -596,18 +654,29 @@ def _take_score(clip: Dict[str, Any]) -> Tuple[float, float, float]:
     recall    = how much of the script line was said
     precision = how much of what was said belongs to the script (fumbles, ad-libs and extra words lower it)."""
     script_tokens = [t for l in clip.get("matched_lines", []) for t in l["tokens"]]
-    clip_tokens = [_clean_token(w["w"]) for w in clip.get("hq_words", []) if _clean_token(w["w"])]
-    if not script_tokens or not clip_tokens:
+    clip_tokens = _clip_tokens(clip)
+    if not clip_tokens:
         return 0.0, 0.0, 0.0
+    if not script_tokens:   # no script to compare with: judge by how much clean speech the take has
+        uniq = len(set(clip_tokens)) / max(1, len(clip_tokens))
+        return round(len(clip_tokens) * uniq / 100.0, 4), 0.0, round(uniq, 4)
     recall = _token_recall(script_tokens, clip_tokens)
     precision = _token_recall(clip_tokens, script_tokens)
     return round(recall + 0.35 * precision, 4), recall, precision
 
 
+def _speech_density(clip: Dict[str, Any]) -> float:
+    """Words per second of clip time: higher means tighter delivery with less dead air."""
+    dur = float((clip.get("info") or {}).get("duration") or 0.0)
+    return len(clip.get("hq_words", [])) / dur if dur > 0 else 0.0
+
+
 def select_best_takes(clips_data: List[Dict[str, Any]]) -> None:
-    """When two or more clips are takes of the same script line(s), analyse every take and keep the best one.
-    Every take is transcribed and scored; the later take wins only on a near tie (people usually redo after a slip).
-    Dropped takes stay in the brief with their scores, so the agent can swap them in plan.edl."""
+    """When two or more clips say the same thing (takes of one line, or the same audio in several files, whatever
+    the files are called and wherever they sit in the list), keep exactly ONE: the best.
+    Every clip has already been transcribed and is scored against the script. If scores are within 0.02 the
+    tighter delivery wins (more words per second), then the later take. Unused takes stay in the brief with their
+    scores, so the agent can swap one in by editing plan.edl."""
     groups: Dict[int, List[Dict[str, Any]]] = {}
     for c in clips_data:
         groups.setdefault(c.get("take_group", id(c)), []).append(c)
@@ -615,10 +684,9 @@ def select_best_takes(clips_data: List[Dict[str, Any]]) -> None:
         if len(members) < 2:
             continue
         scored = [(c, *_take_score(c)) for c in members]
-        best = scored[0]
-        for cand in scored[1:]:
-            if cand[1] >= best[1] - 0.02:   # later take wins ties
-                best = cand
+        top = max(s[1] for s in scored)
+        contenders = [s for s in scored if s[1] >= top - 0.02]
+        best = max(contenders, key=lambda s: (_speech_density(s[0]) if len(contenders) > 1 else 0.0, clips_data.index(s[0])))
         lines = ",".join(l["id"] for l in best[0].get("matched_lines", [])) or "-"
         summary = ", ".join(f"{c['stem']} {r * 100:.0f}% said/{p * 100:.0f}% on-script" for c, _, r, p in scored)
         for c, sc, r, p in scored:
@@ -627,7 +695,7 @@ def select_best_takes(clips_data: List[Dict[str, Any]]) -> None:
             else:
                 c["dropped_take"] = True
                 c["anomalies"].append(
-                    f"[ALT_TAKE] {lines}: not used, {best[0]['stem']} scored higher ({summary}). "
+                    f"[ALT_TAKE] {lines}: not used, {best[0]['stem']} is the best of {len(scored)} ({summary}). "
                     f"To use this take instead, put {c['stem']} in that line's segment in plan.edl"
                 )
 

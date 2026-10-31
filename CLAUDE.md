@@ -7,7 +7,7 @@ Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input
 ## 1. Hard Rules
 1. **Workspace Isolation**: Never modify any files outside this Zeno folder (team PCs: `~/Downloads/Office Project/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`). Never touch other projects in `Documents`.
 2. **Folders**: Zeno runs from `~/Downloads/Office Project/Zeno` on team PCs (the installer puts it there). Every finished video (`.mp4` + `.timeline.txt`) goes to `~/Downloads/Zeno Outputs/`, never inside the repo. Raw clips can stay in any local folder: pass their path to `prepare.py`.
-3. **Takes**: When two or more clips are takes of the same script line, all of them are transcribed and scored; `prepare.py` keeps the best (`[BEST_TAKE]`) and lists the others as `[ALT_TAKE]` with their scores in `brief.txt`. Never assume the last take is right: check the scores and swap a take in `plan.edl` if needed.
+3. **Takes**: Every clip is transcribed. Clips that say the same thing are takes of one line, whatever their file names, their order, or even if the audio or video is identical (2, 3 or 5 copies): `prepare.py` scores all of them and keeps exactly ONE (`[BEST_TAKE]`); the others are listed as `[ALT_TAKE]` with scores in `brief.txt`. Never assume the first, middle or last take is right: check the scores and swap a take in `plan.edl` if needed.
 4. **Never Read Raw JSONs or Python Source**:
    - **Never** read `work/*/words.json`, `work/*/silences.json`, or `work/*/align.json` unless debugging a specific word timing.
    - **Never** read `scripts/*.py` during normal edits. Use the 3-step CLI workflow and `plan.edl` syntax below.

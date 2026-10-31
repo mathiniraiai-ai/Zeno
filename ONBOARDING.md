@@ -42,7 +42,7 @@ Languages are mixed freely: native words stay native, English words stay English
 
 Clips can stay where they are: give the agent the folder path (for example `~/Desktop/shoot_31oct/`) instead of copying them into `input/footage/`.
 
-If two or more clips are takes of the same line, Zeno transcribes and scores every take and keeps the best one. The others are listed as `[ALT_TAKE]` in the brief with their scores, so the agent (or you) can swap one in.
+Zeno transcribes every clip. Clips that say the same thing are treated as takes of one line, whatever they are named and wherever they are in the folder, even if there are 5 copies of the same audio or video. It scores them all and keeps exactly one, the best. The others are listed as `[ALT_TAKE]` in the brief with their scores, so the agent (or you) can swap one in.
 
 ## 3. What works today
 - General editing: best takes, pause-snapped cuts, layouts (`single`, `split_v`, `split_h`, `chat_bar`, `video_call`, `hybrid`), ✓/✗ marks, loudness.
