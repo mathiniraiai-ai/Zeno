@@ -135,6 +135,118 @@ class AcousticOnsetVerifier:
 
         return refined_words
 
+    def snap_starts_to_energy(
+        self,
+        words: List[Dict[str, Any]],
+        waveform: np.ndarray,
+        back_sec: float = 0.30,
+        fwd_sec: float = 0.30,
+        deep_db: float = 12.0,
+        rise_frac: float = 0.35,
+        phrase_starts_only: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """
+        Move a word's start to the nearest real speech onset: the rising edge after a deep energy valley
+        (silence or a clear dip between words) within [start - back_sec, start + fwd_sec].
+
+        Only phrase starts are touched (the first word, and any word after one ending in . ? ! ... or the danda):
+        inside a sentence, speech has many dips (stop consonants) that look like pauses, and snapping to them
+        moved ordinary words by up to 0.34 s in testing. Only deep valleys count (at least `deep_db` below the local
+        speech level). If no deep valley is near, the start is left alone. Checked on a reference video where CTC put
+        one line start 0.12 s late and another 0.22 s early; both were corrected from the energy curve.
+        """
+        sentence_end = ('.', '?', '!', '\u2026', '\u0964', '\u0965')
+        if not words or len(waveform) == 0:
+            return words
+        rms, times = self.compute_energy_envelope(waveform)
+        if len(rms) < 5:
+            return words
+        db = 20.0 * np.log10(np.maximum(rms, 1e-5))
+        hop = float(self.hop_length) / float(self.sample_rate)
+
+        out: List[Dict[str, Any]] = []
+        for i, w in enumerate(words):
+            s = float(w["start"])
+            e = float(w["end"])
+            is_phrase_start = i == 0 or str(words[i - 1].get("word", "")).rstrip().endswith(sentence_end)
+            if phrase_starts_only and not is_phrase_start:
+                out.append(dict(w))
+                continue
+            lo = max(0, int((s - back_sec) / hop))
+            hi = min(len(db) - 1, int((s + fwd_sec) / hop))
+            ctx_lo = max(0, int((s - 0.5) / hop))
+            ctx_hi = min(len(db) - 1, int((s + 0.5) / hop))
+            level = float(np.percentile(db[ctx_lo:ctx_hi + 1], 85))
+            new_start = s
+            best = None
+            if hi - lo >= 5:
+                seg = db[lo:hi + 1]
+                # candidate valleys: local minima that are deep relative to the speech level
+                for k in range(1, len(seg) - 1):
+                    if not (seg[k] <= seg[k - 1] and seg[k] <= seg[k + 1]):
+                        continue
+                    if seg[k] > level - deep_db:
+                        continue
+                    thresh = seg[k] + rise_frac * (level - seg[k])
+                    j = k
+                    while lo + j < len(db) - 1 and j < (hi - lo) + 30 and db[lo + j] < thresh:
+                        j += 1
+                    onset = (lo + j) * hop
+                    if out and onset < out[-1]["end"] - 0.05:
+                        continue   # would start inside the previous word (CTC word ends run early, so allow 50 ms)
+                    if best is None or abs(onset - s) < abs(best - s):
+                        best = onset
+            if best is not None:
+                prev_start = out[-1]["start"] if out else 0.0
+                new_start = max(prev_start + 0.04, min(best, e - 0.05))
+            moved = abs(new_start - s) >= 0.03
+            nw = {**w, "start": round(new_start, 3)}
+            if moved:
+                nw["start_energy_snap"] = round(new_start - s, 3)
+                if out and out[-1]["end"] > new_start:
+                    out[-1] = {**out[-1], "end": round(max(out[-1]["start"] + 0.05, new_start), 3)}
+            out.append(nw)
+        return out
+
+    def extend_ends_to_energy(
+        self,
+        words: List[Dict[str, Any]],
+        waveform: np.ndarray,
+        max_extend_sec: float = 0.25,
+        drop_db: float = 15.0,
+    ) -> List[Dict[str, Any]]:
+        """
+        CTC marks a word's end at its last emitting frame, which is about 60 ms before the sound really stops
+        (measured on isolated test words). Extend each end forward while the energy stays within `drop_db` of the word's
+        own level, up to `max_extend_sec`, and never into the next word. Ends are only extended, never shortened.
+        """
+        if not words or len(waveform) == 0:
+            return words
+        rms, _ = self.compute_energy_envelope(waveform)
+        if len(rms) < 5:
+            return words
+        db = 20.0 * np.log10(np.maximum(rms, 1e-5))
+        hop = float(self.hop_length) / float(self.sample_rate)
+        out: List[Dict[str, Any]] = []
+        for i, w in enumerate(words):
+            e = float(w["end"])
+            nxt = float(words[i + 1]["start"]) if i + 1 < len(words) else float("inf")
+            a = max(0, int(max(float(w["start"]), e - 0.30) / hop))
+            b = min(len(db) - 1, int(e / hop))
+            if b <= a:
+                out.append(dict(w))
+                continue
+            level = float(np.percentile(db[a:b + 1], 85))
+            k = b
+            limit = min(len(db) - 1, int((e + max_extend_sec) / hop))
+            while k < limit and db[k + 1] >= level - drop_db:
+                k += 1
+            target = max(e, k * hop)
+            # extend, but never run into the next word; also trim any overlap CTC left between neighbours
+            end = min(target, nxt) if nxt - target < 0.01 else min(target, nxt - 0.01)
+            out.append({**w, "end": round(max(float(w["start"]) + 0.05, end), 3)})
+        return out
+
     def refine_segment_boundaries(
         self,
         start_sec: float,

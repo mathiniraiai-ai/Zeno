@@ -12,6 +12,7 @@
 4. **On-screen text** — only what the script document asks for. → `concepts/05_onscreen_text`
 5. **Edit** — `prepare.py` → read `brief.txt` + `plan.edl` → fix → `render.py --verify` (CLAUDE.md §3).
 6. **Report** — token table + README row. → `concepts/06_token_budget`
+7. **Timing looks wrong?** → `concepts/07_alignment_accuracy`
 
 Read only the concept file for the step you are on.
 

@@ -13,9 +13,9 @@ A short story skit (about 60–95 s): a problem scene, a friend's tip, then an A
 4. **Between scenes**: a 0.42 s `warm_flash` transition, with the content swap hidden under it.
 
 ## Rules
-- Cut to the next speaker 0.1–0.2 s before they speak. Cut away 0.1–0.2 s after the previous line ends.
+- Cut to the next speaker 0.1–0.2 s before they speak. Cut away 0.03–0.2 s after the previous line ends.
 - Keep the laughter and reaction beat after the last line of scene 1 (about 6 s in total).
-- Turn gaps in the dialogue are about 0.2 s. Keep longer gaps (1.0–1.2 s) at dramatic beats.
+- Turn gaps in the dialogue are about 0.15 s. Keep longer gaps (1.0–1.3 s) at dramatic beats.
 - No digital zoom. Variety comes from shot size.
 - Faces sit about 35% from the top in every close-up and split panel.
 - No music and no SFX. Normalise loudness to -14 LUFS (the reference is -19.3).

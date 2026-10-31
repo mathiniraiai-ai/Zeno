@@ -275,6 +275,8 @@ class KaviooAcousticPipeline:
         # 6. Acoustic Onset Verification Layer
         if verify_onsets:
             refined_active_words = self.onset_verifier.refine_word_onsets(viterbi_words, raw_waveform, duration_sec)
+            refined_active_words = self.onset_verifier.snap_starts_to_energy(refined_active_words, raw_waveform)
+            refined_active_words = self.onset_verifier.extend_ends_to_energy(refined_active_words, raw_waveform)
         else:
             refined_active_words = viterbi_words
 
@@ -448,6 +450,8 @@ class KaviooAcousticPipeline:
 
                 if verify_onsets and len(raw_waveform) > 0:
                     refined_active = self.onset_verifier.refine_word_onsets(viterbi_words, raw_waveform, slice_dur)
+                    refined_active = self.onset_verifier.snap_starts_to_energy(refined_active, raw_waveform)
+                    refined_active = self.onset_verifier.extend_ends_to_energy(refined_active, raw_waveform)
                 else:
                     refined_active = viterbi_words
 

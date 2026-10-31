@@ -7,7 +7,7 @@ The Engine analyses raw clips. You never read its raw JSON.
 |---|---|
 | Audio, pauses, loudness | FFmpeg (`silencedetect`, `loudnorm`) |
 | What was said (verbatim, retakes included) | Gemini Flash (`gemini_transcriber.py`) |
-| Exact word times | Meta **MMS_FA** + Indic G2P (`align_engine/`) |
+| Exact word times | Meta **wav2vec2 base (95M, MIT licence)** + Indic G2P (`align_engine/`) |
 | Faces, framing | OpenCV YuNet (`vision_tracker.py`) |
 | Take choice vs script | `difflib` matcher (`script_matcher.py`) |
 
@@ -30,5 +30,5 @@ Native language and English are mixed almost every time: single words, phrases, 
 ## Known limits
 - `prepare.py` calls `transcribe_and_align_clip(..., script_path=...)`, but that function has no `script_path` argument. The error is swallowed, so the primary path silently falls back to `transcribe.py`. Not fixed yet.
 - Footage is almost never one language (see "Mixed languages" above).
-- Alignment confidence is not reported yet (every word shows 0.5).
-- MMS timing is checked on synthetic voices only, not on real footage.
+- Word confidence (0 to 1) is real now: English words median about 0.8, Malayalam about 0.1. Use it to compare words in the same language, not across languages.
+- Word timing is checked on synthetic voices and one reference video only. Boundary accuracy on real raw footage is not measured.

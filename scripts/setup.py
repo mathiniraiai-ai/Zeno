@@ -2,9 +2,9 @@
 """One-command cross-platform bootstrap & health check for Claude Editor (macOS & Windows).
 
 Usage:
-    python3 scripts/setup.py              # Verify FFmpeg, venv, MMS_FA cache, and all asset packs
+    python3 scripts/setup.py              # Verify FFmpeg, venv, wav2vec2 cache, and all asset packs
     python3 scripts/setup.py --init-venv  # Create local .venv and install ML/audio dependencies
-    python3 scripts/setup.py --prewarm    # Pre-download torchaudio MMS_FA checkpoint
+    python3 scripts/setup.py --prewarm    # Pre-download torchaudio wav2vec2 checkpoint
 """
 import argparse
 import os
@@ -121,19 +121,19 @@ def check_or_setup_venv(init_venv: bool = False, prewarm: bool = False) -> bool:
     except Exception as exc:
         print(f"  [!] Could not inspect packages in {venv_py}: {exc}")
 
-    print("\n[3/5] Checking Meta MMS_FA Alignment Checkpoint Cache...")
+    print("\n[3/5] Checking Meta wav2vec2 Alignment Checkpoint Cache...")
     ckpt_dir = Path(__file__).resolve().parents[1] / "models" / "torch" / "hub" / "checkpoints"
-    wav2vec_ckpts = [c for c in ckpt_dir.glob("model.pt")] if ckpt_dir.is_dir() else []
+    wav2vec_ckpts = list(ckpt_dir.glob("*wav2vec2*")) if ckpt_dir.is_dir() else []
     if wav2vec_ckpts:
         for ckpt in wav2vec_ckpts:
             mb = ckpt.stat().st_size / (1024 * 1024)
             print(f"  [OK] Cached checkpoint: {ckpt} ({mb:.1f} MB)")
     elif prewarm:
-        print("  + Pre-warming torchaudio MMS_FA checkpoint (~1.26 GB)...")
+        print("  + Pre-warming torchaudio wav2vec2 checkpoint (~360 MB)...")
         prewarm_code = "import sys; sys.path.insert(0, r'%s'); from align_engine.acoustic import AcousticModel; AcousticModel()._ensure_model_loaded()" % (Path(__file__).resolve().parent)
         subprocess.run([str(venv_py), "-c", prewarm_code], check=False)
     else:
-        print(f"  [i] MMS_FA checkpoint not yet cached in {ckpt_dir} (will auto-download on first CTC alignment or run with --prewarm).")
+        print(f"  [i] wav2vec2 checkpoint not yet cached in {ckpt_dir} (will auto-download on first CTC alignment or run with --prewarm).")
 
     return True
 
@@ -180,10 +180,56 @@ def check_env() -> None:
     print(f"  [{'OK' if has_gemini else 'i'}] GEMINI_API_KEY configured: {'Yes' if has_gemini else 'No (offline/heuristic fallback active)'}")
 
 
+def smoke_test() -> bool:
+    """Prove the machine can really edit: FFmpeg filters Zeno uses, the wav2vec2 aligner, and the Gemini key setting."""
+    print("\n[smoke] Running real checks (about 1-2 minutes the first time)...")
+    ok = True
+    ffmpeg_path = common.resolve_ffmpeg()
+
+    test_graph = (
+        "tpad=stop=2:stop_mode=clone,"
+        "lutrgb=r='val+(255-val)*100/255':enable='between(t,0,0.2)',"
+        "drawbox=x=0:y=0:w=4:h=64:color=white@0.8:t=fill,format=yuv420p"
+    )
+    r = subprocess.run([str(ffmpeg_path), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=64x64:d=0.5:r=24",
+                        "-vf", test_graph, "-f", "null", "-"], capture_output=True, text=True)
+    print(f"  [{'OK' if r.returncode == 0 else 'FAIL'}] FFmpeg filters (tpad, lutrgb, drawbox)" + ("" if r.returncode == 0 else f": {r.stderr.strip()[:200]}"))
+    ok = ok and r.returncode == 0
+
+    loud = subprocess.run([str(ffmpeg_path), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "sine=f=440:d=1",
+                           "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-f", "null", "-"], capture_output=True, text=True)
+    print(f"  [{'OK' if loud.returncode == 0 else 'FAIL'}] FFmpeg loudnorm")
+    ok = ok and loud.returncode == 0
+
+    venv_py = common.find_venv_python()
+    code = (
+        "import sys, time, os, tempfile\n"
+        f"sys.path.insert(0, r'{Path(__file__).resolve().parent}')\n"
+        "import numpy as np, soundfile as sf\n"
+        "from align_engine.acoustic import AcousticModel\n"
+        "t = time.time(); m = AcousticModel()\n"
+        "p = os.path.join(tempfile.gettempdir(), 'zeno_smoke.wav'); sf.write(p, np.zeros(16000, dtype='float32'), 16000)\n"
+        "lp, _, dur, tpf = m.extract_emissions(p)\n"
+        "print('OK device=%s frames=%d seconds=%.1f' % (m.device, lp.shape[0], time.time() - t))\n"
+    )
+    r = subprocess.run([str(venv_py), "-c", code], capture_output=True, text=True)
+    line = (r.stdout.strip().splitlines() or [""])[-1]
+    good = r.returncode == 0 and line.startswith("OK")
+    print(f"  [{'OK' if good else 'FAIL'}] wav2vec2 alignment model: {line if good else (r.stderr.strip()[-300:] or 'no output')}")
+    ok = ok and good
+
+    common.load_dotenv()
+    has_key = bool(os.environ.get("GEMINI_API_KEY"))
+    print(f"  [{'OK' if has_key else 'FAIL'}] Gemini key set in .env (key not tested live)")
+    ok = ok and has_key
+    return ok
+
+
 def main():
     ap = argparse.ArgumentParser(description="Bootstrap and verify Zeno cross-platform setup.")
     ap.add_argument("--init-venv", action="store_true", help="Create local .venv and install dependencies")
-    ap.add_argument("--prewarm", action="store_true", help="Pre-download MMS_FA checkpoint into models/torch")
+    ap.add_argument("--prewarm", action="store_true", help="Pre-download wav2vec2 checkpoint into models/torch")
+    ap.add_argument("--smoke", action="store_true", help="Run real checks: FFmpeg filters, wav2vec2 forward pass, Gemini key")
     args = ap.parse_args()
 
     print("=" * 72)
@@ -195,9 +241,10 @@ def main():
     venv_ok = check_or_setup_venv(init_venv=args.init_venv, prewarm=args.prewarm)
     assets_ok = verify_assets()
     check_env()
+    smoke_ok = smoke_test() if args.smoke else True
 
     print("\n" + "=" * 72)
-    if ff_ok and venv_ok and assets_ok:
+    if ff_ok and venv_ok and assets_ok and smoke_ok:
         print("READY: Zeno cross-platform environment and all asset packs verified!")
     else:
         print("WARNING: Some checks reported missing components; review the output above.")

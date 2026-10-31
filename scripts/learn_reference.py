@@ -187,7 +187,7 @@ def _tokens(text: str) -> list:
 
 
 def align(video: Path, name: str, script: Path, lang: str):
-    """Transcribe (Gemini) + align (MMS) the reference audio, then map each script line to a time span."""
+    """Transcribe (Gemini) + align (wav2vec2) the reference audio, then map each script line to a time span."""
     out_dir = WORK / f"{name}_ref"
     out_dir.mkdir(parents=True, exist_ok=True)
     wav = out_dir / "audio16k.wav"

@@ -91,8 +91,8 @@
     "face_width_frac": 0.33
    }
   ],
-  "cut_lead_sec": "speech starts 0.12-0.22 s after the cut to that speaker (L1, L3, L4, L5); L2 has a 1.05 s reaction beat first",
-  "cut_tail_sec": "the cut to the next speaker lands 0.09-0.19 s after the previous line ends (L1-L3)",
+  "cut_lead_sec": "speech starts 0.12-0.22 s after the cut to that speaker (L3, L4, L5; L1 is the first shot); L2 has a 1.05 s reaction beat first",
+  "cut_tail_sec": "the cut to the next speaker lands 0.03-0.21 s after the previous line ends (L1-L3)",
   "after_last_line": "the laughter plays over the same close-up for ~4 s, then a 1.7 s reaction shot, then the transition"
  },
  "framing": {
@@ -133,9 +133,9 @@
   },
   "panel_swaps": "7 hard clip swaps inside panels at turn boundaries (44.21, 47.96, 50.96, 58.92, 65.46, 73.96, 84.38); each is small (the character goes from talking to listening pose); the full frame never cuts",
   "turn_gap_sec": {
-   "median": 0.22,
-   "min": 0.08,
-   "max": 1.01
+   "median": 0.16,
+   "min": 0.03,
+   "max": 1.05
   }
  },
  "zoom": {
@@ -159,12 +159,13 @@
  },
  "timing": {
   "scene_boundary": "transition starts as the last line of the scene ends (+/-0.05 s); next scene's first line starts 0.1-0.5 s after the transition ends",
-  "turn_gap_median_sec": 0.22,
+  "turn_gap_median_sec": 0.16,
   "dramatic_beat_gaps_sec": [
-   1.24,
-   1.15,
-   1.01
-  ]
+   1.26,
+   1.05,
+   1.0
+  ],
+  "measured_with": "wav2vec2 base 95M with energy start snap and end extension"
  },
  "audio": {
   "music_bed": "none",

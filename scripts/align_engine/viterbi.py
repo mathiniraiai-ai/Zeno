@@ -162,7 +162,7 @@ class ViterbiAligner:
                     "word": w_str,
                     "start": round(start_sec, 3),
                     "end": round(end_sec, 3),
-                    "confidence": round(min(1.0, max(0.5, conf)), 3)
+                    "confidence": round(min(1.0, max(0.0, conf)), 3)
                 })
             else:
                 words.append({
