@@ -12,8 +12,9 @@ styles/<style-name>/
 ```
 
 ## Naming
-`<layout>--<purpose>`, lowercase, for example `vertical-split--roleplay`, `video-call--dialogue`.
+Use the user's own name for the video type (for example `micronarrative`). If they give none, use `<layout>--<purpose>`, lowercase, for example `vertical-split--roleplay`.
 - The user names the video type. If they don't, take it from the script header and layout, then confirm with the user.
+- Existing styles: `micronarrative`.
 - One name per style. Do not create a second folder for the same thing.
 
 ## Rules

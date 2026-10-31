@@ -7,7 +7,7 @@ CLAUDE.md sets the working numbers: target 12–18k, ceiling 20k.
 - The Engine does the work. You read `brief.txt` (~900 tokens) and `plan.edl` (~240 tokens), plus one contact-sheet image.
 - One script tab, never the whole document.
 - A fresh session for each video. Unused connectors off.
-- Sonnet 5.5 by default. Opus 5.5 only for learning a new style.
+- Cheaper tier by default (for example Sonnet 5.5). Strongest tier (for example Opus 5.5) only for learning a new style. Same budget for any agent.
 - Warn the user mid-job if retakes or messy footage risk passing 20k per minute.
 
 ## End of every job

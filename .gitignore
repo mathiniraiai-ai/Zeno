@@ -36,3 +36,7 @@ models/torch/
 **/*$py.class
 **/.DS_Store
 **/Thumbs.db
+
+# Reference videos learned from (large; frames and measurements live in styles/<name>/refs/)
+input/reference/*
+!input/reference/.gitkeep

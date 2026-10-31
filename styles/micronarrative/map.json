@@ -1,0 +1,330 @@
+{
+ "reference": "Reel W42 Malayalam micronarrative, friends ordering food abroad, cafe counter (93 s)",
+ "script_tab": "google-doc 1sDH1dI6nx7ewzcuQaQeuXttWwBbrFYgaJ3d_DNBdKBk tab=t.o4usjjssj43l",
+ "shots": [
+  {
+   "id": 1,
+   "start": 0.0,
+   "end": 2.208,
+   "dur": 2.208
+  },
+  {
+   "id": 2,
+   "start": 2.208,
+   "end": 4.708,
+   "dur": 2.5
+  },
+  {
+   "id": 3,
+   "start": 4.708,
+   "end": 7.292,
+   "dur": 2.583
+  },
+  {
+   "id": 4,
+   "start": 7.292,
+   "end": 12.167,
+   "dur": 4.875
+  },
+  {
+   "id": 5,
+   "start": 12.167,
+   "end": 19.0,
+   "dur": 6.833
+  },
+  {
+   "id": 6,
+   "start": 19.0,
+   "end": 20.667,
+   "dur": 1.667
+  },
+  {
+   "id": 7,
+   "start": 20.667,
+   "end": 37.0,
+   "dur": 16.333
+  },
+  {
+   "id": 8,
+   "start": 37.0,
+   "end": 93.25,
+   "dur": 56.25
+  },
+  {
+   "id": 9,
+   "start": 93.25,
+   "end": 93.333,
+   "dur": 0.083
+  }
+ ],
+ "lines": [
+  {
+   "id": "L1",
+   "scene": 1,
+   "speaker": "Woman",
+   "text": "Uh... chicken... sauce no need.",
+   "directions": [],
+   "start": 0.2,
+   "end": 2.02,
+   "shot": 1,
+   "lead": 0.2,
+   "tail": 0.19,
+   "match": 1.0
+  },
+  {
+   "id": "L2",
+   "scene": 1,
+   "speaker": "Counter Lady",
+   "text": "Sorry? What do you want, ma'am?",
+   "directions": [
+    "frowning"
+   ],
+   "start": 3.26,
+   "end": 4.62,
+   "shot": 2,
+   "lead": 1.05,
+   "tail": 0.09,
+   "match": 1.0
+  },
+  {
+   "id": "L3",
+   "scene": 1,
+   "speaker": "Co-worker 3",
+   "text": "Come on, hurry up, lady! Some of us are hungry",
+   "directions": [],
+   "start": 4.83,
+   "end": 7.14,
+   "shot": 3,
+   "lead": 0.12,
+   "tail": 0.15,
+   "match": 1.0
+  },
+  {
+   "id": "L4",
+   "scene": 1,
+   "speaker": "Co-worker 1",
+   "text": "She wants the chicken with no sauce. Her English is terrible, honestly.",
+   "directions": [
+    "stepping in, loud"
+   ],
+   "start": 7.51,
+   "end": 11.24,
+   "shot": 4,
+   "lead": 0.22,
+   "tail": 0.93,
+   "match": 1.0
+  },
+  {
+   "id": "L5",
+   "scene": 1,
+   "speaker": "Co-worker 2",
+   "text": "\"One chicken. Sauce no.\"",
+   "directions": [
+    "mockingly"
+   ],
+   "start": 12.39,
+   "end": 14.89,
+   "shot": 5,
+   "lead": 0.22,
+   "tail": 4.11,
+   "match": 1.0
+  },
+  {
+   "id": "L6",
+   "scene": 2,
+   "speaker": "Friend",
+   "text": "അവർ നിനക്ക് വേണ്ടി order ചെയ്ത രീതി നിനക്ക് ഇഷ്ടപ്പെട്ടോ?",
+   "directions": [],
+   "start": 21.35,
+   "end": 23.35,
+   "shot": 7,
+   "lead": 0.68,
+   "tail": 13.65,
+   "match": 1.0
+  },
+  {
+   "id": "L7",
+   "scene": 2,
+   "speaker": "Woman",
+   "text": "എന്നെ ഇങ്ങനെ കളിയാക്കേണ്ട ആവശ്യമൊന്നുമില്ലായിരുന്നു.",
+   "directions": [],
+   "start": 23.45,
+   "end": 25.21,
+   "shot": 7,
+   "lead": 2.78,
+   "tail": 11.79,
+   "match": 1.0
+  },
+  {
+   "id": "L8",
+   "scene": 2,
+   "speaker": "Friend",
+   "text": "സത്യം പറഞ്ഞാൽ, ഞാനും പണ്ട് നിന്നെപ്പോലെ തന്നെയായിരുന്നു. എനിക്ക് ഒറ്റയ്ക്ക് English ൽ food പോലും order ചെയ്യാൻ അറിയില്ലായിരുന്നു, ആളുകൾ എന്നെയും കളിയാക്കാറുണ്ടായിരുന്നു.",
+   "directions": [],
+   "start": 25.4,
+   "end": 31.32,
+   "shot": 7,
+   "lead": 4.73,
+   "tail": 5.68,
+   "match": 1.0
+  },
+  {
+   "id": "L9",
+   "scene": 2,
+   "speaker": "Woman",
+   "text": "എന്നിട്ട്… നീ എങ്ങനെയാ പഠിച്ചത്?",
+   "directions": [],
+   "start": 31.39,
+   "end": 32.8,
+   "shot": 7,
+   "lead": 10.72,
+   "tail": 4.2,
+   "match": 1.0
+  },
+  {
+   "id": "L10",
+   "scene": 2,
+   "speaker": "Friend",
+   "text": "ഒരു AI teacher ന്റെ കൂടെ. അതും വെറും മുപ്പത് ദിവസം കൊണ്ട്. ദാ — — ഇതൊന്ന് try ചെയ്തു നോക്ക്.",
+   "directions": [
+    "hands her the phone"
+   ],
+   "start": 33.01,
+   "end": 36.84,
+   "shot": 7,
+   "lead": 12.34,
+   "tail": 0.16,
+   "match": 1.0
+  },
+  {
+   "id": "L11",
+   "scene": 3,
+   "speaker": "Woman",
+   "text": "Sorry… എന്റെ English അത്ര നല്ലതല്ല.",
+   "directions": [],
+   "start": 37.25,
+   "end": 39.42,
+   "shot": 8,
+   "lead": 0.25,
+   "tail": 53.83,
+   "match": 0.8
+  },
+  {
+   "id": "L12",
+   "scene": 3,
+   "speaker": "Miss Nova",
+   "text": "അതൊന്നും സാരമില്ല. ദിവസവും ഒരു പതിനഞ്ചോ ഇരുപതോ മിനിറ്റ് എന്റെ കൂടെ സംസാരിച്ച് practice ചെയ്തൂടെ?",
+   "directions": [],
+   "start": 39.64,
+   "end": 44.1,
+   "shot": 8,
+   "lead": 2.64,
+   "tail": 49.15,
+   "match": 1.0
+  },
+  {
+   "id": "L13",
+   "scene": 3,
+   "speaker": "Woman",
+   "text": "Really? പക്ഷേ എന്റെ English improve ചെയ്യാൻ നിങ്ങൾ എങ്ങനെയാ help ചെയ്യുക?",
+   "directions": [],
+   "start": 44.33,
+   "end": 47.84,
+   "shot": 8,
+   "lead": 7.33,
+   "tail": 45.41,
+   "match": 1.0
+  },
+  {
+   "id": "L14",
+   "scene": 3,
+   "speaker": "Miss Nova",
+   "text": "തീർച്ചയായും ചെയ്യാം! അതും മലയാളത്തിൽ തന്നെ ഞാൻ help ചെയ്യാം.",
+   "directions": [],
+   "start": 48.05,
+   "end": 50.98,
+   "shot": 8,
+   "lead": 11.05,
+   "tail": 42.27,
+   "match": 1.0
+  },
+  {
+   "id": "L15",
+   "scene": 3,
+   "speaker": "Woman",
+   "text": "Oh nice.. പക്ഷേ ഇത് എനിക്ക് work ആകുമെന്ന് എന്താ ഇത്ര ഉറപ്പ്? ഞാൻ മാസങ്ങളോളം coaching classes ൽ പോയിട്ടും എനിക്ക് മര്യാദയ്ക്ക് English സംസാരിക്കാൻ പഠിക്കാൻ പറ്റിയില്ല.",
+   "directions": [],
+   "start": 51.06,
+   "end": 58.82,
+   "shot": 8,
+   "lead": 14.06,
+   "tail": 34.43,
+   "match": 1.0
+  },
+  {
+   "id": "L16",
+   "scene": 3,
+   "speaker": "Miss Nova",
+   "text": "ഇത് വളരെ simple ആണ്. ആദ്യം ചില simple questions ചോദിച്ച് നിങ്ങളുടെ ഇപ്പോഴത്തെ English level ഞാൻ മനസ്സിലാക്കും. അതിനുശേഷം അതിനെ base ചെയ്ത് ഒരു personalized learning plan ഉണ്ടാക്കും. Unlimited real-life speaking activities ലൂടെ നിങ്ങൾ practice ചെയ്യുകയും ചെയ്യാം.",
+   "directions": [],
+   "start": 59.06,
+   "end": 73.53,
+   "shot": 8,
+   "lead": 22.06,
+   "tail": 19.72,
+   "match": 1.0
+  },
+  {
+   "id": "L17",
+   "scene": 3,
+   "speaker": "Woman",
+   "text": "Ohh. കേട്ടിട്ട് നല്ല smart ആയിട്ടുണ്ടല്ലോ.",
+   "directions": [],
+   "start": 74.54,
+   "end": 76.03,
+   "shot": 8,
+   "lead": 37.54,
+   "tail": 17.22,
+   "match": 0.8
+  },
+  {
+   "id": "L18",
+   "scene": 3,
+   "speaker": "Miss Nova",
+   "text": "Yeah, സത്യത്തിൽ ഇന്നത്തെ കാലത്ത് spoken English improve ചെയ്യാനുള്ള ഏറ്റവും smartest way ഇതാണ്. ദിവസവും just പതിനഞ്ചോ ഇരുപതോ മിനിറ്റ് എന്റെ കൂടെ practice ചെയ്യൂ, വെറും ഒരു മാസം കൊണ്ട് മാറ്റം കാണാം.",
+   "directions": [],
+   "start": 76.26,
+   "end": 84.37,
+   "shot": 8,
+   "lead": 39.26,
+   "tail": 8.88,
+   "match": 0.96
+  },
+  {
+   "id": "L19",
+   "scene": 3,
+   "speaker": "Woman",
+   "text": "Oh wow, ഇത് തന്നെയാണ് എനിക്ക് വേണ്ടിയിരുന്നത്. എനിക്ക് എവിടെ നിന്നാ നിങ്ങളുടെ കൂടെ practice ചെയ്യാൻ പറ്റുക?",
+   "directions": [],
+   "start": 84.48,
+   "end": 87.83,
+   "shot": 8,
+   "lead": 47.48,
+   "tail": 5.42,
+   "match": 0.86
+  },
+  {
+   "id": "L20",
+   "scene": 3,
+   "speaker": "Miss Nova",
+   "text": "താഴെ കൊടുത്തിരിക്കുന്ന \"Install Now\" button ൽ click ചെയ്ത് Supernova AI download ചെയ്താൽ മതി. വരൂ, നമുക്ക് ഒരുമിച്ച് നിങ്ങളുടെ spoken English practice ചെയ്ത് improve ചെയ്യാം.",
+   "directions": [],
+   "start": 88.02,
+   "end": 93.27,
+   "shot": 8,
+   "lead": 51.02,
+   "tail": -0.02,
+   "match": 0.78
+  }
+ ]
+}

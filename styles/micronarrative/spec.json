@@ -1,0 +1,195 @@
+{
+ "style": "micronarrative",
+ "status": "learned from ONE reference; every number is measured unless marked inferred",
+ "learned_from": {
+  "reference_video": "input/reference/micronarrative_ml_ref.mp4 (not committed)",
+  "duration_sec": 93.33,
+  "size": "720x1280",
+  "fps": 24,
+  "language": "Malayalam; scene 1 is English",
+  "script_tab": "t.o4usjjssj43l",
+  "date": "2026-10-31"
+ },
+ "render_note": "Reference is 720x1280 @24 fps. Zeno renders 1080x1920 @30; scale all pixel values by 1.5.",
+ "visuals": "fully AI-generated: live-action cafe scene, a 3D-cartoon teacher (Miss Nova), a woman in pyjamas at night",
+ "structure": [
+  {
+   "scene": 1,
+   "name": "restaurant (English)",
+   "start": 0.0,
+   "end": 20.69,
+   "layout": "single",
+   "cutting": "speaker-follow cuts, 6 shots",
+   "shots": "wide establishing, then one close-up per speaker, then a reaction close-up of the friend"
+  },
+  {
+   "scene": 2,
+   "name": "after lunch (Malayalam)",
+   "start": 20.69,
+   "end": 36.98,
+   "layout": "single",
+   "cutting": "ONE continuous two-shot, no cuts, no zoom"
+  },
+  {
+   "scene": 3,
+   "name": "night, AI teacher (Malayalam + English words)",
+   "start": 36.98,
+   "end": 93.25,
+   "layout": "split_h",
+   "cutting": "no full-frame cuts; each panel swaps clip at turn boundaries"
+  }
+ ],
+ "script_cues": [
+  "SCENE n headings",
+  "'SPLIT SCREEN' with 'Woman - Right screen' / 'Miss Nova - Left screen'",
+  "named speakers as 'Name: line'",
+  "stage directions in (parentheses) and plain sentences (laughter, queue)"
+ ],
+ "scene1_shot_grammar": {
+  "plain_cuts_sec": [
+   2.208,
+   4.708,
+   7.292,
+   12.167,
+   19.0
+  ],
+  "shots": [
+   {
+    "id": 1,
+    "type": "wide establishing",
+    "dur": 2.21,
+    "face_width_frac": 0.09
+   },
+   {
+    "id": 2,
+    "type": "close-up speaker",
+    "dur": 2.5,
+    "face_width_frac": 0.36
+   },
+   {
+    "id": 3,
+    "type": "close-up speaker",
+    "dur": 2.58,
+    "face_width_frac": 0.41
+   },
+   {
+    "id": 4,
+    "type": "close-up speaker",
+    "dur": 4.87,
+    "face_width_frac": 0.42
+   },
+   {
+    "id": 5,
+    "type": "close-up speaker then laughter",
+    "dur": 6.83,
+    "face_width_frac": 0.3
+   },
+   {
+    "id": 6,
+    "type": "reaction close-up (friend not laughing)",
+    "dur": 1.67,
+    "face_width_frac": 0.33
+   }
+  ],
+  "cut_lead_sec": "speech starts 0.12-0.22 s after the cut to that speaker (L1, L3, L4, L5); L2 has a 1.05 s reaction beat first",
+  "cut_tail_sec": "the cut to the next speaker lands 0.09-0.19 s after the previous line ends (L1-L3)",
+  "after_last_line": "the laughter plays over the same close-up for ~4 s, then a 1.7 s reaction shot, then the transition"
+ },
+ "framing": {
+  "face_center_y_frac": "0.32-0.37 in every close-up and in both split panels",
+  "close_up_face_width_frac": "0.30-0.42",
+  "two_shot_face_width_frac": 0.19,
+  "two_shot_face_center_x_frac": 0.73
+ },
+ "split_h": {
+  "orientation": "left | right, full height (NOT stacked)",
+  "left": "Miss Nova (3D cartoon, blue background)",
+  "right": "Woman (live-action, night room)",
+  "divider_px_at_720": {
+   "left_panel_x": [
+    0,
+    357
+   ],
+   "divider_x": [
+    357,
+    360
+   ],
+   "right_panel_x": [
+    360,
+    720
+   ]
+  },
+  "divider": "thin light line, about 3 px of 720, colour ~#E1DBE1, no border highlight, no dimming of the listener",
+  "canvas_1080_equivalent": {
+   "left_w": 536,
+   "divider_w": 4,
+   "right_w": 540
+  },
+  "face_in_panel": {
+   "face_width_frac_of_panel": 0.63,
+   "face_center_y_frac": 0.36,
+   "left_face_center_x_in_panel": 0.5,
+   "right_face_center_x_in_panel": 0.54
+  },
+  "panel_swaps": "7 hard clip swaps inside panels at turn boundaries (44.21, 47.96, 50.96, 58.92, 65.46, 73.96, 84.38); each is small (the character goes from talking to listening pose); the full frame never cuts",
+  "turn_gap_sec": {
+   "median": 0.22,
+   "min": 0.08,
+   "max": 1.01
+  }
+ },
+ "zoom": {
+  "digital_zoom": "none measured",
+  "note": "face width stays within 4% inside shots 2, 3, 7 and 8; shots 4-6 changed 4-13%, most likely subject motion inside the AI clip (not confirmed with a background-scale test). Variety comes from shot size, not zoom."
+ },
+ "transition_between_scenes": {
+  "name": "warm_flash",
+  "count": 2,
+  "at_sec": [
+   20.5,
+   36.79
+  ],
+  "duration_frames_24fps": 10,
+  "duration_sec": 0.42,
+  "envelope_frames": [
+   "f0 yellow-orange onset mean RGB ~(239,185,114)",
+   "f1-f3 hold ~(243,202,121)",
+   "f4-f7 shift to coral ~(241,141,125)",
+   "f8 fade ~(197,113,114)",
+   "f9 clean"
+  ],
+  "content_swap": "at frame 5 (0.21 s after start), hidden under the flash",
+  "audio": "no whoosh; scene-boundary audio dips to near silence (0.05-0.2 s)",
+  "implementation": "NOT built. Needs an overlay (yellow to coral gradient, screen/add blend) tuned side by side against refs/transition_warm_flash.jpg and transition_rgb.json",
+  "same_in_both_transitions": true
+ },
+ "timing": {
+  "scene_boundary": "transition starts as the last line of the scene ends (+/-0.05 s); next scene's first line starts 0.1-0.5 s after the transition ends",
+  "turn_gap_median_sec": 0.22,
+  "dramatic_beat_gaps_sec": [
+   1.24,
+   1.15,
+   1.01
+  ]
+ },
+ "audio": {
+  "music_bed": "none",
+  "sfx": "none found; laughter (voice) 15.0-19.5 s",
+  "room_tone_db": "-52 to -44",
+  "speech_median_db": -22.9,
+  "reference_loudness_lufs": -19.3,
+  "zeno_target_lufs": -14,
+  "note": "normalise to Zeno's -14 LUFS; the reference is quieter"
+ },
+ "on_screen_text": {
+  "non_subtitle": "none found (no title cards, buttons or logos; 'Install Now' appears only inside the subtitle)",
+  "subtitles": "present (word-by-word, white text, blue highlight on the current word, lower-middle). IGNORED by instruction; not measured or reproduced"
+ },
+ "unknowns": [
+  "format of the future raw footage (per-line clips? per-scene clips?)",
+  "whether the listener in split screen is a separate idle clip",
+  "how Zeno should choose a reaction shot (scene 1 shot 6) from raw clips",
+  "whether a Malayalam scene-1 version uses the same English shot order",
+  "subtitle style (parked)"
+ ]
+}
