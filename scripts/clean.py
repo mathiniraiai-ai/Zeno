@@ -10,6 +10,7 @@ What it removes (all can be rebuilt):
   1. work/_segments/        render cache
   2. work/<project>/        heavy files (audio, video, images) of projects not touched for --days (default 14)
   3. work/<project>/        the whole folder of projects not touched for --purge-days (default 90)
+     work/_clips/<clip>/     per-clip caches follow the same two age rules
   4. input/standins/        with --standins   (stand-in clips cut from a reference)
   5. input/reference/       with --references (reference videos used to learn a style)
 
@@ -55,7 +56,10 @@ def plan_cleanup(root: Path, days: float, purge_days: float, standins: bool, ref
         for f in seg.iterdir():
             items.append(("render cache", f, size_of(f)))
     if work.is_dir():
-        for proj in sorted(p for p in work.iterdir() if p.is_dir() and not p.name.startswith("_")):
+        clip_cache = work / "_clips"
+        folders = [p for p in work.iterdir() if p.is_dir() and not p.name.startswith("_")]
+        folders += [p for p in clip_cache.iterdir() if p.is_dir()] if clip_cache.is_dir() else []
+        for proj in sorted(folders):
             age_days = (now - newest_mtime(proj)) / 86400
             if age_days >= purge_days:
                 items.append((f"project older than {purge_days:g} days", proj, size_of(proj)))

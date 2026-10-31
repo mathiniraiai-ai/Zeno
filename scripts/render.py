@@ -21,6 +21,7 @@ from common import (  # noqa: E402
     MARKS_DIR,
     SFX_DIR,
     WORK,
+    clip_work_dir,
     _normalize_mark_type,
     ffmpeg,
     probe,
@@ -224,8 +225,7 @@ def main() -> None:
     if first_src.is_file():
         first = probe(first_src)
     else:
-        first_stem = Path(str(segs[0]["src"])).stem
-        info_cache = WORK / first_stem / "info.json"
+        info_cache = clip_work_dir(segs[0]["src"]) / "info.json"
         first = read_json(info_cache) if info_cache.is_file() else {"width": 720, "height": 1280, "fps": 24}
 
     canvas = plan.get("canvas", {})

@@ -18,6 +18,7 @@ from common import (
     ROOT,
     SCRIPTCUT_ROOT,
     WORK,
+    clip_work_dir,
     YUNET_MODEL,
     probe,
     read_json,
@@ -385,8 +386,7 @@ def compute_slot_crop_filter(
 
 def _load_clip_speech_spans(video_path: Path) -> List[Tuple[float, float]]:
     """Auto-load speech spans from `work/<stem>/hq_words.json` or `words.json` if present."""
-    stem = video_path.stem
-    work_dir = WORK / stem
+    work_dir = clip_work_dir(video_path)
     for fname in ("hq_words.json", "words.json"):
         f = work_dir / fname
         if f.is_file():
@@ -1044,7 +1044,7 @@ def main() -> None:
         info = analyze_clip_vision(p)
         clips_data[p.stem] = info
         # Also persist vision.json in work/<stem>/ if work/<stem> exists
-        work_dir = WORK / p.stem
+        work_dir = clip_work_dir(p)
         if work_dir.is_dir():
             write_json(work_dir / "vision.json", info)
 

@@ -195,7 +195,7 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
 
         # 1. Check Header Directives
         if line.startswith("#"):
-            m_dir = re.match(r"^#(output|src_dir|canvas|speakers|audio)\b\s*:?\s*(.*)$", line, re.I)
+            m_dir = re.match(r"^#(output|script|src_dir|canvas|speakers|audio)\b\s*:?\s*(.*)$", line, re.I)
             if not m_dir:
                 continue
             directive = m_dir.group(1).lower()
@@ -203,6 +203,8 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
 
             if directive == "output":
                 plan["output"] = _unquote(rest)
+            elif directive == "script":
+                plan["script"] = _unquote(rest)
             elif directive == "src_dir":
                 src_dir = _unquote(rest)
             elif directive == "canvas":
@@ -482,6 +484,8 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
 
     if plan_dict.get("output"):
         lines.append(f"#output {_quote_if_needed(str(plan_dict['output']))}")
+    if plan_dict.get("script"):
+        lines.append(f"#script {_quote_if_needed(str(plan_dict['script']))}")
 
     segs = plan_dict.get("segments") or []
     src_dir = str(plan_dict.get("src_dir") or _detect_common_src_dir(segs))

@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
     IS_WIN,
     WORK,
+    clip_work_dir,
     ffmpeg,
     find_venv_python,
     probe,
@@ -89,7 +90,7 @@ def main():
     clips = [c for pat in a.clips for c in (glob.glob(str(resolve(pat))) or [pat])]
     for clip in clips:
         clip = resolve(clip)
-        d = WORK / clip.stem
+        d = clip_work_dir(clip)
         d.mkdir(parents=True, exist_ok=True)
         wav = d / "audio16k.wav"
         if clip.is_file():

@@ -425,6 +425,46 @@ def resolve(p) -> Path:
     return cand if cand.is_absolute() else ROOT / s_norm
 
 
+CLIP_CACHE = WORK / "_clips"
+_fingerprints: dict = {}
+
+
+def clip_work_dir(src) -> Path:
+    """Cache folder for one source clip: work/_clips/<stem>-<fingerprint>.
+
+    The fingerprint comes from the file's size plus its first and last 1 MB, so two different clips that share a
+    name (S1.mp4 from two videos) never share a transcript or alignment, while the same file in another folder
+    keeps its cache. If the file is missing (re-rendering after the footage was moved), the one cache folder for
+    that name is used, else the old work/<stem> location.
+    """
+    stem = Path(str(src)).stem
+    p = resolve(src)
+    if p.is_file():
+        try:
+            st = p.stat()
+            key = (str(p), st.st_size, st.st_mtime_ns)
+            if key not in _fingerprints:
+                import hashlib
+                h = hashlib.sha1(str(st.st_size).encode())
+                with open(p, "rb") as fh:
+                    h.update(fh.read(1 << 20))
+                    if st.st_size > (2 << 20):
+                        fh.seek(-(1 << 20), 2)
+                        h.update(fh.read(1 << 20))
+                _fingerprints[key] = h.hexdigest()[:10]
+            return CLIP_CACHE / f"{stem}-{_fingerprints[key]}"
+        except OSError:
+            pass
+    matches = sorted(CLIP_CACHE.glob(f"{glob_escape(stem)}-??????????")) if CLIP_CACHE.is_dir() else []
+    if len(matches) == 1:
+        return matches[0]
+    return WORK / stem
+
+
+def glob_escape(s: str) -> str:
+    return re.sub(r"([*?\[\]])", r"[\1]", s)
+
+
 def run(cmd, quiet=True):
     """Run a command; raise with the tail of stderr if it fails."""
     r = subprocess.run([str(c) for c in cmd], capture_output=True, text=True,

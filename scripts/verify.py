@@ -29,6 +29,7 @@ from common import (  # noqa: E402
     FFMPEG,
     ROOT,
     WORK,
+    clip_work_dir,
     _normalize_mark_type,
     probe,
     read_json,
@@ -146,7 +147,7 @@ def check_cuts_and_pauses(plan: Dict[str, Any]) -> Tuple[bool, int, int, int]:
 
     for i, s in enumerate(segs):
         stem = Path(str(s.get("src", ""))).stem
-        wdir = WORK / stem
+        wdir = clip_work_dir(s.get("src", ""))
         st, en = float(s["start"]), float(s["end"])
 
         if i > 0 and Path(str(segs[i - 1].get("src", ""))).stem == stem:
@@ -219,7 +220,7 @@ def check_script_coverage(
 
     for s in segs:
         stem = Path(str(s.get("src", ""))).stem
-        wdir = WORK / stem
+        wdir = clip_work_dir(s.get("src", ""))
         st, en = float(s["start"]), float(s["end"])
         words: List[Dict[str, Any]] = []
         for fname in ("hq_words.json", "words.json"):
@@ -245,8 +246,8 @@ def check_script_coverage(
         if stem_a != stem_b and seg_word_slices[i] and seg_word_slices[i + 1]:
             w_end = seg_word_slices[i][min(len(seg_word_slices[i]) - 1, len(seg_word_slices[i]) // 2 - 1)]
             # Compare actual last word in hq_words of seg i vs first word in hq_words of seg i+1
-            hq_a = WORK / stem_a / "hq_words.json"
-            hq_b = WORK / stem_b / "hq_words.json"
+            hq_a = clip_work_dir(segs[i].get("src", "")) / "hq_words.json"
+            hq_b = clip_work_dir(segs[i + 1].get("src", "")) / "hq_words.json"
             if hq_a.is_file() and hq_b.is_file():
                 wa = [
                     w for w in read_json(hq_a)
@@ -474,6 +475,13 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
 
     cuts_ok, clipped_w, long_pauses, jc_masked = check_cuts_and_pauses(plan)
 
+    if not script_path:
+        # Use the script this plan was prepared from (recorded by prepare.py), not just the first file in input/script/
+        side = p_file.parent / "plan.json"
+        try:
+            script_path = plan.get("script") or (read_json(side).get("script") if side.is_file() else None)
+        except Exception:
+            script_path = None
     resolved_script = resolve(script_path) if script_path else None
     script_ok, cov_lines, tot_lines, b_dups = check_script_coverage(plan, script_path=resolved_script)
 

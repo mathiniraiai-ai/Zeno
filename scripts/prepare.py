@@ -44,6 +44,7 @@ from common import (  # noqa: E402
     FFMPEG,
     ROOT,
     WORK,
+    clip_work_dir,
     ffmpeg,
     find_venv_python,
     read_script_text,
@@ -1148,7 +1149,7 @@ def discover_clips(raw_args: List[str]) -> List[Tuple[str, str, Path]]:
     for item in expanded:
         p = Path(item)
         stem = p.stem if p.suffix else p.name
-        wdir = WORK / stem
+        wdir = clip_work_dir(p) if p.is_file() else WORK / stem
         if p.is_file():
             items.append((stem, str(p), wdir))
         elif wdir.is_dir() and (wdir / "info.json").is_file():
@@ -1161,7 +1162,7 @@ def discover_clips(raw_args: List[str]) -> List[Tuple[str, str, Path]]:
         footage_files = sorted((ROOT / "input" / "footage").glob("*.mp4"), key=_natural_clip_sort_key)
         if footage_files:
             for fp in footage_files:
-                items.append((fp.stem, f"input/footage/{fp.name}", WORK / fp.stem))
+                items.append((fp.stem, f"input/footage/{fp.name}", clip_work_dir(fp)))
         else:
             work_dirs = sorted(
                 [d for d in WORK.iterdir() if d.is_dir() and (d / "info.json").is_file() and re.match(r"^S\d+$", d.name)],
@@ -1265,6 +1266,7 @@ def main() -> None:
     output_mp4 = f"output/{project_name}.mp4"
     plan: Dict[str, Any] = {
         "output": output_mp4,
+        "script": str(script_path.relative_to(ROOT)) if script_path.is_relative_to(ROOT) else str(script_path),
         "canvas": canvas,
         "preset": resolved_preset,
         "mark_pack": args.mark_pack,
