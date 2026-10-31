@@ -439,6 +439,14 @@ def main() -> None:
         if not ok:
             sys.exit(1)
 
+    # 7) automated per-clip & per-agent token telemetry logging
+    try:
+        import token_tracker
+        rec = token_tracker.finalize_job_telemetry(plan_path, plan, total, out_path)
+        token_tracker.print_console_summary(rec)
+    except Exception:
+        pass
+
 
 if __name__ == "__main__":
     main()

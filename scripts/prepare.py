@@ -32,6 +32,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import wave
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -1194,6 +1195,7 @@ def main() -> None:
         help="Keep work/ lean by preventing raw intermediate JSON bloat",
     )
     args = ap.parse_args()
+    job_start_epoch = time.time()
 
     # Resolve script file
     if args.script:
@@ -1303,6 +1305,22 @@ def main() -> None:
     print(f"  Brief : {proj_dir / 'brief.txt'} (~{est_tokens} tokens, {len(brief_text.splitlines())} lines)")
     print(f"  EDL   : {proj_dir / 'plan.edl'}")
     print(f"  JSON  : {proj_dir / 'plan.json'}")
+    try:
+        import token_tracker
+        snap = token_tracker.save_prepare_snapshot(
+            project_name=project_name,
+            lang=lang,
+            clips_data=clips_data,
+            segments=segments,
+            marks=marks,
+            job_start_epoch=job_start_epoch,
+        )
+        print(
+            f"  Tokens: {snap['transcribe_in_tokens']:,} in / {snap['transcribe_out_tokens']:,} out "
+            f"({snap['transcribe_total_tokens']:,} transcription total) | Agent: {snap['agent_name']} ({snap['agent_model']})"
+        )
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

@@ -89,6 +89,15 @@ r2 = client.post("/api/keys", json={"name": "Mathinirai Selvan", "code": "team-c
 check("name only -> email built as first.last@gosupernova.live", r2.status_code == 200 and r2.json()["email"] == "mathinirai.selvan@gosupernova.live", str(r2.json()))
 r3 = client.post("/api/keys", json={"name": "Mathinirai@GoSupernova.live", "code": "team-code"})
 check("typing the full address also works", r3.status_code == 200 and r3.json()["email"] == "mathinirai@gosupernova.live", str(r3.json()))
+tel = client.post("/v1/telemetry", headers={"Authorization": "Bearer " + r3.json()["key"]}, json={
+    "project": "test_ad", "language": "ml", "agent_name": "Antigravity", "agent_model": "Gemini 4 Argon",
+    "clips_count": 2, "video_seconds": 24.5, "transcribe_in_tokens": 820, "transcribe_out_tokens": 190, "transcribe_total_tokens": 1010,
+    "agent_in_tokens": 4200, "agent_cached_tokens": 12000, "agent_out_tokens": 950, "agent_total_tokens": 5150,
+    "grand_total_tokens": 6160, "clips": [{"clip": "S1", "input_tokens": 410, "output_tokens": 95, "total_tokens": 505}],
+})
+check("telemetry endpoint stores run in DB", tel.status_code == 200 and tel.json().get("ok") is True, str(tel.json()))
+admin_data = client.get("/admin/api/keys", headers=basic("admin-pw")).json()
+check("admin API returns stored runs", len(admin_data.get("runs") or []) == 1 and admin_data["runs"][0]["grand_total_tokens"] == 6160)
 h = client.get("/health").json()
 check("health reports store and admin switch", h["key_store_ok"] and h["admin_enabled"], str(h))
 print(f"\n{sum(results)}/{len(results)} checks passed")

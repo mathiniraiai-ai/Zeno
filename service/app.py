@@ -166,6 +166,12 @@ class _Gemini:
                     )
                     data = self._parse(resp.text or "{}")
                     data["model_used"] = model
+                    um = getattr(resp, "usage_metadata", None)
+                    if um is not None:
+                        in_tok = int(getattr(um, "prompt_token_count", 0) or 0)
+                        out_tok = int(getattr(um, "candidates_token_count", 0) or 0) + int(getattr(um, "thoughts_token_count", 0) or 0)
+                        tot_tok = int(getattr(um, "total_token_count", 0) or (in_tok + out_tok))
+                        data["usage"] = {"input_tokens": in_tok, "output_tokens": out_tok, "total_tokens": tot_tok}
                     if count(data) and (best is None or count(data) > count(best)):
                         best = data
                     if count(data) >= min_words and count(data):
@@ -230,13 +236,41 @@ def transcribe(
     except HTTPException as exc:
         log.info("user=%s bytes=%d status=%d seconds=%.1f", name, len(audio), exc.status_code, time.time() - started)
         raise
+    usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+    in_tok = int(usage.get("input_tokens") or 0)
+    out_tok = int(usage.get("output_tokens") or 0)
+    tot_tok = int(usage.get("total_tokens") or (in_tok + out_tok))
     if key_id is not None:
         try:
-            store().record_use(key_id, duration)
+            store().record_use(key_id, duration, input_tokens=in_tok, output_tokens=out_tok, total_tokens=tot_tok)
         except Exception:
             log.exception("could not record usage")
-    log.info("user=%s bytes=%d status=200 model=%s words=%d seconds=%.1f%s", name, len(audio), result.get("model_used"), len(result.get("words") or []), time.time() - started, " WARNING=" + result["warning"] if result.get("warning") else "")
+    log.info("user=%s bytes=%d status=200 model=%s words=%d in_tok=%d out_tok=%d seconds=%.1f%s", name, len(audio), result.get("model_used"), len(result.get("words") or []), in_tok, out_tok, time.time() - started, " WARNING=" + result["warning"] if result.get("warning") else "")
     return result
+
+
+@app.post("/v1/telemetry")
+async def record_telemetry(request: Request, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """Record a completed video edit run (agent name/model, per-clip process & tokens, overall tokens) into Postgres."""
+    name, key_id = authenticate(authorization)
+    check_rate(name)
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Expected JSON object")
+    except Exception:
+        raise HTTPException(400, "Invalid telemetry JSON")
+    try:
+        run_id = store().record_run(key_id, name, payload)
+    except Exception:
+        log.exception("could not record telemetry run")
+        raise HTTPException(503, "Could not store telemetry")
+    log.info(
+        "telemetry run_id=%d user=%s project=%s agent=%s/%s clips=%s grand_tokens=%s",
+        run_id, name, payload.get("project"), payload.get("agent_name"), payload.get("agent_model"),
+        payload.get("clips_count"), payload.get("grand_total_tokens"),
+    )
+    return {"ok": True, "run_id": run_id}
 
 
 # ---------------------------------------------------------------- key signup and admin pages
@@ -329,7 +363,7 @@ def admin_page(authorization: Optional[str] = Header(None)) -> HTMLResponse:
 @app.get("/admin/api/keys")
 def admin_keys(authorization: Optional[str] = Header(None)) -> JSONResponse:
     require_admin(authorization)
-    return JSONResponse({"keys": store().list()}, headers=NO_STORE)
+    return JSONResponse({"keys": store().list(), "runs": store().list_runs()}, headers=NO_STORE)
 
 
 @app.post("/admin/api/keys/{key_id}/revoke")

@@ -273,6 +273,7 @@ class GeminiTranscriber:
             target_language=lang_code,
         )
         healed_words = [w["word"] for w in (audit.healed_words or [])] or [str(w) for w in raw_words]
+        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
         return {
             "status": "success",
             "model_used": model_used,
@@ -280,6 +281,11 @@ class GeminiTranscriber:
             "full_transcript": audit.healed_text or " ".join(healed_words),
             "words": healed_words,
             "cues": data.get("cues") or [],
+            "usage": {
+                "input_tokens": int(usage.get("input_tokens") or 0),
+                "output_tokens": int(usage.get("output_tokens") or 0),
+                "total_tokens": int(usage.get("total_tokens") or (int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0))),
+            },
         }
 
     def _transcribe_via_cloud(
@@ -337,6 +343,7 @@ class GeminiTranscriber:
                             "full_transcript": cached.get("full_transcript", ""),
                             "words": cached.get("words", []),
                             "cues": cached.get("cues", []),
+                            "usage": cached.get("usage") or {},
                         },
                         language_hint=language_hint,
                         model_used=cached.get("model_used", "cached_gemini"),
@@ -389,6 +396,12 @@ class GeminiTranscriber:
                     ),
                 )
                 data = self._parse_json_lenient(resp.text or "{}")
+                um = getattr(resp, "usage_metadata", None)
+                if um is not None:
+                    in_tok = int(getattr(um, "prompt_token_count", 0) or 0)
+                    out_tok = int(getattr(um, "candidates_token_count", 0) or 0) + int(getattr(um, "thoughts_token_count", 0) or 0)
+                    tot_tok = int(getattr(um, "total_token_count", 0) or (in_tok + out_tok))
+                    data["usage"] = {"input_tokens": in_tok, "output_tokens": out_tok, "total_tokens": tot_tok}
                 res = self._heal_result(data, language_hint, model_used=model_name)
                 if res.get("words"):
                     self._save_cache(cache_file, wav_p, res)
@@ -422,6 +435,7 @@ class GeminiTranscriber:
                 "full_transcript": res.get("full_transcript", ""),
                 "words": res.get("words", []),
                 "cues": res.get("cues", []),
+                "usage": res.get("usage") or {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
             }
             cache_file.parent.mkdir(parents=True, exist_ok=True)
             cache_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

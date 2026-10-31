@@ -171,13 +171,19 @@ def check_env() -> None:
     local_env = common.ROOT / ".env"
     sibling_env = common.SCRIPTCUT_ROOT / ".env"
     has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
+    has_service = bool(os.environ.get("SCRIPTCUT_CLOUD_URL")) and bool(os.environ.get("SCRIPTCUT_CLOUD_TOKEN"))
     if local_env.is_file():
         print(f"  [OK] Found local .env ({local_env})")
     elif sibling_env.is_file():
         print(f"  [OK] Using fallback sibling .env ({sibling_env})")
     else:
-        print("  [i] No .env file found. Copy .env.example to .env and add your GEMINI_API_KEY.")
-    print(f"  [{'OK' if has_gemini else 'i'}] GEMINI_API_KEY configured: {'Yes' if has_gemini else 'No (offline/heuristic fallback active)'}")
+        print("  [i] No .env file found. Copy .env.example to .env and add your personal Zeno key.")
+    if has_service:
+        print("  [OK] Transcription configured: Team service key (SCRIPTCUT_CLOUD_URL + SCRIPTCUT_CLOUD_TOKEN)")
+    elif has_gemini:
+        print("  [OK] Transcription configured: Direct GEMINI_API_KEY")
+    else:
+        print("  [i] Transcription configured: No (offline fallback active)")
 
 
 def smoke_test() -> bool:
