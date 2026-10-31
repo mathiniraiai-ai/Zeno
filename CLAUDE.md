@@ -2,6 +2,8 @@
 
 Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input/footage/` and a script in `input/script/`, output best takes, pause-snapped cuts, dynamic speaker layouts, and `✓`/`✗` marks + SFX to `output/`.
 
+**Agent entry point**: read `agent/DIRECTOR.md` first. It sets the decision loop and points to one concept file per topic in `agent/concepts/` (script intake, footage intake, style library, reference learning, on-screen text, token budget). Learned styles live in `styles/<name>/`. A style may allow captions or extra graphics only if its own `SKILL.md` says so; otherwise rule 4 below applies.
+
 ## 1. Hard Rules
 1. **Workspace Isolation**: Never modify any files outside `/Users/mathiniraiselvan/Documents/Office project/Zeno`. Never touch other projects in `Documents`.
 2. **Never Read Raw JSONs or Python Source**:
