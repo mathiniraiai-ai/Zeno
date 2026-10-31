@@ -465,13 +465,26 @@ def _clip_tokens(clip: Dict[str, Any]) -> List[str]:
 
 
 def _same_content(a: List[str], b: List[str]) -> float:
-    """How much of the shorter clip's speech is also in the longer one (0..1), whatever the files are called.
-    Two takes of one line, a partial take plus a full take, or the same audio in two files all score high.
-    Two clips that say different things (or the two halves of one line) score low."""
+    """How much of the shorter clip's speech appears, in the same order, in the longer one (0..1).
+    Order matters: a retake repeats the same words in the same order, while two different lines that merely share
+    some words ('the', 'charts', 'bigger') do not. File names are never used."""
     if not a or not b:
         return 0.0
     short, long_ = (a, b) if len(a) <= len(b) else (b, a)
-    return _token_recall(short, long_, threshold=0.70)
+    # canonical word ids: spellings that sound alike get one id, so small transcription differences do not matter
+    canon: List[str] = []
+    ids: Dict[str, int] = {}
+    def wid(tok: str) -> int:
+        for k, rep in enumerate(canon):
+            if tok == rep or _word_similarity(tok, rep) >= 0.82:
+                return k
+        canon.append(tok)
+        return len(canon) - 1
+    sa, sb = [wid(t) for t in short], [wid(t) for t in long_]
+    blocks = SequenceMatcher(None, sa, sb, autojunk=False).get_matching_blocks()
+    # tiny scattered matches (a lone 'the') should not count: only runs of 2+ words, or the whole clip
+    matched = sum(bl.size for bl in blocks if bl.size >= 2) if len(short) >= 4 else sum(bl.size for bl in blocks)
+    return matched / len(short)
 
 
 SAME_TAKE_THRESHOLD = 0.72
@@ -654,7 +667,8 @@ def _take_score(clip: Dict[str, Any]) -> Tuple[float, float, float]:
     recall    = how much of the script line was said
     precision = how much of what was said belongs to the script (fumbles, ad-libs and extra words lower it)."""
     script_tokens = [t for l in clip.get("matched_lines", []) for t in l["tokens"]]
-    clip_tokens = _clip_tokens(clip)
+    wrong = clip.get("wrong_word_idx") or set()   # words the wrong character says will be cut, so they earn no credit
+    clip_tokens = [_clean_token(w["w"]) for i, w in enumerate(clip.get("hq_words", [])) if i not in wrong and _clean_token(w["w"])]
     if not clip_tokens:
         return 0.0, 0.0, 0.0
     if not script_tokens:   # no script to compare with: judge by how much clean speech the take has
@@ -698,6 +712,195 @@ def select_best_takes(clips_data: List[Dict[str, Any]]) -> None:
                     f"[ALT_TAKE] {lines}: not used, {best[0]['stem']} is the best of {len(scored)} ({summary}). "
                     f"To use this take instead, put {c['stem']} in that line's segment in plan.edl"
                 )
+
+
+def _expected_speakers(clip: Dict[str, Any]) -> List[Optional[str]]:
+    """Which character the script says speaks each word of this clip (words follow the clip's matched lines in order)."""
+    lines = clip.get("matched_lines") or []
+    words = clip.get("hq_words") or []
+    if not lines:
+        return [None] * len(words)
+    if len(lines) == 1:
+        return [lines[0].get("speaker") or None] * len(words)
+    out: List[Optional[str]] = []
+    ptr = 0
+    for w in words:
+        tok = _clean_token(w["w"])
+        best_li, best_sim = ptr, 0.0
+        for li in range(ptr, len(lines)):
+            sim = max((_word_similarity(tok, st) for st in lines[li]["tokens"]), default=0.0)
+            if sim > best_sim + 1e-9:
+                best_li, best_sim = li, sim
+        if best_li > ptr and best_sim >= 0.7:
+            ptr = best_li
+        out.append(lines[ptr].get("speaker") or None)
+    return out
+
+
+def apply_speaker_check(clips_data: List[Dict[str, Any]], script_lines: List[Dict[str, Any]]) -> None:
+    """Find dialogue spoken by the wrong character (script says Man, voice is Robot, or the reverse) and mark it to be cut.
+    Sets clip["exclusions"] (time spans to cut) and clip["wrong_word_idx"]. Needs 2+ named speakers in the script."""
+    speakers = {l.get("speaker") for l in script_lines if l.get("speaker")}
+    if len(speakers) < 2:
+        return
+    try:
+        import speaker_check
+    except Exception as exc:   # librosa/soundfile missing: say so, never fail the job
+        print(f"  Speaker check skipped: {exc}")
+        return
+    items = []
+    for i, c in enumerate(clips_data):
+        wav = Path(c["work_dir"]) / "audio16k.wav"
+        if wav.is_file() and c.get("hq_words") and c.get("matched_lines"):
+            items.append({"id": i, "wav": wav, "words": c["hq_words"], "expected": _expected_speakers(c), "rms_env": c.get("rms_env") or []})
+    res = speaker_check.analyze(items)
+    if not res["ok"]:
+        msg = f"[SPEAKER_CHECK] not applied: {res['reason']}"
+        print(f"  Speaker check: {res['reason']}")
+        if clips_data:
+            clips_data[0]["anomalies"].append(msg)
+        return
+    n_cut = 0
+    for i, info in res["clips"].items():
+        c = clips_data[i]
+        dur = float(c["info"].get("duration") or 10.0)
+        for sp in info["spans"]:
+            end = dur if sp["end"] is None else sp["end"]
+            lid = ",".join(l["id"] for l in c.get("matched_lines", [])) or "-"
+            c.setdefault("exclusions", []).append((float(sp["start"]), float(end)))
+            c.setdefault("wrong_word_idx", set()).update(range(sp["first"], sp["last"] + 1))
+            c["anomalies"].append(
+                f"[WRONG_SPEAKER] {lid}: script says {sp['expected']}, but {sp['heard']} speaks '{sp['text'][:48]}' "
+                f"-> cut {sp['start']:.2f}-{end:.2f}s, joined to the next good part"
+            )
+            n_cut += 1
+    print(f"  Speaker check: {len(speakers)} voices told apart (d'={res['dprime']}, {res['agreement']:.0%} match the script); {n_cut} wrong-speaker span(s) cut")
+
+
+def cut_clips(clips: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """detect_clip_anomalies_and_cuts, then remove wrong-speaker spans from the kept segments and join the good parts."""
+    segs = detect_clip_anomalies_and_cuts(clips)
+    out: List[Dict[str, Any]] = []
+    for seg in segs:
+        ex = sorted((seg.get("clip") or {}).get("exclusions") or [])
+        if not ex:
+            out.append(seg)
+            continue
+        pieces = [(float(seg["start"]), float(seg["end"]))]
+        for xs, xe in ex:
+            nxt = []
+            for a, b in pieces:
+                if xe <= a or xs >= b:
+                    nxt.append((a, b))
+                    continue
+                if xs - a >= 0.3:
+                    nxt.append((a, xs))
+                if b - xe >= 0.3:
+                    nxt.append((xe, b))
+            pieces = nxt
+        for n, (a, b) in enumerate(pieces):
+            part = dict(seg)
+            part["start"], part["end"] = round(a, 2), round(b, 2)
+            part["words"] = [w for w in seg.get("words", []) if a - 0.05 <= float(w["start"]) <= b + 0.05]
+            if (a, b) != (float(seg["start"]), float(seg["end"])):
+                part["reason"] = f"{seg.get('reason', 'keep')}+wrong_speaker_cut"
+                if n > 0 and float(part.get("zoom", 1.0)) == 1.0:
+                    part["zoom"] = 1.08          # hides the jump cut where the good parts are joined
+                    part.setdefault("focus", [0.5, 0.4])
+            out.append(part)
+    return out
+
+
+def _seg_tokens(seg: Dict[str, Any]) -> List[str]:
+    ws = seg.get("words")
+    if ws is None:
+        ws = [w for w in seg["clip"].get("hq_words", []) if float(seg["start"]) - 0.05 <= float(w["start"]) <= float(seg["end"]) + 0.05]
+    return [_clean_token(w["w"]) for w in ws if _clean_token(w["w"])]
+
+
+def fill_lines_lost_to_wrong_speaker(
+    raw_segments: List[Dict[str, Any]],
+    clips_data: List[Dict[str, Any]],
+    script_lines: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """After wrong-speaker parts were cut, some script lines may have no good audio left in the kept clips
+    (the Robot's line was only ever spoken by the Man there). Look in EVERY clip, including unused takes, for that line
+    spoken by the right character, cut it out and splice it in at the right place in the script order.
+    Returns the clips that were used as fill-ins."""
+    cut_clips_ = [c for c in clips_data if c.get("exclusions")]
+    if not cut_clips_:
+        return []
+    # which script lines does each kept segment really contain?
+    seg_lines: List[List[int]] = []
+    covered: set = set()
+    for seg in raw_segments:
+        toks = _seg_tokens(seg)
+        got = [l for l in seg["clip"].get("matched_lines", []) if _token_recall(l["tokens"], toks) >= 0.5]
+        seg_lines.append([l["index"] for l in got])
+        covered.update(l["index"] for l in got)
+        if seg["clip"].get("exclusions"):
+            seg["lines_override"] = got
+    wanted = {}
+    for c in cut_clips_:
+        for l in c.get("matched_lines", []):
+            if l["index"] not in covered:
+                wanted[l["index"]] = l
+    used: List[Dict[str, Any]] = []
+    for idx in sorted(wanted):
+        line = wanted[idx]
+        best = None   # (score, clip, i0, j0)
+        for c in clips_data:
+            words = c.get("hq_words") or []
+            bad = c.get("wrong_word_idx") or set()
+            toks = [_clean_token(w["w"]) for w in words]
+            lt = line["tokens"]
+            if len(lt) < 2 or not words:
+                continue
+            head, tail = lt[: min(3, len(lt))], lt[-min(3, len(lt)):]
+            starts = [i for i in range(len(words)) if toks[i] and max((_word_similarity(toks[i], h) for h in head), default=0) >= 0.7]
+            ends = [j for j in range(len(words)) if toks[j] and max((_word_similarity(toks[j], t) for t in tail), default=0) >= 0.7]
+            for i0 in starts:
+                js = [j for j in ends if j > i0 and j - i0 + 1 <= int(len(lt) * 1.6) + 2]
+                if not js:
+                    continue
+                j0 = max(js)
+                if any(k in bad for k in range(i0, j0 + 1)):
+                    continue
+                win = [t for t in toks[i0:j0 + 1] if t]
+                rec, prec = _token_recall(lt, win), _token_recall(win, lt)
+                if rec < 0.6:
+                    continue
+                score = rec + 0.35 * prec
+                if best is None or score > best[0] + 1e-9 or (abs(score - best[0]) <= 0.02 and clips_data.index(c) > clips_data.index(best[1])):
+                    best = (score, c, i0, j0)
+        if best is None:
+            who = line.get("speaker") or "the right character"
+            for c in cut_clips_:
+                if any(l["index"] == idx for l in c.get("matched_lines", [])):
+                    c["anomalies"].append(f"[WRONG_SPEAKER_NO_FIX] {line['id']}: only the wrong voice says it; no clip has {who} saying it. Reshoot or accept the gap")
+                    break
+            print(f"  ! {line['id']} ({line.get('speaker') or '?'}) has no correct take anywhere in the footage")
+            continue
+        _, donor, i0, j0 = best
+        words = donor["hq_words"]
+        env = donor.get("rms_env") or []
+        dur = float(donor["info"].get("duration") or 10.0)
+        a = round(max(0.0, words[i0]["start"] - 0.12), 2) if i0 == 0 else find_rms_minimum(env, float(words[i0 - 1]["end"]), float(words[i0]["start"]))[0]
+        b = round(min(dur, words[j0]["end"] + 0.15), 2) if j0 == len(words) - 1 else find_rms_minimum(env, float(words[j0]["end"]), float(words[j0 + 1]["start"]))[0]
+        seg = {"clip": donor, "src": donor["src"], "stem": donor["stem"], "start": a, "end": max(b, a + 0.3),
+               "words": words[i0:j0 + 1], "zoom": 1.0, "reason": "fill_wrong_speaker", "lines_override": [line]}
+        pos = len(raw_segments)
+        for si, sl in enumerate(seg_lines):
+            if sl and min(sl) > idx:
+                pos = si
+                break
+        raw_segments.insert(pos, seg)
+        seg_lines.insert(pos, [idx])
+        covered.add(idx)
+        donor["anomalies"].append(f"[FILL] {line['id']} ({line.get('speaker') or '?'}): {donor['stem']} {a:.2f}-{seg['end']:.2f}s spliced in because the wrong character spoke it elsewhere")
+        if donor not in used:
+            used.append(donor)
+    return used
 
 
 def detect_clip_anomalies_and_cuts(
@@ -1029,7 +1232,9 @@ def assign_segment_ids_marks_and_layouts(
     for seg in raw_segments:
         clip = seg["clip"]
         c_lines = clip.get("matched_lines", [])
-        if len(c_lines) <= 1:
+        if seg.get("lines_override") is not None:   # set when wrong-speaker parts were cut or a fill-in take was spliced
+            seg["lines"] = seg["lines_override"]
+        elif len(c_lines) <= 1:
             seg["lines"] = c_lines
         else:
             # If clip was split into 2 segments (like S1 -> L1+L2 and L3, or S2 -> L4 and L5)
@@ -1400,12 +1605,15 @@ def main() -> None:
 
     # Align clips to script lines & run deterministic anomaly detection + auto-cutting
     match_clips_to_script_lines(clips_data, script_lines)
+    apply_speaker_check(clips_data, script_lines)   # before choosing takes: a take with the wrong voice scores lower
     select_best_takes(clips_data)
     kept_clips = [c for c in clips_data if not c.get("dropped_take")]
-    raw_segments = detect_clip_anomalies_and_cuts(kept_clips)
+    raw_segments = cut_clips(kept_clips)
+    fill_clips = fill_lines_lost_to_wrong_speaker(raw_segments, clips_data, script_lines)
+    kept_clips = kept_clips + [c for c in fill_clips if c not in kept_clips]
     for c in clips_data:
-        if c.get("dropped_take"):   # trims for the unused take, so swapping it in is a one-line edit
-            alt = detect_clip_anomalies_and_cuts([c])
+        if c.get("dropped_take") and c not in fill_clips:   # trims for the unused take, so swapping it in is a one-line edit
+            alt = cut_clips([c])
             if alt:
                 c["anomalies"].append(f"  unused take would keep {alt[0]['start']:.2f}-{alt[-1]['end']:.2f}s of {c['src']}")
     segments, marks, resolved_preset = assign_segment_ids_marks_and_layouts(

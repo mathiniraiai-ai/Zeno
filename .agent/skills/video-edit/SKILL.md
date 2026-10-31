@@ -14,11 +14,12 @@ Complete reference for executing a script-led video edit inside this Zeno folder
 1. **Workspace Isolation**: Only read and write files inside this Zeno folder (team PCs: `~/Downloads/Office Project/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`). Never modify any other project in `Documents`.
 2. **Folders**: Zeno runs from `~/Downloads/Office Project/Zeno` on team PCs (the installer puts it there). Every finished video (`.mp4` + `.timeline.txt`) goes to `~/Downloads/Zeno Outputs/`, never inside the repo. Raw clips can stay in any local folder: pass their path to `prepare.py`.
 3. **Takes**: Every clip is transcribed. Clips that say the same thing are takes of one line, whatever their file names, their order, or even if the audio or video is identical (2, 3 or 5 copies): `prepare.py` scores all of them and keeps exactly ONE (`[BEST_TAKE]`); the others are listed as `[ALT_TAKE]` with scores in `brief.txt`. Never assume the first, middle or last take is right: check the scores and swap a take in `plan.edl` if needed.
-4. **Zero Raw Telemetry Reads**:
+4. **Speakers**: The script names who speaks each line (`L2 Robot: ...`). `prepare.py` measures the voices and cuts any line spoken by the wrong character (`[WRONG_SPEAKER]` in `brief.txt`), then looks in every clip, including unused takes, for that line said by the right character and splices it in (`[FILL]`). `[WRONG_SPEAKER_NO_FIX]` means no clip has the right voice saying it: tell the user to reshoot. `[SPEAKER_CHECK] not applied` means the voices could not be told apart: say so in the report. Reference samples in `input/voices/<Speaker>.wav` make this reliable with few clips.
+5. **Zero Raw Telemetry Reads**:
    - **NEVER** read `work/*/words.json`, `work/*/silences.json`, or `work/*/align.json`.
    - **NEVER** read `scripts/*.py` to discover flags or schema fields—everything is documented in this skill.
    - Only read `work/<project>/brief.txt` (`~900 tokens`) and `work/<project>/plan.edl` (`~240 tokens`).
-5. **Editorial Minimalism**:
+6. **Editorial Minimalism**:
    - Best takes only; all retakes, false starts, stutters, dead air, and end-of-clip AI babble removed.
    - Hard cuts by default, snapped into natural pauses (`0.08–0.15s` breath padding).
    - `0.3s` `fade` only at major topic changes.

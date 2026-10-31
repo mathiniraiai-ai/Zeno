@@ -44,6 +44,8 @@ Clips can stay where they are: give the agent the folder path (for example `~/De
 
 Zeno transcribes every clip. Clips that say the same thing are treated as takes of one line, whatever they are named and wherever they are in the folder, even if there are 5 copies of the same audio or video. It scores them all and keeps exactly one, the best. The others are listed as `[ALT_TAKE]` in the brief with their scores, so the agent (or you) can swap one in.
 
+If the script names the speakers (`L2 Robot: ...`), Zeno checks every line is spoken by the right character. A line spoken by the wrong one is cut, and the same line is taken from another clip where the right character says it. Optional: put a 10 to 30 second sample of each character in `input/voices/` (`Man.wav`, `Robot.wav`) so it works reliably even with few clips.
+
 ## 3. What works today
 - General editing: best takes, pause-snapped cuts, layouts (`single`, `split_v`, `split_h`, `chat_bar`, `video_call`, `hybrid`), ✓/✗ marks, loudness.
 - Learned style **micronarrative** (`styles/micronarrative/`): the look and transitions are built and checked against the reference. Arranging raw clips into this style is **not built yet**; it needs one real raw set to finish.
