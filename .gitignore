@@ -23,6 +23,7 @@ input/script/*
 # Large (>50MB) native binaries & model weights
 tools/ffmpeg/ffmpeg*
 tools/ffmpeg/ffprobe*
+models/torch/
 
 # Explicitly keep reusable assets, lightweight ONNX face model, and scripts
 !assets/**

@@ -122,7 +122,7 @@ def check_or_setup_venv(init_venv: bool = False, prewarm: bool = False) -> bool:
         print(f"  [!] Could not inspect packages in {venv_py}: {exc}")
 
     print("\n[3/5] Checking Wav2Vec2 CTC Alignment Checkpoint Cache...")
-    ckpt_dir = Path.home() / ".cache" / "torch" / "hub" / "checkpoints"
+    ckpt_dir = Path(__file__).resolve().parents[1] / "models" / "torch" / "hub" / "checkpoints"
     wav2vec_ckpts = list(ckpt_dir.glob("*wav2vec2*")) if ckpt_dir.is_dir() else []
     if wav2vec_ckpts:
         for ckpt in wav2vec_ckpts:

@@ -57,7 +57,6 @@ def resolve_yunet_model() -> Optional[Path]:
         YUNET_MODEL,
         MODELS_DIR / "face_detection_yunet_2023mar.onnx",
         SCRIPTCUT_ROOT / "models" / "face_detection_yunet_2023mar.onnx",
-        Path("/Users/mathiniraiselvan/Documents/Office project/ScriptCut-AI/models/face_detection_yunet_2023mar.onnx"),
     ]
     for cand in candidates:
         if cand and cand.is_file():

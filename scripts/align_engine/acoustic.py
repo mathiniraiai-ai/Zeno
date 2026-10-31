@@ -3,6 +3,11 @@ import re
 import math
 import gc
 import ctypes
+from pathlib import Path
+
+# Keep the wav2vec2 weights inside the project (models/torch/hub/checkpoints) instead of ~/.cache.
+os.environ.setdefault("TORCH_HOME", str(Path(__file__).resolve().parents[2] / "models" / "torch"))
+
 import numpy as np
 import soundfile as sf
 from typing import Tuple, Dict, Optional, List, Any

@@ -110,7 +110,6 @@ def resolve_ffmpeg() -> Path:
     # 4. Check sibling ScriptCut-AI/bin/ffmpeg
     sibling_cands = [
         SCRIPTCUT_ROOT / "bin" / ("ffmpeg.exe" if IS_WIN else "ffmpeg"),
-        Path("/Users/mathiniraiselvan/Documents/Office project/ScriptCut-AI/bin/ffmpeg"),
     ]
     for sib in sibling_cands:
         if _is_runnable_binary(sib):
@@ -145,7 +144,6 @@ def resolve_ffprobe() -> Path:
     # 4. Check sibling ScriptCut-AI/bin/ffprobe
     sibling_cands = [
         SCRIPTCUT_ROOT / "bin" / ("ffprobe.exe" if IS_WIN else "ffprobe"),
-        Path("/Users/mathiniraiselvan/Documents/Office project/ScriptCut-AI/bin/ffprobe"),
     ]
     for sib in sibling_cands:
         if _is_runnable_binary(sib):
@@ -184,7 +182,6 @@ def find_venv_python() -> Path:
         else [
             SCRIPTCUT_ROOT / ".venv" / "bin" / "python",
             SCRIPTCUT_ROOT / ".venv" / "bin" / "python3",
-            Path("/Users/mathiniraiselvan/Documents/Office project/ScriptCut-AI/.venv/bin/python"),
             SCRIPTCUT_ROOT / ".venv" / "Scripts" / "python.exe",
         ]
     )

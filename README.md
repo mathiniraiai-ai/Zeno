@@ -44,6 +44,21 @@ No B-roll, no unrequested captions, no CTA, no extra visual clutter. Everything 
    - Generates all swappable `✓`/`✗` mark packs in `assets/marks/` (`default`, `glossy`, `flash`, `vignette`).
    - Prepares the lightweight forced-alignment environment (`uroman`, Indic G2P, and Meta `Wav2Vec2` / `MMS` `95M` forced aligner).
 
+### Windows (NVIDIA GPU)
+
+Zeno runs the same on Windows. The aligner uses CUDA automatically when `torch.cuda.is_available()`, otherwise CPU (alignment is `<1s/clip` either way); rendering is FFmpeg `libx264` on CPU on both platforms.
+
+```powershell
+winget install Gyan.FFmpeg
+py -3.12 -m venv .venv
+.venv\Scripts\python -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/<cuda-tag>   # pick <cuda-tag> (e.g. cu126) at pytorch.org
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\python scripts\setup.py --prewarm   # downloads the wav2vec2 weights into models/torch/ (~360 MB, not committed)
+```
+Run the pipeline with `.venv\Scripts\python scripts\prepare.py ...` (the scripts also auto-detect `.venv\Scripts\python.exe`).
+
+On Apple Silicon / macOS: `uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt`.
+
 ---
 
 ## The 3-Step Low-Token Workflow
