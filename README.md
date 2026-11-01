@@ -16,6 +16,14 @@ No B-roll, no unrequested captions, no CTA, no extra visual clutter. Everything 
 
 ---
 
+## License
+
+Zeno is licensed under the [Supernova Internal Use License](LICENSE). It may be used only by Supernova's Authorized Users for Supernova's own internal purposes. Redistribution, third-party use and offering it as a service are not permitted without written permission.
+
+Third-party components keep their own licenses (see Section 7 of [LICENSE](LICENSE)). This project uses the universal romanizer software "uroman" written by Ulf Hermjakob, USC Information Sciences Institute (2015-2020).
+
+---
+
 ## Folder layout
 
 | Folder / File | What's in it | Committed to GitHub? |

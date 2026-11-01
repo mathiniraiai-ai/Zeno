@@ -1,0 +1,96 @@
+SUPERNOVA INTERNAL USE LICENSE
+
+Copyright (c) 2026 Supernova. All rights reserved.
+
+This license applies to the "Zeno" software in this repository, including its
+Python scripts, agent instructions, configuration files, documentation, and any
+other original material written for it (together, the "Software"). It does not
+apply to the third-party components described in Section 7.
+
+1. DEFINITIONS
+
+   "Company" means Supernova.
+
+   "Authorized Users" means the Company's employees, and contractors who work
+   on the Company's behalf under a written agreement with the Company.
+
+   "Internal Purposes" means the Company's own internal business operations,
+   including editing and producing video content for the Company's own
+   products, channels and marketing. Internal Purposes do not include work for
+   any other person or organization, whether paid or unpaid.
+
+2. GRANT
+
+   Subject to this license, the Company grants Authorized Users a limited,
+   non-exclusive, non-transferable, non-sublicensable and revocable license to
+   run, copy and modify the Software, solely for Internal Purposes and solely
+   on devices and accounts controlled by the Company.
+
+3. RESTRICTIONS
+
+   Without the Company's prior written permission, no one may:
+
+   a) use the Software for any purpose other than Internal Purposes;
+   b) copy, distribute, publish, sell, lease, sublicense or otherwise make the
+      Software, or any modified version of it, available to any third party;
+   c) offer the Software, or any service built on it, to third parties,
+      including as a hosted, managed or software-as-a-service product;
+   d) use the Software on behalf of clients or other organizations;
+   e) remove or change copyright, license or attribution notices.
+
+   Viewing this repository does not grant any right to use the Software.
+   Anyone who is not an Authorized User has no license under this document.
+
+4. OWNERSHIP
+
+   The Company retains all rights, title and interest in the Software and in
+   any modification of it made by Authorized Users. This license transfers no
+   ownership.
+
+5. OUTPUT
+
+   Videos, timelines and other files produced by using the Software belong to
+   the Company. This license places no additional restriction on them, but they
+   remain subject to the rights of anyone who owns the source footage, scripts,
+   music, sound effects or other material used to make them.
+
+6. TERMINATION
+
+   This license ends automatically if any term is breached, or when a person
+   stops being an Authorized User. On termination, that person must stop using
+   the Software and delete all copies in their control. The Company may also
+   revoke this license at any time by written notice.
+
+7. THIRD-PARTY COMPONENTS
+
+   The Software uses or bundles third-party components that are NOT covered by
+   this license and stay under their own licenses and terms:
+
+   - uroman (scripts/align_engine/uroman/), licensed under its own terms in
+     scripts/align_engine/uroman/LICENSE.txt. As that license requires:
+     "This project uses the universal romanizer software 'uroman' written by
+     Ulf Hermjakob, USC Information Sciences Institute (2015-2020)."
+   - Meta wav2vec2 base model, loaded through torchaudio, under its own
+     license.
+   - FFmpeg, OpenCV, PyTorch, NumPy and other dependencies, which are
+     downloaded or installed separately under their own licenses.
+   - Audio and image assets in assets/, which remain under the terms of their
+     original sources and are not licensed to anyone by this document.
+
+8. NO WARRANTY
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+9. LIMITATION OF LIABILITY
+
+   TO THE FULLEST EXTENT PERMITTED BY LAW, IN NO EVENT SHALL THE COMPANY OR ITS
+   CONTRIBUTORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN
+   AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+   CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+10. OTHER USE
+
+    Any use not expressly allowed above requires the Company's prior written
+    permission. All rights not expressly granted are reserved.
