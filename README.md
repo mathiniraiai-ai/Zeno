@@ -1,11 +1,14 @@
 # Zeno
 
-**Zeno** is an AI Video Editing Harness for **Claude Code (Opus 4.5 / 5.5)** and **Antigravity (Gemini 4 Argon)**. Give it raw footage and a script, and it returns a finished `1080×1920` MP4:
+> **Zeno is a harness that lets any AI agent edit script-led short videos at about a quarter of the token cost** — built for **Claude Code (Opus 4.5 / 5.5)** and **Antigravity (Gemini 4 Argon)** with **Meta Wav2Vec2 + `uroman` forced alignment**, **OpenCV visual tracking & motion analysis**, and **5 dynamic layouts**.
+
+Give it raw footage and a script, and it returns a finished `1080×1920` (or `720×1280`) MP4:
 - **Best takes only** — retakes, false starts, stutters, dead air, and trailing AI clip babble removed
-- **Sub-word pause-snapped cuts** — powered by Meta wav2vec2 base (`95M`, MIT licence) forced alignment + Indic G2P + `uroman` fallback
+- **Sub-word pause-snapped cuts** — powered by Meta wav2vec2 base (`95M`, MIT licence) forced alignment + Indic G2P + `uroman` fallback + asymmetric onset/coda acoustic protection
+- **OpenCV Visual Tracking & Dynamic Zooms** — OpenCV face/subject tracking, static-shot motion detection, sub-pixel `flash_zoom` / `sudden_in` on hooks & brand endorsements, and Meta Creative transitions (`whip_left`, `whip_right`, `zoom_burst`, `flash_zoom`, `warm_flash`, `slide_up`)
 - **5 Dynamic Speaker Layouts (+ `hybrid`)** — `single`, `split_v`, `split_h`, `chat_bar`, `video_call`, and `hybrid`
-- **Swappable `✓` / `✗` mark packs + SFX** — placed automatically wherever the script indicates a phrase is right or wrong
-- **75% Lower Token Footprint** — targets **`12k–18k tokens` per minute of finished video** (strict ceiling: `20k tokens / min`, or `~20k–30k tokens` total for a typical 1.5-min edit)
+- **Swappable `✓` / `✗` mark packs + SFX** — minimal 2-pulse end-of-sentence Red/Green flash overlays and strong right/wrong SFX placed automatically from script cues
+- **75% Lower Token Footprint** — targets **`12k–18k tokens` per minute of finished video** (strict ceiling: `20k tokens / min`, or `~14k–25k tokens` total for a typical 1.5–2 min edit)
 
 New team member? Start with [ONBOARDING.md](ONBOARDING.md).
 
