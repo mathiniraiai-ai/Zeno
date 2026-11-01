@@ -1,30 +1,83 @@
-# micronarrative
+# micronarrative (Macro / Micro-Narrative Style Skill)
 
-A short story skit (about 60–95 s): a problem scene, a friend's tip, then an AI-teacher demo. All visuals are AI-generated. Learned from one reference: W42, Malayalam, 93 s ("Friends ordering food abroad"). Numbers are in `spec.json`; script lines and times are in `map.json`; screenshots are in `refs/`.
+A short story skit (`60–130s`): a live conversation problem scene, a friend's tip or dialogue continuation, and an AI-teacher split-screen demo with Miss Nova. Learned from reference metrics in [`spec.json`](spec.json) and production-hardened across Zeno's multi-agent harness.
 
-## Use when
-- The script tab has `SCENE n` headings, named speakers (`Name: line`), and a last scene marked `SPLIT SCREEN` with Miss Nova.
-- The user calls the video a micronarrative.
+---
 
-## Structure
-1. **Scene 1, the problem** (about 20 s): `single`, speaker-follow cuts. A wide establishing shot, then one close-up per speaker, then a reaction close-up.
-2. **Scene 2, the tip** (about 16 s): `single`, ONE continuous two-shot. No cuts, no zoom.
-3. **Scene 3, the AI teacher** (about 56 s): `split_h`. Miss Nova on the left, the character on the right. The full frame never cuts; each panel swaps clips at turn boundaries.
-4. **Between scenes**: a 0.42 s `warm_flash` transition, with the content swap hidden under it.
+## 1. Related Harness Documents & Links
 
-## Rules
-- Cut to the next speaker 0.1–0.2 s before they speak. Cut away 0.03–0.2 s after the previous line ends.
-- Keep the laughter and reaction beat after the last line of scene 1 (about 6 s in total).
-- Turn gaps in the dialogue are about 0.15 s. Keep longer gaps (1.0–1.3 s) at dramatic beats.
-- No digital zoom. Variety comes from shot size.
-- Faces sit about 35% from the top in every close-up and split panel.
-- No music and no SFX. Normalise loudness to -14 LUFS (the reference is -19.3).
-- No on-screen text beyond what the script asks for. Burned-in subtitles are ignored for now.
-- Split divider: thin light line (about 3 px of 720) on the left panel's right edge, no active-speaker border, no dimming of the listener. Both panels play live video.
+- **Master Video Edit Skill**: [`.agent/skills/video-edit/SKILL.md`](../../.agent/skills/video-edit/SKILL.md)
+- **Director Loop & Entry Point**: [`agent/DIRECTOR.md`](../../agent/DIRECTOR.md)
+- **Always-On Workspace Rules**: [`AGENTS.md`](../../AGENTS.md) | [`CLAUDE.md`](../../CLAUDE.md) | [`.agent/rules/editor-workflow.md`](../../.agent/rules/editor-workflow.md)
+- **Measured Style Numbers & Timing Spec**: [`styles/micronarrative/spec.json`](spec.json) | [`styles/micronarrative/map.json`](map.json)
+- **Word-Boundary & Zero-Audio-Loss Architecture**: [`agent/concepts/word_boundary_training.md`](../../agent/concepts/word_boundary_training.md)
+- **Token Telemetry & Ledger Skill**: [`.agent/skills/token-telemetry/SKILL.md`](../../.agent/skills/token-telemetry/SKILL.md)
 
-## Engine status
-- Built and checked against the reference: `single` and `split_h` (live panels, exact framing, measured divider), the `warm_flash` transition, plan building from this spec (`scripts/style_plan.py`), loudness. Rebuilding the reference from stand-in clips matches it frame by frame (clean frames differ by 2-3 of 255; flash frames by 10-18).
-- Not built or not tested: take selection and clip-to-line matching on real raw footage, per-panel clip swaps, reaction-shot selection, a style router.
+---
 
-## Open questions (see `spec.json` "unknowns")
-Format of the future raw clips (one per line, or one per scene?), and what the listening panel shows in scene 3.
+## 2. When to Use This Skill
+
+- The script has `Scene N` / `SCENE N` headings, named speakers (`Speaker: line`), a live conversation first half, and a vertical split-screen section with Miss Nova (or two speakers).
+- The user refers to the edit as a **macro narrative** or **micronarrative**.
+
+---
+
+## 3. Split-Screen Handling: Two Distinct Footage Modes
+
+Always check how the split-screen raw footage was generated before assigning layouts in `plan.edl`:
+
+### Mode A — Pre-Stitched Vertical Split Screen (Google Flow)
+- **How the raw clips look**: Each raw `.mp4` clip coming from **Google Flow** already has the vertical split screen (Character A + Character B side-by-side or stacked) **stitched inside a single video frame** (`720×1280` or `1080×1920`).
+- **How Zeno edits them**:
+  - **DO NOT** use `split_h` or `split_v` with `peer=` (which would crop and double-stack an already-split frame).
+  - Match the clips **straight in sequence using `layout=single`**.
+  - Cut cleanly from clip to clip at each dialogue turn boundary (`0.10–0.20s` pre-roll before speech onset, `0.03–0.20s` post-roll after speech end).
+
+### Mode B — Separate Character Clips (HeyGen / Separate Renders)
+- **How the raw clips look**: Character A (e.g., Miss Nova) and Character B are generated as **two separate single-person video files**.
+- **How Zeno edits them**:
+  - Composite them together using `layout=split_h` (left/right 50/50 vertical split) or `layout=split_v` (top/bottom 50/50 split) with `peer=<partner_clip>@<in>..<out>`.
+  - Swap panels cleanly at turn boundaries while keeping the full frame divider locked (`#E1DBE1` thin divider, both panels live).
+
+---
+
+## 4. Scene Structure & Editorial Rules
+
+1. **First Half — Live Conversation (`Scene 1` Problem + `Scene 2` Tip/Continuation)**:
+   - `layout=single`, speaker-follow cuts across wide establishing shots, speaker close-ups, two-shots, and reaction beats.
+   - Preserve natural reaction/laughter beats where indicated in the script.
+2. **Second Half — Vertical Split Screen (`Scene 3` AI Teacher Demo)**:
+   - If pre-stitched in Google Flow: `layout=single` (straight cuts matching each turn's pre-stitched clip).
+   - If separate HeyGen clips: `layout=split_h` / `split_v` with `peer=` compositing.
+3. **Where to Zoom vs. Where NOT to Zoom**:
+   - **NO Zoom / NO Zoom-Out (`zoom=1.0`)**:
+     - **Never** put zoom-ins or zoom-outs on **pre-stitched split-screen clips** (keeps the split divider and both faces locked in place).
+     - **Never** put zoom on **continuous two-shots** (e.g., Scene 2 tip shot) or on clips that already have camera movement (detected automatically by OpenCV `detect_static_camera_motion()`).
+   - **Where to Apply Zoom**:
+     - Apply zoom **only** on static single-speaker close-ups/mid-shots in the live conversation or单-speaker turns when needed:
+       - `zoom=1.08` punch-in to mask same-clip jump cuts.
+       - 3× supersampled sub-pixel `mild_in` (`1.0->1.06`), `mild_out` (`1.08->1.0`), or `flash_zoom` (`sudden_in` / `sudden_out`) on static single-speaker emphasis lines.
+4. **Where to Put On-Screen Text vs. Where NOT to**:
+   - **Put on-screen text ONLY** where the script explicitly asks for a text card/banner (e.g., `"Stop saying: ..."` top banner).
+   - **Never** add unrequested subtitles, captions, CTAs, or decorative text where not specified in the script.
+5. **Where to Show Errors (`✗` / `✓`) vs. Where NOT to**:
+   - **Show `✗` (`wrong`) and `✓` (`right`) marks ONLY** when the script contains an explicit spoken-English learner mistake followed by the teacher's correction and the learner's corrected repeat.
+   - Uses Zeno's **Minimal 2-Pulse End-of-Sentence Flash (`mark_pack: flash`)**:
+     - Triggers **only when the wrong or right sentence finishes speaking**.
+     - Subtle `0.50` alpha Red/Green frame glow (`red_flash.png` / `green_flash.png`) that **flashes 2 times** over `0.56s` (`Pulse 1 → OFF → Pulse 2`) with error buzzer (`+4 dB`) or right ding (`+2.5 dB`).
+   - On narrative/conversational dialogue lines with no explicit learner mistake/correction beat, **do not place `✗` / `✓` marks**.
+6. **Where Transitions Are Added**:
+   - Placed **at scene boundaries** (e.g., Scene 1 → Scene 2, and Scene 2 Live Conversation → Scene 3 Vertical Split Screen) using `tr=warm_flash@0.38` (or Meta creative transitions: `whip_left`, `whip_right`, `zoom_burst`, `flash_zoom`, `slide_up`).
+   - All transitions use **Zero-Audio-Loss (`tpad` video tail cloning + `0.00s` audio concat)** so zero words or syllables are ever swallowed at cuts.
+
+---
+
+## 5. Mandatory 5-Agent Parallel Workflow (Plus 10-Agent Deep Pipeline)
+
+Every macro/micronarrative edit runs through the **5-Agent Parallel Workflow** codified in [`AGENTS.md`](../../AGENTS.md) and [`agent/DIRECTOR.md`](../../agent/DIRECTOR.md) (scalable to the **10-Agent Deep Pipeline** for multi-feature engineering passes):
+
+1. **Agent 1 — Script Coverage, Concept Brief & Take Auditor**: Verifies 100% verbatim script coverage in order, speaker identity, reaction beats, and `[BEST_TAKE]` selection.
+2. **Agent 2 — Acoustic Pause-Cut & De-Duplication Specialist**: Uses Meta `Wav2Vec2` + `uroman` + `AcousticOnsetVerifier` (`-35ms` consonant pre-attack guard, `+45ms` coda release guard) to remove retakes/repeats and tighten dead air (`>0.85s`) with zero clipped syllables.
+3. **Agent 3 — OpenCV Motion & Dynamic Zoom/Layout Choreographer**: Enforces `layout=single` straight matching on pre-stitched Google Flow split-screen clips, locks `zoom=1.0` on all split-screen/two-shot/moving clips, and applies 3× supersampled zooms only on static single-speaker shots.
+4. **Agent 4 — Transitions, On-Screen Text & Minimal 2-Pulse Marks/SFX Designer**: Places scene-boundary transitions (`warm_flash`), script-cued text banners (only where requested), and end-of-sentence 2-pulse `✗`/`✓` flashes (only where errors/corrections occur).
+5. **Agent 5 — Post-Render Deep Video Analyzer & Auto-Fixer (Mandatory Post-Render Gate)**: Runs after `render.py --verify` to inspect the final `.mp4` locally via Python (`verify.py`, `words.json`, FFmpeg `silencedetect`, 10ms WAV RMS energy, and RGB frame checks) for **0 repeated words**, **0 silences `>1.05s`**, **0 clipped words**, active transitions, and `-14 LUFS` loudness—auto-fixing `plan.edl` and re-rendering before delivery if any issue is found.

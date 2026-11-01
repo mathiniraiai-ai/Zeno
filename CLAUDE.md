@@ -44,23 +44,24 @@ Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input
    ```
    - Renders `~/Downloads/Zeno Outputs/<name>.mp4` + `~/Downloads/Zeno Outputs/<name>.timeline.txt`, runs deterministic script coverage & `-14 LUFS` loudness check, and generates `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` marks).
 
-## 4. The 5 Dynamic Layout Modes & Swappable Mark Packs
+## 4. The 5 Dynamic Layout Modes, Pre-Stitched Split Screens & Swappable Mark Packs
 
 | Layout Mode | Visual Layout (`1080×1920`) | When to Use |
 |---|---|---|
-| `single` | Full-frame clip. Use `zoom=1.08` punch-in on jump cuts, or `zoom=1.0->1.06` slow push. | Solo teaching lines, hooks, wrap-ups. |
-| `split_v` | Top/bottom 50/50 split (`1080×960` each) with divider & inactive speaker dim. | Two-character Q&A or roleplay dialogues. |
-| `split_h` | Left/right 50/50 vertical split (`540×1920` each) with active border highlight. | Fast back-and-forth exchanges. |
+| `single` | Full-frame clip (`zoom=1.08` jump-cut punch-in, `zoom=1.0->1.06` slow push, `flash_zoom`). | Solo teaching lines, hooks, live conversation, **OR pre-stitched Google Flow vertical split-screen clips** (match straight as `single` with `zoom=1.0`). |
+| `split_v` | Top/bottom 50/50 split (`1080×960` each) with divider & inactive speaker dim. | Two-character Q&A when Character A and Character B are **separate raw files** (e.g., HeyGen renders). |
+| `split_h` | Left/right 50/50 vertical split (`540×1920` each) with divider. | Side-by-side split screen when Character A and Character B are **separate raw files**. |
 | `chat_bar` | Full-frame speaker + frosted glassmorphic prompt bar (`label="Phrase..."`). | Language drills ("How to say X?"). |
 | `video_call` | Full-frame speaker + rounded Picture-in-Picture (PiP) card (`pip=S1@3.2`). | Remote call / FaceTime style dialogues. |
 | `hybrid` | Mixes `single` on teaching monologues with `split_v`/`video_call`/`chat_bar` on dialogue turns. | **Default (`auto`)** — best retention. |
 
 **Swappable `✓`/`✗` Mark Packs (`--mark-pack` or `# mark_pack:`)**:
-- `flash` (**default**): Full-frame `1080×1920` green/red border overlay (`assets/marks/green_flash.png`, `red_flash.png`) that **flashes rapidly ON and OFF (~5 Hz strobe)** with strong `+4 dB` error buzzer (`buzzer.wav` + `kn20228_wrong_core.mp3`) and `+2.5 dB` right ding (`correct_ding.wav` + `sn_correct.wav`).
-- `vignette`: Full-frame radial glow (`assets/marks/w42_green_vignette.png`, `w42_red_vignette.png`) with rapid strobe ON/OFF.
+- `flash` (**default**): Full-frame `1080×1920` subtle `0.50` alpha green/red border overlay (`assets/marks/green_flash.png`, `red_flash.png`) that triggers **only at the end of the wrong/right sentence** and **flashes 2 times (`0.56s`: Pulse 1 → OFF → Pulse 2)** with `+4 dB` error buzzer (`buzzer.wav` + `kn20228_wrong_core.mp3`) and `+2.5 dB` right ding (`correct_ding.wav` + `sn_correct.wav`).
+- `vignette`: Full-frame radial glow (`assets/marks/w42_green_vignette.png`, `w42_red_vignette.png`, `0.50` alpha 2-pulse at sentence end).
 - `default`: Flat circle badge (`assets/marks/right.png`, `wrong.png`)
 - `glossy`: 3D glass gradient badge (`assets/marks/glossy_right.png`, `glossy_wrong.png`)
 - Custom: Place `right.png` & `wrong.png` in `assets/marks/<pack>/`.
+- **Skill Links**: [`.agent/skills/video-edit/SKILL.md`](.agent/skills/video-edit/SKILL.md) | [`styles/micronarrative/SKILL.md`](styles/micronarrative/SKILL.md) | [`agent/DIRECTOR.md`](agent/DIRECTOR.md) | [`agent/concepts/word_boundary_training.md`](agent/concepts/word_boundary_training.md)
 
 ## 5. Mandatory 5-Agent Parallel Workflow & Agent 5 Deep Post-Render Analyzer
 

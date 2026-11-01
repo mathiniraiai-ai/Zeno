@@ -90,29 +90,44 @@ python3 scripts/render.py work/<project>/plan.edl --verify
 
 ---
 
-## 3. Layout Selection Rules (5 Modes + `hybrid`)
+## 3. Layout Selection Rules (5 Modes + `hybrid` + Pre-Stitched Split Screen)
 
-Choose the layout preset via `--preset` or per-segment in `plan.edl`:
+Choose the layout preset via `--preset` or per-segment in `plan.edl` (see also [`styles/micronarrative/SKILL.md`](../../../styles/micronarrative/SKILL.md), [`agent/DIRECTOR.md`](../../../agent/DIRECTOR.md), and [`agent/concepts/word_boundary_training.md`](../../../agent/concepts/word_boundary_training.md)):
 
 | Layout Mode | Visual Structure (`1080×1920`) | Best Used For | Key Segment Extras |
 |---|---|---|---|
-| `single` | Full-screen vertical frame (`1080×1920`). | Teacher monologue, intro hook, explanation, wrap-up. | `focus=0.5,0.45`, `zoom=1.08`, `zoom=1.0->1.06` |
-| `split_v` | Top/bottom 50/50 split (`1080×960` each) with clean divider line and subtle dimming on inactive speaker. | Two-person dialogue (e.g., Speaker A asks in top panel, Speaker B answers in bottom panel). | `top=S1@5.4`, `bottom=S2`, `active=bottom` |
-| `split_h` | Left/right 50/50 vertical split (`540×1920` each) with active border highlight. | Rapid-fire back-and-forth exchanges or side-by-side comparisons. | `left=S1@5.4`, `right=S2`, `active=right` |
+| `single` | Full-screen vertical frame (`1080×1920`). | Teacher monologue, intro hook, live conversation shots, **OR pre-stitched Google Flow vertical split-screen clips** (matched straight without re-compositing). | `focus=0.5,0.45`, `zoom=1.08`, `zoom=1.0->1.06`, `zoom_type=flash_zoom` |
+| `split_v` | Top/bottom 50/50 split (`1080×960` each) with clean divider line and subtle dimming on inactive speaker. | Two-person dialogue when Character A and Character B are **separate raw files** (e.g., HeyGen separate renders). | `top=S1@5.4`, `bottom=S2`, `active=bottom` |
+| `split_h` | Left/right 50/50 vertical split (`540×1920` each) with divider. | Side-by-side split screen when Character A and Character B are **separate raw files**. | `left=S1@5.4`, `right=S2`, `active=right` |
 | `chat_bar` | Full-screen speaker + frosted glassmorphic chat bar overlay showing the prompt/phrase. | Language drills ("How do you say 'I am hungry' in Kannada?"). | `label="Prompt text"`, `bar_pos=bottom` |
 | `video_call` | Full-screen active speaker + rounded Picture-in-Picture (PiP) card in top-left/top-right corner. | Simulated phone/video call roleplay between two clips. | `pip=S1@5.4`, `pip_pos=top-left` |
 | `hybrid` | Automatically uses `single` for teaching/monologue lines and `split_v` / `video_call` / `chat_bar` for conversational turns. | **Recommended default (`auto`)** for multi-clip educational reels. | Any per-segment layout override |
 
+### 3B. Macro / Micronarrative & Pre-Stitched Split-Screen Rules ([`styles/micronarrative/SKILL.md`](../../../styles/micronarrative/SKILL.md))
+
+1. **Google Flow Pre-Stitched Vertical Split Screen vs. Separate HeyGen Clips**:
+   - **Pre-Stitched (Google Flow)**: When the raw clip already has the vertical split screen baked into a single video frame, **match the clips straight as `layout=single`**. Never use `split_h`/`split_v` with `peer=` on already-stitched footage.
+   - **Separate Clips (HeyGen)**: When Character A and Character B are separate raw video files, composite them via `split_h` or `split_v` with `peer=<clip>@<in>..<out>`.
+2. **Where to Zoom vs. Where NOT to Zoom**:
+   - **NO Zoom / NO Zoom-Out (`zoom=1.0`)**: Never apply zoom-in or zoom-out on **pre-stitched split-screen clips**, **continuous two-shots**, or clips where OpenCV (`detect_static_camera_motion`) detects existing camera motion.
+   - **Where to Zoom**: Apply 3× supersampled sub-pixel zooms (`zoom=1.08` jump-cut punch-in, `mild_in` `1.0->1.06`, `mild_out` `1.08->1.0`, or `flash_zoom`) **only** on static single-speaker shots.
+3. **Where to Put On-Screen Text vs. Where NOT to**:
+   - Place on-screen text banners (e.g., `"Stop saying: ..."`) **only** where explicitly requested by the script. Never add unrequested captions or subtitles.
+4. **Where to Show Errors (`✗` / `✓`) vs. Where NOT to**:
+   - Place `wrong` (`✗`) and `right` (`✓`) marks **only** on explicit spoken-English learner mistake and corrected-repeat beats, using the **Minimal 2-Pulse End-of-Sentence Flash** (`0.50` alpha subtle Red/Green frame glow flashing **2 times** over `0.56s` right as the sentence finishes).
+5. **Where Transitions Are Added**:
+   - Place transitions (`warm_flash@0.38`, `whip_left`, `whip_right`, `zoom_burst`, `flash_zoom`, `slide_up`) at **scene boundaries**, backed by **Zero-Audio-Loss (`tpad` video tail clone + `0.00s` audio concat)** so zero words or syllables are ever clipped.
+
 ---
 
-## 4. Swappable `✓` / `✗` Mark Packs & Rapid-Strobe Full-Frame Overlays
+## 4. Swappable `✓` / `✗` Mark Packs & Minimal 2-Pulse End-of-Sentence Overlays
 
 Configure via `--mark-pack <pack>` on `prepare.py` or `# mark_pack: <pack>` in `plan.edl`:
 
 | Pack Name | Visual Style | Asset Path |
 |---|---|---|
-| `flash` (**default**) | Full-frame `1080×1920` green/red border overlay that **flashes rapidly ON and OFF (~5 Hz strobe)** | `assets/marks/green_flash.png`, `assets/marks/red_flash.png` |
-| `vignette` | Full-frame `1080×1920` radial edge glow that **flashes rapidly ON and OFF (~5 Hz strobe)** | `assets/marks/w42_green_vignette.png`, `assets/marks/w42_red_vignette.png` |
+| `flash` (**default**) | Full-frame `1080×1920` subtle `0.50` alpha green/red glow that triggers **at the end of the wrong/right sentence** and **flashes 2 times (`0.56s`: Pulse 1 → OFF → Pulse 2)** | `assets/marks/green_flash.png`, `assets/marks/red_flash.png` |
+| `vignette` | Full-frame `1080×1920` radial edge glow (`0.50` alpha, 2 pulses at sentence end) | `assets/marks/w42_green_vignette.png`, `assets/marks/w42_red_vignette.png` |
 | `default` | Classic high-contrast flat green circle `✓` and red circle `✗` badge | `assets/marks/right.png`, `assets/marks/wrong.png` |
 | `glossy` | 3D glassmorphic pill/circle badge with specular highlight & drop shadow | `assets/marks/glossy_right.png`, `assets/marks/glossy_wrong.png` |
 | `<custom>` | Any user-supplied `right.png` & `wrong.png` placed in `assets/marks/<custom>/` | `assets/marks/<custom>/right.png`, `wrong.png` |

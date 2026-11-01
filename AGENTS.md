@@ -57,22 +57,26 @@ Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Co
 
 ---
 
-## 4. Layout Modes & Swappable Mark Packs
+## 4. Layout Modes, Pre-Stitched Split Screens & Swappable Mark Packs
 
 - **Layouts (`--preset` or per-segment in `plan.edl`)**:
-  - `single` — Full-frame speaker (`1080×1920`), `zoom=1.08` punch-in for jump cuts, `zoom=1.0->1.06` slow push, `zoom=1.08->1.0` pull-out.
-  - `split_v` — Top/bottom 50/50 split (`1080×960` each) with divider & active speaker focus.
-  - `split_h` — Left/right 50/50 vertical split (`540×1920` each) for rapid exchanges.
+  - `single` — Full-frame speaker (`1080×1920`), `zoom=1.08` punch-in for jump cuts, `zoom=1.0->1.06` slow push, `zoom=1.08->1.0` pull-out, `flash_zoom`. **Also used for Google Flow pre-stitched vertical split-screen clips** (match straight as `single` with `zoom=1.0`; never double-composite with `split_h`/`split_v` when the split screen is already baked into the raw clip).
+  - `split_v` — Top/bottom 50/50 split (`1080×960` each) when Character A and Character B are **separate raw files** (e.g., HeyGen separate renders).
+  - `split_h` — Left/right 50/50 vertical split (`540×1920` each) when Character A and Character B are **separate raw files**.
   - `chat_bar` — Main speaker + glassmorphic prompt bar displaying the target phrase/question.
   - `video_call` — Main speaker + rounded Picture-in-Picture (PiP) card for the second speaker.
   - `hybrid` (`auto`) — Dynamically combines `single` for teaching monologues with `split_v` / `video_call` / `chat_bar` for dialogue turns.
 - **Mark Packs (`--mark-pack` or `# mark_pack:` in `plan.edl`)**:
-  - `flash` (**default**): Full-frame `1080×1920` Red/Green PNG border overlays (`assets/marks/red_flash.png` & `green_flash.png`) that **strobe/flash rapidly ON and OFF (~5 Hz)** with strong double-layered error SFX (`+4 dB` `buzzer.wav` + `kn20228_wrong_core.mp3`) and crisp right SFX (`+2.5 dB` `correct_ding.wav` + `sn_correct.wav`).
-  - `vignette`: Full-frame radial glow (`assets/marks/w42_red_vignette.png` & `w42_green_vignette.png`) with rapid strobe ON/OFF.
+  - `flash` (**default**): Full-frame `1080×1920` subtle `0.50` alpha Red/Green PNG border overlays (`assets/marks/red_flash.png` & `green_flash.png`) that trigger **only at the end of the wrong/right sentence** and **flash 2 times (`0.56s`: Pulse 1 → OFF → Pulse 2)** with double-layered error SFX (`+4 dB` `buzzer.wav` + `kn20228_wrong_core.mp3`) and crisp right SFX (`+2.5 dB` `correct_ding.wav` + `sn_correct.wav`).
+  - `vignette`: Full-frame radial glow (`assets/marks/w42_red_vignette.png` & `w42_green_vignette.png`, `0.50` alpha 2-pulse at sentence end).
   - `default` (flat circle badge), `glossy` (3D glass pill/badge), or custom PNGs in `assets/marks/<pack>/`.
-- **Transitions & Custom Whoosh SFX**:
-  - Use `tr=smoothleft@0.28`, `tr=smoothright@0.28`, `tr=warm_flash@0.35`, `tr=fade@0.28` at scene/topic turns, paired with `sfx whoosh.wav seg=<id> at=0.0 gain=-2` (or auto-triggered on visual transitions).
-- **Skill Reference**: Activate `.agent/skills/video-edit/SKILL.md` for full `plan.edl` / `plan.json` schema details and troubleshooting.
+- **Transitions & Zero-Audio-Loss Splices**:
+  - Use `tr=warm_flash@0.38`, `tr=whip_left@0.28`, `tr=whip_right@0.28`, `tr=zoom_burst@0.28`, `tr=flash_zoom@0.28`, `tr=slide_up@0.28`, `tr=smoothleft@0.28`, `tr=smoothright@0.28` at scene/topic turns (backed by `tpad` video clone + `0.00s` audio concat so zero syllables are clipped).
+- **Skill References & Links**:
+  - Master Video Edit Skill: [`.agent/skills/video-edit/SKILL.md`](.agent/skills/video-edit/SKILL.md)
+  - Macro / Micronarrative Style Skill: [`styles/micronarrative/SKILL.md`](styles/micronarrative/SKILL.md) (`spec.json`: [`styles/micronarrative/spec.json`](styles/micronarrative/spec.json))
+  - Director Loop: [`agent/DIRECTOR.md`](agent/DIRECTOR.md)
+  - Word-Boundary & Zero-Audio-Loss Guide: [`agent/concepts/word_boundary_training.md`](agent/concepts/word_boundary_training.md)
 
 ---
 

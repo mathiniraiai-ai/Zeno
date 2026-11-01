@@ -47,7 +47,10 @@ To stay portable:
 
 | Thing | Location |
 |---|---|
-| Rules and concepts | `agent/` |
+| Rules and concepts | `agent/` ([`agent/concepts/word_boundary_training.md`](concepts/word_boundary_training.md)) |
+| Master video-edit skill | [`.agent/skills/video-edit/SKILL.md`](../.agent/skills/video-edit/SKILL.md) |
+| Macro / Micronarrative style skill | [`styles/micronarrative/SKILL.md`](../styles/micronarrative/SKILL.md) ([`spec.json`](../styles/micronarrative/spec.json)) |
+| Token telemetry skill | [`.agent/skills/token-telemetry/SKILL.md`](../.agent/skills/token-telemetry/SKILL.md) |
 | Learned styles | `styles/<name>/` |
 | Engine (Python) | `scripts/` |
 | Inputs / outputs | `input/`, `output/`, `work/` |
