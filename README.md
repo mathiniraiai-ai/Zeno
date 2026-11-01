@@ -1,8 +1,8 @@
 # Zeno
 
-> **Zeno is a harness that lets any AI agent edit script-led short videos at about a quarter of the token cost.**
+> **Zeno is a harness layer that lets any AI agent edit script-led short videos at about a quarter of the token cost** — for **Claude Code (Opus 4.5 / 5.5)** & **Antigravity (Gemini 4 Argon)** with **Meta Wav2Vec2 + `uroman` forced alignment**, **OpenCV visual tracking & motion analysis**, and **5 dynamic layouts**.
 
-Built for **Claude Code (Opus 4.5 / 5.5)** and **Antigravity (Gemini 4 Argon)** — give it raw footage and a script, and it returns a finished `1080×1920` (or `720×1280`) MP4:
+Give it raw footage and a script, and it returns a finished `1080×1920` (or `720×1280`) MP4:
 - **Best takes only** — retakes, false starts, stutters, dead air, and trailing AI clip babble removed
 - **Sub-word pause-snapped cuts** — powered by Meta wav2vec2 base (`95M`, MIT licence) forced alignment + Indic G2P + `uroman` fallback + asymmetric onset/coda acoustic protection
 - **OpenCV Visual Tracking & Dynamic Zooms** — OpenCV face/subject tracking, static-shot motion detection, sub-pixel `flash_zoom` / `sudden_in` on hooks & brand endorsements, and Meta Creative transitions (`whip_left`, `whip_right`, `zoom_burst`, `flash_zoom`, `warm_flash`, `slide_up`)
