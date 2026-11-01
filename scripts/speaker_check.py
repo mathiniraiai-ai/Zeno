@@ -17,10 +17,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 SR = 16000
-MIN_UNIT_SEC = 0.90          # shorter stretches give unreliable voice measurements
+MIN_UNIT_SEC = 0.38          # catch 2-word wrong-speaker clauses (~0.4s+) while remaining steady
 MIN_UNITS_PER_SPEAKER = 2
 MIN_DPRIME = 2.0             # how far apart two voices must be (in units of spread) before we dare to cut
-LONG_PAUSE = 0.9             # a pause this long starts a new turn even without a speaker change
+LONG_PAUSE = 0.38            # a pause >=0.38s starts a new phrase unit so mid-clip speaker swaps are isolated
 MARGIN = 0.30                # a turn counts as wrong only if it is clearly closer to the other voice
 CUT_PAD = 0.04
 
@@ -152,10 +152,13 @@ def analyze(items: List[Dict[str, Any]]) -> Dict[str, Any]:
         except Exception:
             pass
     result["reference_voices"] = refs_used
-    counts0 = Counter(r[3] for r in rows)
-    if len(counts0) < 2 or min(counts0.values()) < MIN_UNITS_PER_SPEAKER:
-        result["reason"] = f"too few measurable phrases per speaker {dict(counts0)}"
+    counts_all = Counter(r[3] for r in rows)
+    valid_sp = {s for s, c in counts_all.items() if c >= MIN_UNITS_PER_SPEAKER}
+    if len(valid_sp) < 2:
+        result["reason"] = f"too few measurable phrases per speaker {dict(counts_all)}"
         return result
+    rows = [r for r in rows if r[3] in valid_sp]
+    counts0 = Counter(r[3] for r in rows)
 
     X = np.array([r[2] for r in rows], dtype=float)
     mu, sd = X.mean(axis=0), X.std(axis=0) + 1e-6
