@@ -5,9 +5,9 @@
 set -e
 cd "$(dirname "$0")"
 
-# 0. Team rule: Zeno lives in ~/Downloads/Office Project/Zeno and finished videos go to ~/Downloads/Zeno Outputs.
+# 0. Team rule: Zeno lives in ~/Documents/Zeno and finished videos go to ~/Downloads/Zeno Outputs.
 #    If this folder is somewhere else, move it there first. (The owner's dev copy has a .zeno-dev file and stays put.)
-TARGET="$HOME/Downloads/Office Project/Zeno"
+TARGET="$HOME/Documents/Zeno"
 HERE="$(pwd -P)"
 if [ ! -f .zeno-dev ] && [ "$HERE" != "$(cd "$TARGET" 2>/dev/null && pwd -P)" ]; then
   if [ -e "$TARGET" ]; then

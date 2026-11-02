@@ -9,7 +9,11 @@ Zeno turns raw clips and a script into a finished vertical video. An AI agent (C
 
 ## 1. Install (once, one double-click, about 5 minutes)
 
-1. Get the Zeno folder from the owner. You can unzip or clone it anywhere: the installer moves it to **`Downloads/Office Project/Zeno`**, where Zeno always runs, and creates **`Downloads/Zeno Outputs`** for finished videos.
+1. Clone the Zeno folder into **`Documents/Zeno`** (or unzip/clone anywhere — the installer automatically places it in **`Documents/Zeno`**, where Zeno always runs, and creates **`Downloads/Zeno Outputs`** for finished videos):
+   ```bash
+   cd ~/Documents
+   git clone https://github.com/mathiniraiai-ai/Zeno.git
+   ```
 2. Double-click the installer:
    - **Mac:** `install.command`. The first time, macOS may block it: right-click it, choose **Open**, then **Open** again.
    - **Windows:** `install.bat`.

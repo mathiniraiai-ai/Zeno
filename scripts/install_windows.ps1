@@ -4,11 +4,12 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
-# 0. Team rule: Zeno lives in Downloads\Office Project\Zeno and finished videos go to Downloads\Zeno Outputs.
+# 0. Team rule: Zeno lives in Documents\Zeno and finished videos go to Downloads\Zeno Outputs.
 #    If this folder is somewhere else, copy it there and continue from the new copy.
 #    (Windows can't move a folder a script is running from. The owner's dev copy has a .zeno-dev file and stays put.)
 $downloads = Join-Path $env:USERPROFILE "Downloads"
-$target = Join-Path $downloads "Office Project\Zeno"
+$documents = Join-Path $env:USERPROFILE "Documents"
+$target = Join-Path $documents "Zeno"
 $here = (Get-Location).Path
 if (-not (Test-Path ".zeno-dev") -and ($here.TrimEnd('\') -ne $target.TrimEnd('\'))) {
     if (Test-Path $target) {
