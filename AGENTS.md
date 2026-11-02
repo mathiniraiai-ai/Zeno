@@ -93,6 +93,7 @@ For every editing task (running on **Antigravity** by default or **Claude Code**
    - Uses local Python dependencies (`scripts/verify.py`, cached `words.json`/`hq_words.json` timestamps, FFmpeg `silencedetect`, 10ms WAV RMS energy, and RGB frame inspection — **without** sending the video to external APIs) to inspect the complete output video.
    - Verifies: (a) **0 repeated words/dialogues** inside or across segments, (b) **0 empty silences `>1.05s`** in the rendered audio stream, (c) **active transitions & `whoosh.wav` SFX**, and (d) **full-frame rapid-strobe Red/Green PNG overlays + strong error/right SFX**.
    - If any defect is detected, Agent 5 pinpoints the exact segment/timestamp, fixes `plan.edl`, and re-renders before delivery.
+- **CPU & Thermal Guardrail**: Parallel subagents (`Agent 1`–`Agent 4`) must operate strictly on text artifacts (`brief.txt`, `plan.edl`, script files, and cached JSONs) and **must never spawn concurrent Python/OpenCV/Librosa/FFmpeg processes across raw `.mp4` files**. Heavy media commands (`prepare.py`, `render.py`, `verify.py`) run sequentially in the main process with `ZENO_MAX_THREADS=4` and lowered OS priority.
 
 ## Secrets (all agents)
 Never open, print, quote or paste `.env` or any key in a chat or log. It holds the user's personal Zeno key (or a Gemini key). To check setup, run `python3 scripts/setup.py --smoke`; it reports [OK]/[FAIL] without showing keys. Read `.env.example` instead if you need the variable names.

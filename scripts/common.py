@@ -78,6 +78,19 @@ def load_dotenv(dotenv_path=None, override=False):
 # Load environment variables before resolving tool paths
 load_dotenv()
 
+# CPU & Thermal Governor: prevent OpenMP / Accelerate / OpenBLAS / PyTorch / FFmpeg
+# from spawning unbounded threads across all cores and overheating laptops/PCs.
+ZENO_MAX_THREADS = max(1, int(os.environ.get("ZENO_MAX_THREADS", "4") or "4"))
+for _thr_var in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "TORCH_NUM_THREADS",
+):
+    os.environ.setdefault(_thr_var, str(ZENO_MAX_THREADS))
+
 
 def _is_runnable_binary(path: Path) -> bool:
     """Return True if path exists, is a file, and matches the host OS binary convention."""
@@ -466,10 +479,16 @@ def glob_escape(s: str) -> str:
     return re.sub(r"([*?\[\]])", r"[\1]", s)
 
 
-def run(cmd, quiet=True):
+def run(cmd, quiet=True, low_priority=False):
     """Run a command; raise with the tail of stderr if it fails."""
+    kwargs = {}
+    if low_priority:
+        if IS_WIN and hasattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS"):
+            kwargs["creationflags"] = subprocess.BELOW_NORMAL_PRIORITY_CLASS
+        elif not IS_WIN and hasattr(os, "nice"):
+            kwargs["preexec_fn"] = lambda: os.nice(10)
     r = subprocess.run([str(c) for c in cmd], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
+                       encoding="utf-8", errors="replace", **kwargs)
     if r.returncode != 0:
         raise RuntimeError(f"Command failed ({r.returncode}): {cmd[0]}\n{r.stderr[-3000:]}")
     if not quiet:
@@ -478,7 +497,10 @@ def run(cmd, quiet=True):
 
 
 def ffmpeg(*args):
-    return run([FFMPEG, "-hide_banner", "-y", *args])
+    str_args = [str(a) for a in args]
+    if "-threads" not in str_args:
+        return run([FFMPEG, "-hide_banner", "-y", "-threads", str(ZENO_MAX_THREADS), *args], low_priority=True)
+    return run([FFMPEG, "-hide_banner", "-y", *args], low_priority=True)
 
 
 def probe(path):

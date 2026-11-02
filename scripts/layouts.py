@@ -340,6 +340,7 @@ def detect_static_camera_motion(
     try:
         import cv2
         import numpy as np
+        cv2.setNumThreads(2)
     except ImportError:
         _STATIC_MOTION_CACHE[key] = 0.0
         return 0.0
@@ -420,13 +421,12 @@ def resolve_segment_zoom_spec(
         return z0, z1, inferred_style, max(0.0, zoom_at), (zoom_dur if zoom_dur > 0.02 else 0.18)
 
     if abs(z1 - z0) < 0.005 and z0 > 1.005:
-        drift = min(1.30, round(z0 + 0.015, 4))
-        return z0, drift, "smooth", 0.0, exact_dur
+        return z0, z0, "static", 0.0, exact_dur
 
     if abs(z1 - z0) >= 0.005:
         return z0, z1, "smooth", 0.0, exact_dur
 
-    if exact_dur >= 1.8 and seg.get("auto_zoom", True) is not False:
+    if exact_dur >= 1.8 and seg.get("auto_zoom", False) is True:
         bg_motion = detect_static_camera_motion(
             seg["src"],
             float(seg.get("start", 0.0)),
@@ -457,13 +457,23 @@ def _build_subpixel_zoom_filter(
     zoom_dur: float = 0.18,
 ) -> List[str]:
     """Build a supersampled sub-pixel `zoompan` filter chain free of 2px stair-stepping jitter."""
-    if abs(z0 - 1.0) <= 0.004 and abs(z1 - 1.0) <= 0.004 and zoom_style == "none":
+    if abs(z0 - 1.0) <= 0.004 and abs(z1 - 1.0) <= 0.004 and zoom_style in ("none", "static", ""):
         return []
+
+    # Fast zero-heat path for static punch-in zooms (e.g. zoom=1.08 with no zoom_to):
+    # uses direct lanczos scale + crop instead of per-frame 4K zoompan evaluation.
+    if abs(z1 - z0) <= 0.004 and zoom_style in ("none", "static", "") and z0 > 1.004:
+        zw = even(slot_w * z0)
+        zh = even(slot_h * z0)
+        return [
+            f"scale={zw}:{zh}:flags=lanczos",
+            f"crop={slot_w}:{slot_h}:x='(iw-{slot_w})*{fx:.4f}':y='(ih-{slot_h})*{fy:.4f}'",
+        ]
 
     total_frames = max(2, int(round(exact_dur * fps)))
     n_minus_1 = max(1, total_frames - 1)
 
-    ss_factor = 3 if max(slot_w, slot_h) <= 1280 else 2
+    ss_factor = 2
     sw_super = even(slot_w * ss_factor)
     sh_super = even(slot_h * ss_factor)
 

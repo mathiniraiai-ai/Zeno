@@ -546,7 +546,7 @@ def main() -> None:
         "-map", "[vout]",
         "-map", "[aout]",
         "-c:v", "libx264",
-        "-preset", "ultrafast" if a.draft else "slow",
+        "-preset", "ultrafast" if a.draft else "veryfast",
         "-crf", "23" if a.draft else "18",
         "-profile:v", "high",
         "-pix_fmt", "yuv420p",
