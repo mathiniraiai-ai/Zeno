@@ -522,13 +522,14 @@ def build_segment_cache_key(
             "src": _file_mtime_sig(peer["src"]),
             "still_at": peer.get("still_at"),
             "idle_span": peer.get("idle_span"),
+            "mode": peer.get("mode", "loop"),
             "focus": peer.get("focus"),
             "slot": peer.get("slot"),
         }
 
     plan_loudness = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
     payload = {
-        "v": 5,
+        "v": 7,
         "src": _file_mtime_sig(seg["src"]),
         "start": round(float(seg["start"]), 4),
         "end": round(float(seg["end"]), 4),
@@ -664,19 +665,20 @@ def build_segment_ffmpeg_args(
     seg_gain_db = float(seg.get("gain_db") or 0.0)
 
     af_parts = [
-        "aresample=48000",
-        "aformat=channel_layouts=stereo",
-        "asetpts=PTS-STARTPTS",
-        "apad",
         f"atrim=0:{exact:.6f}",
         "asetpts=PTS-STARTPTS",
         "highpass=f=70",
-        f"loudnorm=I={seg_loud}:TP={DEFAULT_PEAK_CAP_DB}:LRA=9",
+        "dynaudnorm=f=150:g=7:p=0.89:m=5.0",
     ]
     if abs(seg_gain_db) >= 0.05:
         af_parts.append(f"volume={seg_gain_db:+.2f}dB")
     af_parts.extend([
-        f"alimiter=limit={DEFAULT_PEAK_CAP_DB}dB:level=false",
+        "alimiter=limit=0.84:level=false",
+        "aresample=48000",
+        "aformat=channel_layouts=stereo",
+        "apad",
+        f"atrim=0:{exact:.6f}",
+        "asetpts=PTS-STARTPTS",
         f"afade=t=in:d={EDGE_FADE}",
         f"afade=t=out:st={max(0.0, exact - EDGE_FADE):.6f}:d={EDGE_FADE}",
     ])
@@ -730,27 +732,47 @@ def build_segment_ffmpeg_args(
         still_at = float(peer.get("still_at") if peer.get("still_at") is not None else 0.5)
         idle_span = peer.get("idle_span")
 
-        # Use clean mouth-closed idle loop if peer clip exists and idle_span >= 0.45s, else still PNG
+        # Always use live moving listening video when peer_src is a video file (never static screenshot unless mode == "still")
         peer_idx = next_idx
         next_idx += 1
+        peer_loop_filter = ""
+        peer_dur = float(peer_info.get("duration") or 6.0)
         if peer_src.is_file() and peer.get("mode") == "live":
-            # Both panels play their own clip in sync (micronarrative scene 3); audio still comes from the main clip.
+            # Both panels play their own clip in sync; audio still comes from the main clip.
             inputs.extend(["-ss", f"{float(peer.get('start', 0.0)):.3f}", "-t", f"{dur + 0.5:.3f}", "-i", peer_src])
-        elif (
-            peer_src.is_file()
-            and isinstance(idle_span, (list, tuple))
-            and len(idle_span) >= 2
-            and (float(idle_span[1]) - float(idle_span[0])) >= 0.45
-            and peer.get("mode", "still") == "loop"
-        ):
-            s0 = max(0.0, float(idle_span[0]))
-            s_dur = max(0.45, float(idle_span[1]) - s0)
-            inputs.extend(["-stream_loop", "-1", "-ss", f"{s0:.3f}", "-t", f"{s_dur:.3f}", "-i", peer_src])
+        elif peer_src.is_file() and peer.get("mode", "loop") != "still":
+            if isinstance(idle_span, (list, tuple)) and len(idle_span) >= 2 and (float(idle_span[1]) - float(idle_span[0])) >= 0.30:
+                s0 = max(0.0, float(idle_span[0]))
+                s1 = float(idle_span[1])
+                s_dur = max(0.30, s1 - s0)
+            else:
+                # Dedicated listening clip: play from 0.0 across full clip duration and wrap seamlessly
+                s0 = float(peer.get("start", 0.0) or 0.0) % max(0.5, peer_dur)
+                s1 = peer_dur
+                s_dur = max(0.30, peer_dur - s0)
+
+            is_full_listening_clip = (s0 <= 0.15 and abs(s1 - peer_dur) <= 0.25) or ("listen" in peer_src.stem.lower() or "idle" in peer_src.stem.lower())
+            if s_dur >= exact - 0.15:
+                inputs.extend(["-ss", f"{s0:.3f}", "-t", f"{exact + 0.5:.3f}", "-i", peer_src])
+            elif is_full_listening_clip:
+                # Dedicated listening video clip shorter than segment: native demuxer -stream_loop -1 + filter trim
+                inputs.extend(["-stream_loop", "-1", "-ss", f"{s0:.3f}", "-i", peer_src])
+                peer_loop_filter = f"trim=0:{exact:.4f},setpts=PTS-STARTPTS"
+            else:
+                # Sub-span inside a combined talking+listening clip: loop only [s0, s1] so mouth never opens
+                inputs.extend(["-ss", f"{s0:.3f}", "-t", f"{s_dur:.3f}", "-i", peer_src])
+                loop_frames = max(2, int(round(s_dur * fps)))
+                peer_loop_filter = f"fps={fps},loop=loop=-1:size={loop_frames}:start=0,setpts=N/({fps}*TB),trim=0:{exact:.4f},setpts=PTS-STARTPTS"
         elif peer_src.is_file():
             still_png = _extract_peer_still_png(peer_src, still_at)
             inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", still_png])
         else:
             inputs.extend(["-ss", f"{still_at:.3f}", "-t", f"{exact:.4f}", "-i", peer_src])
+
+        peer_in_label = f"[{peer_idx}:v]"
+        if peer_loop_filter:
+            fc.append(f"[{peer_idx}:v]{peer_loop_filter}[peer_loop_in]")
+            peer_in_label = "[peer_loop_in]"
 
         if lay == "split_v":
             slot_w = W
@@ -761,11 +783,11 @@ def build_segment_ffmpeg_args(
             peer_h_slot = slot_h_bot if active_top else slot_h_top
 
             fc.append(_build_slot_video_chain("[0:v]", "[live_slot]", src_w, src_h, slot_w, live_h, fps, exact, [fx, fy], z0, z1))
-            fc.append(_build_slot_video_chain(f"[{peer_idx}:v]", "[peer_slot]", peer_w, peer_h, slot_w, peer_h_slot, fps, exact, peer_focus, 1.0, 1.0))
+            fc.append(_build_slot_video_chain(peer_in_label, "[peer_slot]", peer_w, peer_h, slot_w, peer_h_slot, fps, exact, peer_focus, 1.0, 1.0))
 
             stack_order = "[live_slot][peer_slot]" if active_top else "[peer_slot][live_slot]"
             fc.append(
-                f"{stack_order}vstack=inputs=2,"
+                f"{stack_order}vstack=inputs=2:shortest=1,"
                 f"drawbox=x=0:y={slot_h_top - 2}:w={W}:h=4:color=white@0.85:t=fill,"
                 f"format=yuv420p{v_curr}"
             )
@@ -779,7 +801,7 @@ def build_segment_ffmpeg_args(
 
             exact_fit = str(seg.get("framing") or "").lower() == "exact"
             fc.append(_build_slot_video_chain("[0:v]", "[live_slot]", src_w, src_h, live_w, slot_h, fps, exact, [fx, fy], z0, z1, exact=exact_fit))
-            fc.append(_build_slot_video_chain(f"[{peer_idx}:v]", "[peer_slot]", peer_w, peer_h, peer_w_slot, slot_h, fps, exact, peer_focus, 1.0, 1.0, exact=exact_fit))
+            fc.append(_build_slot_video_chain(peer_in_label, "[peer_slot]", peer_w, peer_h, peer_w_slot, slot_h, fps, exact, peer_focus, 1.0, 1.0, exact=exact_fit))
 
             stack_order = "[live_slot][peer_slot]" if active_left else "[peer_slot][live_slot]"
             dv = seg.get("divider")
@@ -789,7 +811,7 @@ def build_segment_ffmpeg_args(
                 divider = f"drawbox=x={dx}:y=0:w={dw}:h={H}:color=0x{dv.get('color', 'FFFFFF')}@{dv.get('alpha', 1.0)}:t=fill,"
             else:
                 divider = f"drawbox=x={slot_w_left - 2}:y=0:w=4:h={H}:color=white@0.85:t=fill,"
-            fc.append(f"{stack_order}hstack=inputs=2,{divider}format=yuv420p{v_curr}")
+            fc.append(f"{stack_order}hstack=inputs=2:shortest=1,{divider}format=yuv420p{v_curr}")
 
     # ------------------------------------------------------------------
     # Layout 4: CHAT_BAR / TEXTING (floating_overlay or docked)

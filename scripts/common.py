@@ -482,15 +482,21 @@ def glob_escape(s: str) -> str:
     return re.sub(r"([*?\[\]])", r"[\1]", s)
 
 
-def run(cmd, quiet=True, low_priority=False):
+def run(cmd, quiet=True, low_priority=False, timeout=None):
     """Run a command; raise with the tail of stderr if it fails."""
+    exec_cmd = [str(c) for c in cmd]
     kwargs = {}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
     if low_priority:
         if IS_WIN and hasattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS"):
             kwargs["creationflags"] = subprocess.BELOW_NORMAL_PRIORITY_CLASS
+        elif IS_MAC and Path("/usr/sbin/taskpolicy").is_file():
+            # Pin background media jobs to Apple Silicon Utility/Efficiency QoS tier so P-cores stay cool
+            exec_cmd = ["/usr/sbin/taskpolicy", "-c", "utility", *exec_cmd]
         elif not IS_WIN and hasattr(os, "nice"):
             kwargs["preexec_fn"] = lambda: os.nice(10)
-    r = subprocess.run([str(c) for c in cmd], capture_output=True, text=True,
+    r = subprocess.run(exec_cmd, capture_output=True, text=True,
                        encoding="utf-8", errors="replace", **kwargs)
     if r.returncode != 0:
         raise RuntimeError(f"Command failed ({r.returncode}): {cmd[0]}\n{r.stderr[-3000:]}")
@@ -499,11 +505,20 @@ def run(cmd, quiet=True, low_priority=False):
     return r
 
 
-def ffmpeg(*args):
+def ffmpeg(*args, timeout=180):
     str_args = [str(a) for a in args]
-    if "-threads" not in str_args:
-        return run([FFMPEG, "-hide_banner", "-y", "-threads", str(ZENO_MAX_THREADS), *args], low_priority=True)
-    return run([FFMPEG, "-hide_banner", "-y", *args], low_priority=True)
+    t_cap = str(min(int(ZENO_MAX_THREADS), 2))
+    base = [
+        FFMPEG,
+        "-hide_banner",
+        "-y",
+        "-filter_threads", t_cap,
+        "-filter_complex_threads", t_cap,
+    ]
+    if "-threads" not in str_args and len(args) >= 2:
+        # Place -threads before input AND before the output file so libx264/encoders are also capped
+        return run([*base, "-threads", t_cap, *args[:-1], "-threads", t_cap, args[-1]], low_priority=True, timeout=timeout)
+    return run([*base, *args], low_priority=True, timeout=timeout)
 
 
 def probe(path):

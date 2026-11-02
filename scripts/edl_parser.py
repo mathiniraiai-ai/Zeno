@@ -425,7 +425,7 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                         seg["transition_duration"] = round(float(tr_parts[1]), 4)
                 elif k == "peer":
                     peer_dict: Dict[str, Any] = {}
-                    p_parts = _split_top_level(v_raw, "@")
+                    p_parts = _split_top_level(v_unq, "@")
                     first_p = _unquote(p_parts[0])
                     if ":" in first_p and not re.match(r"^[A-Za-z]:[/\\]", first_p):
                         psp, psrc = first_p.split(":", 1)
@@ -438,6 +438,7 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                         if re.match(r"^[\d.]+-[\d.]+$", ex):
                             s0, s1 = ex.split("-", 1)
                             peer_dict["idle_span"] = [round(float(s0), 4), round(float(s1), 4)]
+                            peer_dict.setdefault("mode", "loop")
                         elif re.match(r"^[\d.]+,[\d.]+$", ex):
                             fx_s, fy_s = ex.split(",", 1)
                             peer_dict["focus"] = [round(float(fx_s), 4), round(float(fy_s), 4)]

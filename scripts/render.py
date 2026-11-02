@@ -144,11 +144,17 @@ def render_square_1x1(
     sq = even(sq_size)
     fg_w = even(sq * 9.0 / 16.0)
     bg_h = even(sq * 16.0 / 9.0)
+    # 4x downscaled Gaussian blur (16x fewer pixels) -> upscale back to sq x sq: visually identical, 94% less CPU heat
+    blur_scale = 4
+    sq_small = even(sq // blur_scale)
+    bg_h_small = even(bg_h // blur_scale)
+    sigma_small = max(1.0, blur_sigma / float(blur_scale))
     fc = (
         f"[0:v]split=2[bg_in][fg_in];"
-        f"[bg_in]scale={sq}:{bg_h}:force_original_aspect_ratio=increase:flags=lanczos,"
-        f"crop={sq}:{sq}:(iw-{sq})/2:(ih-{sq})/2,"
-        f"gblur=sigma={blur_sigma:.1f}[bg];"
+        f"[bg_in]scale={sq_small}:{bg_h_small}:force_original_aspect_ratio=increase:flags=bilinear,"
+        f"crop={sq_small}:{sq_small}:(iw-{sq_small})/2:(ih-{sq_small})/2,"
+        f"gblur=sigma={sigma_small:.2f},"
+        f"scale={sq}:{sq}:flags=bicubic[bg];"
         f"[fg_in]scale={fg_w}:{sq}:flags=lanczos[fg];"
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p[vout]"
     )
@@ -354,6 +360,11 @@ def main() -> None:
         type=float,
         default=18.0,
         help="Gaussian blur sigma for the 1:1 background layer (default: 18.0, ~7%% blur)",
+    )
+    ap.add_argument(
+        "--no-premiere",
+        action="store_true",
+        help="Skip automatic Adobe Premiere Pro (.prproj + .premiere.xml) project export",
     )
     a = ap.parse_args()
 
@@ -652,7 +663,7 @@ def main() -> None:
     ln = (
         f"loudnorm=I={loud}:TP={DEFAULT_PEAK_CAP_DB}:LRA=11:measured_I={meas['input_i']}:measured_TP={meas['input_tp']}:"
         f"measured_LRA={meas['input_lra']}:measured_thresh={meas['input_thresh']}:"
-        f"offset={meas['target_offset']}:linear=true{vol_extra},alimiter=limit={DEFAULT_PEAK_CAP_DB}dB:level=false,aresample=48000"
+        f"offset={meas['target_offset']}:linear=true{vol_extra},alimiter=limit=0.75:level=false,aresample=48000"
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     ffmpeg("-i", mix, "-c:v", "copy", "-af", ln, "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_path)
@@ -687,6 +698,23 @@ def main() -> None:
     tl.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
     print(f"\nDone: {out_path}")
+
+    if not getattr(a, "no_premiere", False):
+        try:
+            import premiere_export
+            pr_res = premiere_export.export_premiere_project(
+                plan=plan,
+                plan_path=plan_path,
+                out_dir=out_path.parent,
+                work_dir=plan_path.parent,
+                fps=fps,
+                width=W,
+                height=H,
+            )
+            print(f"Done (Premiere .prproj): {pr_res['prproj']}")
+            print(f"Done (Premiere .xml):    {pr_res['xml']}")
+        except Exception as exc:
+            print(f"[WARN] Premiere Pro export skipped: {exc}")
 
     if a.square or plan.get("square") or (plan.get("canvas") or {}).get("square"):
         sq_out = out_path.with_name(f"{out_path.stem}_1x1.mp4")

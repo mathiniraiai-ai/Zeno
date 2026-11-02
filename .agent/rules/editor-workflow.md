@@ -19,14 +19,16 @@ description: Low-token 3-step video editing workflow, hard boundaries, layout pr
 - **Mandatory End-of-Job Output**: Print the Token Usage table at the end of every job and append the new row to `README.md`:
   `| Date | Task | Context tokens (start → end) | Tokens used | 5-hour limit | Weekly limit |`
 
-## 3. The 3-Step Workflow
-1. **Analyse & Auto-Plan (`1 command`)**:
-   `python3 scripts/prepare.py input/footage/*.mp4 --script input/script/<script>.txt --lang <lang> [--preset auto|single|split_v|split_h|chat_bar|video_call|hybrid] [--mark-pack default|glossy|flash|vignette]`
-2. **Review Brief & Refine Plan (`1 read + 1 tiny edit`)**:
-   Read ONLY `work/<project>/brief.txt` (`~900 tokens`) and `work/<project>/plan.edl` (`~240 tokens`). Verify the layout mode (`single`, `split_v`, `split_h`, `chat_bar`, `video_call`, or `hybrid`), retakes, and `✓`/`✗` marks. Edit `plan.edl` (or `plan.json`) only where adjustments are needed.
-3. **Render & Verify (`1 command`)**:
-   `python3 scripts/render.py work/<project>/plan.edl --verify`
-   Renders the final MP4 to `~/Downloads/Zeno Outputs/`, runs deterministic script coverage & `-14 LUFS` loudness verification, and generates `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` marks).
+## 3. The 5-Stage Interactive Zeno Harness (`scripts/zeno.py`)
+0. **Stage 0 — Readiness Check**: `python3 scripts/zeno.py --check` (`[✓] Installed` vs `[✗] Remaining`).
+1. **Stages 1–3 — Ingest, Transcribe, Match & Pitch (`1 command` + 50s Live Heartbeat)**:
+   `python3 scripts/zeno.py --inspect <raw_dir_or_clips> --script <script_or_gdoc_url> [--lang <lang>] [--preset auto|single|split_v|split_h|chat_bar|video_call|hybrid] [--mark-pack default|glossy|flash|vignette]`
+   Schedule a 50s timer while running in the background and read `python3 scripts/progress.py` (`work/<project>/progress.json`) to post live stage updates in chat.
+2. **Stage 3 Gate — Refine Plan & Ask Yes/No (`Mandatory Stop`)**:
+   Read ONLY `work/<project>/brief.txt`, `work/<project>/plan.edl`, and `work/<project>/pitch_card.md`. Refine `plan.edl` using Agents 1–4, refresh the pitch card (`python3 scripts/zeno.py --pitch work/<project>/plan.edl`), present the **Editorial Pitch Card**, and **ask the user Yes/No** before rendering.
+3. **Stages 4–5 — Render, Premiere `.prproj` Export & Deep QC (`1 command` after Yes)**:
+   `python3 scripts/zeno.py --execute work/<project>/plan.edl [--square]`
+   Renders the final MP4 + `_1x1.mp4` + `.timeline.txt` + editable Adobe Premiere Pro project files (`.prproj` + `.premiere.xml`) to `~/Downloads/Zeno Outputs/`, runs deterministic script coverage & `-11.5 LUFS` loudness verification, and generates `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` marks).
 
 ## 4. Dynamic Layouts, Pre-Stitched Split Screens, 2-Pulse Overlays & 5-Agent Workflow
 - **Layouts**: `single` (full-frame + dynamic zoom-in/zoom-out, **AND straight matching with `zoom=1.0` for Google Flow pre-stitched vertical split-screen clips**), `split_v` (top/bottom 50/50 split for separate character files), `split_h` (left/right 50/50 split for separate character files), `chat_bar` (speaker + floating prompt bar), `video_call` (speaker + rounded PiP card), and `hybrid` (`auto` mix of `single` for monologues and split/PiP/chat_bar for dialogues).

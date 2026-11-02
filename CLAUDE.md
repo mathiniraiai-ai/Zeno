@@ -27,22 +27,24 @@ Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input
 | YYYY-MM-DD | **<Language> – "<Title>"** (<N> clips, <M> script lines): <MM:SS> final, <K> ✓/✗ marks → `~/Downloads/Zeno Outputs/<name>.mp4` | <start> → <end> | ~<delta> | <start>% → <end>% | <start>% → <end>% |
 ```
 
-## 3. The 3-Step Workflow
+## 3. The 5-Stage Interactive Zeno Harness (`scripts/zeno.py`)
 
-1. **Analyse & Auto-Plan (`1 command`)**:
+0. **Stage 0 — Edit Bay Readiness Check**:
+   `python3 scripts/zeno.py --check` (prints `[✓] Installed` vs `[✗] Remaining` across all 8 dependencies without reading `.env` secrets).
+1. **Stages 1–3 — Ingest, Transcribe, Match & Pitch (`1 command` + 50s Live Heartbeat)**:
    ```bash
-   python3 scripts/prepare.py input/footage/*.mp4 --script input/script/<script>.txt --lang <lang> [--preset auto|single|split_v|split_h|chat_bar|video_call|hybrid] [--mark-pack default|glossy|flash|vignette]
+   python3 scripts/zeno.py --inspect <raw_dir_or_clips> --script <script_path_or_google_doc_url> [--lang <lang>] [--preset auto|single|split_v|split_h|chat_bar|video_call|hybrid] [--mark-pack default|glossy|flash|vignette]
    ```
    - `<lang>`: `en`, `kn`/`kannada`, `ta`/`tamil`, `hi`/`hindi`, `te`/`telugu`, `ml`/`malayalam`, or `auto`.
-2. **Review Brief & Refine Plan (`1 read + 1 tiny edit`)**:
-   - Read **ONLY** `work/<project>/brief.txt` (`~900 tokens`) and `work/<project>/plan.edl` (`~240 tokens`).
-   - Verify layout mode (`single`, `split_v`, `split_h`, `chat_bar`, `video_call`, or `hybrid`), retake removal, pause-snapped cut points, and `✓`/`✗` marks.
-   - Edit `work/<project>/plan.edl` (or `plan.json`) only where adjustments are needed.
-3. **Render & Verify (`1 command`)**:
+   - Emits live stage progress every ~48s (`work/<project>/progress.json` / `python3 scripts/progress.py`). Schedule a 50s timer while running in the background so the user gets live stage updates in chat.
+2. **Stage 3 Gate — Refine Plan & Ask Yes/No Before Rendering (`Mandatory Stop`)**:
+   - Read **ONLY** `work/<project>/brief.txt`, `work/<project>/plan.edl`, and `work/<project>/pitch_card.md`.
+   - Refine `work/<project>/plan.edl` using Agents 1–4, refresh the pitch card (`python3 scripts/zeno.py --pitch work/<project>/plan.edl`), **present the Editorial Pitch Card**, and **ask the user Yes/No** before rendering.
+3. **Stages 4–5 — Render, Premiere `.prproj` Export & Verify (`1 command` after Yes)**:
    ```bash
-   python3 scripts/render.py work/<project>/plan.edl --verify [--square] [--loudness -11.5] [--gain-db +2.0]
+   python3 scripts/zeno.py --execute work/<project>/plan.edl [--square] [--loudness -11.5] [--gain-db +2.0]
    ```
-   - Renders `~/Downloads/Zeno Outputs/<name>.mp4` (plus `<name>_1x1.mp4` `1080×1080` blurred-background Square Meta Ad when `--square` is passed) + `~/Downloads/Zeno Outputs/<name>.timeline.txt`, runs deterministic script coverage & `-11.5 LUFS` (`-1.0 dBTP` cap) loudness check, and generates `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` marks). Use `vol=+3dB` on any segment in `plan.edl` for exact mid-video dB boosts.
+   - Renders `~/Downloads/Zeno Outputs/<name>.mp4` + `<name>_1x1.mp4` (`1080×1080` Square Meta Ad) + `<name>.timeline.txt` + **editable Adobe Premiere Pro project files** (`<name>.prproj` and `<name>.premiere.xml`), runs deterministic script coverage & `-11.5 LUFS` (`-1.0 dBTP` cap) loudness check, and generates `work/<project>/marks_contact_sheet.jpg`. Use `vol=+3dB` on any segment in `plan.edl` for exact mid-video dB boosts, or run `python3 scripts/premiere_export.py work/<project>/plan.edl` standalone.
 
 ## 4. The 5 Dynamic Layout Modes, Pre-Stitched Split Screens & Swappable Mark Packs
 

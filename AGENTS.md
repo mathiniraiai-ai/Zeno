@@ -35,27 +35,37 @@ Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Co
 
 ---
 
-## 3. The 3-Step Workflow
+## 3. The 5-Stage Interactive Zeno Harness (`scripts/zeno.py`)
 
-1. **Analyse & Auto-Plan (`1 command`)**:
+Zeno operates like a **Senior Human Video Editor** in 5 transparent stages with a **mandatory Pre-Render Yes/No Approval Gate** and **48–50s live backend progress updates**:
+
+0. **Stage 0 — Edit Bay Readiness Check (On First Clone / Greeting)**:
    ```bash
-   python3 scripts/prepare.py input/footage/*.mp4 \
-     --script input/script/<script>.txt \
-     --lang <lang> \
-     [--preset auto|single|split_v|split_h|chat_bar|video_call|hybrid] \
-     [--mark-pack default|glossy|flash|vignette]
+   python3 scripts/zeno.py --check
    ```
-2. **Review Brief & Refine Plan (`1 read + 1 tiny edit`)**:
-   - Read **ONLY** `work/<project>/brief.txt` (`~900 tokens`) and `work/<project>/plan.edl` (`~240 tokens`).
-   - Verify layout mode (`single`, `split_v`, `split_h`, `chat_bar`, `video_call`, or `hybrid`), retake pruning, pause-snapped cut points, and `✓`/`✗` marks.
-   - Edit `work/<project>/plan.edl` (or `work/<project>/plan.json`) only where adjustments are needed.
-3. **Render & Verify (`1 command`)**:
+   - Displays `[✓] Installed` vs `[✗] Remaining` across all 8 dependencies (`.venv`, FFmpeg, OpenCV/Pillow/SciPy, YuNet ONNX, `.env` key presence without reading secrets, Indic/UI fonts, SFX/Marks/Premiere `.prproj` shell, and `~/Downloads/Zeno Outputs/`).
+1. **Stages 1–3 — Ingest, Transcribe, Match & Pitch (`1 command` + 50s Live Heartbeat)**:
    ```bash
-   python3 scripts/render.py work/<project>/plan.edl --verify [--square] [--loudness -11.5] [--gain-db +2.0]
+   python3 scripts/zeno.py --inspect <raw_dir_or_clips> \
+     --script <script_path_or_google_doc_url> \
+     [--lang auto] [--preset auto|single|split_v|split_h|chat_bar|video_call|hybrid] \
+     [--mark-pack flash|vignette|glossy|default]
    ```
-   - Renders `~/Downloads/Zeno Outputs/<name>.mp4` (and `<name>_1x1.mp4` when `--square` is passed) + `~/Downloads/Zeno Outputs/<name>.timeline.txt`, runs deterministic script coverage & `-11.5 LUFS` (`-1.0 dBTP` cap) Meta Ads loudness verification, and outputs `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` overlays).
-   - **1:1 Square Meta Ads Export (`--square`)**: Splits the `9:16` video into 2 layers — **Layer 1 (Background)**: `1:1` (`1080×1080`) center crop with 5–10% Gaussian blur (`gblur=sigma=18`); **Layer 2 (Foreground)**: full sharp `9:16` clip (`608×1080`) placed in the exact center on top.
-   - **Per-Clip Audio Cap & Exact dB Control**: Every segment is automatically normalized to `-11.5 LUFS` (`-1.0 dB` peak limit) before stitching. Use `vol=+3dB` (or `vol=-2dB`) on any segment line in `plan.edl` to adjust a specific mid-demo segment's exact dB.
+   - **Stage 1 (Mapping)**: Scans raw clips, probes resolution/FPS/duration, and extracts 16kHz audio.
+   - **Stage 2 (Transcribing)**: Transcribes word-level timestamps, scores `[BEST_TAKE]` vs `[ALT_TAKE]`, and checks speaker voices.
+   - **Stage 3 (Matching & Editorial Pitch)**: Builds `work/<project>/brief.txt`, `work/<project>/plan.edl`, and `work/<project>/pitch_card.md`.
+   - **Live 50s Chat Heartbeat**: When running `--inspect` or `--execute` in the background, schedule a `50s` timer (`schedule` with `DurationSeconds=50`) and read `python3 scripts/progress.py` (`work/<project>/progress.json`) so the user sees live stage updates every ~50 seconds in chat.
+2. **Stage 3 Gate — Refine Plan & Ask Yes/No Before Rendering (`Mandatory Stop`)**:
+   - Read **ONLY** `work/<project>/brief.txt`, `work/<project>/plan.edl`, and `work/<project>/pitch_card.md`.
+   - Refine `plan.edl` using Agents 1–4 (text-only: script coverage, pause/retake cuts, zooms/layouts, transitions/2-pulse marks) and refresh the pitch card via `python3 scripts/zeno.py --pitch work/<project>/plan.edl`.
+   - **Present the Editorial Pitch Card** (Concept & Style, Speakers, Raw Clips Mapped, Listening Video, Timeline Plan, Marks/SFX, and Deliverables) and **ask the user Yes/No (`ask_question`)** before starting Stage 4 rendering.
+3. **Stages 4–5 — Render, Premiere `.prproj` Export & Deep QC (`1 command` after Yes)**:
+   ```bash
+   python3 scripts/zeno.py --execute work/<project>/plan.edl [--square] [--loudness -11.5] [--gain-db +2.0]
+   ```
+   - **Stage 4 (Editing & Rendering)**: Renders pause-snapped segments, dynamic layouts (`single`, `split_h`, `split_v`), stacked `"Stop Saying"` banners, transitions, and 2-pulse `✓`/`✗` flashes.
+   - **Stage 5 (Mastering, `.prproj` & Deep QC)**: Normalizes master audio to `-11.5 LUFS` (`-1.0 dBTP` cap), exports `~/Downloads/Zeno Outputs/<name>.mp4` + `<name>_1x1.mp4` (`1:1` Square Meta Ad) + `<name>.timeline.txt` + **editable Adobe Premiere Pro project files** (`<name>.prproj` and `<name>.premiere.xml`), and runs `verify.py` + `marks_contact_sheet.jpg`.
+   - *(Standalone CLI users can also run `python3 scripts/zeno.py <raw_dir> --script <url_or_path>` to run Stage 0 → Stages 1–3 → `[Y/n]` prompt → Stages 4–5 interactively in one command).*
 
 ---
 

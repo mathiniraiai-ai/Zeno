@@ -28,65 +28,62 @@ Complete reference for executing a script-led video edit inside this Zeno folder
 
 ---
 
-## 2. Step-by-Step Execution Procedure
+## 2. The 5-Stage Interactive Zeno Harness (`scripts/zeno.py`)
 
-### Step 1: Run `prepare.py` (1 Command)
+### Stage 0: Edit Bay Readiness Check (`--check`)
 
-Identify the footage files in `input/footage/` and the script in `input/script/` (or save a user-pasted script to `input/script/<project>.txt`). Run:
+When greeting the user or checking setup after a clone, run:
 
 ```bash
-python3 scripts/prepare.py input/footage/*.mp4 \
-  --script input/script/<script>.txt \
-  --lang <lang> \
+python3 scripts/zeno.py --check
+```
+
+Displays `[✓] Installed` vs `[✗] Remaining` across all 8 dependencies (`.venv`, FFmpeg/FFprobe, OpenCV/Pillow/SciPy, YuNet ONNX, `.env` key presence without reading secrets, Indic/UI fonts, SFX/Marks/Premiere `.prproj` shell, and `~/Downloads/Zeno Outputs/`).
+
+---
+
+### Stages 1–3: Ingest, Transcribe, Match & Pitch (`--inspect` + 50s Live Heartbeat)
+
+Pass the raw footage folder (or clip list) and script file (or Google Docs URL) to `zeno.py --inspect`:
+
+```bash
+python3 scripts/zeno.py --inspect <raw_dir_or_clips> \
+  --script <script_path_or_google_doc_url> \
+  --lang <auto|en|kn|ta|hi|te|ml> \
   --preset <auto|single|split_v|split_h|chat_bar|video_call|hybrid> \
-  --mark-pack <default|glossy|flash|vignette>
+  --mark-pack <flash|vignette|glossy|default>
 ```
 
-**Supported `--lang` values**:
-- `en` (English — Gemini Flash-Lite + Meta Wav2Vec2 95M forced alignment)
-- `kn` / `kannada`, `ta` / `tamil`, `hi` / `hindi`, `te` / `telugu`, `ml` / `malayalam` (Indic languages — Gemini Flash-Lite transcript + Meta Wav2Vec2 95M forced aligner with `uroman` & Indic G2P)
-- `auto` (auto-detects spoken language)
-
-**What `prepare.py` generates automatically**:
-- Extracts audio, detects silences, transcribes clips, and runs sub-word forced alignment (`<0.25s/clip` on Apple Silicon M2).
-- Aligns clips against `input/script/<script>.txt`, prunes retakes/false starts, snaps cuts to pauses, and detects `✓`/`✗` cue words.
-- Writes:
-  - `work/<project>/brief.txt` — Human/LLM-readable summary of all clips, candidate takes, detected pauses, and auto-selected cuts (`~900 tokens`).
-  - `work/<project>/plan.edl` — Compact pipe-delimited edit decision list (`~240 tokens`).
-  - `work/<project>/plan.json` — Full JSON mirror of `plan.edl`.
+**Live 50-Second Progress Updates**:
+- `zeno.py` runs `ProgressTracker` (`scripts/progress.py`), emitting unbuffered `[MM:SS] [HEARTBEAT | Stage X/5]` lines every 48 seconds and writing atomic snapshots to `work/<project>/progress.json` (`Stage 1: Mapping` → `Stage 2: Transcribing` → `Stage 3: Matching`).
+- When running `--inspect` or `--execute` in the background, schedule a `50s` timer (`schedule` with `DurationSeconds=50`) and read `python3 scripts/progress.py` so the user gets live stage updates in chat every ~50 seconds.
+- Writes `work/<project>/brief.txt`, `work/<project>/plan.edl`, and `work/<project>/pitch_card.md`.
 
 ---
 
-### Step 2: Review `brief.txt` & Refine `plan.edl` (1 Read + 1 Edit)
+### Stage 3 Gate: Review `brief.txt`, Refine `plan.edl` & Ask Yes/No (`Mandatory Stop`)
 
-1. Read `work/<project>/brief.txt` and `work/<project>/plan.edl`.
-2. Check every segment against the script:
-   - **Completeness**: Every script line is covered in the exact scripted order.
-   - **Retake Removal**: If a clip has multiple attempts at a line, confirm the cleanest, most natural take is selected (typically the last complete attempt, watching out for trailing AI babble or repeated words at clip edges).
-   - **Pause-Snapped Cuts**: Confirm `start` and `end` timestamps sit inside a silence/pause window or have `0.08–0.15s` padding around the first/last word.
-   - **Jump-Cut Disguise**: If two consecutive `single`-layout segments come from the same clip (`src`), set `zoom=1.08` (or `1.10`) on the second segment.
-   - **Layout Dynamics**: Confirm the layout mode matches the scene type (see Section 3).
-   - **Marks & SFX**: Confirm every right/wrong teaching moment has a `right` (`✓`) or `wrong` (`✗`) mark timed to when the judgement or target phrase occurs (`at` is seconds relative to the segment's `start`).
-3. Edit `work/<project>/plan.edl` (or `work/<project>/plan.json`) with your adjustments.
+1. Read `work/<project>/brief.txt`, `work/<project>/plan.edl`, and `work/<project>/pitch_card.md`.
+2. Refine `work/<project>/plan.edl` using Agents 1–4 (Completeness, Retake Removal, Pause-Snapped Cuts, Jump-Cut Disguise, Layout Dynamics, Live Listening Partner on `V2`, and 2-Pulse `✓`/`✗` Marks).
+3. Refresh the Editorial Pitch Card (`python3 scripts/zeno.py --pitch work/<project>/plan.edl`), **present the Pitch Card in chat**, and **ask the user Yes/No (`ask_question`)** before starting Stage 4 rendering.
 
 ---
 
-### Step 3: Render & Verify in One Pass (1 Command)
+### Stages 4–5: Render, Premiere `.prproj` Export & Deep QC (`--execute` after Yes)
+
+Once the user confirms **Yes**, run:
 
 ```bash
-python3 scripts/render.py work/<project>/plan.edl --verify
+python3 scripts/zeno.py --execute work/<project>/plan.edl --square
 ```
 
-**What `render.py --verify` does**:
-1. Parses `plan.edl` (and syncs `plan.json`).
-2. Renders each segment with exact frame rounding, `12ms` edge audio fades (zero clicks), dynamic layout compositing, and two-pass `-14 LUFS` EBU R128 loudness normalization.
-3. Writes `~/Downloads/Zeno Outputs/<name>.mp4` (H.264 CRF 18, AAC 192 kbps) and `~/Downloads/Zeno Outputs/<name>.timeline.txt`.
-4. **Deterministic Verification**:
-   - Checks that all scripted lines are present and in order without re-running expensive LLM loops.
-   - Verifies audio loudness and absence of clipping/dropouts.
-   - Generates `work/<project>/marks_contact_sheet.jpg` showing a composite grid of every `✓`/`✗` mark frame with timecodes.
-5. **Visual Check (`1 image read`)**:
-   - View `work/<project>/marks_contact_sheet.jpg` to confirm `✓`/`✗` badges and layouts look clean and unobstructed.
+**What `zeno.py --execute` (and `render.py --verify --square`) does**:
+1. **Stage 4 (Editing & Rendering)**: Renders each segment with frame-accurate cuts, `12ms` edge audio fades, dynamic layout compositing (`single`, `split_h`, `split_v`), stacked `"Stop Saying"` strikethrough banners, transitions, and 2-pulse `✓`/`✗` flashes.
+2. **Stage 5 (Mastering, `.prproj` & Deep QC)**:
+   - Normalizes master audio to `-11.5 LUFS` (`-1.0 dBTP` cap).
+   - Writes `~/Downloads/Zeno Outputs/<name>.mp4` (`9:16`), `<name>_1x1.mp4` (`1:1` Square Meta Ad), and `<name>.timeline.txt`.
+   - Exports **editable Adobe Premiere Pro project files** (`<name>.prproj` and `<name>.premiere.xml` via `scripts/premiere_export.py`) with non-destructive raw cuts (`V1` speaker, `V2` live listener, `V3–V5` banners, `V6` `✓`/`✗` marks, `A1` dialogue, `A3–A4` SFX).
+   - Runs **Agent 5 Post-Render Deep QC** (`verify.py` + `work/<project>/marks_contact_sheet.jpg`).
 
 ---
 

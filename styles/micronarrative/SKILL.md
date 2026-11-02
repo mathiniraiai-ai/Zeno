@@ -72,6 +72,11 @@ Always check how the split-screen raw footage was generated before assigning lay
 6. **Where Transitions Are Added**:
    - Placed **at scene boundaries** (e.g., Scene 1 → Scene 2, and Scene 2 Live Conversation → Scene 3 Vertical Split Screen) using `tr=warm_flash@0.38` (or Meta creative transitions: `whip_left`, `whip_right`, `zoom_burst`, `flash_zoom`, `slide_up`).
    - All transitions use **Zero-Audio-Loss (`tpad` video tail cloning + `0.00s` audio concat)** so zero words or syllables are ever swallowed at cuts.
+7. **4-Clip Split-Screen Workflow (2 Talking Clips + 2 Dedicated Listening Clips — Never Static Images)**:
+   - When the user provides **4 clips** for a `split_h` or `split_v` dialogue scene (Character A Talking, Character B Talking, Character A Listening, Character B Listening):
+     - While **Character A (`Robot` / `Miss Nova`, Left)** is speaking (`src="CharacterA_Talking.mp4"`), stitch **Character B's dedicated Listening video clip** on the Right (`peer="CharacterB:CharacterB_Listening.mp4@right"`).
+     - While **Character B (`Human` / `Lady`, Right)** is speaking (`src="CharacterB_Talking.mp4"`), stitch **Character A's dedicated Listening video clip** on the Left (`peer="CharacterA:CharacterA_Listening.mp4@left"`).
+     - [`scripts/layouts.py`](../../scripts/layouts.py) automatically plays and loops the dedicated listening video clip (`-stream_loop -1` + `trim=0:{exact}`) so the listening character is **100% live moving video** at all times (never a static screenshot).
 
 ---
 
