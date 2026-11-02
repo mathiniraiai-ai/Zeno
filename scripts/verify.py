@@ -17,6 +17,7 @@ Performs 5 deterministic checks and outputs a 5-line PASS/FAIL summary:
 from __future__ import annotations
 
 import argparse
+import array
 import json
 import re
 import subprocess
@@ -112,7 +113,7 @@ def check_loudness(mp4_path: Path, target_lufs: float = -11.5) -> Tuple[bool, fl
             "-i",
             str(mp4_path),
             "-af",
-            f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11:print_format=json",
+            f"loudnorm=I={target_lufs}:TP=-1.0:LRA=11:print_format=json",
             "-f",
             "null",
             "-",
@@ -122,27 +123,28 @@ def check_loudness(mp4_path: Path, target_lufs: float = -11.5) -> Tuple[bool, fl
         if m:
             meas = json.loads(m.group(0))
             i_lufs = float(meas.get("input_i", target_lufs))
-            tp_db = float(meas.get("input_tp", -1.5))
+            tp_db = float(meas.get("input_tp", -1.0))
             cache_data[key] = {"input_i": i_lufs, "input_tp": tp_db}
             try:
                 write_json(cache_path, cache_data)
             except Exception:
                 pass
         else:
-            i_lufs, tp_db = target_lufs, -1.5
+            i_lufs, tp_db = target_lufs, -1.0
 
-    ok = abs(i_lufs - target_lufs) <= 1.8 and tp_db <= -0.2
+    ok = abs(i_lufs - target_lufs) <= 1.8 and tp_db <= -0.5
     return ok, i_lufs, tp_db
 
 
-def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None) -> Tuple[bool, int, int, int]:
-    """Check cut boundaries against cached word spans + silences, plus rendered MP4 dead-air scan.
-    Returns (passed, clipped_words_count, long_pauses_count, masked_jump_cuts_count).
+def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None) -> Tuple[bool, int, int, int, int]:
+    """Check cut boundaries against cached word spans + silences, plus rendered MP4 dead-air and boundary click scan.
+    Returns (passed, clipped_words_count, long_pauses_count, masked_jump_cuts_count, boundary_clicks_count).
     """
     segs = plan.get("segments", [])
     clipped_words = 0
     long_pauses = 0
     jump_cuts_masked = 0
+    boundary_clicks = 0
 
     for i, s in enumerate(segs):
         stem = Path(str(s.get("src", ""))).stem
@@ -215,8 +217,46 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
         except Exception:
             pass
 
-    passed = (clipped_words == 0 and long_pauses == 0)
-    return passed, clipped_words, long_pauses, jump_cuts_masked
+    # Inspect ±8ms windows around each inter-segment splice for full-scale step clicks
+    if mp4_path is not None and mp4_path.is_file() and len(segs) > 1:
+        try:
+            fps = int((plan.get("canvas") or {}).get("fps", 24))
+            starts, _, _ = compute_timeline_starts(plan, fps)
+            r_pcm = subprocess.run(
+                [
+                    str(FFMPEG),
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    str(mp4_path),
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    "-f",
+                    "s16le",
+                    "-",
+                ],
+                capture_output=True,
+            )
+            if r_pcm.stdout:
+                pcm = array.array("h")
+                pcm.frombytes(r_pcm.stdout[: (len(r_pcm.stdout) // 2) * 2])
+                n_samp = len(pcm)
+                for jt in starts[1:]:
+                    c_idx = int(round(jt * 16000))
+                    lo = max(1, c_idx - 128)
+                    hi = min(n_samp - 1, c_idx + 128)
+                    if hi > lo:
+                        max_step = max(abs(int(pcm[k]) - int(pcm[k - 1])) for k in range(lo, hi))
+                        if max_step > 24000:
+                            boundary_clicks += 1
+        except Exception:
+            pass
+
+    passed = (clipped_words == 0 and long_pauses == 0 and boundary_clicks == 0)
+    return passed, clipped_words, long_pauses, jump_cuts_masked, boundary_clicks
 
 
 def check_script_coverage(
@@ -501,7 +541,7 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
     target_lufs = float((plan.get("audio") or {}).get("loudness", -11.5))
     audio_ok, i_lufs, tp_db = check_loudness(out_mp4, target_lufs=target_lufs)
 
-    cuts_ok, clipped_w, long_pauses, jc_masked = check_cuts_and_pauses(plan, mp4_path=out_mp4)
+    cuts_ok, clipped_w, long_pauses, jc_masked, b_clicks = check_cuts_and_pauses(plan, mp4_path=out_mp4)
 
     if not script_path:
         # Use the script this plan was prepared from (recorded by prepare.py), not just the first file in input/script/
@@ -539,7 +579,7 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
     )
     print(
         f"[CUTS   {'PASS' if cuts_ok else 'FAIL'}] {len(plan.get('segments', []))} segments verified: "
-        f"{clipped_w} clipped words, {long_pauses} internal pauses >1.3s, {jc_masked} jump-cuts masked (zoom 1.08x)"
+        f"{clipped_w} clipped words, {long_pauses} internal pauses >1.3s, {jc_masked} jump-cuts masked, {b_clicks} boundary clicks"
     )
     print(
         f"[SCRIPT {'PASS' if script_ok else 'FAIL'}] {cov_lines}/{tot_lines} script lines present in order "

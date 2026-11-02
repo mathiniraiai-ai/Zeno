@@ -117,6 +117,14 @@ _META_TRANSITIONS: Dict[str, Dict[str, Any]] = {
         "default_dur": 0.25,
         "post": lambda jt, fps=24: [f"dblur=angle=90:radius=24:enable='between(t,{max(0.0, jt - 0.08):.4f},{jt + 0.08:.4f})'"],
     },
+    "dip_to_black": {
+        "xfade": "fadeblack",
+        "default_dur": 0.30,
+    },
+    "dip_to_white": {
+        "xfade": "fadewhite",
+        "default_dur": 0.30,
+    },
 }
 
 
@@ -477,11 +485,14 @@ def main() -> None:
         fc.append(f"[{i}:a]asetpts=PTS-STARTPTS[sa{i}]")
     v, au = "[sv0]", "[sa0]"
     acc = durs[0]
+    xf_audio_dur = 0.045  # 45ms constant-power/triangular audio crossfade (zero drift via apad)
     for i in range(1, len(segs)):
         s = segs[i]
         nv, na = f"[v{i}]", f"[a{i}]"
         if s["_tr"] == "cut":
-            fc.append(f"{v}{au}[sv{i}][sa{i}]concat=n=2:v=1:a=1{nv}{na}")
+            fc.append(f"{v}[sv{i}]concat=n=2:v=1:a=0{nv}")
+            fc.append(f"{au}apad=pad_dur={xf_audio_dur:.4f}[ap{i}]")
+            fc.append(f"[ap{i}][sa{i}]acrossfade=d={xf_audio_dur:.4f}:c1=tri:c2=tri{na}")
             acc += durs[i]
         else:
             tr_name = s["_tr"]
@@ -493,7 +504,8 @@ def main() -> None:
             fc.append(f"{v}tpad=stop_mode=clone:stop={k_half},fps={fps}[xa{i}]")
             fc.append(f"[sv{i}]tpad=start_mode=clone:start={k_half + 1},fps={fps}[xb{i}]")
             fc.append(f"[xa{i}][xb{i}]xfade=transition={xfade_tr}:duration={d_xfade:.4f}:offset={offset_xfade:.4f}{nv}")
-            fc.append(f"{au}[sa{i}]concat=n=2:v=0:a=1{na}")
+            fc.append(f"{au}apad=pad_dur={xf_audio_dur:.4f}[ap{i}]")
+            fc.append(f"[ap{i}][sa{i}]acrossfade=d={xf_audio_dur:.4f}:c1=tri:c2=tri{na}")
             acc += durs[i]
         v, au = nv, na
 
@@ -605,12 +617,17 @@ def main() -> None:
             sfx_list.append((sfx_path, t, raw_g))
             log_fx.append((t, f"SFX {sfx_path.name} ({raw_g:+.1f}dB)"))
 
-    # Auto-attach custom whoosh.wav to visual transitions if not already scheduled at that cut
+    # Auto-attach custom whoosh.wav strictly to kinetic/flash transitions (never fade/dip_to_black/dip_to_white/cut)
+    _WHOOSH_TRANSITIONS = {
+        "whip_left", "whip_right", "flash_zoom", "zoom_burst",
+        "slide_up", "smoothleft", "smoothright", "warm_flash",
+    }
     whoosh_asset = resolve_sfx_asset("whoosh.wav", pack=sfx_pack)
     if whoosh_asset.is_file():
         for i in range(1, len(segs)):
             s = segs[i]
-            if s.get("_tr", "cut") != "cut" or s.get("_flash"):
+            eff_tr = str(s.get("_flash") or s.get("_tr", "cut")).lower()
+            if eff_tr in _WHOOSH_TRANSITIONS:
                 t_tr = float(starts[i])
                 already_has_whoosh = any(
                     abs(existing_t - t_tr) <= 0.35 and ("whoosh" in existing_p.name.lower() or "swish" in existing_p.name.lower() or "swoosh" in existing_p.name.lower())
@@ -627,16 +644,37 @@ def main() -> None:
                 sfx_list.append((sfx_path, t_auto, g_auto))
                 log_fx.append((t_auto, f"SFX {sfx_path.name}"))
 
+    # Subtle continuous -48 dBFS room-tone floor bridge so take-to-take noise floor never drops to digital zero
+    fc.append(
+        f"anoisesrc=d={total:.4f}:c=pink:r=48000:a=0.00398,"
+        f"highpass=f=80,lowpass=f=1800,aformat=channel_layouts=stereo[rtone]"
+    )
+    mix_inputs = [au, "[rtone]"]
+
+    # Optional style-driven background music bed with -18 dB ducking under speech (off by default)
+    music_spec = (plan.get("audio") or {}).get("music")
+    if music_spec:
+        music_path = resolve(str(music_spec))
+        if music_path.is_file():
+            music_gain = float((plan.get("audio") or {}).get("music_gain_db", -18.0))
+            inputs += ["-stream_loop", "-1", "-t", f"{total:.4f}", "-i", music_path]
+            fc.append(
+                f"[{n}:a]aresample=48000,aformat=channel_layouts=stereo,"
+                f"volume={music_gain:+.1f}dB,afade=t=in:d=0.5,afade=t=out:st={max(0.0, total - 0.8):.4f}:d=0.8[mbd]"
+            )
+            mix_inputs.append("[mbd]")
+            n += 1
+
     if sfx_list:
-        labels = []
         for k, (fpath, t, g) in enumerate(sfx_list):
             inputs += ["-i", fpath]
             ms = int(t * 1000)
             fc.append(f"[{n}:a]aresample=48000,aformat=channel_layouts=stereo,volume={g}dB,adelay={ms}|{ms}[sx{k}]")
-            labels.append(f"[sx{k}]")
+            mix_inputs.append(f"[sx{k}]")
             n += 1
-        fc.append(f"{au}{''.join(labels)}amix=inputs={len(labels) + 1}:normalize=0:duration=first[amx]")
-        au = "[amx]"
+
+    fc.append(f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:normalize=0:duration=first[amx]")
+    au = "[amx]"
 
     # 4) mix pass, then two-pass loudness normalisation into the final file
     loud = float(plan.get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))

@@ -591,6 +591,38 @@ def run_execute(
 # ============================================================================
 # CLI Entrypoint
 # ============================================================================
+def apply_stage3_tweaks(
+    plan_path: Path,
+    swap_layout: Optional[str] = None,
+    swap_takes: Optional[List[str]] = None,
+) -> None:
+    """Apply Stage 3 quick-tweak overrides (--swap-layout / --swap-take) directly to plan.edl."""
+    if not swap_layout and not swap_takes:
+        return
+    plan = edl_parser.load_edl(plan_path)
+    changed = False
+    if swap_layout:
+        plan["preset"] = swap_layout
+        for s in plan.get("segments", []):
+            if swap_layout == "single":
+                s.pop("layout", None)
+            elif s.get("layout") in ("split_h", "split_v", "chat_bar", "video_call") or swap_layout in ("split_h", "split_v"):
+                s["layout"] = swap_layout
+        changed = True
+    if swap_takes:
+        for item in swap_takes:
+            if "=" not in item:
+                continue
+            seg_id, new_src = [p.strip() for p in item.split("=", 1)]
+            for s in plan.get("segments", []):
+                if str(s.get("id")) == seg_id:
+                    s["src"] = new_src
+                    changed = True
+    if changed:
+        plan_path.write_text(edl_parser.format_edl(plan), encoding="utf-8")
+        common.write_json(plan_path.with_suffix(".json"), plan)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description="Zeno — 5-Stage Standalone & Conversational AI Video Editor Harness"
@@ -627,6 +659,19 @@ def main() -> None:
     ap.add_argument("--loudness", type=float, default=None, help="Target loudness in LUFS (default: -11.5)")
     ap.add_argument("--gain-db", type=float, default=None, help="Additional master gain in dB")
     ap.add_argument("--draft", action="store_true", help="Fast draft encode")
+    ap.add_argument(
+        "--swap-layout",
+        choices=["single", "split_h", "split_v", "chat_bar", "video_call"],
+        default=None,
+        help="Stage 3 quick-tweak: swap dialogue layout across segments in plan.edl",
+    )
+    ap.add_argument(
+        "--swap-take",
+        action="append",
+        default=None,
+        metavar="SEG_ID=CLIP",
+        help="Stage 3 quick-tweak: swap a segment's take (e.g. --swap-take L3=S4.mp4)",
+    )
     ap.add_argument("--yes", "-y", action="store_true", help="Auto-confirm the Stage 3 Yes/No gate in standalone mode")
     args = ap.parse_args()
 
@@ -636,10 +681,13 @@ def main() -> None:
 
     if args.pitch:
         p_path = common.resolve(args.pitch)
+        apply_stage3_tweaks(p_path, swap_layout=args.swap_layout, swap_takes=args.swap_take)
         print(build_editorial_pitch_card(p_path.parent, p_path))
         sys.exit(0)
 
     if args.execute:
+        p_path = common.resolve(args.execute)
+        apply_stage3_tweaks(p_path, swap_layout=args.swap_layout, swap_takes=args.swap_take)
         rc = run_execute(
             args.execute,
             square=args.square,

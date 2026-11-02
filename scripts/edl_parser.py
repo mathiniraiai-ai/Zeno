@@ -406,9 +406,22 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                 elif k in ("zoom_style", "z_style"):
                     seg["zoom_style"] = v_unq.strip().lower()
                 elif k == "focus":
+                    if "->" in v_unq:
+                        f_left, f_right = v_unq.split("->", 1)
+                        p0 = [float(x) for x in f_left.strip("[]()").split(",") if x.strip()]
+                        p1 = [float(x) for x in f_right.strip("[]()").split(",") if x.strip()]
+                        if len(p0) >= 2:
+                            seg["focus"] = [round(p0[0], 4), round(p0[1], 4)]
+                        if len(p1) >= 2:
+                            seg["focus_end"] = [round(p1[0], 4), round(p1[1], 4)]
+                    else:
+                        parts = [float(x) for x in v_unq.strip("[]()").split(",") if x.strip()]
+                        if len(parts) >= 2:
+                            seg["focus"] = [round(parts[0], 4), round(parts[1], 4)]
+                elif k == "focus_end":
                     parts = [float(x) for x in v_unq.strip("[]()").split(",") if x.strip()]
                     if len(parts) >= 2:
-                        seg["focus"] = [round(parts[0], 4), round(parts[1], 4)]
+                        seg["focus_end"] = [round(parts[0], 4), round(parts[1], 4)]
                 elif k in ("sp", "speaker"):
                     seg["speaker"] = v_unq.replace("_", " ")
                 elif k == "scene":
@@ -669,7 +682,14 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
             toks.append(f"z={_fmt_num(s['zoom'])}")
 
         if s.get("focus") and isinstance(s["focus"], (list, tuple)) and len(s["focus"]) >= 2:
-            toks.append(f"focus={_fmt_num(s['focus'][0])},{_fmt_num(s['focus'][1])}")
+            f0_s = f"{_fmt_num(s['focus'][0])},{_fmt_num(s['focus'][1])}"
+            fe = s.get("focus_end")
+            if isinstance(fe, (list, tuple)) and len(fe) >= 2 and (
+                abs(float(fe[0]) - float(s["focus"][0])) > 0.005 or abs(float(fe[1]) - float(s["focus"][1])) > 0.005
+            ):
+                toks.append(f"focus={f0_s}->{_fmt_num(fe[0])},{_fmt_num(fe[1])}")
+            else:
+                toks.append(f"focus={f0_s}")
 
         if s.get("speaker"):
             toks.append(f"sp={_quote_if_needed(str(s['speaker']))}")

@@ -631,19 +631,31 @@ def match_clips_to_script_lines(
         return
     beat_lines = [l for l in script_lines if l.get("beat")]
     speech_lines = [l for l in script_lines if not l.get("beat")]
-    # clips with (almost) no speech carry the script's silent beats, in order
+    # clips with (almost) no speech carry the script's silent beats, or serve as listening reaction clips (`peer=`)
     def _is_silent(c: Dict[str, Any]) -> bool:
         ws = c.get("hq_words") or []
-        return not ws or (len(ws) <= 2 and sum(float(w["end"]) - float(w["start"]) for w in ws) < 0.8)
-    silent = [c for c in clips_data if _is_silent(c)] if beat_lines else []
+        dur = float((c.get("info") or {}).get("duration") or 1.0)
+        speech_sec = sum(float(w["end"]) - float(w["start"]) for w in ws)
+        speech_ratio = speech_sec / max(0.1, dur)
+        return not ws or speech_ratio < 0.08 or (len(ws) <= 2 and speech_sec < 0.8)
+
+    all_silent = [c for c in clips_data if _is_silent(c)]
+    for c in all_silent:
+        c["is_listening"] = True
+    silent = all_silent[:len(beat_lines)] if beat_lines else []
     for c, bl in zip(silent, beat_lines):
         c["matched_lines"] = [bl]
         c["is_beat"] = True
         c["take_group"] = id(c)
+    for c in all_silent[len(beat_lines):]:
+        c["matched_lines"] = []
+        c["dropped_take"] = True
+        c["take_group"] = id(c)
+        c["anomalies"].append(f"[LISTENING_CLIP] {c['stem']} detected as silent listening reaction clip (auto-paired via peer=)")
     for bl in beat_lines[len(silent):]:
         if clips_data:
             clips_data[0]["anomalies"].append(f"[BEAT_NO_CLIP] {bl['id']} ({bl['text'][:40]}): no silent clip for this beat; add the clip or accept the gap")
-    clips_data = [c for c in clips_data if not c.get("is_beat")]
+    clips_data = [c for c in clips_data if not c.get("is_beat") and not c.get("is_listening")]
     script_lines = speech_lines
     if not clips_data:
         return
@@ -1127,17 +1139,15 @@ def detect_clip_anomalies_and_cuts(
                 None,
             )
             if lead_sil:
-                # Natural breath lead-in (0.11s - 0.18s before silence end)
-                pad_in = 0.18 if lead_sil["start"] > 0.30 else (0.16 if 0.50 <= lead_sil["end"] < 0.65 else 0.13)
-                if stem == "S7":
-                    pad_in = 0.14
-                elif stem in ("S9", "S10", "S15"):
-                    pad_in = 0.11
-                elif stem == "S13":
-                    pad_in = 0.15
-                elif stem == "S16":
-                    pad_in = 0.17
-                clip_start = round(max(0.0, lead_sil["end"] - pad_in), 2)
+                # Derive natural breath lead-in dynamically from the clip's own 10ms RMS envelope
+                min_t, _ = find_rms_minimum(
+                    rms_env,
+                    max(0.0, lead_sil["end"] - 0.25),
+                    words[0]["start"],
+                    prefer_center=False,
+                )
+                onset_t = next((t for t, db in rms_env if t >= min_t and db > -32.0), lead_sil["end"])
+                clip_start = round(max(0.0, min(onset_t - 0.14, min_t, lead_sil["end"] - 0.11)), 2)
 
         # Check for Intra-Clip Phrase Repeat at Tail ([TAIL_REPEAT] e.g. S2 "Do you want coffee? Do you want coffee?")
         phrase_repeat_cut: Optional[float] = None
@@ -1214,47 +1224,26 @@ def detect_clip_anomalies_and_cuts(
 
             if len(active_tail_frames) >= 15 or extra_base_words or unaligned_tail_gap:
                 if tail_sil:
-                    pad_out = 0.14 if tail_sil["start"] <= last_word_end + 0.05 else 0.16
-                    if stem == "S3":
-                        clip_end = round(min(6.30, last_word_end + 0.16), 2) if last_word_end >= 6.10 else 6.30
-                    elif stem == "S10":
-                        clip_end = round(tail_sil["start"] + 0.13, 2)
-                    else:
-                        clip_end = round(tail_sil["start"] + pad_out, 2)
+                    min_t, _ = find_rms_minimum(
+                        rms_env,
+                        max(last_word_end, tail_sil["start"]),
+                        min(dur, tail_sil["start"] + 0.24),
+                        prefer_center=True,
+                    )
+                    clip_end = round(min(dur, max(last_word_end + 0.08, min_t)), 2)
                 else:
-                    clip_end = round(last_word_end + 0.14, 2)
+                    clip_end = round(min(dur, last_word_end + 0.14), 2)
                 babble_start = active_tail_frames[0] if active_tail_frames else (tail_sil["end"] if tail_sil else clip_end)
                 clip["anomalies"].append(
                     f"[TAIL_BABBLE_CUT] trimmed at {clip_end:.2f}s (untranscribed tail audio {babble_start:.2f}-{dur:.2f}s)"
                 )
             elif tail_sil:
-                if stem == "S1":
-                    clip_end = round(tail_sil["start"] + 0.145, 2)
-                elif stem == "S6":
-                    clip_end = round(last_word_end + 0.15, 2)
-                elif stem in ("S7", "S8"):
-                    clip_end = round(tail_sil["start"] + 0.103, 2)
-                elif stem == "S9":
-                    clip_end = round(last_word_end, 2)
-                elif stem == "S12":
-                    clip_end = round(tail_sil["start"] + 0.13, 2)
-                elif stem == "S13":
-                    clip_end = round(tail_sil["start"] + 0.227, 2)
-                elif stem == "S16":
-                    clip_end = round(tail_sil["start"] + 0.174, 2)
-                else:
-                    clip_end = round(min(dur, max(last_word_end, tail_sil["start"]) + 0.14), 2)
+                anchor = max(last_word_end, tail_sil["start"])
+                min_t, _ = find_rms_minimum(rms_env, anchor, min(dur, anchor + 0.26), prefer_center=True)
+                clip_end = round(min(dur, max(last_word_end + 0.08, min_t)), 2)
             else:
-                if stem == "S11":
-                    clip_end = round(last_word_end + 0.09, 2)
-                elif stem == "S14":
-                    clip_end = round(last_word_end + 0.12, 2)
-                elif stem == "S15":
-                    clip_end = round(last_word_end + 0.16, 2)
-                elif stem == "S17":
-                    clip_end = round(last_word_end + 0.08, 2)
-                else:
-                    clip_end = round(min(dur, last_word_end + 0.12), 2)
+                min_t, _ = find_rms_minimum(rms_env, last_word_end, min(dur, last_word_end + 0.22), prefer_center=True)
+                clip_end = round(min(dur, max(last_word_end + 0.08, min_t)), 2)
 
         # A note like "(laughs mockingly)" or "(cries)" on this line: keep the reaction after the last word (up to 1.2 s)
         note_text = " ".join(str(l.get("note") or "") for l in matched_lines)
@@ -1342,12 +1331,19 @@ def detect_clip_anomalies_and_cuts(
         if internal_pauses:
             p_sil = internal_pauses[0]
             p_dur = p_sil["end"] - p_sil["start"]
-            pad_out = 0.21 if stem == "S2" else 0.22
-            pad_in = 0.17 if stem == "S2" else 0.21
-            seg1_end = round(p_sil["start"] + pad_out, 2)
-            seg2_start = round(p_sil["end"] - pad_in, 2)
             w_part1 = [w for w in words if w["start"] < p_sil["start"] + 0.15]
             w_part2 = [w for w in words if w["end"] > p_sil["end"] - 0.15]
+            pre_txt = " ".join(w["w"] for w in w_part1)
+            is_beat_turn = any(p in pre_txt for p in ("?", "!")) or any(l.get("mark") for l in matched_lines)
+            target_gap = 0.28 if is_beat_turn else 0.17
+            out_min, _ = find_rms_minimum(
+                rms_env, p_sil["start"], min(p_sil["end"], p_sil["start"] + 0.26), prefer_center=True
+            )
+            in_min, _ = find_rms_minimum(
+                rms_env, max(p_sil["start"], p_sil["end"] - 0.26), p_sil["end"], prefer_center=False
+            )
+            seg1_end = round(min(p_sil["end"], max(p_sil["start"] + 0.14, out_min + target_gap * 0.55)), 2)
+            seg2_start = round(max(seg1_end, min(p_sil["end"] - 0.12, in_min - target_gap * 0.45)), 2)
 
             clip["anomalies"].append(
                 f"[PAUSE_SPLIT] {p_dur:.2f}s internal pause ({p_sil['start']:.2f}-{p_sil['end']:.2f}s tightened to {seg1_end:.2f}/{seg2_start:.2f}s with zoom=1.08)"
@@ -1385,6 +1381,15 @@ def detect_clip_anomalies_and_cuts(
                 "reason": "full_clean",
             })
 
+    # Pacing Pass: flag / re-energize long static shots (>6.0s) and monotonous equal-length runs
+    for s_idx, rseg in enumerate(raw_segments):
+        seg_dur = round(float(rseg["end"]) - float(rseg["start"]), 2)
+        if seg_dur > 6.0 and float(rseg.get("zoom", 1.0)) == 1.0 and not rseg.get("zoom_to"):
+            rseg["zoom_to"] = 1.06
+            rseg["clip"]["anomalies"].append(
+                f"[PACING_PASS] {rseg['stem']} ({seg_dur:.2f}s > 6.0s): added dynamic zoom motion so shot never stays static"
+            )
+
     return raw_segments
 
 
@@ -1394,10 +1399,21 @@ def assign_segment_ids_marks_and_layouts(
     clips_data: List[Dict[str, Any]],
     preset: str = "auto",
     mark_pack: str = "default",
+    all_clips: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], str]:
     """Assign segment IDs (L1..L21, with a/b/c suffixes for multi-part lines),
     auto-place WRONG/RIGHT marks from script tags, and apply layouts & slow-push zooms.
     """
+    pool_clips = all_clips if all_clips is not None else clips_data
+    listening_pool = [
+        c for c in pool_clips
+        if c.get("is_listening") or "listen" in str(c.get("stem", "")).lower() or "idle" in str(c.get("stem", "")).lower()
+    ]
+    all_speakers: List[str] = []
+    for l in script_lines:
+        sp = l.get("speaker")
+        if sp and sp not in all_speakers:
+            all_speakers.append(sp)
     # Map each raw segment to the script line(s) it covers
     for seg in raw_segments:
         clip = seg["clip"]
@@ -1492,11 +1508,78 @@ def assign_segment_ids_marks_and_layouts(
         if layout_mode and layout_mode != "single":
             seg_dict["layout"] = layout_mode
 
+        # Auto-populate peer= for split_h / split_v / video_call using silent listening clips or opposite speaker's idle span
+        if layout_mode in ("split_h", "split_v", "video_call") and not seg_dict.get("peer"):
+            cur_spk = spk_list[0] if spk_list else ""
+            other_spk = next((s for s in all_speakers if s != cur_spk), cur_spk or "Peer")
+            peer_clip = None
+            for lc in listening_pool:
+                if lc["src"] != seg["src"] and (not other_spk or other_spk.lower() in str(lc["stem"]).lower()):
+                    peer_clip = lc
+                    break
+            if peer_clip is None and listening_pool:
+                peer_clip = next((lc for lc in listening_pool if lc["src"] != seg["src"]), listening_pool[0])
+            if peer_clip is not None:
+                l_dur = float((peer_clip.get("info") or {}).get("duration") or dur)
+                seg_dict["peer"] = {
+                    "speaker": other_spk,
+                    "src": peer_clip["src"],
+                    "idle_span": [0.0, round(min(max(2.0, dur), l_dur), 2)],
+                    "mode": "loop",
+                }
+            else:
+                # Fallback: find a silent span in any clip spoken by other_spk
+                other_clip = next(
+                    (c for c in pool_clips if c["src"] != seg["src"] and any(l.get("speaker") == other_spk for l in c.get("matched_lines", []))),
+                    None,
+                )
+                if other_clip is not None:
+                    sils = other_clip.get("macro_silences") or []
+                    best_sil = max(sils, key=lambda s: float(s["end"]) - float(s["start"]), default=None)
+                    c_dur = float((other_clip.get("info") or {}).get("duration") or 3.0)
+                    span = [round(float(best_sil["start"]), 2), round(float(best_sil["end"]), 2)] if best_sil and (best_sil["end"] - best_sil["start"]) >= 0.8 else [0.0, round(min(2.5, c_dur), 2)]
+                    seg_dict["peer"] = {
+                        "speaker": other_spk,
+                        "src": other_clip["src"],
+                        "idle_span": span,
+                        "mode": "loop",
+                    }
+
+        # Auto-extract stacked "Stop Saying" banner on Scene 1 / Hook when script opens with "Stop saying ..."
+        if idx == 0 and lines:
+            first_txt = lines[0].get("text", "")
+            m_stop = re.search(r"stop\s+saying\s+['\"“”‘’]?([^'\"“”‘’.,!?]+)['\"“”‘’]?", first_txt, re.I)
+            if m_stop:
+                phrase = m_stop.group(1).strip()
+                if phrase:
+                    seg_dict["banners"] = [{
+                        "kind": "stop_saying",
+                        "title": "Stop Saying",
+                        "phrase": f'"{phrase}"',
+                        "at": 0.0,
+                        "duration": round(min(dur, 4.2), 2),
+                    }]
+
+        # Auto-assign intentional transitions on scene/topic shifts
+        if segments_out:
+            prev_seg = segments_out[-1]
+            prev_lay = prev_seg.get("layout", "single")
+            cur_lay = seg_dict.get("layout", "single")
+            prev_scene = prev_seg.get("scene", "")
+            if prev_scene and scene_name and prev_scene != scene_name:
+                # Topic / scene boundary -> smooth transition
+                seg_dict["transition"] = "smoothleft" if cur_lay in ("split_h", "split_v") else ("smoothright" if prev_lay in ("split_h", "split_v") else "fade")
+                seg_dict["transition_duration"] = 0.28
+
         if zoom != 1.0:
             seg_dict["zoom"] = zoom
             seg_dict["focus"] = seg.get("focus", [0.5, 0.4])
+        elif seg.get("zoom_to"):
+            seg_dict["zoom"] = 1.0
+            seg_dict["zoom_to"] = float(seg["zoom_to"])
+            seg_dict["focus"] = seg.get("focus", [0.5, 0.42])
         elif dur >= LONG_MONOLOGUE_ZOOM_SEC and len(lines) == 1:
-            # Subtle slow push on long solo monologues (>8.95s, e.g. S11 9.95s, S14 9.98s, S17 9.65s)
+            # Subtle slow push on long solo monologues (>8.95s)
             is_closing_cta = (idx == len(raw_segments) - 1)
             seg_dict["zoom_to"] = 1.05 if is_closing_cta else 1.06
             seg_dict["focus"] = [0.5, 0.45]
@@ -1811,6 +1894,7 @@ def main() -> None:
         kept_clips,
         preset=args.preset,
         mark_pack=args.mark_pack,
+        all_clips=clips_data,
     )
 
     first_info = clips_data[0]["info"]

@@ -698,10 +698,25 @@ def analyze_clip_vision(
                 for k in range(2)
             ]
             avg_focus = compute_eye_anchored_focus(avg_bbox, avg_eye)
+            # Deadband-smoothed focus path (first half vs second half)
+            half_idx = max(1, len(one_face_frames) // 2)
+            first_h = one_face_frames[:half_idx]
+            last_h = one_face_frames[half_idx:] or first_h
+            bbox_0 = [round(sum(fl[0]["bbox_norm"][k] for fl in first_h) / len(first_h), 4) for k in range(4)]
+            eye_0 = [round(sum(fl[0]["eye_center_norm"][k] for fl in first_h) / len(first_h), 4) for k in range(2)]
+            bbox_1 = [round(sum(fl[0]["bbox_norm"][k] for fl in last_h) / len(last_h), 4) for k in range(4)]
+            eye_1 = [round(sum(fl[0]["eye_center_norm"][k] for fl in last_h) / len(last_h), 4) for k in range(2)]
+            f0 = compute_eye_anchored_focus(bbox_0, eye_0)
+            f1 = compute_eye_anchored_focus(bbox_1, eye_1)
+            if math.hypot(f1[0] - f0[0], f1[1] - f0[1]) > 0.04:
+                focus_start, focus_end = f0, f1
+            else:
+                focus_start, focus_end = avg_focus, avg_focus
             primary = dict(one_face_frames[len(one_face_frames) // 2][0])
             primary["bbox_norm"] = avg_bbox
             primary["eye_center_norm"] = avg_eye
-            primary["focus"] = avg_focus
+            primary["focus"] = focus_start
+            primary["focus_end"] = focus_end
             primary["headroom_pct"] = round(avg_bbox[1] * 100.0, 2)
             primary["eyeline_pct"] = round(avg_eye[1] * 100.0, 2)
             rep_faces = [primary]
@@ -757,6 +772,7 @@ def analyze_clip_vision(
         "face_count": face_count,
         "shot_type": shot_type,
         "focus": primary_face["focus"],
+        "focus_end": primary_face.get("focus_end", primary_face["focus"]),
         "bbox_norm": primary_face["bbox_norm"],
         "eye_center_norm": primary_face["eye_center_norm"],
         "headroom_pct": primary_face["headroom_pct"],

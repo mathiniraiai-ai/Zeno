@@ -14,9 +14,12 @@ Supports all 5 layout families:
 """
 from __future__ import annotations
 
+import array
 import hashlib
 import json
+import math
 import re
+import wave
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -27,6 +30,7 @@ from common import (
     SFX_DIR,
     WORK,
     _normalize_mark_type,
+    clip_work_dir,
     ffmpeg,
     probe,
     resolve,
@@ -381,12 +385,142 @@ def detect_static_camera_motion(
     return score
 
 
+_RMS_GAIN_CACHE: Dict[str, float] = {}
+_COLOR_MATCH_CACHE: Dict[str, Optional[str]] = {}
+
+
+def _measure_clip_rms_gain_db(src: Path, target_dbfs: float = -18.0) -> float:
+    """Measure active-speech RMS of `src` and return a 1-number per-clip gain offset in dB
+    so natural intra-sentence dynamics are preserved without double loudnorm/dynaudnorm.
+    """
+    sig = _file_mtime_sig(src)
+    if sig in _RMS_GAIN_CACHE:
+        return _RMS_GAIN_CACHE[sig]
+    try:
+        wdir = clip_work_dir(src)
+        wav_path = wdir / "audio16k.wav"
+        if not wav_path.is_file():
+            wav_path = wdir / "audio.wav"
+        if not wav_path.is_file():
+            _RMS_GAIN_CACHE[sig] = 0.0
+            return 0.0
+        with wave.open(str(wav_path), "rb") as wf:
+            sr = wf.getframerate() or 16000
+            raw = wf.readframes(wf.getnframes())
+        samples = array.array("h")
+        samples.frombytes(raw[: (len(raw) // 2) * 2])
+        win = max(160, sr // 20)  # 50ms windows
+        active_sq: List[float] = []
+        for idx in range(0, len(samples) - win, win):
+            chunk = samples[idx : idx + win]
+            ms = sum(float(s) * float(s) for s in chunk) / len(chunk)
+            if ms > 1e-3:
+                dbfs = 10.0 * math.log10(ms / (32768.0 * 32768.0))
+                if dbfs > -42.0:
+                    active_sq.append(ms)
+        if not active_sq:
+            _RMS_GAIN_CACHE[sig] = 0.0
+            return 0.0
+        mean_ms = sum(active_sq) / len(active_sq)
+        clip_dbfs = 10.0 * math.log10(mean_ms / (32768.0 * 32768.0))
+        gain_db = round(max(-8.0, min(10.0, target_dbfs - clip_dbfs)), 2)
+        _RMS_GAIN_CACHE[sig] = gain_db
+        return gain_db
+    except Exception:
+        _RMS_GAIN_CACHE[sig] = 0.0
+        return 0.0
+
+
+def compute_face_color_match_filter(
+    seg: Dict[str, Any],
+    plan: Optional[Dict[str, Any]] = None,
+    target_luma: float = 132.0,
+    target_rg: float = 1.08,
+    target_bg: float = 0.92,
+) -> Optional[str]:
+    """Measure exposure (Y) and white balance (R/G, B/G) strictly inside the inner 60% of
+    the speaker's face ROI and return a tightly clamped FFmpeg `eq` + `colorbalance` filter
+    (plus optional `.cube` LUT) ONLY when explicitly requested (`color_match=True` or `lut` set).
+    OFF by default so raw clip colours are never altered unintentionally.
+    """
+    lut_spec = seg.get("lut") or (plan or {}).get("lut") or ((plan or {}).get("canvas") or {}).get("lut")
+    color_enabled = bool(seg.get("color_match") is True or (plan or {}).get("color_match") is True)
+    if not color_enabled and not lut_spec:
+        return None
+    src = resolve(seg["src"])
+    if not src.is_file():
+        return None
+    start_s = float(seg.get("start", 0.0))
+    end_s = float(seg.get("end", start_s + 1.0))
+    cache_key = f"{_file_mtime_sig(src)}|{start_s:.2f}|{end_s:.2f}|{color_enabled}|{lut_spec or ''}"
+    if cache_key in _COLOR_MATCH_CACHE:
+        return _COLOR_MATCH_CACHE[cache_key]
+
+    filt_parts: List[str] = []
+    try:
+        import cv2
+        import numpy as np
+
+        cap = cv2.VideoCapture(str(src))
+        if cap.isOpened():
+            t_mid = max(0.0, 0.5 * (start_s + end_s))
+            cap.set(cv2.CAP_PROP_POS_MSEC, t_mid * 1000.0)
+            ok, frame = cap.read()
+            cap.release()
+            if ok and frame is not None and frame.size > 0:
+                fh, fw = frame.shape[:2]
+                bbox = seg.get("bbox_norm")
+                if not bbox:
+                    try:
+                        vis = analyze_clip_vision(src)
+                        bbox = vis.get("bbox_norm")
+                    except Exception:
+                        bbox = None
+                if not bbox or len(bbox) < 4:
+                    bbox = [0.28, 0.16, 0.72, 0.78]
+                x0, y0, x1, y1 = [float(v) for v in bbox[:4]]
+                bw = max(0.08, x1 - x0)
+                bh = max(0.08, y1 - y0)
+                rx0 = max(0, min(fw - 2, int((x0 + 0.20 * bw) * fw)))
+                ry0 = max(0, min(fh - 2, int((y0 + 0.20 * bh) * fh)))
+                rx1 = max(rx0 + 2, min(fw, int((x1 - 0.20 * bw) * fw)))
+                ry1 = max(ry0 + 2, min(fh, int((y1 - 0.20 * bh) * fh)))
+                roi = frame[ry0:ry1, rx0:rx1]
+                if roi.size > 0:
+                    b_mean = float(np.mean(roi[:, :, 0]))
+                    g_mean = float(np.mean(roi[:, :, 1]))
+                    r_mean = float(np.mean(roi[:, :, 2]))
+                    luma = 0.299 * r_mean + 0.587 * g_mean + 0.114 * b_mean
+                    luma_plane = 0.299 * roi[:, :, 2] + 0.587 * roi[:, :, 1] + 0.114 * roi[:, :, 0]
+                    std_y = float(np.std(luma_plane))
+                    br = round(max(-0.04, min(0.04, (target_luma - luma) / 255.0 * 0.45)), 4)
+                    ct = round(max(0.96, min(1.04, 42.0 / max(24.0, std_y))), 3)
+                    rs = round(max(-0.05, min(0.05, (target_rg - r_mean / max(1.0, g_mean)) * 0.35)), 4)
+                    bs = round(max(-0.05, min(0.05, (target_bg - b_mean / max(1.0, g_mean)) * 0.35)), 4)
+                    if abs(br) >= 0.004 or abs(ct - 1.0) >= 0.008:
+                        filt_parts.append(f"eq=brightness={br:.4f}:contrast={ct:.3f}")
+                    if abs(rs) >= 0.005 or abs(bs) >= 0.005:
+                        filt_parts.append(f"colorbalance=rs={rs:.4f}:bs={bs:.4f}")
+    except Exception:
+        pass
+
+    if lut_spec:
+        lut_path = resolve(str(lut_spec))
+        if lut_path.is_file():
+            filt_parts.append(f"lut3d='{lut_path.as_posix()}'")
+
+    res = ",".join(filt_parts) if filt_parts else None
+    _COLOR_MATCH_CACHE[cache_key] = res
+    return res
+
+
 def resolve_segment_zoom_spec(
     seg: Dict[str, Any],
     exact_dur: float,
 ) -> Tuple[float, float, str, float, float]:
-    """Return `(z0, z1, zoom_style, zoom_at, zoom_dur)` for `seg`, applying OpenCV
-    static-shot auto-zoom when a clip has no camera movement and no explicit zoom.
+    """Return `(z0, z1, zoom_style, zoom_at, zoom_dur)` for `seg`, applying transcript-intent
+    zooms (push-ins on questions/hooks, pull-outs on resolutions/answers, and emphasis-word
+    punch-ins) when no explicit zoom is set.
     """
     z0_raw = seg.get("zoom")
     z1_raw = seg.get("zoom_to")
@@ -436,11 +570,31 @@ def resolve_segment_zoom_spec(
         )
         if bg_motion < 2.8:
             sid_str = str(seg.get("id") or "S1")
-            parity = sum(ord(c) for c in sid_str) % 2
-            if exact_dur >= 4.0 or parity == 0:
+            note = str(seg.get("note") or seg.get("text") or "")
+            # 1. Check for emphasis words inside segment word timings to trigger an emphasis punch-in
+            seg_words = seg.get("words") or []
+            seg_start = float(seg.get("start", 0.0))
+            for w in seg_words:
+                wt = str(w.get("w") or "")
+                rel_t = float(w.get("start", seg_start)) - seg_start
+                if 0.25 <= rel_t <= exact_dur - 0.45 and re.search(
+                    r"\b(stop|never|wrong|don't|instead|correct|right|always|actually|remember|secret)\b",
+                    wt,
+                    re.I,
+                ):
+                    return 1.0, 1.08, "sudden_in", round(rel_t, 3), 0.18
+            # 2. Questions / Hooks -> smooth push-in (1.0 -> 1.06)
+            if "?" in note or sid_str in ("S1", "S2", "L1", "L2") or re.search(
+                r"\b(why|what|how|when|where|who|stop\s+saying|mistake|wrong)\b", note, re.I
+            ):
+                return 1.0, 1.06, "smooth", 0.0, exact_dur
+            # 3. Resolutions / Answers -> smooth pull-out (1.06 -> 1.0)
+            if re.search(r"\[(?:right|correct)\]|\b(perfect|correct|exactly|instead|better|right\s+way|means|install|download)\b", note, re.I):
+                return 1.06, 1.0, "smooth", 0.0, exact_dur
+            # 4. Default by segment duration
+            if exact_dur >= 3.5:
                 return 1.0, 1.05, "smooth", 0.0, exact_dur
-            else:
-                return 1.05, 1.0, "smooth", 0.0, exact_dur
+            return 1.05, 1.0, "smooth", 0.0, exact_dur
 
     return 1.0, 1.0, "none", 0.0, exact_dur
 
@@ -457,14 +611,20 @@ def _build_subpixel_zoom_filter(
     zoom_style: str = "smooth",
     zoom_at: float = 0.0,
     zoom_dur: float = 0.18,
+    fx1: Optional[float] = None,
+    fy1: Optional[float] = None,
 ) -> List[str]:
     """Build a supersampled sub-pixel `zoompan` filter chain free of 2px stair-stepping jitter."""
-    if abs(z0 - 1.0) <= 0.004 and abs(z1 - 1.0) <= 0.004 and zoom_style in ("none", "static", ""):
+    fx1_v = fx if fx1 is None else max(0.05, min(0.95, float(fx1)))
+    fy1_v = fy if fy1 is None else max(0.08, min(0.85, float(fy1)))
+    has_pan = math.hypot(fx1_v - fx, fy1_v - fy) > 0.04
+
+    if abs(z0 - 1.0) <= 0.004 and abs(z1 - 1.0) <= 0.004 and zoom_style in ("none", "static", "") and not has_pan:
         return []
 
-    # Fast zero-heat path for static punch-in zooms (e.g. zoom=1.08 with no zoom_to):
+    # Fast zero-heat path for static punch-in zooms (e.g. zoom=1.08 with no zoom_to and no pan):
     # uses direct lanczos scale + crop instead of per-frame 4K zoompan evaluation.
-    if abs(z1 - z0) <= 0.004 and zoom_style in ("none", "static", "") and z0 > 1.004:
+    if abs(z1 - z0) <= 0.004 and zoom_style in ("none", "static", "") and z0 > 1.004 and not has_pan:
         zw = even(slot_w * z0)
         zh = even(slot_h * z0)
         return [
@@ -491,8 +651,15 @@ def _build_subpixel_zoom_filter(
         p_expr = f"(1-cos(PI*min(on/{n_minus_1},1)))/2"
         z_expr = f"({z0:.4f}+({z1 - z0:+.4f})*{p_expr})"
 
-    x_expr = f"(iw-iw/zoom)*{fx:.4f}"
-    y_expr = f"(ih-ih/zoom)*{fy:.4f}"
+    if has_pan:
+        pan_p = f"(1-cos(PI*min(on/{n_minus_1},1)))/2"
+        fx_e = f"({fx:.4f}+({fx1_v - fx:+.4f})*{pan_p})"
+        fy_e = f"({fy:.4f}+({fy1_v - fy:+.4f})*{pan_p})"
+        x_expr = f"(iw-iw/zoom)*{fx_e}"
+        y_expr = f"(ih-ih/zoom)*{fy_e}"
+    else:
+        x_expr = f"(iw-iw/zoom)*{fx:.4f}"
+        y_expr = f"(ih-ih/zoom)*{fy:.4f}"
 
     filters = [
         f"scale={sw_super}:{sh_super}:flags=bicubic",
@@ -529,7 +696,7 @@ def build_segment_cache_key(
 
     plan_loudness = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
     payload = {
-        "v": 7,
+        "v": 8,
         "src": _file_mtime_sig(seg["src"]),
         "start": round(float(seg["start"]), 4),
         "end": round(float(seg["end"]), 4),
@@ -541,6 +708,9 @@ def build_segment_cache_key(
         "zoom_at": seg.get("zoom_at"),
         "zoom_dur": seg.get("zoom_dur"),
         "focus": seg.get("focus"),
+        "focus_end": seg.get("focus_end"),
+        "color_match": bool(seg.get("color_match") is True or (plan or {}).get("color_match") is True),
+        "lut": seg.get("lut") or (plan or {}).get("lut"),
         "gain_db": seg.get("gain_db"),
         "loudness": seg.get("loudness"),
         "plan_loudness": plan_loudness,
@@ -573,15 +743,20 @@ def _build_slot_video_chain(
     zoom_style: str = "smooth",
     zoom_at: float = 0.0,
     zoom_dur: float = 0.18,
+    focus_end: Optional[Sequence[float]] = None,
+    color_filter: Optional[str] = None,
 ) -> str:
     """Build an FFmpeg video filter chain that scales and crops `input_label` into
     `(slot_w, slot_h)` with eye-anchored headroom (`14%`) and sub-pixel supersampled zoom.
     """
     slot_w, slot_h = even(slot_w), even(slot_h)
     if exact and abs((src_w / src_h) / (slot_w / slot_h) - 1.0) < 0.03:
-        return f"{input_label}setpts=PTS-STARTPTS,fps={fps},scale={slot_w}:{slot_h}:flags=lanczos,setsar=1,format=yuv420p{output_label}"
+        cf_part = f",{color_filter}" if color_filter else ""
+        return f"{input_label}setpts=PTS-STARTPTS,fps={fps},scale={slot_w}:{slot_h}:flags=lanczos{cf_part},setsar=1,format=yuv420p{output_label}"
     fx = max(0.05, min(0.95, float(focus[0]) if len(focus) >= 1 else 0.5))
     fy = max(0.08, min(0.85, float(focus[1]) if len(focus) >= 2 else 0.38))
+    fx1 = float(focus_end[0]) if focus_end and len(focus_end) >= 1 else fx
+    fy1 = float(focus_end[1]) if focus_end and len(focus_end) >= 2 else fy
 
     chain = ["setpts=PTS-STARTPTS", f"fps={fps}"]
     crop_info = compute_slot_crop_filter(
@@ -607,8 +782,12 @@ def _build_slot_video_chain(
             zoom_style=zoom_style,
             zoom_at=zoom_at,
             zoom_dur=zoom_dur,
+            fx1=fx1,
+            fy1=fy1,
         )
     )
+    if color_filter:
+        chain.append(color_filter)
     chain.extend(["setsar=1", "format=yuv420p"])
     return f"{input_label}{','.join(chain)}{output_label}"
 
@@ -652,28 +831,32 @@ def build_segment_ffmpeg_args(
     lay = normalize_layout_name(seg.get("layout"))
     z0, z1, zoom_style, zoom_at, zoom_dur = resolve_segment_zoom_spec(seg, exact)
     focus = list(seg.get("focus") or [0.5, 0.38])
+    focus_end = list(seg.get("focus_end") or focus)
     fx, fy = float(focus[0]), float(focus[1])
+    fx1, fy1 = float(focus_end[0]), float(focus_end[1])
 
     src = resolve(seg["src"])
     src_info = probe(src) if src.is_file() else {"width": W, "height": H, "has_audio": True, "duration": dur + 1.0}
     src_w = int(src_info.get("width") or W)
     src_h = int(src_info.get("height") or H)
     has_audio = bool(src_info.get("has_audio", True))
+    color_filter = compute_face_color_match_filter(seg, plan)
 
     plan_loud = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
     seg_loud = float(seg.get("loudness") if seg.get("loudness") is not None else plan_loud)
     seg_gain_db = float(seg.get("gain_db") or 0.0)
+    clip_gain_db = _measure_clip_rms_gain_db(src) if has_audio else 0.0
+    total_gain_db = round(clip_gain_db + seg_gain_db, 2)
 
     af_parts = [
         f"atrim=0:{exact:.6f}",
         "asetpts=PTS-STARTPTS",
         "highpass=f=70",
-        "dynaudnorm=f=150:g=7:p=0.89:m=5.0",
     ]
-    if abs(seg_gain_db) >= 0.05:
-        af_parts.append(f"volume={seg_gain_db:+.2f}dB")
+    if abs(total_gain_db) >= 0.05:
+        af_parts.append(f"volume={total_gain_db:+.2f}dB")
     af_parts.extend([
-        "alimiter=limit=0.84:level=false",
+        "alimiter=limit=0.891:level=false",
         "aresample=48000",
         "aformat=channel_layouts=stereo",
         "apad",
@@ -714,8 +897,12 @@ def build_segment_ffmpeg_args(
                 zoom_style=zoom_style,
                 zoom_at=zoom_at,
                 zoom_dur=zoom_dur,
+                fx1=fx1,
+                fy1=fy1,
             )
         )
+        if color_filter:
+            vf.append(color_filter)
         vf.extend(["setsar=1", "format=yuv420p"])
         fc.append(f"[0:v]{','.join(vf)}{v_curr}")
 
@@ -782,7 +969,7 @@ def build_segment_ffmpeg_args(
             live_h = slot_h_top if active_top else slot_h_bot
             peer_h_slot = slot_h_bot if active_top else slot_h_top
 
-            fc.append(_build_slot_video_chain("[0:v]", "[live_slot]", src_w, src_h, slot_w, live_h, fps, exact, [fx, fy], z0, z1))
+            fc.append(_build_slot_video_chain("[0:v]", "[live_slot]", src_w, src_h, slot_w, live_h, fps, exact, [fx, fy], z0, z1, focus_end=[fx1, fy1], color_filter=color_filter))
             fc.append(_build_slot_video_chain(peer_in_label, "[peer_slot]", peer_w, peer_h, slot_w, peer_h_slot, fps, exact, peer_focus, 1.0, 1.0))
 
             stack_order = "[live_slot][peer_slot]" if active_top else "[peer_slot][live_slot]"
@@ -800,7 +987,7 @@ def build_segment_ffmpeg_args(
             peer_w_slot = slot_w_right if active_left else slot_w_left
 
             exact_fit = str(seg.get("framing") or "").lower() == "exact"
-            fc.append(_build_slot_video_chain("[0:v]", "[live_slot]", src_w, src_h, live_w, slot_h, fps, exact, [fx, fy], z0, z1, exact=exact_fit))
+            fc.append(_build_slot_video_chain("[0:v]", "[live_slot]", src_w, src_h, live_w, slot_h, fps, exact, [fx, fy], z0, z1, exact=exact_fit, focus_end=[fx1, fy1], color_filter=color_filter))
             fc.append(_build_slot_video_chain(peer_in_label, "[peer_slot]", peer_w, peer_h, peer_w_slot, slot_h, fps, exact, peer_focus, 1.0, 1.0, exact=exact_fit))
 
             stack_order = "[live_slot][peer_slot]" if active_left else "[peer_slot][live_slot]"

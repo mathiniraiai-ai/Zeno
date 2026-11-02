@@ -34,13 +34,17 @@ Wherever this page says `python`, use the project's Python: `.venv/bin/python` o
 
 Start a **fresh agent session for each video** (it keeps token use low), open this folder, and tell the agent what you have. The agent reads `agent/DIRECTOR.md` and follows it. The steps underneath are:
 
-1. **Get the script.** Paste the Google Doc link of the one tab you need:
-   `python scripts/script_intake.py "<link-to-the-tab>" --name <project>`
-   The doc must be shared as "anyone with the link can view". Only that tab is saved to `input/script/<project>.txt`.
-2. **Put the raw clips** in `input/footage/`.
-3. **Analyse and plan:** `python scripts/prepare.py input/footage/*.mp4 --script input/script/<project>.txt --lang <lang>`
-4. **Review** `work/<project>/brief.txt` and `plan.edl`; the agent fixes anything off.
-5. **Render:** `python scripts/render.py work/<project>/plan.edl --verify` → `Downloads/Zeno Outputs/<name>.mp4`
+1. **Check the Edit Bay (Stage 0):**
+   `python scripts/zeno.py --check`
+   Confirms `.venv`, FFmpeg, OpenCV/Pillow/SciPy, YuNet face tracker, `.env` key presence, Indic/UI fonts, SFX/Marks/Premiere `.prproj` shell, and `~/Downloads/Zeno Outputs/`.
+2. **Ingest, Transcribe, Match & Pitch (Stages 1–3):**
+   `python scripts/zeno.py --inspect <raw_dir_or_clips> --script "<google_doc_url_or_path>" [--lang auto]`
+   Extracts 16kHz audio, transcribes word timings, scores best takes, auto-pairs silent listening clips (`peer=`) for `split_h`/`split_v`, and generates `work/<project>/brief.txt`, `work/<project>/plan.edl`, and `work/<project>/pitch_card.md` (with a 50s live progress heartbeat in `work/<project>/progress.json`).
+3. **Review & Approve the Editorial Pitch Card (Stage 3 Gate):**
+   Review `pitch_card.md` and `plan.edl` (optionally quick-tweaking via `--swap-layout` or `--swap-take`), then confirm Yes/No before rendering.
+4. **Render, Export Premiere `.prproj` & Verify (Stages 4–5):**
+   `python scripts/zeno.py --execute work/<project>/plan.edl`
+   Renders `~/Downloads/Zeno Outputs/<name>.mp4` (`9:16`), `<name>_1x1.mp4` (`1:1` Square Meta Ad), `<name>.timeline.txt`, and editable Adobe Premiere Pro project files (`<name>.prproj` and `<name>.premiere.xml`), then runs deterministic post-render verification.
 
 Languages are mixed freely: native words stay native, English words stay English. `--lang` names the main native language.
 
@@ -55,8 +59,10 @@ If the script names the speakers (`L2 Robot: ...`), Zeno checks every line is sp
 **Silent moments in the script:** write them as `(Man takes out his phone)` or note a reaction on a line, `L4 Man (laughs mockingly): ...`. Zeno keeps those moments instead of trimming them.
 
 ## 3. What works today
-- General editing: best takes, pause-snapped cuts, layouts (`single`, `split_v`, `split_h`, `chat_bar`, `video_call`, `hybrid`), ✓/✗ marks, loudness.
-- Learned style **micronarrative** (`styles/micronarrative/`): the look and transitions are built and checked against the reference. Arranging raw clips into this style is **not built yet**; it needs one real raw set to finish.
+- **5-Stage Interactive Zeno Harness (`scripts/zeno.py`)**: Stage 0 readiness check (`--check`), Stages 1–3 ingest/transcribe/match/pitch (`--inspect` + 50s live heartbeat), Stage 3 Pre-Render Yes/No Approval Gate (`pitch_card.md` + `--swap-layout` / `--swap-take`), and Stages 4–5 render + Premiere Pro export + deep QC (`--execute`).
+- **Human-Like Editing Engine**: 10ms RMS breath-envelope cuts, rhythm-aware pause tightening, 45ms zero-drift audio crossfades + `-48 dBFS` room-tone floor bridging, per-clip RMS gain matching + single master 2-pass `-11.5 LUFS` / `-1.0 dBTP` loudness mastering, transcript-intent zooms & deadband-smoothed focus pan, kinetic-gated `whoosh.wav` SFX, and 2-pulse `flash`/`vignette` `✓`/`✗` marks.
+- **4-Clip Split-Screen Talking + Live Listening Video (`styles/micronarrative/`)**: Auto-detects silent listening clips (`*_listening.*` or 0-word clips) and pairs them as live moving `peer=` streams on `split_h`/`split_v`, plus auto-extracts stacked `"Stop Saying"` hook banners.
+- **Adobe Premiere Pro `.prproj` + `.premiere.xml` Export**: Exports native GZIP-compressed `.prproj` and FCP7 `.premiere.xml` files with multi-keyframe eased Scale curves, Center focus offsets, video/audio `<transitionitem>` dissolves, and sequence `<marker>` cues.
 - Burned-in subtitles in client footage are ignored for now.
 
 ## 4. Where files go

@@ -282,6 +282,7 @@ def _collect_timeline_model(
             a_tracks[-1].append(item)
 
     cursor = 0.0
+    markers: list[dict] = []
     for idx, seg in enumerate(segments):
         src_in = float(seg.get("start", 0.0))
         src_out = float(seg.get("end", src_in))
@@ -298,18 +299,46 @@ def _collect_timeline_model(
 
         media_dur = get_media_dur(clip_path, is_still=False)
         layout_mode = str(seg.get("layout", plan.get("preset", "single")) or "single")
+        zoom_style = "smooth"
+        zoom_at = 0.0
+        zoom_dur = dur
         if hasattr(layouts, "resolve_segment_zoom_spec"):
-            z0, z1, _, _, _ = layouts.resolve_segment_zoom_spec(seg, dur)
+            z0, z1, zoom_style, zoom_at, zoom_dur = layouts.resolve_segment_zoom_spec(seg, dur)
         else:
             z_spec = parse_zoom_spec(seg.get("zoom", 1.0))
             z0 = float(z_spec.get("z0", 1.0))
             z1 = float(seg.get("zoom_to") or z_spec.get("z1", z0))
         vol_db = float(seg.get("gain_db", 0.0) or 0.0)
 
-        # Motion & Crop parameters for V1
+        # Motion & Crop parameters for V1 (with multi-keyframe eased Scale curves & focus Center offset)
         v1_scale_start = round(z0 * 100.0, 2)
         v1_scale_end = round(z1 * 100.0, 2)
-        v1_center = (0.0, 0.0)
+        scale_kfs: list[tuple[float, float]] = []
+        if zoom_style in ("sudden_in", "sudden_out", "flash_zoom") and abs(z1 - z0) > 0.004:
+            t0_z = max(0.0, min(dur - 0.05, float(zoom_at)))
+            d_snap = max(0.08, min(1.20, float(zoom_dur or 0.18)))
+            mid_z = z0 + (z1 - z0) * 0.875
+            drift_z = z1 + (0.015 if z1 >= z0 else -0.015)
+            scale_kfs = [
+                (0.0, round(z0 * 100.0, 2)),
+                (t0_z, round(z0 * 100.0, 2)),
+                (min(dur, t0_z + d_snap * 0.5), round(mid_z * 100.0, 2)),
+                (min(dur, t0_z + d_snap), round(z1 * 100.0, 2)),
+                (dur, round(drift_z * 100.0, 2)),
+            ]
+        elif abs(z1 - z0) > 0.004:
+            for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+                p_ease = 0.5 * (1.0 - math.cos(math.pi * frac))
+                scale_kfs.append((round(frac * dur, 4), round((z0 + (z1 - z0) * p_ease) * 100.0, 2)))
+
+        focus_pt = seg.get("focus") or [0.5, 0.38]
+        z_mid = 0.5 * (z0 + z1)
+        if isinstance(focus_pt, (list, tuple)) and len(focus_pt) >= 2 and z_mid > 1.005:
+            cx_f = round((0.5 - float(focus_pt[0])) * max(0.0, z_mid - 1.0), 4)
+            cy_f = round((0.38 - float(focus_pt[1])) * max(0.0, z_mid - 1.0), 4)
+            v1_center = (cx_f, cy_f)
+        else:
+            v1_center = (0.0, 0.0)
         v1_crop = None
 
         slot = str(seg.get("slot") or "").lower()
@@ -321,12 +350,26 @@ def _collect_timeline_model(
         )
         if layout_mode == "split_h":
             v1_scale_start = v1_scale_end = 100.0
+            scale_kfs = []
             v1_crop = {"left": 25.0, "right": 25.0, "top": 0.0, "bottom": 0.0}
             v1_center = (-0.25 if active_first else 0.25, 0.0)
         elif layout_mode == "split_v":
             v1_scale_start = v1_scale_end = 100.0
+            scale_kfs = []
             v1_crop = {"left": 0.0, "right": 0.0, "top": 25.0, "bottom": 25.0}
             v1_center = (0.0, -0.25 if active_first else 0.25)
+
+        tr_raw = seg.get("transition")
+        tr_spec = None
+        if tr_raw and str(tr_raw).lower() != "cut" and idx > 0:
+            tr_dur = float(seg.get("transition_duration") or 0.28)
+            tr_spec = {"type": str(tr_raw).lower(), "dur": tr_dur}
+
+        markers.append({
+            "t": t_start,
+            "name": f"{seg_id} ({seg.get('speaker', layout_mode)})",
+            "comment": str(seg.get("note") or ""),
+        })
 
         v1_item = {
             "seg_idx": idx,
@@ -340,9 +383,11 @@ def _collect_timeline_model(
             "media_dur": media_dur,
             "scale_start": v1_scale_start,
             "scale_end": v1_scale_end,
+            "scale_keyframes": scale_kfs,
             "center": v1_center,
             "crop": v1_crop,
             "opacity_keyframes": None,
+            "transition": tr_spec,
             "link_id": f"link_seg_{idx}",
         }
         v_tracks[0].append(v1_item)
@@ -358,6 +403,7 @@ def _collect_timeline_model(
             "src_out": src_out,
             "media_dur": media_dur,
             "gain_db": vol_db,
+            "transition": {"type": "crossfade", "dur": 0.045} if idx > 0 else None,
             "link_id": f"link_seg_{idx}",
         }
         a_tracks[0].append(a1_item)
@@ -538,9 +584,10 @@ def _collect_timeline_model(
                     "link_id": None,
                 })
 
-        # Explicit SFX for this segment from plan["sfx"] or transition whoosh
+        # Explicit SFX for this segment from plan["sfx"] or kinetic transition whoosh
         seg_sfx_list = list(sfx_by_seg.get(seg_id, []))
-        if seg.get("transition") and not any("whoosh" in str(x.get("file", "")) for x in seg_sfx_list):
+        _whoosh_trs = {"whip_left", "whip_right", "flash_zoom", "zoom_burst", "slide_up", "smoothleft", "smoothright", "warm_flash"}
+        if str(seg.get("transition") or "").lower() in _whoosh_trs and not any("whoosh" in str(x.get("file", "")) for x in seg_sfx_list):
             seg_sfx_list.append({"at": 0.0, "file": "whoosh.wav"})
         for sx in seg_sfx_list:
             sx_file = str(sx.get("file") or "whoosh.wav")
@@ -606,6 +653,12 @@ def _collect_timeline_model(
                 place_sfx(REPO / "assets" / "sfx" / "correct_ding.wav", mk_start, gain_db=2.5, max_dur=0.65)
                 place_sfx(REPO / "assets" / "sfx" / "sn_correct.wav", mk_start, gain_db=2.0, max_dur=0.65)
 
+            markers.append({
+                "t": mk_start,
+                "name": f"{'✓ RIGHT' if kind == 'right' else '✗ WRONG'} ({seg_id})",
+                "comment": f"{kind.upper()} 2-pulse mark ({mark_pack})",
+            })
+
         cursor = t_end
 
     # Compact empty overlay video tracks while preserving V1 and V2
@@ -620,6 +673,7 @@ def _collect_timeline_model(
         "height": height,
         "v_tracks": compacted_v,
         "a_tracks": a_tracks,
+        "markers": markers,
     }
 
 
@@ -758,11 +812,43 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
             out_f = in_f + dur_f
             file_xml = get_file_xml(item["path"], item["media_type"], item["media_dur"])
 
-            # Basic Motion filter
+            # Optional FCP7 / Premiere <transitionitem> on V1 before clipitem
+            if t_idx == 0 and item.get("transition"):
+                tr_info = item["transition"]
+                tr_t = str(tr_info.get("type") or "fade").lower()
+                tr_d = float(tr_info.get("dur") or 0.28)
+                half_f = max(2, _sec_to_frames(tr_d * 0.5, fps))
+                if "dip" in tr_t or "flash" in tr_t:
+                    ef_name, ef_id = "Dip to Black", "dip2black"
+                elif any(k in tr_t for k in ("whip", "slide", "smooth")):
+                    ef_name, ef_id = "Band Slide", "bandslide"
+                else:
+                    ef_name, ef_id = "Cross Dissolve", "crossdissolve"
+                lines.append(f"""          <transitionitem>
+            <rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>
+            <start>{max(0, start_f - half_f)}</start>
+            <end>{start_f + half_f}</end>
+            <alignment>center</alignment>
+            <effect>
+              <name>{ef_name}</name>
+              <effectid>{ef_id}</effectid>
+              <effectcategory>Dissolve</effectcategory>
+              <effecttype>transition</effecttype>
+              <mediatype>video</mediatype>
+            </effect>
+          </transitionitem>""")
+
+            # Basic Motion filter (with multi-keyframe eased Scale curve)
             s0 = item["scale_start"]
             s1 = item["scale_end"]
             cx, cy = item["center"]
-            if abs(s0 - s1) > 0.05:
+            scale_kfs = item.get("scale_keyframes") or []
+            if scale_kfs:
+                scale_kf = "".join(
+                    f"\n                  <keyframe><when>{min(out_f, in_f + _sec_to_frames(rel_s, fps))}</when><value>{val}</value></keyframe>"
+                    for rel_s, val in scale_kfs
+                )
+            elif abs(s0 - s1) > 0.05:
                 scale_kf = f"""
                   <keyframe><when>{ in_f }</when><value>{s0}</value></keyframe>
                   <keyframe><when>{ out_f }</when><value>{s1}</value></keyframe>"""
@@ -884,6 +970,19 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
             dur_f = end_f - start_f
             in_f = _sec_to_frames(item["src_in"], fps)
             out_f = in_f + dur_f
+            if t_idx == 0 and item.get("transition") and start_f >= 2:
+                lines.append(f"""          <transitionitem>
+            <rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>
+            <start>{max(0, start_f - 1)}</start>
+            <end>{start_f + 1}</end>
+            <alignment>center</alignment>
+            <effect>
+              <name>Crossfade (Constant Power)</name>
+              <effectid>KGAudioTransition</effectid>
+              <effecttype>transition</effecttype>
+              <mediatype>audio</mediatype>
+            </effect>
+          </transitionitem>""")
             file_xml = get_file_xml(
                 item["path"],
                 "video" if item["media_type"] == "audio_from_video" else "audio",
@@ -926,6 +1025,16 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
     lines.extend([
         "      </audio>",
         "    </media>",
+    ])
+    for mk in model.get("markers", []):
+        mk_f = _sec_to_frames(float(mk.get("t", 0.0)), fps)
+        lines.append(f"""    <marker>
+      <name>{escape(str(mk.get('name', '')))}</name>
+      <comment>{escape(str(mk.get('comment', '')))}</comment>
+      <in>{mk_f}</in>
+      <out>-1</out>
+    </marker>""")
+    lines.extend([
         "  </sequence>",
         "</xmeml>",
     ])

@@ -1,54 +1,51 @@
 ---
-description: Run the low-token 3-step video editing workflow (prepare -> review brief/plan.edl -> render --verify) on input/footage/ and input/script/.
-argument-hint: "[optional: --lang <lang> --preset <auto|single|split_v|split_h|chat_bar|video_call|hybrid> --mark-pack <default|glossy|flash|vignette>]"
+description: Run the Zeno 5-stage edit (inspect -> review brief/plan.edl/pitch card -> Yes/No gate -> execute) on a clips folder and script.
+argument-hint: "<raw_dir_or_clips> <script_path_or_gdoc_url> [--lang <lang> --preset <auto|single|split_v|split_h|chat_bar|video_call|hybrid> --mark-pack <flash|vignette|glossy|default>]"
 ---
 
-# `/edit` — Zeno Automated Low-Token Video Edit Command
+# `/edit` — Zeno Low-Token Video Edit
 
-Execute the complete 3-step **Zeno** pipeline within the **`12k–18k tokens / min`** budget (strict ceiling: **`20k tokens / min`**).
+Run the **`scripts/zeno.py`** harness within the **`12k–18k tokens / min`** budget (strict ceiling: **`20k tokens / min`** of finished video). Read `agent/DIRECTOR.md` first if this is a fresh session.
 
 User arguments (if provided): `$ARGUMENTS`
 
 ## Strict Guardrails
-- **NEVER** modify files outside `/Users/mathiniraiselvan/Documents/Office project/Zeno`.
+- **NEVER** modify files outside the Zeno folder (team PCs: `~/Documents/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`).
 - **NEVER** read `work/*/words.json`, `work/*/silences.json`, `work/*/align.json`, or `scripts/*.py`.
-- Read **only** `work/<project>/brief.txt`, `work/<project>/plan.edl`, and the final `work/<project>/marks_contact_sheet.jpg`.
+- **NEVER** open or print `.env`. Check setup with `python3 scripts/setup.py --smoke`.
+- Read **only** `work/<project>/brief.txt`, `work/<project>/plan.edl`, `work/<project>/pitch_card.md`, and the final `work/<project>/marks_contact_sheet.jpg`.
+- Finished videos go to `~/Downloads/Zeno Outputs/`, never inside the repo.
 
 ## Execution Steps
 
-1. **Locate Inputs & Run `prepare.py` (`1 command`)**:
-   - Check `input/footage/` and `input/script/` (if the user pasted the script in chat, save it to `input/script/<project>.txt` first).
-   - Run:
+0. **Readiness (first run only)**: `python3 scripts/zeno.py --check`
+
+1. **Inspect (`1 command`, Stages 1–3)**:
+   - Clips can live in any folder. If the user pasted the script in chat, save it to `input/script/<project>.txt` first.
+   - Run (in the background; it prints progress every ~48s, also in `work/<project>/progress.json` / `python3 scripts/progress.py`):
      ```bash
-     python3 scripts/prepare.py input/footage/*.mp4 \
-       --script input/script/<script>.txt \
-       --lang <lang_or_auto> \
-       --preset <preset_or_auto> \
-       --mark-pack <pack_or_default>
+     python3 scripts/zeno.py --inspect <raw_dir_or_clips> --script <script_path_or_gdoc_url> \
+       [--lang <lang>] [--preset <preset>] [--mark-pack <pack>]
      ```
+   - Relay stage updates to the user while it runs.
 
-2. **Review Brief & Refine `plan.edl` (`1 read + 1 tiny edit`)**:
-   - Read `work/<project>/brief.txt` and `work/<project>/plan.edl`.
-   - Confirm:
-     - Only the cleanest take of each scripted line is kept (all retakes, stutters, dead air, and end-of-clip AI babble removed).
-     - Cut points (`start-end`) snap cleanly into pauses (`0.08–0.15s` breath padding).
-     - Same-clip consecutive `single` cuts have `zoom=1.08` punch-in; topic transitions use `fade:0.3`.
-     - Layout mode (`single`, `split_v`, `split_h`, `chat_bar`, `video_call`, or `hybrid`) and `✓`/`✗` marks (`right`/`wrong`) match the script's conversational structure and right/wrong cues.
-   - If any take, timestamp, layout, or mark needs refinement, edit `work/<project>/plan.edl` directly.
-   - If messy footage threatens to push token usage past `20k tokens / min`, warn the user immediately.
+2. **Review & refine (`1 read + tiny edits`)**:
+   - Read `brief.txt`, `plan.edl`, `pitch_card.md`.
+   - Confirm: one `[BEST_TAKE]` per line (check `[ALT_TAKE]` scores, swap in `plan.edl` if wrong); `[WRONG_SPEAKER_NO_FIX]` means tell the user to reshoot; `[SPEAKER_CHECK] not applied` goes in the report; cuts snap to pauses; same-clip consecutive `single` cuts use `zoom=1.08`; layouts and ✓/✗ marks match the script.
+   - Edit `plan.edl` directly, then refresh the card: `python3 scripts/zeno.py --pitch work/<project>/plan.edl`
+   - Warn the user immediately if messy footage threatens `20k tokens / min`.
 
-3. **Render & Verify (`1 command + 1 image read`)**:
-   - Run:
-     ```bash
-     python3 scripts/render.py work/<project>/plan.edl --verify
-     ```
-   - Read `work/<project>/marks_contact_sheet.jpg` (`1 image read`) to visually verify `✓`/`✗` badge placement and speaker framing.
+3. **Gate (`Mandatory Stop`)**: present the Editorial Pitch Card and ask the user **Yes/No**. Do not render before a Yes.
 
-4. **Mandatory Token Usage Report**:
-   - Append a new row to the `## Token usage log` table in `README.md`.
-   - Output the final delivery summary and Token Usage table:
-     ```markdown
-     | Date | Task | Context tokens (start → end) | Tokens used | 5-hour limit | Weekly limit |
-     |---|---|---|---|---|---|
-     | YYYY-MM-DD | **<Language> – "<Title>"** (<N> clips, <M> script lines): <MM:SS> final, <K> ✓/✗ marks → `output/<name>.mp4` | <start> → <end> | ~<delta> | <start>% → <end>% | <start>% → <end>% |
-     ```
+4. **Execute (`1 command` after Yes, Stages 4–5)**:
+   ```bash
+   python3 scripts/zeno.py --execute work/<project>/plan.edl [--square] [--loudness -11.5] [--gain-db +2.0]
+   ```
+   Renders the 9:16 master, `_1x1` square, `.timeline.txt`, and Premiere `.prproj` / `.premiere.xml`, then runs `verify.py`. Read `marks_contact_sheet.jpg` once to check ✓/✗ placement and speaker framing.
+
+5. **Token report (mandatory)**: print this table and append the row to `README.md` (and note the agent and model used):
+   ```markdown
+   | Date | Task | Context tokens (start → end) | Tokens used | 5-hour limit | Weekly limit |
+   |---|---|---|---|---|---|
+   | YYYY-MM-DD | **<Language> – "<Title>"** (<N> clips, <M> script lines): <MM:SS> final, <K> ✓/✗ marks → `~/Downloads/Zeno Outputs/<name>.mp4` | <start> → <end> | ~<delta> | <start>% → <end>% | <start>% → <end>% |
+   ```

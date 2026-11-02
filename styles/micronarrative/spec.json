@@ -216,7 +216,9 @@
    "width": 1080,
    "height": 1920,
    "fps": 30
-  }
+  },
+  "color_match": false,
+  "lut": null
  },
  "rebuild_check": {
   "date": "2026-10-31",
