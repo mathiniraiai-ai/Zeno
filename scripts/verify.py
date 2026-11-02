@@ -553,15 +553,14 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
     resolved_script = resolve(script_path) if script_path else None
     script_ok, cov_lines, tot_lines, b_dups = check_script_coverage(plan, script_path=resolved_script)
 
-    # Write contact sheet to plan directory AND work/<output_stem>/ (plus legacy alias) if they exist
+    # Write contact sheet to plan directory AND work/<output_stem>/ if it exists
     sheet_path = p_file.parent / "marks_contact_sheet.jpg"
     marks_ok, m_pass, m_tot, m_details, sheet_kb = verify_marks_and_build_contact_sheet(
         out_mp4, plan, seg_start, exp_w, exp_h, sheet_path
     )
-    for alias_name in (out_mp4.stem, "Kannada_I_am_hungry", "kannada_hungry"):
-        alt_proj_dir = WORK / alias_name
-        if alt_proj_dir.is_dir() and alt_proj_dir.resolve() != p_file.parent.resolve() and sheet_path.is_file():
-            (alt_proj_dir / "marks_contact_sheet.jpg").write_bytes(sheet_path.read_bytes())
+    alt_proj_dir = WORK / out_mp4.stem
+    if alt_proj_dir.is_dir() and alt_proj_dir.resolve() != p_file.parent.resolve() and sheet_path.is_file():
+        (alt_proj_dir / "marks_contact_sheet.jpg").write_bytes(sheet_path.read_bytes())
 
     pct = int(round(100.0 * cov_lines / max(1, tot_lines)))
     rel_out = str(out_mp4)

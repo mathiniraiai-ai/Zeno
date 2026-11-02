@@ -147,6 +147,20 @@ def check_system_readiness(quiet: bool = False) -> Tuple[bool, List[Tuple[bool, 
         str(OUTPUT),
     ))
 
+    # 9. Style Tuning Config & Regression Suite
+    try:
+        import style_config
+        t_cfg = style_config.get_tuning("micronarrative")
+        cfg_ok = len(t_cfg) >= 25 and (ROOT / "tests" / "test_engine.py").is_file()
+    except Exception:
+        t_cfg = {}
+        cfg_ok = False
+    checks.append((
+        cfg_ok,
+        "Style Config & Tests",
+        f"{len(t_cfg)} tunable parameters in spec.json + tests/test_engine.py ready" if cfg_ok else "Missing style_config.py or tests/test_engine.py",
+    ))
+
     all_ok = all(item[0] for item in checks)
     if not quiet:
         installed = [c for c in checks if c[0]]

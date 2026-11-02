@@ -89,14 +89,18 @@ try:
 except Exception:
     edl_parser = None
 
+import style_config  # noqa: E402
 
-MACRO_SILENCE_DB = -35.0
-MACRO_SILENCE_MIN_SEC = 0.30
-MICRO_DIP_DB = -28.0
-MICRO_DIP_MIN_SEC = 0.05
-PAUSE_SPLIT_MONOLOGUE_SEC = 1.35
-PAUSE_SPLIT_ABSOLUTE_SEC = 1.45
-LONG_MONOLOGUE_ZOOM_SEC = 9.50
+_TUNING = style_config.get_tuning("micronarrative")
+MACRO_SILENCE_DB = float(_TUNING["macro_silence_db"])
+MACRO_SILENCE_MIN_SEC = float(_TUNING["macro_silence_min_sec"])
+MICRO_DIP_DB = float(_TUNING["micro_dip_db"])
+MICRO_DIP_MIN_SEC = float(_TUNING["micro_dip_min_sec"])
+PAUSE_SPLIT_MONOLOGUE_SEC = float(_TUNING["pause_split_monologue_sec"])
+PAUSE_SPLIT_ABSOLUTE_SEC = float(_TUNING["pause_split_dialogue_sec"])
+LONG_MONOLOGUE_ZOOM_SEC = float(_TUNING["long_monologue_zoom_sec"])
+MAX_ALT_TAKES_IN_BRIEF = int(_TUNING["max_alt_takes_in_brief"])
+MAX_BRIEF_CHARS = int(_TUNING["max_brief_chars"])
 
 # Common intentional Kannada/Indic reduplications (not retakes)
 INTENTIONAL_REDUPLICATIONS = {
@@ -1720,7 +1724,21 @@ def format_brief_txt(
         "## CLIPS, CHARACTER SPEAKERS & AUTO-CUTS",
     ]
 
+    # Cap [ALT_TAKE] entries in brief.txt so messy shoots with 5-15 retakes never bloat Director tokens
+    alt_seen_by_group: Dict[Any, int] = {}
+    omitted_by_group: Dict[Any, List[str]] = {}
     for c in clips_data:
+        if c.get("dropped_take") and not c.get("is_listening"):
+            gid = c.get("take_group", id(c))
+            cnt = alt_seen_by_group.get(gid, 0) + 1
+            alt_seen_by_group[gid] = cnt
+            if cnt > MAX_ALT_TAKES_IN_BRIEF:
+                c["_omit_from_brief"] = True
+                omitted_by_group.setdefault(gid, []).append(str(c["stem"]))
+
+    for c in clips_data:
+        if c.get("_omit_from_brief"):
+            continue
         stem = c["stem"]
         dur = float(c["info"].get("duration") or 0.0)
         l_ids = ",".join(
@@ -1745,6 +1763,10 @@ def format_brief_txt(
         )
         for anom in c.get("anomalies", []):
             out_lines.append(f"  ! {anom}")
+        gid = c.get("take_group", id(c))
+        if not c.get("dropped_take") and gid in omitted_by_group:
+            om_list = omitted_by_group[gid]
+            out_lines.append(f"  ! [ALT_TAKES_OMITTED] +{len(om_list)} lower-scored takes omitted ({', '.join(om_list)})")
 
     out_lines += ["", "## MARKS (✓/✗)"]
     for m in marks:
@@ -1753,9 +1775,9 @@ def format_brief_txt(
         )
 
     text = "\n".join(out_lines) + "\n"
-    # Guarantee strictly < 1,100 tokens (~4,000 chars)
-    if len(text) > 3900:
-        text = text[:3900] + "\n# [truncated to stay <1,100 tokens]\n"
+    # Guarantee strictly < 1,100 tokens (~3,900 chars)
+    if len(text) > MAX_BRIEF_CHARS:
+        text = text[:MAX_BRIEF_CHARS] + "\n# [truncated to stay <1,100 tokens]\n"
     return text
 
 
@@ -1938,14 +1960,6 @@ def main() -> None:
     (proj_dir / "brief.txt").write_text(brief_text, encoding="utf-8")
     (proj_dir / "plan.edl").write_text(edl_text, encoding="utf-8")
     write_json(proj_dir / "plan.json", plan)
-
-    # If legacy alias directory work/kannada_hungry exists and project is Kannada_I_am_hungry (or vice-versa), sync both
-    for alias_name in ("Kannada_I_am_hungry", "kannada_hungry"):
-        alias_dir = WORK / alias_name
-        if alias_dir.is_dir() and alias_dir.resolve() != proj_dir.resolve():
-            (alias_dir / "brief.txt").write_text(brief_text, encoding="utf-8")
-            (alias_dir / "plan.edl").write_text(edl_text, encoding="utf-8")
-            write_json(alias_dir / "plan.json", plan)
 
     est_tokens = len(brief_text) // 4
     print(f"Prepared {len(clips_data)} clips -> {len(segments)} segments, {len(marks)} marks")
