@@ -54,7 +54,7 @@ def build(style: str, manifest: list, canvas: dict, output: str, fps_src: float 
     for i, s in enumerate(segments, 1):
         s["id"] = f"S{i}"
     return {"output": output, "canvas": canvas, "preset": "hybrid", "segments": segments,
-            "marks": [], "sfx": [], "audio": {"loudness": -14}}
+            "marks": [], "sfx": [], "audio": {"loudness": -11.5}}
 
 
 def main():

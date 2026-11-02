@@ -89,7 +89,7 @@ def compute_timeline_starts(plan: Dict[str, Any], fps: int) -> Tuple[List[float]
     return starts, durs, total, seg_start
 
 
-def check_loudness(mp4_path: Path, target_lufs: float = -14.0) -> Tuple[bool, float, float]:
+def check_loudness(mp4_path: Path, target_lufs: float = -11.5) -> Tuple[bool, float, float]:
     """Measure integrated loudness (LUFS) and True Peak (dBTP), caching by file mtime + size."""
     cache_path = WORK / "_segments" / "loudness_cache.json"
     cache_data: Dict[str, Any] = {}
@@ -498,7 +498,7 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
         and abs(dur_diff) <= 0.15
     )
 
-    target_lufs = float((plan.get("audio") or {}).get("loudness", -14.0))
+    target_lufs = float((plan.get("audio") or {}).get("loudness", -11.5))
     audio_ok, i_lufs, tp_db = check_loudness(out_mp4, target_lufs=target_lufs)
 
     cuts_ok, clipped_w, long_pauses, jc_masked = check_cuts_and_pauses(plan, mp4_path=out_mp4)

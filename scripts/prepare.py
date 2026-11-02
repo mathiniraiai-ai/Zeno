@@ -1550,7 +1550,7 @@ def format_plan_edl(plan: Dict[str, Any]) -> str:
     fps = canvas.get("fps", 24)
     preset = plan.get("preset", "single")
     mark_pack = plan.get("mark_pack", "default")
-    loudness = plan.get("audio", {}).get("loudness", -14)
+    loudness = plan.get("audio", {}).get("loudness", -11.5)
 
     lines = [
         f"# output: {plan.get('output', 'output/out.mp4')}",
@@ -1832,7 +1832,7 @@ def main() -> None:
         "mark_pack": args.mark_pack,
         "segments": segments,
         "marks": marks,
-        "audio": {"loudness": -14},
+        "audio": {"loudness": -11.5},
     }
 
     edl_text = format_plan_edl(plan)

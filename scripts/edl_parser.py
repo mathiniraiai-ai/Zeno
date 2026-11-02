@@ -449,6 +449,12 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                             except ValueError:
                                 pass
                     seg["peer"] = peer_dict
+                elif k in ("vol", "volume", "gain", "gain_db"):
+                    gv = float(v_unq.lower().rstrip("db").strip())
+                    seg["gain_db"] = int(gv) if gv.is_integer() else round(gv, 2)
+                elif k == "loudness":
+                    lv = float(v_unq.lower().rstrip("lufs").strip())
+                    seg["loudness"] = int(lv) if lv.is_integer() else round(lv, 2)
                 elif k == "note":
                     seg["note"] = v_unq
                 continue
@@ -675,6 +681,14 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
             if s.get("transition_duration") is not None:
                 tr_str += f"@{_fmt_num(s['transition_duration'])}"
             toks.append(f"tr={tr_str}")
+
+        if s.get("gain_db") is not None and float(s["gain_db"]) != 0.0:
+            gv = float(s["gain_db"])
+            sign = "+" if gv > 0 else ""
+            toks.append(f"vol={sign}{_fmt_num(gv)}dB")
+
+        if s.get("loudness") is not None:
+            toks.append(f"loudness={_fmt_num(s['loudness'])}")
 
         peer = s.get("peer")
         if isinstance(peer, dict) and peer.get("src"):

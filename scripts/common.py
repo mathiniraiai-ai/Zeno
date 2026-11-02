@@ -224,6 +224,9 @@ WORK = ROOT / "work"
 OUTPUT = Path(os.environ.get("ZENO_OUTPUT_DIR", "").strip() or (Path.home() / "Downloads" / "Zeno Outputs")).expanduser()
 
 DEFAULT_SFX = {"right": "correct_ding.wav", "wrong": "buzzer.wav"}
+# Meta Ads & Social Media Reels/Shorts Loudness Standard (-11.5 LUFS, -1.0 dBTP peak cap)
+DEFAULT_LOUDNESS_LUFS = -11.5
+DEFAULT_PEAK_CAP_DB = -1.0
 
 # Named Swappable Mark Packs (tick / error badges & full-screen flashes/vignettes)
 MARK_PACKS = {

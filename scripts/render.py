@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
+    DEFAULT_LOUDNESS_LUFS,
+    DEFAULT_PEAK_CAP_DB,
     DEFAULT_SFX,
     MARKS_DIR,
     SFX_DIR,
@@ -159,6 +161,8 @@ def render_segment(seg: Dict[str, Any], W: int, H: int, fps: int, out: Path, dra
             )
         )
     vf += ["setsar=1", "format=yuv420p", "tpad=stop_mode=clone:stop=3"]
+    seg_loud = float(seg.get("loudness") if seg.get("loudness") is not None else DEFAULT_LOUDNESS_LUFS)
+    seg_gain_db = float(seg.get("gain_db") or 0.0)
     af = [
         "aresample=48000",
         "aformat=channel_layouts=stereo",
@@ -166,6 +170,13 @@ def render_segment(seg: Dict[str, Any], W: int, H: int, fps: int, out: Path, dra
         "apad",
         f"atrim=0:{exact:.6f}",
         "asetpts=PTS-STARTPTS",
+        "highpass=f=70",
+        f"loudnorm=I={seg_loud}:TP={DEFAULT_PEAK_CAP_DB}:LRA=9",
+    ]
+    if abs(seg_gain_db) >= 0.05:
+        af.append(f"volume={seg_gain_db:+.2f}dB")
+    af += [
+        f"alimiter=limit={DEFAULT_PEAK_CAP_DB}dB:level=false",
         f"afade=t=in:d={EDGE_FADE}",
         f"afade=t=out:st={max(0.0, exact - EDGE_FADE):.6f}:d={EDGE_FADE}",
     ]
@@ -276,6 +287,18 @@ def main() -> None:
         default=None,
         help="Override ✓/✗ mark badge pack (default, glossy, flash, vignette)",
     )
+    ap.add_argument(
+        "--loudness",
+        type=float,
+        default=None,
+        help=f"Override target integrated loudness in LUFS (default: {DEFAULT_LOUDNESS_LUFS} LUFS for Meta Ads/Reels)",
+    )
+    ap.add_argument(
+        "--gain-db",
+        type=float,
+        default=None,
+        help="Apply an exact global dB boost/cut on top of loudness normalization (e.g. +2.0 or -1.5)",
+    )
     a = ap.parse_args()
 
     plan_path, plan = _load_plan(a.plan)
@@ -286,6 +309,10 @@ def main() -> None:
                 s["layout"] = a.preset
     if a.mark_pack:
         plan["mark_pack"] = a.mark_pack
+    if a.loudness is not None:
+        plan.setdefault("audio", {})["loudness"] = a.loudness
+    if a.gain_db is not None:
+        plan.setdefault("audio", {})["gain_db"] = a.gain_db
 
     segs = plan["segments"]
     first_src = resolve(segs[0]["src"])
@@ -536,7 +563,8 @@ def main() -> None:
         au = "[amx]"
 
     # 4) mix pass, then two-pass loudness normalisation into the final file
-    loud = plan.get("audio", {}).get("loudness", -14)
+    loud = float(plan.get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
+    master_gain_db = float(plan.get("audio", {}).get("gain_db", 0.0) or 0.0)
     mix = WORK / "_segments" / "mix.mkv"
     fc.append(f"{v}null[vout]")
     fc.append(f"{au}anull[aout]")
@@ -553,12 +581,13 @@ def main() -> None:
         "-c:a", "pcm_s16le",
         mix,
     )
-    r = ffmpeg("-i", mix, "-af", f"loudnorm=I={loud}:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-")
+    r = ffmpeg("-i", mix, "-af", f"loudnorm=I={loud}:TP={DEFAULT_PEAK_CAP_DB}:LRA=11:print_format=json", "-f", "null", "-")
     meas = json.loads(re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr).group(0))
+    vol_extra = f",volume={master_gain_db:+.2f}dB" if abs(master_gain_db) >= 0.05 else ""
     ln = (
-        f"loudnorm=I={loud}:TP=-1.5:LRA=11:measured_I={meas['input_i']}:measured_TP={meas['input_tp']}:"
+        f"loudnorm=I={loud}:TP={DEFAULT_PEAK_CAP_DB}:LRA=11:measured_I={meas['input_i']}:measured_TP={meas['input_tp']}:"
         f"measured_LRA={meas['input_lra']}:measured_thresh={meas['input_thresh']}:"
-        f"offset={meas['target_offset']}:linear=true,alimiter=limit=-1.2dB:level=false,aresample=48000"
+        f"offset={meas['target_offset']}:linear=true{vol_extra},alimiter=limit={DEFAULT_PEAK_CAP_DB}dB:level=false,aresample=48000"
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     ffmpeg("-i", mix, "-c:v", "copy", "-af", ln, "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_path)

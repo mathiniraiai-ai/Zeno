@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from common import (
+    DEFAULT_LOUDNESS_LUFS,
+    DEFAULT_PEAK_CAP_DB,
     MARKS_DIR,
     SFX_DIR,
     WORK,
@@ -524,8 +526,9 @@ def build_segment_cache_key(
             "slot": peer.get("slot"),
         }
 
+    plan_loudness = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
     payload = {
-        "v": 4,
+        "v": 5,
         "src": _file_mtime_sig(seg["src"]),
         "start": round(float(seg["start"]), 4),
         "end": round(float(seg["end"]), 4),
@@ -537,6 +540,9 @@ def build_segment_cache_key(
         "zoom_at": seg.get("zoom_at"),
         "zoom_dur": seg.get("zoom_dur"),
         "focus": seg.get("focus"),
+        "gain_db": seg.get("gain_db"),
+        "loudness": seg.get("loudness"),
+        "plan_loudness": plan_loudness,
         "peer": peer_sig,
         "chat": seg.get("chat"),
         "banners": seg.get("banners") or seg.get("stop_saying"),
@@ -653,16 +659,28 @@ def build_segment_ffmpeg_args(
     src_h = int(src_info.get("height") or H)
     has_audio = bool(src_info.get("has_audio", True))
 
-    af_chain = ",".join([
+    plan_loud = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
+    seg_loud = float(seg.get("loudness") if seg.get("loudness") is not None else plan_loud)
+    seg_gain_db = float(seg.get("gain_db") or 0.0)
+
+    af_parts = [
         "aresample=48000",
         "aformat=channel_layouts=stereo",
         "asetpts=PTS-STARTPTS",
         "apad",
         f"atrim=0:{exact:.6f}",
         "asetpts=PTS-STARTPTS",
+        "highpass=f=70",
+        f"loudnorm=I={seg_loud}:TP={DEFAULT_PEAK_CAP_DB}:LRA=9",
+    ]
+    if abs(seg_gain_db) >= 0.05:
+        af_parts.append(f"volume={seg_gain_db:+.2f}dB")
+    af_parts.extend([
+        f"alimiter=limit={DEFAULT_PEAK_CAP_DB}dB:level=false",
         f"afade=t=in:d={EDGE_FADE}",
         f"afade=t=out:st={max(0.0, exact - EDGE_FADE):.6f}:d={EDGE_FADE}",
     ])
+    af_chain = ",".join(af_parts)
 
     inputs: List[Any] = ["-ss", f"{float(seg['start']):.3f}", "-t", f"{dur + 0.5:.3f}", "-i", src]
     audio_input_idx: Optional[int] = 0 if has_audio else None
