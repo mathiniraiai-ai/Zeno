@@ -124,6 +124,51 @@ def even(x: float) -> int:
     return int(round(x / 2)) * 2
 
 
+def render_square_1x1(
+    src_mp4: Path,
+    out_mp4: Optional[Path] = None,
+    sq_size: int = 1080,
+    blur_sigma: float = 18.0,
+    draft: bool = False,
+) -> Path:
+    """Convert a 9:16 vertical MP4 into a 1:1 square MP4:
+      - Layer 1 (Background): 1:1 center crop from the 9:16 clip with 5-10% Gaussian blur (gblur=sigma=18).
+      - Layer 2 (Foreground): Full 9:16 vertical clip scaled to fit height and centered on top.
+    """
+    src_mp4 = resolve(src_mp4)
+    if out_mp4 is None:
+        out_mp4 = src_mp4.with_name(f"{src_mp4.stem}_1x1.mp4")
+    out_mp4 = Path(out_mp4)
+    out_mp4.parent.mkdir(parents=True, exist_ok=True)
+
+    sq = even(sq_size)
+    fg_w = even(sq * 9.0 / 16.0)
+    bg_h = even(sq * 16.0 / 9.0)
+    fc = (
+        f"[0:v]split=2[bg_in][fg_in];"
+        f"[bg_in]scale={sq}:{bg_h}:force_original_aspect_ratio=increase:flags=lanczos,"
+        f"crop={sq}:{sq}:(iw-{sq})/2:(ih-{sq})/2,"
+        f"gblur=sigma={blur_sigma:.1f}[bg];"
+        f"[fg_in]scale={fg_w}:{sq}:flags=lanczos[fg];"
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p[vout]"
+    )
+    ffmpeg(
+        "-i", src_mp4,
+        "-filter_complex", fc,
+        "-map", "[vout]",
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-preset", "ultrafast" if draft else "veryfast",
+        "-crf", "23" if draft else "18",
+        "-profile:v", "high",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "copy",
+        "-movflags", "+faststart",
+        out_mp4,
+    )
+    return out_mp4
+
+
 def render_segment(seg: Dict[str, Any], W: int, H: int, fps: int, out: Path, draft: bool) -> float:
     """Fallback single-layout segment renderer with sub-pixel supersampled zoompan and PTS-safe audio."""
     dur = max(0.08, float(seg["end"]) - float(seg["start"]))
@@ -299,7 +344,27 @@ def main() -> None:
         default=None,
         help="Apply an exact global dB boost/cut on top of loudness normalization (e.g. +2.0 or -1.5)",
     )
+    ap.add_argument(
+        "--square",
+        action="store_true",
+        help="Also render a 1:1 (1080x1080) Square Meta Ads version with a 1:1 center-cropped Gaussian blurred background and centered 9:16 foreground",
+    )
+    ap.add_argument(
+        "--blur-sigma",
+        type=float,
+        default=18.0,
+        help="Gaussian blur sigma for the 1:1 background layer (default: 18.0, ~7%% blur)",
+    )
     a = ap.parse_args()
+
+    # Direct MP4 -> 1:1 Square conversion if a .mp4 path is passed with --square
+    if str(a.plan).lower().endswith(".mp4"):
+        src_vid = resolve(a.plan)
+        sq_out = OUTPUT / f"{src_vid.stem}_1x1.mp4"
+        print(f"Rendering 1:1 Square version from {src_vid} -> {sq_out} ...")
+        render_square_1x1(src_vid, sq_out, sq_size=1080, blur_sigma=a.blur_sigma, draft=a.draft)
+        print(f"Done (1:1 Square): {sq_out}")
+        return
 
     plan_path, plan = _load_plan(a.plan)
     if a.preset:
@@ -622,6 +687,12 @@ def main() -> None:
     tl.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
     print(f"\nDone: {out_path}")
+
+    if a.square or plan.get("square") or (plan.get("canvas") or {}).get("square"):
+        sq_out = out_path.with_name(f"{out_path.stem}_1x1.mp4")
+        print(f"Rendering 1:1 Square version -> {sq_out} ...")
+        render_square_1x1(out_path, sq_out, sq_size=max(W, 1080), blur_sigma=a.blur_sigma, draft=a.draft)
+        print(f"Done (1:1 Square): {sq_out}")
 
     # 6) optional post-render verification
     if a.verify and verify is not None and hasattr(verify, "run_verification"):
