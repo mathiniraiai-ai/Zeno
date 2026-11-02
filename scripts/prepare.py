@@ -1447,6 +1447,15 @@ def assign_segment_ids_marks_and_layouts(
     primary_seen: Dict[str, int] = {}
     segments_out: List[Dict[str, Any]] = []
     marks_out: List[Dict[str, Any]] = []
+    hook_transition_count = 0
+    has_done_first_zoom_in = False
+    prev_single_zoom_style = ""
+    supernova_keypoint_re = re.compile(
+        r"(supernova|miss\s*nova|\bnova\b|ai\s*tutor|spoken\s*english|improve|two\s*weeks|2\s*weeks|"
+        r"15\s*minutes|fifteen|daily\s*speaking|daily\s*practice|stop\s*saying|secret|important|"
+        r"mistake|professional|fluent|confidence|ನಿಲ್ಲಿಸಿ|ಎರಡು\s*ವಾರ|ತೋರಿಸ್ತೀನಿ\s*ನೋಡಿ|ಅಭ್ಯಾಸ|ಸುಲಭ)",
+        re.I,
+    )
 
     # Query vision_tracker for layout recommendations when available
     resolved_preset = preset if preset != "auto" else "single"
@@ -1576,31 +1585,78 @@ def assign_segment_ids_marks_and_layouts(
                         "duration": round(min(dur, 4.2), 2),
                     }]
 
-        # Auto-assign intentional transitions ONLY at macro layout changes (e.g. single -> split_h),
-        # never on single -> single hook jump cuts or split_h -> split_h dialogue turns.
+        # Auto-assign intentional transitions:
+        # 1. Up to 1-2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside the initial single-character hook
+        # 2. Macro layout transition (warm_flash / smoothright) when switching between single and split_h/split_v
+        # 3. NEVER place transitions inside two-character split_h / split_v dialogue turns
         if segments_out:
             prev_seg = segments_out[-1]
             prev_lay = prev_seg.get("layout", "single")
             cur_lay = seg_dict.get("layout", "single")
             if prev_lay != cur_lay:
                 seg_dict["transition"] = "warm_flash" if cur_lay in ("split_h", "split_v") else "smoothright"
-                seg_dict["transition_duration"] = 0.28
+                seg_dict["transition_duration"] = 0.35 if cur_lay in ("split_h", "split_v") else 0.28
+            elif cur_lay == "single" and prev_lay == "single" and hook_transition_count < 2:
+                if Path(str(prev_seg.get("src", ""))).name != Path(str(seg_dict.get("src", ""))).name:
+                    seg_dict["transition"] = "whip_left" if hook_transition_count == 0 else "whip_right"
+                    seg_dict["transition_duration"] = 0.28
+                    hook_transition_count += 1
 
-        # Split screens (split_h / split_v) are 100% static (z=1.0 locked, no zoom-in or zoom-out)
+        # Split screens (split_h / split_v) are 100% static (z=1.0 locked, no zoom-in or zoom-out).
+        # Single-character live segments (layout == "single") prioritize:
+        #   - High preference for the FIRST rapid zoom-in (sudden_in) on the opening segment
+        #   - Sudden zoom-in (sudden_in) on Supernova callouts or strong teaching/value points
+        #   - Rapid zoom-out (sudden_out) or smooth push-in (1.0->1.06) on follow-up single segments
         if layout_mode in ("split_h", "split_v"):
             seg_dict["zoom"] = 1.0
-        elif zoom != 1.0:
-            seg_dict["zoom"] = zoom
-            seg_dict["focus"] = seg.get("focus", [0.5, 0.4])
-        elif seg.get("zoom_to"):
-            seg_dict["zoom"] = 1.0
-            seg_dict["zoom_to"] = float(seg["zoom_to"])
-            seg_dict["focus"] = seg.get("focus", [0.5, 0.42])
-        elif dur >= LONG_MONOLOGUE_ZOOM_SEC and len(lines) == 1:
-            # Subtle slow push on long solo monologues (>8.95s)
-            is_closing_cta = (idx == len(raw_segments) - 1)
-            seg_dict["zoom_to"] = 1.05 if is_closing_cta else 1.06
-            seg_dict["focus"] = [0.5, 0.45]
+        else:
+            full_line_text = " ".join(l.get("text", "") for l in lines) if lines else note
+            seg_words = seg.get("words") or []
+            callout_at = None
+            for w in seg_words:
+                wt = str(w.get("w") or "")
+                if supernova_keypoint_re.search(wt):
+                    rel_w = round(float(w.get("start", seg["start"])) - float(seg["start"]), 2)
+                    if 0.05 <= rel_w <= max(0.15, dur - 0.35):
+                        callout_at = rel_w
+                        break
+
+            if not has_done_first_zoom_in:
+                seg_dict["zoom"] = 1.0
+                seg_dict["zoom_to"] = 1.08
+                seg_dict["zoom_style"] = "sudden_in"
+                seg_dict["zoom_at"] = callout_at if callout_at is not None else 0.25
+                seg_dict["focus"] = seg.get("focus", [0.5, 0.42])
+                has_done_first_zoom_in = True
+                prev_single_zoom_style = "sudden_in"
+            elif supernova_keypoint_re.search(full_line_text) and prev_single_zoom_style != "sudden_in":
+                seg_dict["zoom"] = 1.0
+                seg_dict["zoom_to"] = 1.08
+                seg_dict["zoom_style"] = "sudden_in"
+                seg_dict["zoom_at"] = callout_at if callout_at is not None else 0.12
+                seg_dict["focus"] = seg.get("focus", [0.5, 0.42])
+                prev_single_zoom_style = "sudden_in"
+            elif prev_single_zoom_style == "sudden_in" and dur >= 1.5:
+                seg_dict["zoom"] = 1.08
+                seg_dict["zoom_to"] = 1.0
+                seg_dict["zoom_style"] = "sudden_out"
+                seg_dict["zoom_at"] = 0.10
+                seg_dict["focus"] = seg.get("focus", [0.5, 0.42])
+                prev_single_zoom_style = "sudden_out"
+            elif zoom != 1.0:
+                seg_dict["zoom"] = zoom
+                seg_dict["focus"] = seg.get("focus", [0.5, 0.4])
+                prev_single_zoom_style = "static"
+            elif seg.get("zoom_to"):
+                seg_dict["zoom"] = 1.0
+                seg_dict["zoom_to"] = float(seg["zoom_to"])
+                seg_dict["focus"] = seg.get("focus", [0.5, 0.42])
+                prev_single_zoom_style = "smooth"
+            elif dur >= LONG_MONOLOGUE_ZOOM_SEC and len(lines) == 1:
+                is_closing_cta = (idx == len(raw_segments) - 1)
+                seg_dict["zoom_to"] = 1.05 if is_closing_cta else 1.06
+                seg_dict["focus"] = [0.5, 0.45]
+                prev_single_zoom_style = "smooth"
 
         segments_out.append(seg_dict)
 

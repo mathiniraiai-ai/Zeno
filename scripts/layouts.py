@@ -576,27 +576,39 @@ def resolve_segment_zoom_spec(
         if bg_motion < 2.8:
             sid_str = str(seg.get("id") or "S1")
             note = str(seg.get("note") or seg.get("text") or "")
-            # 1. Check for emphasis words inside segment word timings to trigger an emphasis punch-in
+            callout_re = re.compile(
+                r"(supernova|miss\s*nova|\bnova\b|ai\s*tutor|spoken\s*english|improve|two\s*weeks|2\s*weeks|"
+                r"15\s*minutes|fifteen|daily\s*speaking|daily\s*practice|stop\s*saying|secret|important|"
+                r"mistake|professional|fluent|confidence|ನಿಲ್ಲಿಸಿ|ಎರಡು\s*ವಾರ|ತೋರಿಸ್ತೀನಿ\s*ನೋಡಿ|ಅಭ್ಯಾಸ|ಸುಲಭ)",
+                re.I,
+            )
+            # 1. High preference for the first rapid zoom-in (sudden_in) on opening single-character segments
+            if sid_str in ("S1", "S1a", "L1", "L1a"):
+                return 1.0, 1.08, "sudden_in", 0.25, 0.18
+            # 2. Sudden zoom-in on Supernova callouts or strong teaching/value points inside segment word timings
             seg_words = seg.get("words") or []
             seg_start = float(seg.get("start", 0.0))
             for w in seg_words:
                 wt = str(w.get("w") or "")
                 rel_t = float(w.get("start", seg_start)) - seg_start
-                if 0.25 <= rel_t <= exact_dur - 0.45 and re.search(
-                    r"\b(stop|never|wrong|don't|instead|correct|right|always|actually|remember|secret)\b",
-                    wt,
-                    re.I,
+                if 0.08 <= rel_t <= exact_dur - 0.35 and (
+                    callout_re.search(wt)
+                    or re.search(r"\b(stop|never|wrong|don't|instead|correct|right|always|actually|remember|secret)\b", wt, re.I)
                 ):
                     return 1.0, 1.08, "sudden_in", round(rel_t, 3), 0.18
-            # 2. Questions / Hooks -> smooth push-in (1.0 -> 1.06)
-            if "?" in note or sid_str in ("S1", "S2", "L1", "L2") or re.search(
+            if callout_re.search(note):
+                return 1.0, 1.08, "sudden_in", 0.12, 0.18
+            # 3. Questions / Hooks -> smooth push-in (1.0 -> 1.06)
+            if "?" in note or sid_str in ("S2", "S2a", "L2") or re.search(
                 r"\b(why|what|how|when|where|who|stop\s+saying|mistake|wrong)\b", note, re.I
             ):
                 return 1.0, 1.06, "smooth", 0.0, exact_dur
-            # 3. Resolutions / Answers -> smooth pull-out (1.06 -> 1.0)
+            # 4. Follow-up / Release beats -> rapid zoom-out (sudden_out) or smooth pull-out
+            if sid_str.endswith(("b", "c")) and exact_dur <= 3.2:
+                return 1.08, 1.0, "sudden_out", 0.10, 0.20
             if re.search(r"\[(?:right|correct)\]|\b(perfect|correct|exactly|instead|better|right\s+way|means|install|download)\b", note, re.I):
                 return 1.06, 1.0, "smooth", 0.0, exact_dur
-            # 4. Default by segment duration
+            # 5. Default by segment duration
             if exact_dur >= 3.5:
                 return 1.0, 1.05, "smooth", 0.0, exact_dur
             return 1.05, 1.0, "smooth", 0.0, exact_dur
