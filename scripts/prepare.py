@@ -89,6 +89,7 @@ try:
 except Exception:
     edl_parser = None
 
+import brain_memory  # noqa: E402
 import style_config  # noqa: E402
 
 _TUNING = style_config.get_tuning("micronarrative")
@@ -297,6 +298,49 @@ def find_rms_minimum(
     else:
         best_t, best_db = min(cands, key=lambda x: x[1])
     return round(best_t, 2), best_db
+
+
+def detect_vocal_stress_words(
+    rms_env: List[Tuple[float, float]],
+    words: List[Dict[str, Any]],
+    seg_start: float,
+    seg_end: float,
+    max_peaks: int = 2,
+) -> List[Dict[str, Any]]:
+    """Measure per-word 10ms RMS energy relative to the segment's median speech energy
+    and return the top `max_peaks` vocal emphasis words (`delta_db >= +1.5 dB`) so the
+    Editorial Brain knows the exact millisecond the actor stressed a word in any language.
+    """
+    if not rms_env or not words:
+        return []
+    seg_frames = [db for t, db in rms_env if seg_start <= t <= seg_end and db > -34.0]
+    if not seg_frames:
+        return []
+    sorted_db = sorted(seg_frames)
+    median_db = sorted_db[len(sorted_db) // 2]
+
+    scored: List[Dict[str, Any]] = []
+    for w in words:
+        ws = float(w.get("start", 0.0))
+        we = float(w.get("end", ws))
+        wt = str(w.get("w") or "").strip()
+        if we <= seg_start or ws >= seg_end or (we - ws) < 0.12 or len(_clean_token(wt)) < 2:
+            continue
+        w_dbs = [db for t, db in rms_env if ws <= t <= we and db > -36.0]
+        if not w_dbs:
+            continue
+        peak_db = max(w_dbs)
+        delta_db = round(peak_db - median_db, 1)
+        if delta_db >= 1.5:
+            scored.append({
+                "w": wt,
+                "start": round(ws, 2),
+                "rel_t": round(max(0.0, ws - seg_start), 2),
+                "delta_db": delta_db,
+            })
+
+    scored.sort(key=lambda x: x["delta_db"], reverse=True)
+    return scored[:max_peaks]
 
 
 def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
@@ -1605,13 +1649,33 @@ def assign_segment_ids_marks_and_layouts(
         # Split screens (split_h / split_v) are 100% static (z=1.0 locked, no zoom-in or zoom-out).
         # Single-character live segments (layout == "single") prioritize:
         #   - High preference for the FIRST rapid zoom-in (sudden_in) on the opening segment
-        #   - Sudden zoom-in (sudden_in) on Supernova callouts or strong teaching/value points
+        #   - Sudden zoom-in (sudden_in) on Supernova callouts, strong teaching points, or vocal [STRESS] peaks
         #   - Rapid zoom-out (sudden_out) or smooth push-in (1.0->1.06) on follow-up single segments
+        seg_words = seg.get("words") or []
+        stress_words = detect_vocal_stress_words(
+            seg["clip"].get("rms_env", []),
+            seg_words,
+            float(seg["start"]),
+            float(seg["end"]),
+        )
+        if stress_words:
+            seg_dict["stress_words"] = stress_words
+        if vision_tracker is not None and hasattr(vision_tracker, "detect_actor_readiness_bounds") and seg_words:
+            try:
+                seg_dict["face_ready"] = vision_tracker.detect_actor_readiness_bounds(
+                    seg["src"],
+                    float(seg["start"]),
+                    float(seg["end"]),
+                    first_word_start=float(seg_words[0]["start"]),
+                    last_word_end=float(seg_words[-1]["end"]),
+                )
+            except Exception:
+                pass
+
         if layout_mode in ("split_h", "split_v"):
             seg_dict["zoom"] = 1.0
         else:
             full_line_text = " ".join(l.get("text", "") for l in lines) if lines else note
-            seg_words = seg.get("words") or []
             callout_at = None
             for w in seg_words:
                 wt = str(w.get("w") or "")
@@ -1620,6 +1684,10 @@ def assign_segment_ids_marks_and_layouts(
                     if 0.05 <= rel_w <= max(0.15, dur - 0.35):
                         callout_at = rel_w
                         break
+            if callout_at is None and stress_words:
+                cand_rel = float(stress_words[0]["rel_t"])
+                if 0.08 <= cand_rel <= max(0.15, dur - 0.35):
+                    callout_at = cand_rel
 
             if not has_done_first_zoom_in:
                 seg_dict["zoom"] = 1.0
@@ -1789,6 +1857,10 @@ def format_brief_txt(
         for sc in meta["scenes"]:
             out_lines.append(f"# {sc['scene']:<17}: {sc.get('visual', '')}")
 
+    mem_lines = brain_memory.format_brain_memory_for_brief("micronarrative")
+    if mem_lines:
+        out_lines.extend(mem_lines)
+
     out_lines += [
         "",
         "## CLIPS, CHARACTER SPEAKERS & AUTO-CUTS",
@@ -1833,6 +1905,16 @@ def format_brief_txt(
         )
         for anom in c.get("anomalies", []):
             out_lines.append(f"  ! {anom}")
+        for s in c_segs:
+            sw = s.get("stress_words") or []
+            fr = s.get("face_ready") or {}
+            tags = []
+            if sw:
+                tags.append("STRESS: " + ", ".join(f"'{w['w']}'@+{w['rel_t']:.2f}s(+{w['delta_db']:.1f}dB)" for w in sw))
+            if fr and (fr.get("trimmed_lead_sec", 0.0) > 0 or fr.get("trimmed_tail_sec", 0.0) > 0):
+                tags.append(f"FACE_READY: {fr['ready_start']:.2f}-{fr['ready_end']:.2f}s")
+            if tags:
+                out_lines.append(f"  * [{s['id']}] {' | '.join(tags)}")
         gid = c.get("take_group", id(c))
         if not c.get("dropped_take") and gid in omitted_by_group:
             om_list = omitted_by_group[gid]

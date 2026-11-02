@@ -6,6 +6,7 @@ fallback when `cv2` is unavailable so every pipeline stage works in any Python e
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -737,6 +738,16 @@ def find_listening_idle_window(
     return dict(res)
 
 
+def _clip_file_hash8(resolved: Path) -> str:
+    """Return an 8-char content/mtime signature so disk vision caches never collide across projects."""
+    try:
+        st = resolved.stat()
+        raw = f"{resolved.resolve()}|{st.st_size}|{int(st.st_mtime)}"
+    except OSError:
+        raw = str(resolved)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()[:8]
+
+
 def analyze_clip_vision(
     video_path: Union[str, Path],
     speech_spans: Optional[Sequence[Any]] = None,
@@ -744,11 +755,24 @@ def analyze_clip_vision(
 ) -> Dict[str, Any]:
     """Sample frames from `video_path` to determine face count, shot type, eye-anchored
     `focus = [fx, fy]` (14% headroom / 38% eyeline), and clean mouth-closed idle window.
+    Persists results to `work/<stem>/vision_<hash8>.json` so vision data survives process exits.
     """
     resolved = resolve(video_path)
     cache_key = str(resolved)
     if cache_key in _VISION_CACHE and speech_spans is None:
         return dict(_VISION_CACHE[cache_key])
+
+    disk_cache_file: Optional[Path] = None
+    if resolved.is_file() and speech_spans is None:
+        disk_cache_file = clip_work_dir(resolved) / f"vision_{_clip_file_hash8(resolved)}.json"
+        if disk_cache_file.is_file():
+            try:
+                cached = read_json(disk_cache_file)
+                if isinstance(cached, dict) and cached.get("bbox_norm"):
+                    _VISION_CACHE[cache_key] = cached
+                    return dict(cached)
+            except Exception:
+                pass
 
     info = probe(resolved) if resolved.is_file() else {
         "path": str(resolved), "duration": 6.0, "width": 720, "height": 1280, "fps": 24.0, "has_audio": True
@@ -891,7 +915,40 @@ def analyze_clip_vision(
     }
     if speech_spans is None:
         _VISION_CACHE[cache_key] = result
+        if disk_cache_file is not None:
+            try:
+                write_json(disk_cache_file, result)
+            except Exception:
+                pass
     return dict(result)
+
+
+def detect_actor_readiness_bounds(
+    video_path: Union[str, Path],
+    seg_start: float,
+    seg_end: float,
+    first_word_start: Optional[float] = None,
+    last_word_end: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Compute clean `[ready_start, ready_end]` cut bounds that trim pre-speech 'actor settling'
+    (>0.22s before first word) and post-speech 'end-of-take freeze' (>0.24s after last word).
+    """
+    s0 = max(0.0, float(seg_start))
+    s1 = max(s0 + 0.10, float(seg_end))
+    fw = float(first_word_start) if first_word_start is not None else s0
+    lw = float(last_word_end) if last_word_end is not None else s1
+
+    ready_start = round(max(s0, fw - 0.18), 2) if (fw - s0) > 0.22 else round(s0, 2)
+    ready_end = round(min(s1, lw + 0.18), 2) if (s1 - lw) > 0.24 else round(s1, 2)
+    if ready_end <= ready_start + 0.20:
+        ready_start, ready_end = round(s0, 2), round(s1, 2)
+
+    return {
+        "ready_start": ready_start,
+        "ready_end": ready_end,
+        "trimmed_lead_sec": round(max(0.0, ready_start - s0), 2),
+        "trimmed_tail_sec": round(max(0.0, s1 - ready_end), 2),
+    }
 
 
 # Convenient aliases

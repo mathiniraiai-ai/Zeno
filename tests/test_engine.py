@@ -113,6 +113,7 @@ L2 S2.mp4 0.12-4.10 layout=split_h slot=right sp=Student tr=smoothleft@0.28 peer
             mark_pack="flash",
         )
         self.assertIn("[ALT_TAKES_OMITTED] +3 lower-scored takes omitted (T4, T5, T6)", brief)
+        self.assertIn("# BRAIN MEMORY (MANDATORY 15-YEAR EDITOR RULES):", brief)
         self.assertLess(len(brief), 3900)
 
     def test_4_intent_zoom_and_color_match_off_by_default(self) -> None:
@@ -162,6 +163,53 @@ L2 S2.mp4 0.12-4.10 layout=split_h slot=right sp=Student tr=smoothleft@0.28 peer
             self.assertGreaterEqual(len(root.findall(".//transitionitem")), 15)
             self.assertGreaterEqual(len(root.findall(".//sequence/marker")), 16)
             self.assertGreaterEqual(len(root.findall('.//parameter[parameterid="scale"]/keyframe')), 10)
+
+    def test_6_brain_memory_vocal_stress_and_split_qc(self) -> None:
+        import brain_memory
+        import vision_tracker
+
+        rules = brain_memory.load_brain_memory("micronarrative")
+        self.assertGreaterEqual(len(rules), 7)
+
+        # Vocal stress detection from 10ms RMS envelope
+        fake_rms = [(round(i * 0.01, 2), -24.0) for i in range(300)]
+        for i in range(120, 155):
+            fake_rms[i] = (round(i * 0.01, 2), -16.5)  # +7.5 dB vocal stress peak
+        fake_words = [
+            {"w": "ನಾನು", "start": 0.20, "end": 0.60},
+            {"w": "Supernova", "start": 1.15, "end": 1.60},
+            {"w": "ಮೂಲಕ", "start": 1.80, "end": 2.20},
+        ]
+        stress = prepare.detect_vocal_stress_words(fake_rms, fake_words, 0.10, 2.50)
+        self.assertEqual(len(stress), 1)
+        self.assertEqual(stress[0]["w"], "Supernova")
+        self.assertGreaterEqual(stress[0]["delta_db"], 6.0)
+
+        # Actor readiness / anti-freeze bounds
+        ready = vision_tracker.detect_actor_readiness_bounds("nonexistent.mp4", 0.0, 5.0, first_word_start=0.60, last_word_end=4.20)
+        self.assertEqual(ready["ready_start"], 0.42)
+        self.assertEqual(ready["ready_end"], 4.38)
+
+        # Split-screen & hook QC rules
+        plan_path = ROOT / "work" / "stop_saying_21545" / "plan.edl"
+        if plan_path.is_file():
+            plan = edl_parser.load_edl(plan_path)
+            ok, summary = verify.check_split_and_hook_rules(plan)
+            self.assertTrue(ok, f"Split/Hook QC failed: {summary}")
+
+        # Verify violation detection when split-screen has non-static zoom or intra-split transition
+        bad_plan = {
+            "segments": [
+                {"id": "L2", "src": "a.mp4", "layout": "split_h", "zoom": 1.0, "transition": "warm_flash"},
+                {"id": "L3", "src": "b.mp4", "layout": "split_h", "zoom": 1.08, "transition": "smoothleft"},
+            ],
+            "sfx": [{"file": "whoosh.wav", "segment": "L3", "at": 0.0}],
+        }
+        bad_ok, bad_summary = verify.check_split_and_hook_rules(bad_plan)
+        self.assertFalse(bad_ok)
+        self.assertIn("non_static_zoom", bad_summary)
+        self.assertIn("intra_split_transition", bad_summary)
+        self.assertIn("intra_split_whoosh", bad_summary)
 
 
 if __name__ == "__main__":

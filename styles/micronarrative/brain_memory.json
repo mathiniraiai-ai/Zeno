@@ -1,0 +1,41 @@
+{
+  "style": "micronarrative",
+  "updated_at": "2026-11-02",
+  "rules": [
+    {
+      "id": "HOOK_FIRST_ZOOM_IN",
+      "category": "zoom",
+      "rule": "Single-character live hook (layout=single) MUST give top priority to a rapid zoom-in (sudden_in:1.08) on the opening hook beat before any zoom-out."
+    },
+    {
+      "id": "SUPERNOVA_AND_KEYPOINT_ZOOM_IN",
+      "category": "zoom",
+      "rule": "In single-character live shots (layout=single), trigger a sudden zoom-in (sudden_in:1.08@<word_t>) on Supernova callouts or strong value points ([STRESS] vocal peak words), and pair follow-up beats with sudden_out:1.08 or smooth 1.0->1.06."
+    },
+    {
+      "id": "HOOK_CLIP_TRANSITIONS_1_TO_2",
+      "category": "transitions",
+      "rule": "Place 1 to 2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside a single-character hook; keep intra-clip splits as clean jump cuts (tr=cut, zero whoosh spam)."
+    },
+    {
+      "id": "SPLIT_SCREEN_100_STATIC",
+      "category": "split_screen",
+      "rule": "Two-character split screens (split_h / split_v) MUST stay 100% static (z=1.0 locked) with zero intra-split transitions (tr=cut) and zero whoosh.wav SFX between speaker turns."
+    },
+    {
+      "id": "SPLIT_SCREEN_COMMON_HEADROOM",
+      "category": "split_screen",
+      "rule": "In split_h (Left/Right) and split_v (Top/Bottom), both characters MUST share an identical common headroom (14%-20% matched head-crown gap) and matched face zoom scale, alternating active speaker and silent listening character (left <-> right or top <-> bottom)."
+    },
+    {
+      "id": "ACTOR_READINESS_ANTI_FREEZE",
+      "category": "cutting",
+      "rule": "Respect [FACE_READY] bounds to trim pre-speech 'actor getting ready' stares and post-speech 'end-of-take freeze' frames."
+    },
+    {
+      "id": "RAW_COLORS_AND_SYNC_LOCK",
+      "category": "color_audio",
+      "rule": "Keep color_match OFF (false) by default so raw clip colours are never altered, and never apply J/L audio-video offsets unless explicitly requested."
+    }
+  ]
+}

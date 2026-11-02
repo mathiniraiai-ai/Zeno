@@ -39,9 +39,16 @@ DEFAULT_TUNING: Dict[str, Any] = {
     # Marks & SFX (prepare.py / render.py)
     "mark_duration_sec": 0.56,
     "mark_alpha": 0.50,
+    "wrong_sfx_primary": "buzzer.wav",
+    "wrong_sfx_layer": "kn20228_wrong_core.mp3",
+    "right_sfx_primary": "correct_ding.wav",
+    "right_sfx_layer": "sn_correct.wav",
+    "whoosh_sfx": "whoosh.wav",
     "wrong_sfx_gain_db": 4.0,
     "right_sfx_gain_db": 2.5,
     "whoosh_sfx_gain_db": -2.0,
+    "max_hook_transitions": 2,
+    "use_hw_accel": True,
     # Audio crossfades, room tone & loudness mastering (layouts.py / render.py / verify.py)
     "edge_fade_sec": 0.012,
     "audio_crossfade_sec": 0.045,

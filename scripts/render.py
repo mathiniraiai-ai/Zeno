@@ -599,17 +599,27 @@ def main() -> None:
         n += 1
 
         if m.get("sfx", "default") is not None and str(m.get("sfx", "default")).lower() != "none":
-            sfx_path = resolve_mark_sfx(mtype, sfx=m.get("sfx", "default"), pack=sfx_pack)
-            default_gain = 4.0 if mtype == "wrong" else 2.5
+            plan_tuning = style_config.get_tuning(plan=plan) if style_config is not None else _TUNING
+            sfx_override = m.get("sfx", "default")
+            if str(sfx_override).lower() == "default":
+                sfx_override = str(
+                    plan.get("error_sfx")
+                    or plan_tuning.get("wrong_sfx_primary", "buzzer.wav")
+                    if mtype == "wrong"
+                    else plan_tuning.get("right_sfx_primary", "correct_ding.wav")
+                )
+            sfx_path = resolve_mark_sfx(mtype, sfx=sfx_override, pack=sfx_pack)
+            default_gain = float(plan_tuning.get("wrong_sfx_gain_db", 4.0) if mtype == "wrong" else plan_tuning.get("right_sfx_gain_db", 2.5))
             raw_gain = m.get("sfx_gain_db")
             gain_db = float(raw_gain) if (raw_gain is not None and float(raw_gain) > -3.5) else default_gain
             if sfx_path and sfx_path.is_file():
                 sfx_list.append((sfx_path, t, gain_db))
             # Layer a second punchy SFX for strong error/right feedback when using strobe overlays
             if is_fullframe_strobe:
-                extra_sfx = SFX_DIR / ("kn20228_wrong_core.mp3" if mtype == "wrong" else "sn_correct.wav")
-                if extra_sfx.is_file() and (not sfx_path or extra_sfx.resolve() != sfx_path.resolve()):
-                    sfx_list.append((extra_sfx, t, 4.0 if mtype == "wrong" else 1.5))
+                layer_name = str(plan_tuning.get("wrong_sfx_layer", "kn20228_wrong_core.mp3") if mtype == "wrong" else plan_tuning.get("right_sfx_layer", "sn_correct.wav"))
+                extra_sfx = SFX_DIR / layer_name if layer_name and layer_name.lower() != "none" else None
+                if extra_sfx and extra_sfx.is_file() and (not sfx_path or extra_sfx.resolve() != sfx_path.resolve()):
+                    sfx_list.append((extra_sfx, t, default_gain if mtype == "wrong" else max(1.0, default_gain - 1.0)))
         log_fx.append((t, f"{mtype.upper()} mark ({pos_desc}, {dur:.2f}s)"))
 
     for e in plan.get("sfx", []):
@@ -627,7 +637,10 @@ def main() -> None:
         "whip_left", "whip_right", "flash_zoom", "zoom_burst",
         "slide_up", "smoothleft", "smoothright", "warm_flash",
     }
-    whoosh_asset = resolve_sfx_asset("whoosh.wav", pack=sfx_pack)
+    plan_tuning = style_config.get_tuning(plan=plan) if style_config is not None else _TUNING
+    whoosh_name = str(plan_tuning.get("whoosh_sfx", "whoosh.wav"))
+    whoosh_gain = float(plan_tuning.get("whoosh_sfx_gain_db", -2.0))
+    whoosh_asset = resolve_sfx_asset(whoosh_name, pack=sfx_pack)
     if whoosh_asset.is_file():
         for i in range(1, len(segs)):
             s = segs[i]
@@ -639,8 +652,8 @@ def main() -> None:
                     for existing_p, existing_t, _ in sfx_list
                 )
                 if not already_has_whoosh:
-                    sfx_list.append((whoosh_asset, t_tr, -2.0))
-                    log_fx.append((t_tr, f"SFX {whoosh_asset.name} (-2.0dB, transition)"))
+                    sfx_list.append((whoosh_asset, t_tr, whoosh_gain))
+                    log_fx.append((t_tr, f"SFX {whoosh_asset.name} ({whoosh_gain:+.1f}dB, transition)"))
 
     if layouts is not None and hasattr(layouts, "collect_layout_auto_sfx"):
         for fname, t_auto, g_auto in layouts.collect_layout_auto_sfx(plan, seg_start):

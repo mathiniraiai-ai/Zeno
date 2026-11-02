@@ -609,9 +609,10 @@ def apply_stage3_tweaks(
     plan_path: Path,
     swap_layout: Optional[str] = None,
     swap_takes: Optional[List[str]] = None,
+    error_sfx: Optional[str] = None,
 ) -> None:
-    """Apply Stage 3 quick-tweak overrides (--swap-layout / --swap-take) directly to plan.edl."""
-    if not swap_layout and not swap_takes:
+    """Apply Stage 3 quick-tweak overrides (--swap-layout / --swap-take / --error-sfx) directly to plan.edl."""
+    if not swap_layout and not swap_takes and not error_sfx:
         return
     plan = edl_parser.load_edl(plan_path)
     changed = False
@@ -632,6 +633,12 @@ def apply_stage3_tweaks(
                 if str(s.get("id")) == seg_id:
                     s["src"] = new_src
                     changed = True
+    if error_sfx:
+        plan["error_sfx"] = error_sfx
+        for m in plan.get("marks", []):
+            if str(m.get("type", "")).lower() in ("wrong", "x", "cross", "incorrect", "error", "bad"):
+                m["sfx"] = error_sfx
+        changed = True
     if changed:
         plan_path.write_text(edl_parser.format_edl(plan), encoding="utf-8")
         common.write_json(plan_path.with_suffix(".json"), plan)
@@ -686,8 +693,49 @@ def main() -> None:
         metavar="SEG_ID=CLIP",
         help="Stage 3 quick-tweak: swap a segment's take (e.g. --swap-take L3=S4.mp4)",
     )
+    ap.add_argument(
+        "--error-sfx",
+        default=None,
+        metavar="SFX_FILE",
+        help="Swap the Error/Wrong mark SFX file across spec.json and/or plan.edl (e.g. --error-sfx buzzer.wav)",
+    )
+    ap.add_argument(
+        "--remember",
+        default=None,
+        metavar="RULE_TEXT",
+        help="Save a permanent 15-Year Editor rule to styles/micronarrative/brain_memory.json",
+    )
+    ap.add_argument(
+        "--list-memory",
+        action="store_true",
+        help="List all permanent editorial rules in styles/micronarrative/brain_memory.json",
+    )
     ap.add_argument("--yes", "-y", action="store_true", help="Auto-confirm the Stage 3 Yes/No gate in standalone mode")
     args = ap.parse_args()
+
+    if args.remember:
+        import brain_memory
+        entry = brain_memory.add_brain_memory_rule(args.remember)
+        print(f"  [BRAIN MEMORY SAVED] [{entry['id']}] {entry['rule']}")
+        if not args.inspect and not args.execute and not args.pitch and not args.inputs:
+            sys.exit(0)
+
+    if args.list_memory:
+        import brain_memory
+        for line in brain_memory.format_brain_memory_for_brief("micronarrative"):
+            print(line)
+        if not args.inspect and not args.execute and not args.pitch and not args.inputs:
+            sys.exit(0)
+
+    if args.error_sfx and not args.pitch and not args.execute:
+        spec_p = ROOT / "styles" / "micronarrative" / "spec.json"
+        if spec_p.is_file():
+            spec_data = json.loads(spec_p.read_text(encoding="utf-8"))
+            spec_data.setdefault("tuning", {})["wrong_sfx_primary"] = args.error_sfx
+            spec_p.write_text(json.dumps(spec_data, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+            print(f"  [SFX UPDATED] styles/micronarrative/spec.json -> wrong_sfx_primary = {args.error_sfx}")
+        if not args.inspect and not args.inputs:
+            sys.exit(0)
 
     if args.check and not args.inspect and not args.execute and not args.pitch and not args.inputs:
         ok, _ = check_system_readiness(quiet=False)
@@ -695,13 +743,13 @@ def main() -> None:
 
     if args.pitch:
         p_path = common.resolve(args.pitch)
-        apply_stage3_tweaks(p_path, swap_layout=args.swap_layout, swap_takes=args.swap_take)
+        apply_stage3_tweaks(p_path, swap_layout=args.swap_layout, swap_takes=args.swap_take, error_sfx=args.error_sfx)
         print(build_editorial_pitch_card(p_path.parent, p_path))
         sys.exit(0)
 
     if args.execute:
         p_path = common.resolve(args.execute)
-        apply_stage3_tweaks(p_path, swap_layout=args.swap_layout, swap_takes=args.swap_take)
+        apply_stage3_tweaks(p_path, swap_layout=args.swap_layout, swap_takes=args.swap_take, error_sfx=args.error_sfx)
         rc = run_execute(
             args.execute,
             square=args.square,

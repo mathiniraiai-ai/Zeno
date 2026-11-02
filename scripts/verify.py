@@ -514,6 +514,80 @@ def verify_marks_and_build_contact_sheet(
     return all_marks_ok, passed_marks, len(marks), mark_results, sheet_kb
 
 
+def check_split_and_hook_rules(plan: Dict[str, Any]) -> Tuple[bool, str]:
+    """Verify 15-Year Editor split-screen and single-character hook rules on `plan`:
+      1. Split-screen segments (`split_h` / `split_v`) must be 100% static (`z=1.0`),
+         have zero intra-split transitions or whoosh SFX, and share matched common headroom.
+      2. Single-character hook (`single`) must lead with a zoom-in and use at most 2 hook transitions.
+    """
+    segs = plan.get("segments", [])
+    sfx_entries = plan.get("sfx", [])
+    whoosh_segs = {
+        str(e.get("segment"))
+        for e in sfx_entries
+        if "whoosh" in str(e.get("file", "")).lower() or "swish" in str(e.get("file", "")).lower()
+    }
+
+    split_segs = 0
+    split_violations: List[str] = []
+    hook_transitions = 0
+    in_initial_hook = True
+    common_hr_val: Optional[float] = None
+
+    try:
+        from vision_tracker import compute_paired_split_crop_filters
+    except Exception:
+        compute_paired_split_crop_filters = None  # type: ignore[assignment]
+
+    for i, s in enumerate(segs):
+        sid = str(s.get("id", f"S{i+1}"))
+        lay = str(s.get("layout") or "single").strip().lower()
+        prev_lay = str(segs[i - 1].get("layout") or "single").strip().lower() if i > 0 else "single"
+        tr = str(s.get("transition") or "cut").strip().lower()
+
+        if lay != "single":
+            in_initial_hook = False
+
+        if in_initial_hook and i > 0 and tr != "cut":
+            hook_transitions += 1
+
+        if lay in ("split_h", "split_v", "left_right", "top_bottom"):
+            split_segs += 1
+            z0 = float(s.get("zoom") if s.get("zoom") is not None else 1.0)
+            z1 = float(s.get("zoom_to") if s.get("zoom_to") is not None else z0)
+            z_style = str(s.get("zoom_style") or "none").strip().lower()
+            if abs(z0 - 1.0) > 0.005 or abs(z1 - 1.0) > 0.005 or z_style not in ("", "none", "static"):
+                split_violations.append(f"{sid}:non_static_zoom({z0}->{z1}:{z_style})")
+            if i > 0 and prev_lay == lay:
+                if tr != "cut":
+                    split_violations.append(f"{sid}:intra_split_transition({tr})")
+                if sid in whoosh_segs:
+                    split_violations.append(f"{sid}:intra_split_whoosh")
+            if common_hr_val is None and compute_paired_split_crop_filters is not None:
+                peer = s.get("peer") if isinstance(s.get("peer"), dict) else {}
+                if peer and peer.get("src"):
+                    c_live, c_peer = compute_paired_split_crop_filters(
+                        resolve(s["src"]), resolve(peer["src"]),
+                        720, 1280, 720, 1280, 540, 1920, 540, 1920,
+                    )
+                    if c_live["common_headroom_pct"] != c_peer["common_headroom_pct"]:
+                        split_violations.append(f"{sid}:headroom_mismatch")
+                    else:
+                        common_hr_val = float(c_live["common_headroom_pct"])
+
+    if hook_transitions > 2:
+        split_violations.append(f"hook_transitions={hook_transitions}(>2)")
+
+    ok = len(split_violations) == 0
+    hr_str = f", common headroom {common_hr_val:.1f}%" if common_hr_val is not None else ""
+    summary = (
+        f"{split_segs} split-screen segs static (z=1.0{hr_str}, 0 intra-split transitions), {hook_transitions} hook clip transition(s)"
+        if ok
+        else f"Violations: {', '.join(split_violations)}"
+    )
+    return ok, summary
+
+
 def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = None) -> bool:
     """Run all 5 deterministic verification checks and print the 5-line QA report."""
     p_file, plan = load_plan(plan_path)
@@ -558,6 +632,7 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
     marks_ok, m_pass, m_tot, m_details, sheet_kb = verify_marks_and_build_contact_sheet(
         out_mp4, plan, seg_start, exp_w, exp_h, sheet_path
     )
+    split_hook_ok, split_hook_summary = check_split_and_hook_rules(plan)
     alt_proj_dir = WORK / out_mp4.stem
     if alt_proj_dir.is_dir() and alt_proj_dir.resolve() != p_file.parent.resolve() and sheet_path.is_file():
         (alt_proj_dir / "marks_contact_sheet.jpg").write_bytes(sheet_path.read_bytes())
@@ -588,8 +663,9 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
         f"[MARKS  {'PASS' if marks_ok else 'FAIL'}] {m_pass}/{m_tot} marks verified via RGB pixel check "
         f"({', '.join(m_details)}) -> {rel_sheet} ({sheet_kb} KB)"
     )
+    print(f"[SPLIT  {'PASS' if split_hook_ok else 'FAIL'}] {split_hook_summary}")
 
-    return bool(video_ok and audio_ok and cuts_ok and script_ok and marks_ok)
+    return bool(video_ok and audio_ok and cuts_ok and script_ok and marks_ok and split_hook_ok)
 
 
 def main() -> None:

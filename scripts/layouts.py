@@ -19,6 +19,8 @@ import hashlib
 import json
 import math
 import re
+import subprocess
+import sys
 import wave
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
@@ -26,6 +28,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from common import (
     DEFAULT_LOUDNESS_LUFS,
     DEFAULT_PEAK_CAP_DB,
+    FFMPEG,
     MARKS_DIR,
     SFX_DIR,
     WORK,
@@ -1242,6 +1245,25 @@ def build_segment_ffmpeg_args(
     return args, exact, frames
 
 
+_VT_AVAILABLE: Optional[bool] = None
+
+
+def _has_videotoolbox() -> bool:
+    """Return True if macOS Apple Silicon `h264_videotoolbox` hardware encoder is available."""
+    global _VT_AVAILABLE
+    if _VT_AVAILABLE is not None:
+        return _VT_AVAILABLE
+    if sys.platform != "darwin":
+        _VT_AVAILABLE = False
+        return False
+    try:
+        res = subprocess.run([str(FFMPEG), "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=3)
+        _VT_AVAILABLE = "h264_videotoolbox" in (res.stdout or "")
+    except Exception:
+        _VT_AVAILABLE = False
+    return _VT_AVAILABLE
+
+
 def render_segment_layout(
     seg: Dict[str, Any],
     plan: Optional[Dict[str, Any]],
@@ -1251,9 +1273,28 @@ def render_segment_layout(
     out: Union[str, Path],
     draft: bool = False,
 ) -> float:
-    """Render `seg` with its configured layout into normalized intermediate `.mkv` `out`."""
+    """Render `seg` with its configured layout into normalized intermediate `.mkv` `out`.
+    Uses Apple Silicon `h264_videotoolbox` hardware acceleration when enabled for 3-4x faster
+    encoding and lower CPU thermal load, with automatic fallback to `libx264`.
+    """
     args, exact, _ = build_segment_ffmpeg_args(seg, plan, W, H, fps, out, draft)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
+    use_hw = bool((plan or {}).get("use_hw_accel", True))
+    if use_hw and _has_videotoolbox():
+        vt_args: List[Any] = []
+        i = 0
+        while i < len(args):
+            if args[i] == "-c:v" and i + 5 < len(args) and args[i + 1] == "libx264":
+                vt_args.extend(["-c:v", "h264_videotoolbox", "-b:v", "8M" if draft else "16M", "-allow_sw", "1"])
+                i += 6  # skip -c:v libx264 -preset ... -crf 12
+            else:
+                vt_args.append(args[i])
+                i += 1
+        try:
+            ffmpeg(*vt_args)
+            return exact
+        except Exception:
+            pass
     ffmpeg(*args)
     return exact
 
