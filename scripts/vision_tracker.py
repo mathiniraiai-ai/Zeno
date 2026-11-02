@@ -384,6 +384,113 @@ def compute_slot_crop_filter(
     }
 
 
+def compute_paired_split_crop_filters(
+    live_src: Union[str, Path],
+    peer_src: Union[str, Path],
+    src_w: int,
+    src_h: int,
+    peer_w: int,
+    peer_h: int,
+    live_slot_w: int,
+    live_slot_h: int,
+    peer_slot_w: int,
+    peer_slot_h: int,
+    live_focus: Optional[Sequence[float]] = None,
+    peer_focus: Optional[Sequence[float]] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Compute matched FFmpeg `scale=sw:sh:flags=lanczos,crop=slot_w:slot_h:cx:cy` filters
+    for a two-character split screen (`split_h` or `split_v`) so that BOTH characters share:
+      1. The exact same common headroom (`common_hr` fraction from top of slot to head crown),
+      2. Matched face zoom size (`common_fh` fraction of slot height), and
+      3. Horizontal face centering (`fx`) inside their respective slot.
+    Because the pair calculation is symmetric over `{live_src, peer_src}`, swapping active
+    speaker and listener across dialogue turns produces zero framing shift.
+    """
+    live_slot_w, live_slot_h = _even(max(16, live_slot_w)), _even(max(16, live_slot_h))
+    peer_slot_w, peer_slot_h = _even(max(16, peer_slot_w)), _even(max(16, peer_slot_h))
+    src_w, src_h = max(16, int(src_w or live_slot_w)), max(16, int(src_h or live_slot_h))
+    peer_w, peer_h = max(16, int(peer_w or peer_slot_w)), max(16, int(peer_h or peer_slot_h))
+
+    def _extract_geom(
+        clip_path: Union[str, Path],
+        fallback_focus: Optional[Sequence[float]],
+    ) -> Tuple[float, float, float]:
+        vis: Dict[str, Any] = {}
+        try:
+            p = Path(clip_path)
+            if p.is_file():
+                vis = analyze_clip_vision(p) or {}
+        except Exception:
+            vis = {}
+        bbox = vis.get("bbox_norm")
+        v_foc = vis.get("focus")
+        if bbox and len(bbox) >= 4:
+            x0, y0, x1, y1 = [min(1.0, max(0.0, float(v))) for v in bbox[:4]]
+            if x1 > x0 and y1 > y0:
+                fx = float(v_foc[0]) if (v_foc and len(v_foc) >= 2) else 0.5 * (x0 + x1)
+                return max(0.05, min(0.95, fx)), max(0.04, min(0.65, y0)), max(0.10, min(0.65, y1 - y0))
+        if fallback_focus and len(fallback_focus) >= 2:
+            fx = max(0.05, min(0.95, float(fallback_focus[0])))
+            fy = max(0.10, min(0.75, float(fallback_focus[1])))
+            y0 = max(0.06, fy - 0.14)
+            return fx, y0, 0.26
+        return 0.5, 0.18, 0.26
+
+    fx_a, y0_a, fh_a = _extract_geom(live_src, live_focus)
+    fx_b, y0_b, fh_b = _extract_geom(peer_src, peer_focus)
+
+    # Dynamic common headroom (~15%-20%) shared identically by both characters
+    common_hr = round(max(0.14, min(0.20, min(y0_a, y0_b) * 0.85)), 4)
+
+    s0_a = max(live_slot_w / float(src_w), live_slot_h / float(src_h))
+    s0_b = max(peer_slot_w / float(peer_w), peer_slot_h / float(peer_h))
+    hr_ratio_a = (src_h * s0_a) / float(live_slot_h)
+    hr_ratio_b = (peer_h * s0_b) / float(peer_slot_h)
+
+    def _min_scale_for_headroom(y0: float, h_ratio: float) -> float:
+        k_top = common_hr / max(0.05, y0 * h_ratio)
+        k_bot = (1.0 - common_hr) / max(0.10, (1.0 - y0) * h_ratio)
+        return min(MAX_EXTRA_ZOOM, max(1.0, k_top, k_bot))
+
+    k_hr_a = _min_scale_for_headroom(y0_a, hr_ratio_a)
+    k_hr_b = _min_scale_for_headroom(y0_b, hr_ratio_b)
+
+    # Common face height fraction in slot so both characters have the same face zoom level
+    common_fh = max(fh_a * hr_ratio_a * k_hr_a, fh_b * hr_ratio_b * k_hr_b, MIN_SLOT_FILL * 0.52)
+
+    def _build_one(
+        w_in: int,
+        h_in: int,
+        sw_slot: int,
+        sh_slot: int,
+        s0: float,
+        h_ratio: float,
+        fx: float,
+        y0: float,
+        fh: float,
+        k_hr: float,
+    ) -> Dict[str, Any]:
+        k_face = common_fh / max(0.08, fh * h_ratio)
+        k = min(MAX_EXTRA_ZOOM, max(1.0, k_hr, k_face))
+        s = s0 * k
+        sw = max(sw_slot, _even(w_in * s))
+        sh = max(sh_slot, _even(h_in * s))
+        crop_x = int(round(min(max(fx * sw - sw_slot / 2.0, 0), sw - sw_slot)))
+        crop_y = int(round(min(max(y0 * sh - common_hr * sh_slot, 0), sh - sh_slot)))
+        return {
+            "filter": f"scale={sw}:{sh}:flags=lanczos,crop={sw_slot}:{sh_slot}:{crop_x}:{crop_y}",
+            "scale": (sw, sh),
+            "crop": (crop_x, crop_y),
+            "slot_size": (sw_slot, sh_slot),
+            "common_headroom_pct": round(common_hr * 100.0, 2),
+            "extra_zoom": round(k, 3),
+        }
+
+    live_crop = _build_one(src_w, src_h, live_slot_w, live_slot_h, s0_a, hr_ratio_a, fx_a, y0_a, fh_a, k_hr_a)
+    peer_crop = _build_one(peer_w, peer_h, peer_slot_w, peer_slot_h, s0_b, hr_ratio_b, fx_b, y0_b, fh_b, k_hr_b)
+    return live_crop, peer_crop
+
+
 def _load_clip_speech_spans(video_path: Path) -> List[Tuple[float, float]]:
     """Auto-load speech spans from `work/<stem>/hq_words.json` or `words.json` if present."""
     work_dir = clip_work_dir(video_path)

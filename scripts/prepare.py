@@ -1512,10 +1512,18 @@ def assign_segment_ids_marks_and_layouts(
         if layout_mode and layout_mode != "single":
             seg_dict["layout"] = layout_mode
 
-        # Auto-populate peer= for split_h / split_v / video_call using silent listening clips or opposite speaker's idle span
+        # Auto-populate peer= and alternating speaker slots (left <-> right or top <-> bottom) for split_h / split_v / video_call
         if layout_mode in ("split_h", "split_v", "video_call") and not seg_dict.get("peer"):
             cur_spk = spk_list[0] if spk_list else ""
             other_spk = next((s for s in all_speakers if s != cur_spk), cur_spk or "Peer")
+            if layout_mode in ("split_h", "split_v") and not seg_dict.get("slot"):
+                slot_a, slot_b = ("left", "right") if layout_mode == "split_h" else ("top", "bottom")
+                spk_idx = all_speakers.index(cur_spk) if (cur_spk and cur_spk in all_speakers) else (idx % 2)
+                active_slot = slot_a if (spk_idx % 2 == 0) else slot_b
+                peer_slot = slot_b if active_slot == slot_a else slot_a
+                seg_dict["slot"] = active_slot
+            else:
+                peer_slot = None
             peer_clip = None
             for lc in listening_pool:
                 if lc["src"] != seg["src"] and (not other_spk or other_spk.lower() in str(lc["stem"]).lower()):
@@ -1531,6 +1539,8 @@ def assign_segment_ids_marks_and_layouts(
                     "idle_span": [0.0, round(min(max(2.0, dur), l_dur), 2)],
                     "mode": "loop",
                 }
+                if peer_slot:
+                    seg_dict["peer"]["slot"] = peer_slot
             else:
                 # Fallback: find a silent span in any clip spoken by other_spk
                 other_clip = next(
@@ -1548,6 +1558,8 @@ def assign_segment_ids_marks_and_layouts(
                         "idle_span": span,
                         "mode": "loop",
                     }
+                    if peer_slot:
+                        seg_dict["peer"]["slot"] = peer_slot
 
         # Auto-extract stacked "Stop Saying" banner on Scene 1 / Hook when script opens with "Stop saying ..."
         if idx == 0 and lines:
@@ -1564,18 +1576,20 @@ def assign_segment_ids_marks_and_layouts(
                         "duration": round(min(dur, 4.2), 2),
                     }]
 
-        # Auto-assign intentional transitions on scene/topic shifts
+        # Auto-assign intentional transitions ONLY at macro layout changes (e.g. single -> split_h),
+        # never on single -> single hook jump cuts or split_h -> split_h dialogue turns.
         if segments_out:
             prev_seg = segments_out[-1]
             prev_lay = prev_seg.get("layout", "single")
             cur_lay = seg_dict.get("layout", "single")
-            prev_scene = prev_seg.get("scene", "")
-            if prev_scene and scene_name and prev_scene != scene_name:
-                # Topic / scene boundary -> smooth transition
-                seg_dict["transition"] = "smoothleft" if cur_lay in ("split_h", "split_v") else ("smoothright" if prev_lay in ("split_h", "split_v") else "fade")
+            if prev_lay != cur_lay:
+                seg_dict["transition"] = "warm_flash" if cur_lay in ("split_h", "split_v") else "smoothright"
                 seg_dict["transition_duration"] = 0.28
 
-        if zoom != 1.0:
+        # Split screens (split_h / split_v) are 100% static (z=1.0 locked, no zoom-in or zoom-out)
+        if layout_mode in ("split_h", "split_v"):
+            seg_dict["zoom"] = 1.0
+        elif zoom != 1.0:
             seg_dict["zoom"] = zoom
             seg_dict["focus"] = seg.get("focus", [0.5, 0.4])
         elif seg.get("zoom_to"):

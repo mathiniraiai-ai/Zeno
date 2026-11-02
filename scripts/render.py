@@ -458,6 +458,11 @@ def main() -> None:
     total = 0.0
     for i, s in enumerate(segs):
         tr = s.get("transition", "cut") if i else "cut"
+        if i > 0:
+            prev_lay = str(segs[i - 1].get("layout") or "single").lower()
+            cur_lay = str(s.get("layout") or "single").lower()
+            if prev_lay == cur_lay and cur_lay in ("split_h", "split_v", "left_right", "top_bottom"):
+                tr = "cut"
         s.pop("_flash", None)
         s.pop("_meta_post", None)
         if tr != "cut" and load_overlay_transition(tr) is not None:

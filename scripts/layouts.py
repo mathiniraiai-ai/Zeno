@@ -47,6 +47,7 @@ from ui_generator import (
 from vision_tracker import (
     TARGET_HEADROOM_PCT,
     analyze_clip_vision,
+    compute_paired_split_crop_filters,
     compute_slot_crop_filter,
     find_listening_idle_window,
 )
@@ -520,8 +521,12 @@ def resolve_segment_zoom_spec(
 ) -> Tuple[float, float, str, float, float]:
     """Return `(z0, z1, zoom_style, zoom_at, zoom_dur)` for `seg`, applying transcript-intent
     zooms (push-ins on questions/hooks, pull-outs on resolutions/answers, and emphasis-word
-    punch-ins) when no explicit zoom is set.
+    punch-ins) when no explicit zoom is set. Split screens (`split_h`, `split_v`) are locked
+    at 100% static (`1.0, 1.0, 'none'`).
     """
+    if normalize_layout_name(seg.get("layout")) in ("split_h", "split_v"):
+        return 1.0, 1.0, "none", 0.0, exact_dur
+
     z0_raw = seg.get("zoom")
     z1_raw = seg.get("zoom_to")
     style = str(seg.get("zoom_style") or "").strip().lower()
@@ -696,7 +701,7 @@ def build_segment_cache_key(
 
     plan_loudness = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
     payload = {
-        "v": 8,
+        "v": 9,
         "src": _file_mtime_sig(seg["src"]),
         "start": round(float(seg["start"]), 4),
         "end": round(float(seg["end"]), 4),
@@ -745,6 +750,7 @@ def _build_slot_video_chain(
     zoom_dur: float = 0.18,
     focus_end: Optional[Sequence[float]] = None,
     color_filter: Optional[str] = None,
+    prebuilt_crop_filter: Optional[str] = None,
 ) -> str:
     """Build an FFmpeg video filter chain that scales and crops `input_label` into
     `(slot_w, slot_h)` with eye-anchored headroom (`14%`) and sub-pixel supersampled zoom.
@@ -759,16 +765,19 @@ def _build_slot_video_chain(
     fy1 = float(focus_end[1]) if focus_end and len(focus_end) >= 2 else fy
 
     chain = ["setpts=PTS-STARTPTS", f"fps={fps}"]
-    crop_info = compute_slot_crop_filter(
-        src_w=src_w,
-        src_h=src_h,
-        slot_w=slot_w,
-        slot_h=slot_h,
-        bbox_norm=bbox_norm,
-        focus=[fx, fy],
-        headroom_pct=TARGET_HEADROOM_PCT,
-    )
-    chain.append(crop_info["filter"])
+    if prebuilt_crop_filter:
+        chain.append(prebuilt_crop_filter)
+    else:
+        crop_info = compute_slot_crop_filter(
+            src_w=src_w,
+            src_h=src_h,
+            slot_w=slot_w,
+            slot_h=slot_h,
+            bbox_norm=bbox_norm,
+            focus=[fx, fy],
+            headroom_pct=TARGET_HEADROOM_PCT,
+        )
+        chain.append(crop_info["filter"])
     chain.extend(
         _build_subpixel_zoom_filter(
             slot_w=slot_w,
@@ -969,8 +978,22 @@ def build_segment_ffmpeg_args(
             live_h = slot_h_top if active_top else slot_h_bot
             peer_h_slot = slot_h_bot if active_top else slot_h_top
 
-            fc.append(_build_slot_video_chain("[0:v]", "[live_slot]", src_w, src_h, slot_w, live_h, fps, exact, [fx, fy], z0, z1, focus_end=[fx1, fy1], color_filter=color_filter))
-            fc.append(_build_slot_video_chain(peer_in_label, "[peer_slot]", peer_w, peer_h, slot_w, peer_h_slot, fps, exact, peer_focus, 1.0, 1.0))
+            live_crop, peer_crop = compute_paired_split_crop_filters(
+                live_src=src,
+                peer_src=peer_src,
+                src_w=src_w,
+                src_h=src_h,
+                peer_w=peer_w,
+                peer_h=peer_h,
+                live_slot_w=slot_w,
+                live_slot_h=live_h,
+                peer_slot_w=slot_w,
+                peer_slot_h=peer_h_slot,
+                live_focus=[fx, fy],
+                peer_focus=peer_focus,
+            )
+            fc.append(_build_slot_video_chain("[0:v]", "[live_slot]", src_w, src_h, slot_w, live_h, fps, exact, [fx, fy], 1.0, 1.0, color_filter=color_filter, prebuilt_crop_filter=live_crop["filter"]))
+            fc.append(_build_slot_video_chain(peer_in_label, "[peer_slot]", peer_w, peer_h, slot_w, peer_h_slot, fps, exact, peer_focus, 1.0, 1.0, prebuilt_crop_filter=peer_crop["filter"]))
 
             stack_order = "[live_slot][peer_slot]" if active_top else "[peer_slot][live_slot]"
             fc.append(
@@ -987,8 +1010,22 @@ def build_segment_ffmpeg_args(
             peer_w_slot = slot_w_right if active_left else slot_w_left
 
             exact_fit = str(seg.get("framing") or "").lower() == "exact"
-            fc.append(_build_slot_video_chain("[0:v]", "[live_slot]", src_w, src_h, live_w, slot_h, fps, exact, [fx, fy], z0, z1, exact=exact_fit, focus_end=[fx1, fy1], color_filter=color_filter))
-            fc.append(_build_slot_video_chain(peer_in_label, "[peer_slot]", peer_w, peer_h, peer_w_slot, slot_h, fps, exact, peer_focus, 1.0, 1.0, exact=exact_fit))
+            live_crop, peer_crop = compute_paired_split_crop_filters(
+                live_src=src,
+                peer_src=peer_src,
+                src_w=src_w,
+                src_h=src_h,
+                peer_w=peer_w,
+                peer_h=peer_h,
+                live_slot_w=live_w,
+                live_slot_h=slot_h,
+                peer_slot_w=peer_w_slot,
+                peer_slot_h=slot_h,
+                live_focus=[fx, fy],
+                peer_focus=peer_focus,
+            )
+            fc.append(_build_slot_video_chain("[0:v]", "[live_slot]", src_w, src_h, live_w, slot_h, fps, exact, [fx, fy], 1.0, 1.0, exact=exact_fit, color_filter=color_filter, prebuilt_crop_filter=live_crop["filter"]))
+            fc.append(_build_slot_video_chain(peer_in_label, "[peer_slot]", peer_w, peer_h, peer_w_slot, slot_h, fps, exact, peer_focus, 1.0, 1.0, exact=exact_fit, prebuilt_crop_filter=peer_crop["filter"]))
 
             stack_order = "[live_slot][peer_slot]" if active_left else "[peer_slot][live_slot]"
             dv = seg.get("divider")
