@@ -40,9 +40,9 @@ Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input
    - Edit `work/<project>/plan.edl` (or `plan.json`) only where adjustments are needed.
 3. **Render & Verify (`1 command`)**:
    ```bash
-   python3 scripts/render.py work/<project>/plan.edl --verify
+   python3 scripts/render.py work/<project>/plan.edl --verify [--square] [--loudness -11.5] [--gain-db +2.0]
    ```
-   - Renders `~/Downloads/Zeno Outputs/<name>.mp4` + `~/Downloads/Zeno Outputs/<name>.timeline.txt`, runs deterministic script coverage & `-14 LUFS` loudness check, and generates `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` marks).
+   - Renders `~/Downloads/Zeno Outputs/<name>.mp4` (plus `<name>_1x1.mp4` `1080×1080` blurred-background Square Meta Ad when `--square` is passed) + `~/Downloads/Zeno Outputs/<name>.timeline.txt`, runs deterministic script coverage & `-11.5 LUFS` (`-1.0 dBTP` cap) loudness check, and generates `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` marks). Use `vol=+3dB` on any segment in `plan.edl` for exact mid-video dB boosts.
 
 ## 4. The 5 Dynamic Layout Modes, Pre-Stitched Split Screens & Swappable Mark Packs
 

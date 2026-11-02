@@ -51,9 +51,11 @@ Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Co
    - Edit `work/<project>/plan.edl` (or `work/<project>/plan.json`) only where adjustments are needed.
 3. **Render & Verify (`1 command`)**:
    ```bash
-   python3 scripts/render.py work/<project>/plan.edl --verify
+   python3 scripts/render.py work/<project>/plan.edl --verify [--square] [--loudness -11.5] [--gain-db +2.0]
    ```
-   - Renders `~/Downloads/Zeno Outputs/<name>.mp4` and `~/Downloads/Zeno Outputs/<name>.timeline.txt`, runs deterministic script coverage & `-14 LUFS` loudness verification, and outputs `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` overlays).
+   - Renders `~/Downloads/Zeno Outputs/<name>.mp4` (and `<name>_1x1.mp4` when `--square` is passed) + `~/Downloads/Zeno Outputs/<name>.timeline.txt`, runs deterministic script coverage & `-11.5 LUFS` (`-1.0 dBTP` cap) Meta Ads loudness verification, and outputs `work/<project>/marks_contact_sheet.jpg` (`1 image read` to verify `✓`/`✗` overlays).
+   - **1:1 Square Meta Ads Export (`--square`)**: Splits the `9:16` video into 2 layers — **Layer 1 (Background)**: `1:1` (`1080×1080`) center crop with 5–10% Gaussian blur (`gblur=sigma=18`); **Layer 2 (Foreground)**: full sharp `9:16` clip (`608×1080`) placed in the exact center on top.
+   - **Per-Clip Audio Cap & Exact dB Control**: Every segment is automatically normalized to `-11.5 LUFS` (`-1.0 dB` peak limit) before stitching. Use `vol=+3dB` (or `vol=-2dB`) on any segment line in `plan.edl` to adjust a specific mid-demo segment's exact dB.
 
 ---
 

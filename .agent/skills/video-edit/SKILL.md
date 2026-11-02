@@ -238,9 +238,12 @@ whoosh.wav | L3 | 0.0 | -10
   "sfx": [
     {"file": "whoosh.wav", "segment": "L3", "at": 0.0, "gain_db": -10}
   ],
-  "audio": {"loudness": -14}
+  "audio": {"loudness": -11.5}
 }
 ```
+
+- **1:1 Square Meta Ads Export (`--square`)**: Run `python3 scripts/render.py work/<project>/plan.edl --verify --square` (or `python3 scripts/render.py <video.mp4> --square`) to generate `<name>_1x1.mp4` (`1080×1080`: Layer 1 is a `1:1` center-cropped background with 5–10% Gaussian blur `gblur=sigma=18`; Layer 2 is the full `9:16` clip centered on top).
+- **Per-Segment Audio Cap & Exact `dB` Override**: Every segment is automatically normalized to `-11.5 LUFS` (`-1.0 dBTP` hard limiter) before stitching. Add `vol=+3dB` (or `vol=-2dB`) to any segment in `plan.edl` (or `--gain-db +2.0` on CLI) to set the exact dB on any section.
 
 ---
 
