@@ -926,16 +926,19 @@ def _red_pill_gradient(w: int, h: int, stops: Sequence[Sequence[int]]) -> Image.
 
 def render_stop_saying_banner_png(
     text: str,
-    font_px: int = 60,
-    box_h: int = 80,
-    pad_x: int = 40,
-    radius: int = 7,
+    font_px: int = 54,
+    box_h: int = 76,
+    pad_x: int = 38,
+    radius: int = 8,
     strike_overshoot: int = 36,
-    strike_px: int = 5,
+    strike_px: int = 6,
     uppercase: bool = True,
+    with_strike: bool = True,
+    dashed_strike: bool = False,
 ) -> Path:
-    """Render a crossed-out red pill "Stop Saying" hook banner PNG (ported from
-    `ScriptCut-AI/src/director/banner_assets.py`), cached in `work/_ui_cache/`.
+    """Render a crossed-out red pill "Stop Saying" hook banner PNG (21132 / 20228 style),
+    supporting both un-struck (`with_strike=False` for initial pop-in) and struck-through
+    (`with_strike=True`, solid or dashed white line across the pill) states, cached in `work/_ui_cache/`.
     """
     label = re.sub(r"\s+", " ", (text or "").strip().strip("\"“”'.,!?"))
     if not label:
@@ -943,7 +946,7 @@ def render_stop_saying_banner_png(
     if uppercase:
         label = label.upper()
 
-    style_key = f"{label}|{font_px}|{box_h}|{pad_x}|{radius}|{strike_overshoot}|{strike_px}"
+    style_key = f"{label}|{font_px}|{box_h}|{pad_x}|{radius}|{strike_overshoot}|{strike_px}|{with_strike}|{dashed_strike}"
     digest = hashlib.sha1(style_key.encode("utf-8")).hexdigest()[:14]
     UI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     out_path = UI_CACHE_DIR / f"stop_say_{digest}.png"
@@ -968,9 +971,18 @@ def render_stop_saying_banner_png(
     ty = (h - bh) // 2 - top
     d.text((tx, ty), label, font=font, fill=(255, 255, 255, 255))
 
-    cy = h // 2
-    sp = max(2, int(strike_px))
-    d.rectangle((0, cy - sp // 2, canvas_w - 1, cy + sp // 2), fill=(255, 255, 255, 255))
+    if with_strike:
+        cy = h // 2
+        sp = max(2, int(strike_px))
+        if dashed_strike:
+            dash_w, gap_w = 28, 12
+            x_cur = 0
+            while x_cur < canvas_w:
+                x_end = min(canvas_w - 1, x_cur + dash_w)
+                d.rectangle((x_cur, cy - sp // 2, x_end, cy + sp // 2), fill=(255, 255, 255, 255))
+                x_cur += dash_w + gap_w
+        else:
+            d.rectangle((0, cy - sp // 2, canvas_w - 1, cy + sp // 2), fill=(255, 255, 255, 255))
 
     canvas.save(out_path, format="PNG")
     return out_path

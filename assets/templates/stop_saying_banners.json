@@ -1,18 +1,20 @@
 {
-  "source_project": "kannada/20228 X Stop saying this selfie style - with girl riding horse",
+  "source_project": "21132 X Stop saying - selfie style - trekking in the forest",
   "layout": {
-    "x_norm": 0.69,
-    "y0_norm": 0.12,
-    "step_norm": 0.0635
+    "x_norm": 0.50,
+    "y0_norm": 0.52,
+    "step_norm": 0.068,
+    "max_stack": 3
   },
   "style": {
     "font": "assets/fonts/Montserrat-ExtraBold.ttf",
-    "font_px": 60,
-    "box_h": 80,
-    "pad_x": 40,
-    "radius": 7,
+    "font_px": 54,
+    "box_h": 76,
+    "pad_x": 38,
+    "radius": 8,
     "strike_overshoot": 36,
-    "strike_px": 5,
+    "strike_px": 6,
+    "strike_style": "animated_slash_or_dashed",
     "gradient": [
       [
         150,
@@ -39,12 +41,14 @@
   },
   "timing": {
     "lead_sec": 0.05,
-    "hold_after_last_sec": 0.35
+    "strike_delay_sec": 0.16,
+    "hold_after_last_sec": 0.45,
+    "fade_out_sec": 0.18
   },
   "flash": {
-    "asset": "assets/overlays/kn20228_red_flash.png",
-    "first_opacity": 0.9,
-    "other_opacity": 0.55,
+    "asset": "assets/marks/red_flash.png",
+    "first_opacity": 0.55,
+    "other_opacity": 0.40,
     "duration_sec": 0.35
   }
 }

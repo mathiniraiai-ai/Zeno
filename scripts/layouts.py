@@ -900,32 +900,60 @@ def build_segment_ffmpeg_args(
             fc.append(f"[v_with_pip][chrome]overlay=0:0:eof_action=pass,format=yuv420p{v_curr}")
 
     # ------------------------------------------------------------------
-    # Optional "Stop Saying" Hook Banners on any segment
+    # Optional "Stop Saying" Hook Banners on any segment (21132 3-stack chest-centered style)
     # ------------------------------------------------------------------
     banners = seg.get("banners") or seg.get("stop_saying") or []
     if isinstance(banners, (str, dict)):
         banners = [banners]
     if banners:
+        # Resolve shared group fade-out end time so stacked phrases hold together on screen
+        parsed_banners: List[Tuple[str, float, float]] = []
         for b_idx, b_item in enumerate(banners):
             if isinstance(b_item, str):
-                b_text, b_at, b_dur = b_item, b_idx * 0.45, exact
+                b_text, b_at, b_dur = b_item, round(0.15 + b_idx * 0.65, 3), exact
             elif isinstance(b_item, dict):
                 b_text = str(b_item.get("text") or b_item.get("phrase") or "STOP SAYING")
-                b_at = float(b_item.get("at", b_idx * 0.45))
+                b_at = float(b_item.get("at", round(0.15 + b_idx * 0.65, 3)))
                 b_dur = float(b_item.get("duration", max(0.4, exact - b_at)))
             else:
                 continue
-            banner_png = render_stop_saying_banner_png(b_text)
-            b_in_idx = next_idx
-            next_idx += 1
-            inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", banner_png])
-            bx_expr = f"trunc({W}*0.68-overlay_w/2)"
-            by_expr = int(round(H * (0.12 + b_idx * 0.065)))
-            v_next = f"[vb{b_idx}]"
-            fc.append(f"[{b_in_idx}:v]scale=w='trunc(iw*{W}/1080/2)*2':h=-1,format=rgba[bn{b_idx}]")
+            parsed_banners.append((b_text, b_at, b_dur))
+
+        for b_idx, (b_text, b_at, b_dur) in enumerate(parsed_banners):
+            b_end = min(exact, b_at + b_dur)
+            strike_at = min(b_end - 0.05, b_at + 0.16)
+            # Phase 1: Un-struck red pill pops in when phrase begins (b_at -> strike_at)
+            # Phase 2: Struck-through red pill holds from strike_at -> b_end (with fade-out)
+            png_plain = render_stop_saying_banner_png(b_text, with_strike=False)
+            png_struck = render_stop_saying_banner_png(b_text, with_strike=True)
+            in_plain = next_idx
+            in_struck = next_idx + 1
+            next_idx += 2
+            inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", png_plain])
+            inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", png_struck])
+
+            # Centered horizontally (x=0.50*W), stacked at lower-chest level (y=0.52*H + idx*0.068*H)
+            bx_expr = f"trunc(({W}-overlay_w)/2)"
+            by_expr = int(round(H * (0.52 + b_idx * 0.068)))
+            fade_out_st = max(strike_at + 0.05, b_end - 0.18)
+
+            v_mid = f"[vb{b_idx}a]"
+            v_next = f"[vb{b_idx}b]"
             fc.append(
-                f"{v_curr}[bn{b_idx}]overlay=x={bx_expr}:y={by_expr}:"
-                f"enable='between(t,{b_at:.3f},{min(exact, b_at + b_dur):.3f})':eof_action=pass,format=yuv420p{v_next}"
+                f"[{in_plain}:v]scale=w='trunc(iw*{W}/1080/2)*2':h=-1,format=rgba,"
+                f"fade=t=in:st={b_at:.3f}:d=0.08:alpha=1[bn_p{b_idx}]"
+            )
+            fc.append(
+                f"[{in_struck}:v]scale=w='trunc(iw*{W}/1080/2)*2':h=-1,format=rgba,"
+                f"fade=t=out:st={fade_out_st:.3f}:d=0.18:alpha=1[bn_s{b_idx}]"
+            )
+            fc.append(
+                f"{v_curr}[bn_p{b_idx}]overlay=x={bx_expr}:y={by_expr}:"
+                f"enable='between(t,{b_at:.3f},{strike_at:.3f})':eof_action=pass{v_mid}"
+            )
+            fc.append(
+                f"{v_mid}[bn_s{b_idx}]overlay=x={bx_expr}:y={by_expr}:"
+                f"enable='between(t,{strike_at:.3f},{b_end:.3f})':eof_action=pass,format=yuv420p{v_next}"
             )
             v_curr = v_next
 

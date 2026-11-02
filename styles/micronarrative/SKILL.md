@@ -57,8 +57,11 @@ Always check how the split-screen raw footage was generated before assigning lay
      - Apply zoom **only** on static single-speaker close-ups/mid-shots in the live conversation or单-speaker turns when needed:
        - `zoom=1.08` punch-in to mask same-clip jump cuts.
        - 3× supersampled sub-pixel `mild_in` (`1.0->1.06`), `mild_out` (`1.08->1.0`), or `flash_zoom` (`sudden_in` / `sudden_out`) on static single-speaker emphasis lines.
-4. **Where to Put On-Screen Text vs. Where NOT to**:
-   - **Put on-screen text ONLY** where the script explicitly asks for a text card/banner (e.g., `"Stop saying: ..."` top banner).
+4. **Where to Put On-Screen Text vs. Where NOT to (`21132` "Stop Saying" Stacked Strikethrough Hook)**:
+   - **Put on-screen text ONLY** where the script explicitly cues a "Stop saying..." hook list (e.g., `Stop saying: "What do you mean?", "I don't understand", "Repeat please"`).
+   - **How the `21132` "Stop Saying" Stacked Strikethrough Visual Works (`assets/templates/stop_saying_banners.json`)**:
+     - Placed horizontally centered (`x_norm = 0.50`) at **lower-chest level (`y0_norm = 0.52`, `step_norm = 0.068`)** so the speaker's face is 100% unobstructed.
+     - As the speaker says each phrase (`banner:"What do you mean?"@t1 banner:"I don't understand"@t2 banner:"Repeat please"@t3`), a dark-red gradient pill pops onto the screen, and `0.16s` later a **bold white horizontal strikethrough / dash line slashes across the pill** (`+36px` overshoot on both sides) while the previous struck-through phrases remain stacked above it until the sentence finishes (`0.18s` group fade-out) + subtle red edge flash (`mark_pack: flash`).
    - **Never** add unrequested subtitles, captions, CTAs, or decorative text where not specified in the script.
 5. **Where to Show Errors (`✗` / `✓`) vs. Where NOT to**:
    - **Show `✗` (`wrong`) and `✓` (`right`) marks ONLY** when the script contains an explicit spoken-English learner mistake followed by the teacher's correction and the learner's corrected repeat.
