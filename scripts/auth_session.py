@@ -461,6 +461,11 @@ def grab_token_via_browser(
                     session_path=session_path,
                     write_dotenv=write_dotenv,
                 )
+                # Drain any follow-up browser request for 0.25s so fetch() finishes cleanly
+                try:
+                    srv.handle_request()
+                except Exception:
+                    pass
                 who = saved.get("email") or saved.get("name") or "authenticated user"
                 print(f"  [Zeno Auth] ✓ Session token grabbed & saved automatically for {who} (.zeno_session.json)")
                 return saved

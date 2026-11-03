@@ -510,8 +510,6 @@ def signup_page() -> HTMLResponse:
 
 @app.post("/api/auth/google")
 def google_auth_login(body: GoogleAuthBody, request: Request) -> JSONResponse:
-    ip = _client_ip(request)
-    _check_signup_rate(ip)
     profile = _verify_google_identity(body)
     email = profile["email"]
     name = profile["name"]
@@ -521,7 +519,6 @@ def google_auth_login(body: GoogleAuthBody, request: Request) -> JSONResponse:
         log.exception("key store unavailable during google auth")
         raise HTTPException(503, "Could not issue key right now, try again shortly")
 
-    _check_signup_rate(ip, record=True)
     log.info("google auth key issued for %s <%s>", name, email)
     return JSONResponse(
         {
