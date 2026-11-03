@@ -124,6 +124,13 @@ def _build_clip_lookup(plan: dict, plan_path: pathlib.Path) -> dict[str, str]:
         REPO / "input" / "footage",
         plan_path.parent,
     ]
+    src_dir_raw = plan.get("src_dir")
+    if src_dir_raw:
+        sd = pathlib.Path(str(src_dir_raw))
+        if not sd.is_absolute():
+            sd = (REPO / sd).resolve()
+        if sd.exists():
+            search_dirs.insert(0, sd)
     # Also inspect brief.txt or plan.json if present for footage paths
     brief_file = plan_path.parent / "brief.txt"
     if brief_file.exists():
@@ -344,7 +351,7 @@ def _collect_timeline_model(
         slot = str(seg.get("slot") or "").lower()
         speaker_name = str(seg.get("speaker", "") or "").lower()
         active_first = (
-            slot in ("left", "top", "slot_a", "a", "0")
+            slot in ("left", "top", "pip", "slot_a", "a", "0")
             if slot
             else (("robot" in speaker_name) or ("nova" in speaker_name))
         )
@@ -371,26 +378,54 @@ def _collect_timeline_model(
             "comment": str(seg.get("note") or ""),
         })
 
-        v1_item = {
-            "seg_idx": idx,
-            "name": f"{seg_id}_{clip_path.stem}",
-            "path": clip_path,
-            "media_type": "video",
-            "t_start": t_start,
-            "t_end": t_end,
-            "src_in": src_in,
-            "src_out": src_out,
-            "media_dur": media_dur,
-            "scale_start": v1_scale_start,
-            "scale_end": v1_scale_end,
-            "scale_keyframes": scale_kfs,
-            "center": v1_center,
-            "crop": v1_crop,
-            "opacity_keyframes": None,
-            "transition": tr_spec,
-            "link_id": f"link_seg_{idx}",
-        }
-        v_tracks[0].append(v1_item)
+        # In top_pip, V1 is always the full-screen background and V2 is always the top-center PIP window
+        pip_scale = 69.44
+        pip_center = (0.0, -0.38)
+        pip_crop = {"left": 0.0, "right": 0.0, "top": 28.0, "bottom": 40.5}
+
+        if layout_mode == "top_pip" and active_first:
+            # Speaking clip is the top PIP window on V2 (linked to A1)
+            v2_active_item = {
+                "seg_idx": idx,
+                "name": f"{seg_id}_{clip_path.stem}",
+                "path": clip_path,
+                "media_type": "video",
+                "t_start": t_start,
+                "t_end": t_end,
+                "src_in": src_in,
+                "src_out": src_out,
+                "media_dur": media_dur,
+                "scale_start": pip_scale,
+                "scale_end": pip_scale,
+                "scale_keyframes": [],
+                "center": pip_center,
+                "crop": pip_crop,
+                "opacity_keyframes": None,
+                "transition": tr_spec,
+                "link_id": f"link_seg_{idx}",
+            }
+            v_tracks[1].append(v2_active_item)
+        else:
+            v1_item = {
+                "seg_idx": idx,
+                "name": f"{seg_id}_{clip_path.stem}",
+                "path": clip_path,
+                "media_type": "video",
+                "t_start": t_start,
+                "t_end": t_end,
+                "src_in": src_in,
+                "src_out": src_out,
+                "media_dur": media_dur,
+                "scale_start": v1_scale_start,
+                "scale_end": v1_scale_end,
+                "scale_keyframes": scale_kfs,
+                "center": v1_center,
+                "crop": v1_crop,
+                "opacity_keyframes": None,
+                "transition": tr_spec,
+                "link_id": f"link_seg_{idx}",
+            }
+            v_tracks[0].append(v1_item)
 
         a1_item = {
             "seg_idx": idx,
@@ -408,15 +443,17 @@ def _collect_timeline_model(
         }
         a_tracks[0].append(a1_item)
 
-        # V2: Peer / Listening Partner clip for split_h / split_v / video_call
+        # Peer / Listening Partner clip for split_h / split_v / video_call / top_pip
         peer_spec = seg.get("peer")
         peer_clip_ref = None
         if isinstance(peer_spec, dict):
             peer_clip_ref = peer_spec.get("src") or peer_spec.get("clip")
         elif isinstance(peer_spec, str) and peer_spec.strip():
             peer_clip_ref = peer_spec.split("@")[0].strip()
+            if ":" in peer_clip_ref and len(peer_clip_ref.split(":", 1)[0]) > 1:
+                peer_clip_ref = peer_clip_ref.split(":", 1)[1].strip()
 
-        if layout_mode in ("split_h", "split_v", "video_call") and peer_clip_ref:
+        if layout_mode in ("split_h", "split_v", "video_call", "top_pip") and peer_clip_ref:
             peer_path = _resolve_clip_path(str(peer_clip_ref), plan_path, clip_lookup)
             if peer_path and peer_path.exists():
                 peer_media_dur = get_media_dur(peer_path, is_still=False)
@@ -433,6 +470,7 @@ def _collect_timeline_model(
                 v2_center = (0.0, 0.0)
                 v2_crop = None
                 v2_scale = 100.0
+                target_v_track = 1
                 if layout_mode == "split_h":
                     v2_crop = {"left": 25.0, "right": 25.0, "top": 0.0, "bottom": 0.0}
                     v2_center = (0.25 if active_first else -0.25, 0.0)
@@ -442,13 +480,26 @@ def _collect_timeline_model(
                 elif layout_mode == "video_call":
                     v2_scale = 28.0
                     v2_center = (0.30, -0.32)
+                elif layout_mode == "top_pip":
+                    if active_first:
+                        # Speaking clip is on V2 (top PIP); listening human goes on V1 (full-screen bg)
+                        target_v_track = 0
+                        v2_scale = 100.0
+                        v2_center = (0.0, 0.0)
+                        v2_crop = None
+                    else:
+                        # Speaking human is on V1 (full-screen bg); listening robot goes on V2 (top PIP)
+                        target_v_track = 1
+                        v2_scale = pip_scale
+                        v2_center = pip_center
+                        v2_crop = pip_crop
 
                 rem = dur
                 cur_v2 = t_start
                 span = max(0.2, p_out - p_in)
                 while rem > 0.04:
                     chunk = min(rem, span)
-                    v_tracks[1].append({
+                    v_tracks[target_v_track].append({
                         "seg_idx": idx,
                         "name": f"Listen_{seg_id}_{peer_path.stem}",
                         "path": peer_path,
@@ -460,6 +511,7 @@ def _collect_timeline_model(
                         "media_dur": peer_media_dur,
                         "scale_start": v2_scale,
                         "scale_end": v2_scale,
+                        "scale_keyframes": [],
                         "center": v2_center,
                         "crop": v2_crop,
                         "opacity_keyframes": None,
@@ -783,19 +835,26 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
     ]
 
     clipitem_counter = 1
-    link_map: dict[str, dict[str, int]] = {}
+    link_map: dict[str, dict] = {}
 
-    # Pre-assign IDs for linked V1 + A1 items
-    for v_item in model["v_tracks"][0]:
-        v_item["xml_id"] = f"clipitem-v1-{clipitem_counter}"
-        clipitem_counter += 1
-        if v_item.get("link_id"):
-            link_map.setdefault(v_item["link_id"], {})["v"] = v_item["xml_id"]
-    for a_item in model["a_tracks"][0]:
+    # Pre-assign IDs for linked V1/V2 + A1 items
+    for vt_idx in range(min(2, len(model["v_tracks"]))):
+        for vc_idx, v_item in enumerate(model["v_tracks"][vt_idx]):
+            v_item["xml_id"] = f"clipitem-v{vt_idx+1}-{clipitem_counter}"
+            clipitem_counter += 1
+            if v_item.get("link_id"):
+                info = link_map.setdefault(v_item["link_id"], {})
+                info["v"] = v_item["xml_id"]
+                info["v_track"] = vt_idx + 1
+                info["v_index"] = vc_idx + 1
+    for ac_idx, a_item in enumerate(model["a_tracks"][0]):
         a_item["xml_id"] = f"clipitem-a1-{clipitem_counter}"
         clipitem_counter += 1
         if a_item.get("link_id"):
-            link_map.setdefault(a_item["link_id"], {})["a"] = a_item["xml_id"]
+            info = link_map.setdefault(a_item["link_id"], {})
+            info["a"] = a_item["xml_id"]
+            info["a_track"] = 1
+            info["a_index"] = ac_idx + 1
 
     # Emit Video Tracks
     for t_idx, v_track in enumerate(model["v_tracks"]):
@@ -811,32 +870,6 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
             in_f = _sec_to_frames(item["src_in"], fps)
             out_f = in_f + dur_f
             file_xml = get_file_xml(item["path"], item["media_type"], item["media_dur"])
-
-            # Optional FCP7 / Premiere <transitionitem> on V1 before clipitem
-            if t_idx == 0 and item.get("transition"):
-                tr_info = item["transition"]
-                tr_t = str(tr_info.get("type") or "fade").lower()
-                tr_d = float(tr_info.get("dur") or 0.28)
-                half_f = max(2, _sec_to_frames(tr_d * 0.5, fps))
-                if "dip" in tr_t or "flash" in tr_t:
-                    ef_name, ef_id = "Dip to Black", "dip2black"
-                elif any(k in tr_t for k in ("whip", "slide", "smooth")):
-                    ef_name, ef_id = "Band Slide", "bandslide"
-                else:
-                    ef_name, ef_id = "Cross Dissolve", "crossdissolve"
-                lines.append(f"""          <transitionitem>
-            <rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>
-            <start>{max(0, start_f - half_f)}</start>
-            <end>{start_f + half_f}</end>
-            <alignment>center</alignment>
-            <effect>
-              <name>{ef_name}</name>
-              <effectid>{ef_id}</effectid>
-              <effectcategory>Dissolve</effectcategory>
-              <effecttype>transition</effecttype>
-              <mediatype>video</mediatype>
-            </effect>
-          </transitionitem>""")
 
             # Basic Motion filter (with multi-keyframe eased Scale curve)
             s0 = item["scale_start"]
@@ -920,21 +953,20 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
 
             link_xml = ""
             lid = item.get("link_id")
-            if lid and lid in link_map and "a" in link_map[lid]:
-                vc_id = link_map[lid]["v"]
-                ac_id = link_map[lid]["a"]
+            if lid and lid in link_map and "a" in link_map[lid] and "v" in link_map[lid]:
+                linfo = link_map[lid]
                 link_xml = f"""
               <link>
-                <linkclipref>{vc_id}</linkclipref>
+                <linkclipref>{linfo['v']}</linkclipref>
                 <mediatype>video</mediatype>
-                <trackindex>1</trackindex>
-                <clipindex>{v_track.index(item)+1}</clipindex>
+                <trackindex>{linfo['v_track']}</trackindex>
+                <clipindex>{linfo['v_index']}</clipindex>
               </link>
               <link>
-                <linkclipref>{ac_id}</linkclipref>
+                <linkclipref>{linfo['a']}</linkclipref>
                 <mediatype>audio</mediatype>
-                <trackindex>1</trackindex>
-                <clipindex>{v_track.index(item)+1}</clipindex>
+                <trackindex>{linfo['a_track']}</trackindex>
+                <clipindex>{linfo['a_index']}</clipindex>
                 <groupindex>1</groupindex>
               </link>"""
 
@@ -970,25 +1002,30 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
             dur_f = end_f - start_f
             in_f = _sec_to_frames(item["src_in"], fps)
             out_f = in_f + dur_f
-            if t_idx == 0 and item.get("transition") and start_f >= 2:
-                lines.append(f"""          <transitionitem>
-            <rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>
-            <start>{max(0, start_f - 1)}</start>
-            <end>{start_f + 1}</end>
-            <alignment>center</alignment>
-            <effect>
-              <name>Crossfade (Constant Power)</name>
-              <effectid>KGAudioTransition</effectid>
-              <effecttype>transition</effecttype>
-              <mediatype>audio</mediatype>
-            </effect>
-          </transitionitem>""")
             file_xml = get_file_xml(
                 item["path"],
                 "video" if item["media_type"] == "audio_from_video" else "audio",
                 item["media_dur"],
             )
             lvl = _db_to_linear(item.get("gain_db", 0.0))
+            a_link_xml = ""
+            lid = item.get("link_id")
+            if lid and lid in link_map and "a" in link_map[lid] and "v" in link_map[lid]:
+                linfo = link_map[lid]
+                a_link_xml = f"""
+            <link>
+              <linkclipref>{linfo['v']}</linkclipref>
+              <mediatype>video</mediatype>
+              <trackindex>{linfo['v_track']}</trackindex>
+              <clipindex>{linfo['v_index']}</clipindex>
+            </link>
+            <link>
+              <linkclipref>{linfo['a']}</linkclipref>
+              <mediatype>audio</mediatype>
+              <trackindex>{linfo['a_track']}</trackindex>
+              <clipindex>{linfo['a_index']}</clipindex>
+              <groupindex>1</groupindex>
+            </link>"""
             lines.append(f"""          <clipitem id="{cid}">
             <name>{escape(item['name'])}</name>
             <enabled>TRUE</enabled>
@@ -1018,7 +1055,7 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
                   <value>{lvl}</value>
                 </parameter>
               </effect>
-            </filter>
+            </filter>{a_link_xml}
           </clipitem>""")
         lines.append("        </track>")
 
@@ -1104,9 +1141,24 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
         node = seq_el.find(f".//{tag_name}")
         if node is not None:
             node.text = str(total_ticks)
+    for tag_name, val_str in (
+        ("MZ.EditLine", "0"),
+        ("TL.SQVisibleBaseTime", "0"),
+        ("TL.SQTimePerPixel", "0.09"),
+        ("MZ.Sequence.VideoTimeDisplayFormat", "101" if fps == 25 else "104"),
+    ):
+        node = seq_el.find(f".//{tag_name}")
+        if node is not None:
+            node.text = val_str
 
-    # Locate VideoClipTracks (0..7) and AudioClipTracks (0..7)
+    # Locate VideoClipTracks (0..7) and AudioClipTracks (0..7) and set Sequence FrameRate
     v_tg = by_id["167"]
+    for tg_id in ("167", "169"):
+        tg_obj = by_id.get(tg_id)
+        if tg_obj is not None:
+            fr_el = tg_obj.find(".//FrameRate")
+            if fr_el is not None:
+                fr_el.text = str(fps_ticks)
     v_track_els = [
         by_id[tr.attrib.get("ObjectRef") or tr.attrib.get("ObjectURef")]
         for tr in v_tg.findall(".//Track")
@@ -1117,6 +1169,12 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
         for tr in a_tg.findall(".//Track")
     ]
     links_el = seq_el.find(".//Links")
+    if links_el is not None:
+        links_el.set("Version", "1")
+    for tag_v in ("TrackItems", "Links", "PreviewItems", "TransitionItems"):
+        for el_v in root.iter(tag_v):
+            if "Version" not in el_v.attrib:
+                el_v.set("Version", "1")
     rpi_items_el = by_id["7bac5d15-810e-4df0-a243-6024225b5bf3"].find(".//Items")
     grid_order = 1
 
@@ -1397,7 +1455,178 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
             ci = track_el.find(".//ClipItems")
             ti = ET.Element("TrackItems", {"Version": "1"})
             ci.insert(0, ti)
+        else:
+            ti.set("Version", "1")
         return ti
+
+    def _build_video_component_chain(item: dict, in_ticks: int, out_ticks: int) -> str:
+        s0 = float(item.get("scale_start", 100.0))
+        s1 = float(item.get("scale_end", s0))
+        cx, cy = item.get("center") or (0.0, 0.0)
+        scale_kfs = item.get("scale_keyframes") or []
+        crop = item.get("crop")
+        has_custom_motion = (
+            abs(s0 - 100.0) > 0.05
+            or abs(s1 - 100.0) > 0.05
+            or bool(scale_kfs)
+            or abs(cx) > 0.001
+            or abs(cy) > 0.001
+            or bool(crop)
+        )
+        vcc_id = alloc_oid()
+        if not has_custom_motion:
+            new_elements.append(ET.fromstring(f"""
+            <VideoComponentChain ObjectID="{vcc_id}" ClassID="0970e08a-f58f-4108-b29a-1a717b8e12e2" Version="3">
+                <DefaultMotion>true</DefaultMotion>
+                <DefaultOpacity>true</DefaultOpacity>
+                <DefaultMotionComponentID>1</DefaultMotionComponentID>
+                <DefaultOpacityComponentID>2</DefaultOpacityComponentID>
+                <ComponentChain Version="3">
+                    <Node Version="1"><Properties Version="1">
+                        <MZ.ComponentChain.ActiveComponentID>2</MZ.ComponentChain.ActiveComponentID>
+                        <MZ.ComponentChain.ActiveComponentParamIndex>4294967295</MZ.ComponentChain.ActiveComponentParamIndex>
+                    </Properties></Node>
+                </ComponentChain>
+            </VideoComponentChain>"""))
+            return vcc_id
+
+        pos_x = round(0.5 + float(cx), 6)
+        pos_y = round(0.5 + float(cy), 6)
+        c_left = float(crop.get("left", 0.0)) if crop else 0.0
+        c_top = float(crop.get("top", 0.0)) if crop else 0.0
+        c_right = float(crop.get("right", 0.0)) if crop else 0.0
+        c_bottom = float(crop.get("bottom", 0.0)) if crop else 0.0
+
+        p_ids = [alloc_oid() for _ in range(11)]
+        # Param 0: Position
+        new_elements.append(ET.fromstring(f"""
+        <PointComponentParam ObjectID="{p_ids[0]}" ClassID="ca81d347-309b-44d2-acc7-1c572efb973c" Version="4">
+            <Name>Position</Name>
+            <ParameterID>1</ParameterID>
+            <StartKeyframe>-91445760000000000,{pos_x}:{pos_y},0,0,0,0,0,0,5,4,0,0,0,0</StartKeyframe>
+        </PointComponentParam>"""))
+
+        # Param 1: Scale
+        kf_tags = ""
+        if scale_kfs:
+            kf_entries = ";".join(
+                f"{min(out_ticks, in_ticks + _sec_to_ticks(rel_s))},{val},5,0,0,0.33333333333333331,0,0.33333333333333331"
+                for rel_s, val in scale_kfs
+            ) + ";"
+            kf_tags = f"<IsTimeVarying>true</IsTimeVarying><Keyframes>{kf_entries}</Keyframes>"
+        elif abs(s1 - s0) > 0.05:
+            kf_entries = (
+                f"{in_ticks},{s0},5,0,0,0.33333333333333331,0,0.33333333333333331;"
+                f"{out_ticks},{s1},5,0,0,0.33333333333333331,0,0.33333333333333331;"
+            )
+            kf_tags = f"<IsTimeVarying>true</IsTimeVarying><Keyframes>{kf_entries}</Keyframes>"
+
+        new_elements.append(ET.fromstring(f"""
+        <VideoComponentParam ObjectID="{p_ids[1]}" ClassID="fe47129e-6c94-4fc0-95d5-c056a517aaf3" Version="10">
+            <Name>Scale</Name>
+            <UpperUIBound>200</UpperUIBound>
+            <ParameterID>2</ParameterID>
+            {kf_tags}
+            <StartKeyframe>-91445760000000000,{s0},0,0,0,0,0,0</StartKeyframe>
+            <CurrentValue>{s0}</CurrentValue>
+            <LowerBound>0</LowerBound>
+            <UpperBound>10000</UpperBound>
+        </VideoComponentParam>"""))
+
+        # Param 2: Scale Width
+        new_elements.append(ET.fromstring(f"""
+        <VideoComponentParam ObjectID="{p_ids[2]}" ClassID="fe47129e-6c94-4fc0-95d5-c056a517aaf3" Version="10">
+            <Name>Scale Width</Name>
+            <UpperUIBound>200</UpperUIBound>
+            <ParameterID>3</ParameterID>
+            <StartKeyframe>-91445760000000000,{s0},0,0,0,0,0,0</StartKeyframe>
+            <LowerBound>0</LowerBound>
+            <UpperBound>10000</UpperBound>
+        </VideoComponentParam>"""))
+
+        # Param 3: Uniform Scale
+        new_elements.append(ET.fromstring(f"""
+        <VideoComponentParam ObjectID="{p_ids[3]}" ClassID="cc12343e-f113-4d3b-ae05-b287db77d461" Version="10">
+            <Name> </Name>
+            <ParameterID>4</ParameterID>
+            <StartKeyframe>-91445760000000000,true,0,0,0,0,0,0</StartKeyframe>
+        </VideoComponentParam>"""))
+
+        # Param 4: Rotation
+        new_elements.append(ET.fromstring(f"""
+        <VideoComponentParam ObjectID="{p_ids[4]}" ClassID="fe47129e-6c94-4fc0-95d5-c056a517aaf3" Version="10">
+            <Name>Rotation</Name>
+            <ParameterControlType>3</ParameterControlType>
+            <ParameterID>5</ParameterID>
+            <StartKeyframe>-91445760000000000,0.,0,0,0,0,0,0</StartKeyframe>
+            <LowerBound>-32768</LowerBound>
+            <UpperBound>32767</UpperBound>
+        </VideoComponentParam>"""))
+
+        # Param 5: Anchor Point
+        new_elements.append(ET.fromstring(f"""
+        <PointComponentParam ObjectID="{p_ids[5]}" ClassID="ca81d347-309b-44d2-acc7-1c572efb973c" Version="4">
+            <Name>Anchor Point</Name>
+            <ParameterID>6</ParameterID>
+            <StartKeyframe>-91445760000000000,0.5:0.5,0,0,0,0,0,0,5,4,0,0,0,0</StartKeyframe>
+        </PointComponentParam>"""))
+
+        # Param 6: Anti-flicker Filter
+        new_elements.append(ET.fromstring(f"""
+        <VideoComponentParam ObjectID="{p_ids[6]}" ClassID="a4ff2d6e-7ac2-44f8-9d52-17d9ca50e542" Version="10">
+            <Name>Anti-flicker Filter</Name>
+            <ParameterID>7</ParameterID>
+            <StartKeyframe>-91445760000000000,0.,0,0,0,0,0,0</StartKeyframe>
+            <LowerBound>0</LowerBound>
+            <UpperBound>1</UpperBound>
+        </VideoComponentParam>"""))
+
+        # Params 7..10: Built-in Motion Crop Left, Top, Right, Bottom
+        for idx_c, (c_name, c_pid, c_val) in enumerate([
+            ("Crop Left", 8, c_left),
+            ("Crop Top", 9, c_top),
+            ("Crop Right", 10, c_right),
+            ("Crop Bottom", 11, c_bottom),
+        ], start=7):
+            new_elements.append(ET.fromstring(f"""
+            <VideoComponentParam ObjectID="{p_ids[idx_c]}" ClassID="fe47129e-6c94-4fc0-95d5-c056a517aaf3" Version="10">
+                <Name>{c_name}</Name>
+                <ParameterID>{c_pid}</ParameterID>
+                <StartKeyframe>-91445760000000000,{c_val},0,0,0,0,0,0</StartKeyframe>
+                <LowerBound>0</LowerBound>
+                <UpperBound>100</UpperBound>
+            </VideoComponentParam>"""))
+
+        motion_comp_id = alloc_oid()
+        params_xml = "".join(f'<Param Index="{i}" ObjectRef="{p_ids[i]}" />' for i in range(11))
+        new_elements.append(ET.fromstring(f"""
+        <VideoFilterComponent ObjectID="{motion_comp_id}" ClassID="d10da199-beea-4dd1-b941-ed3a78766d50" Version="9">
+            <Component Version="7">
+                <Params Version="1">{params_xml}</Params>
+                <ID>1</ID>
+                <DisplayName>Motion</DisplayName>
+                <Intrinsic>true</Intrinsic>
+            </Component>
+            <PremiereFilterPrivateData Encoding="base64" BinaryHash="3805854c-243a-c4be-bd40-a8a40000000e">AQA=</PremiereFilterPrivateData>
+            <MatchName>AE.ADBE Motion</MatchName>
+            <VideoFilterType>2</VideoFilterType>
+        </VideoFilterComponent>"""))
+
+        new_elements.append(ET.fromstring(f"""
+        <VideoComponentChain ObjectID="{vcc_id}" ClassID="0970e08a-f58f-4108-b29a-1a717b8e12e2" Version="3">
+            <DefaultOpacity>true</DefaultOpacity>
+            <DefaultOpacityComponentID>2</DefaultOpacityComponentID>
+            <ComponentChain Version="3">
+                <Node Version="1"><Properties Version="1">
+                    <MZ.ComponentChain.ActiveComponentID>1</MZ.ComponentChain.ActiveComponentID>
+                    <MZ.ComponentChain.ActiveComponentParamIndex>4294967295</MZ.ComponentChain.ActiveComponentParamIndex>
+                </Properties></Node>
+                <Components Version="1">
+                    <Component Index="0" ObjectRef="{motion_comp_id}" />
+                </Components>
+            </ComponentChain>
+        </VideoComponentChain>"""))
+        return vcc_id
 
     # Populate VideoClipTracks
     for t_idx, v_track in enumerate(model["v_tracks"]):
@@ -1436,20 +1665,7 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
                 <Name>{escape(item['name'])}</Name>
             </SubClip>"""))
 
-            vcc_id = alloc_oid()
-            new_elements.append(ET.fromstring(f"""
-            <VideoComponentChain ObjectID="{vcc_id}" ClassID="0970e08a-f58f-4108-b29a-1a717b8e12e2" Version="3">
-                <DefaultMotion>true</DefaultMotion>
-                <DefaultOpacity>true</DefaultOpacity>
-                <DefaultMotionComponentID>1</DefaultMotionComponentID>
-                <DefaultOpacityComponentID>2</DefaultOpacityComponentID>
-                <ComponentChain Version="3">
-                    <Node Version="1"><Properties Version="1">
-                        <MZ.ComponentChain.ActiveComponentID>2</MZ.ComponentChain.ActiveComponentID>
-                        <MZ.ComponentChain.ActiveComponentParamIndex>4294967295</MZ.ComponentChain.ActiveComponentParamIndex>
-                    </Properties></Node>
-                </ComponentChain>
-            </VideoComponentChain>"""))
+            vcc_id = _build_video_component_chain(item, in_ticks, out_ticks)
 
             vti_id = alloc_oid()
             start_tag = f"<Start>{start_ticks}</Start>" if start_ticks > 0 else ""
@@ -1458,6 +1674,7 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
                 <ClipTrackItem Version="8">
                     <ComponentOwner Version="1"><Components ObjectRef="{vcc_id}" /></ComponentOwner>
                     <TrackItem Version="4">
+                        <Node Version="1"><ID>{alloc_node_id()}</ID></Node>
                         {start_tag}
                         <End>{end_ticks}</End>
                     </TrackItem>
@@ -1543,6 +1760,7 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
                 <ClipTrackItem Version="8">
                     <ComponentOwner Version="1"><Components ObjectRef="{acc_id}" /></ComponentOwner>
                     <TrackItem Version="4">
+                        <Node Version="1"><ID>{alloc_node_id()}</ID></Node>
                         {start_tag}
                         <End>{end_ticks}</End>
                     </TrackItem>
@@ -1603,14 +1821,17 @@ def export_premiere_project(
 
     output_name = plan.get("output") or plan.get("output_name") or plan.get("project") or plan_path.parent.name
     stem = pathlib.Path(str(output_name)).stem
+    eff_fps = int(plan.get("fps") or fps)
+    eff_w = int(plan.get("width") or width)
+    eff_h = int(plan.get("height") or height)
 
     model = _collect_timeline_model(
         plan=plan,
         plan_path=plan_path,
         work_dir=work_dir,
-        fps=fps,
-        width=width,
-        height=height,
+        fps=eff_fps,
+        width=eff_w,
+        height=eff_h,
     )
 
     out_xml = out_dir / f"{stem}.premiere.xml"
