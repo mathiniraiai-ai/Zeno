@@ -139,9 +139,21 @@ def ensure_latest_update(
     pull_msg = ""
 
     try:
-        # Reset local auto-generated ledger conflicts on team PCs if needed so git pull never blocks
+        # Detect active branch (e.g., MacBook or main) so team PCs pull their tracked branch
+        br_proc = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        branch_name = (br_proc.stdout or "").strip() if br_proc.returncode == 0 else "main"
+        if not branch_name or branch_name == "HEAD":
+            branch_name = "main"
+
         r = subprocess.run(
-            ["git", "pull", "--rebase", "--autostash", "origin", "main"],
+            ["git", "pull", "--rebase", "--autostash", "origin", branch_name],
             cwd=str(ROOT),
             capture_output=True,
             text=True,

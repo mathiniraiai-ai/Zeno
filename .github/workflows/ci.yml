@@ -2,9 +2,9 @@ name: Zeno CI & Regression Suite
 
 on:
   push:
-    branches: [main]
+    branches: [main, MacBook]
   pull_request:
-    branches: [main]
+    branches: [main, MacBook]
 
 jobs:
   test:
