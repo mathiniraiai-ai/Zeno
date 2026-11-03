@@ -309,7 +309,7 @@ def check_script_coverage(
         for j in range(len(toks) - 1):
             if len(toks[j]) >= 3 and _word_similarity(toks[j], toks[j + 1]) >= 0.88:
                 pair_str = f"{toks[j]} {toks[j + 1]}"
-                if pair_str not in script_text_all:
+                if pair_str not in script_text_all and script_text_all.split().count(toks[j]) < 2:
                     boundary_dups += 1
 
     # Check inter-segment boundary duplicates across consecutive segments

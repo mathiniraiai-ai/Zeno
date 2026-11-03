@@ -1,6 +1,6 @@
 {
   "style": "micronarrative",
-  "updated_at": "2026-11-02",
+  "updated_at": "2026-11-03",
   "rules": [
     {
       "id": "HOOK_FIRST_ZOOM_IN",
@@ -15,7 +15,7 @@
     {
       "id": "HOOK_CLIP_TRANSITIONS_1_TO_2",
       "category": "transitions",
-      "rule": "Place 1 to 2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside a single-character hook; keep intra-clip splits as clean jump cuts (tr=cut, zero whoosh spam)."
+      "rule": "Place 1 to 2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside a single-character hook or at Scene N boundaries; keep intra-clip and intra-scene splits as clean jump cuts (tr=cut, zero whoosh spam)."
     },
     {
       "id": "SPLIT_SCREEN_100_STATIC",
@@ -36,6 +36,26 @@
       "id": "RAW_COLORS_AND_SYNC_LOCK",
       "category": "color_audio",
       "rule": "Keep color_match OFF (false) by default so raw clip colours are never altered, and never apply J/L audio-video offsets unless explicitly requested."
+    },
+    {
+      "id": "STATIONARY_NOISE_VS_ONE_WORD_LINE_BEAT_GUARD",
+      "category": "cutting",
+      "rule": "Treat clips with stationary ambient noise (rms_p90 - rms_p50 <= 4.2 dB and active_frac >= 0.90) as silent beat clips (_is_silent=True, clearing any LLM-echoed words), while never misclassifying 1-2 word spoken script lines (e.g. 'Whatever!') as silent beats."
+    },
+    {
+      "id": "MULTI_SPEAKER_SINGLE_CLIP_TURN_PRESERVATION",
+      "category": "alignment",
+      "rule": "When an 8s-10s AI clip contains the tail of Speaker A's line + Speaker B's short question + the head of Speaker A's next line, _match_sequence must match all covered lines without early continue, and apply_speaker_check must never amputate legitimate second-speaker turns."
+    },
+    {
+      "id": "TWO_SHOT_AND_HOLOGRAM_ZOOM_LOCK",
+      "category": "zoom",
+      "rule": "Lock zoom=1.0 (no sudden_in:1.08, sudden_out, or PACING_PASS 1.0->1.06) on all multi-speaker (len(spk_list) >= 2) and two-shot / galley / hologram scenes (Scene 2 & Scene 3) so characters framed near the left/right edges are never cropped."
+    },
+    {
+      "id": "rule_60aba46b87d5aac9",
+      "category": "transitions",
+      "rule": "Place 1 to 2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside a single-character hook; keep intra-clip splits as clean jump cuts (tr=cut, zero whoosh spam)."
     }
   ]
 }

@@ -1102,6 +1102,9 @@ def recommend_project_layouts(
     has_chat_cue = bool(
         re.search(r"\[texting\]|\[chat(?:[_\s]*bar)?\]|text\s*message|whatsapp|chat\s*bubble", all_text, re.I)
     )
+    has_inframe_skit_cue = bool(
+        re.search(r"projection\s+pops\s+off|hologram|talking\s+in\s+the\s+galley|two[- ]?shot", all_text, re.I)
+    )
 
     # Inspect clip geometry across clip_map
     unique_clips = list({id(v): v for v in clip_map.values()}.values())
@@ -1120,7 +1123,10 @@ def recommend_project_layouts(
         primary_multi = preset_norm
     else:
         # "auto" or "hybrid"
-        if baked_split_count > len(unique_clips) // 2 and preset_norm == "auto":
+        if (
+            (baked_split_count > len(unique_clips) // 2 or (has_inframe_skit_cue and not has_split_cue) or (two_shot_count >= 3 and landscape_count == 0 and not has_split_cue))
+            and preset_norm == "auto"
+        ):
             resolved_preset = "single"
             primary_multi = "single"
         elif has_chat_cue and not (has_video_call_cue or has_split_cue):
