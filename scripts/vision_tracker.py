@@ -360,8 +360,9 @@ def compute_slot_crop_filter(
         k = min(MAX_EXTRA_ZOOM, MIN_SLOT_FILL / max(fill_now, 1e-3))
 
     if y1 > y0 and y0 < 0.95:
-        sh_needed = (1.0 - headroom_pct / 100.0) * slot_h / max(0.1, 1.0 - y0)
-        k_head = sh_needed / max(1.0, src_h * s0)
+        sh_needed_bot = (1.0 - headroom_pct / 100.0) * slot_h / max(0.1, 1.0 - y0)
+        sh_needed_top = (headroom_pct / 100.0) * slot_h / max(0.05, y0)
+        k_head = max(sh_needed_bot, sh_needed_top) / max(1.0, src_h * s0)
         if k_head > k:
             k = min(MAX_EXTRA_ZOOM, k_head)
 
