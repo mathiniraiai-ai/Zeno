@@ -357,26 +357,29 @@ def logout(session_path: Optional[Path] = None, dotenv_path: Optional[Path] = No
 def _build_confirmation_html(email: str, name: str) -> bytes:
     who = html.escape(email or name or "Supernova Editor")
     page = f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Zeno — Connected</title>
+<html lang="en"><head><meta charset="utf-8"><title>Signed in - Google Accounts · Zeno</title>
 <style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-         background: #0d1117; color: #e6edf3; display: flex; align-items: center;
-         justify-content: center; min-height: 92vh; margin: 0; }}
-  .card {{ background: #161b22; border: 1px solid #2ea043; border-radius: 12px;
-          padding: 32px 36px; max-width: 480px; text-align: center; box-shadow: 0 12px 32px rgba(0,0,0,0.4); }}
-  .badge {{ display: inline-block; background: rgba(46,160,67,0.18); color: #3fb950;
-           font-weight: 600; padding: 6px 14px; border-radius: 999px; margin-bottom: 14px; font-size: 14px; }}
-  h1 {{ font-size: 22px; margin: 0 0 10px; }}
-  p {{ color: #8b949e; line-height: 1.5; font-size: 14px; margin: 8px 0; }}
-  code {{ color: #79c0ff; background: #0d1117; padding: 2px 6px; border-radius: 5px; }}
+  body {{ font-family: "Google Sans", Roboto, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+         background: #f0f4f9; color: #1f1f1f; display: flex; align-items: center;
+         justify-content: center; min-height: 92vh; margin: 0; padding: 24px; }}
+  .card {{ background: #ffffff; border-radius: 28px;
+          padding: 36px 40px; max-width: 520px; width: 100%; }}
+  .badge {{ display: inline-flex; align-items: center; gap: 6px; background: #e6f4ea; color: #137333;
+           font-weight: 500; padding: 6px 14px; border-radius: 999px; margin-bottom: 16px; font-size: 13px; }}
+  h1 {{ font-size: 28px; font-weight: 400; margin: 0 0 10px; color: #1f1f1f; }}
+  p {{ color: #444746; line-height: 1.5; font-size: 14px; margin: 8px 0; }}
+  code {{ color: #0b57d0; background: #f0f4f9; padding: 2px 6px; border-radius: 4px; }}
 </style></head>
 <body><div class="card">
-  <div class="badge">✓ Connected to Zeno</div>
-  <h1>Signed in as {who}</h1>
-  <p>Your session token has been saved automatically inside your local Zeno workspace (<code>.zeno_session.json</code> &amp; <code>.env</code>).</p>
-  <p>You can close this browser tab and return to your terminal or editor.</p>
+  <div class="badge">✓ Signed in &amp; saved to .env</div>
+  <h1>Welcome, {who}</h1>
+  <p>Your Zeno session has been automatically saved to your local <code>.env</code> file.</p>
+  <p>This tab will close automatically…</p>
 </div>
-<script>try {{ window.history.replaceState({{}}, "", "/callback"); }} catch (e) {{}}</script>
+<script>
+try {{ window.history.replaceState({{}}, "", "/callback"); }} catch (e) {{}}
+setTimeout(() => {{ try {{ window.open('', '_self', ''); window.close(); }} catch (e) {{}} }}, 800);
+</script>
 </body></html>"""
     return page.encode("utf-8")
 

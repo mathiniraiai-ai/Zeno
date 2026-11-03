@@ -47,82 +47,466 @@ th{color:#9fb0cc;font-weight:600;font-size:12px;text-transform:uppercase;letter-
 .lang-pill{background:#0c1326;border:1px solid #26324d;border-radius:10px;padding:8px 12px;font-size:12.5px;color:#cbd5e1}
 """
 
+SIGNUP_STYLE = """
+*{box-sizing:border-box}
+body{
+  margin:0;
+  min-height:100vh;
+  background:#f0f4f9;
+  color:#1f1f1f;
+  font-family:"Google Sans",Roboto,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  padding:24px 16px;
+  -webkit-font-smoothing:antialiased;
+}
+.g-shell{
+  width:100%;
+  max-width:900px;
+}
+.g-card{
+  position:relative;
+  overflow:hidden;
+  background:#ffffff;
+  border-radius:28px;
+  padding:36px 40px 36px;
+  min-height:384px;
+  display:flex;
+  flex-direction:column;
+  justify-content:space-between;
+  transition:opacity .2s ease;
+}
+.g-card.loading{
+  pointer-events:none;
+  opacity:.72;
+}
+.g-progress{
+  position:absolute;
+  top:0;left:0;right:0;
+  height:4px;
+  background:#d3e3fd;
+  display:none;
+  overflow:hidden;
+}
+.g-card.loading .g-progress{
+  display:block;
+}
+.g-progress::after{
+  content:"";
+  position:absolute;
+  top:0;bottom:0;left:-40%;
+  width:40%;
+  background:#0b57d0;
+  border-radius:99px;
+  animation:g-indeterminate 1.25s infinite ease-in-out;
+}
+@keyframes g-indeterminate{
+  0%{left:-40%;width:35%}
+  50%{left:35%;width:50%}
+  100%{left:100%;width:35%}
+}
+.g-logo{
+  width:48px;
+  height:48px;
+  margin-bottom:16px;
+}
+.g-cols{
+  display:grid;
+  grid-template-columns:1fr 1.08fr;
+  gap:48px;
+  align-items:start;
+  flex:1;
+}
+@media (max-width:760px){
+  .g-card{padding:28px 24px 28px;border-radius:24px}
+  .g-cols{grid-template-columns:1fr;gap:24px}
+}
+.g-heading{
+  margin:4px 0 14px;
+  font-size:36px;
+  line-height:44px;
+  font-weight:400;
+  color:#1f1f1f;
+  letter-spacing:-0.2px;
+}
+.g-subtitle{
+  margin:0;
+  font-size:16px;
+  line-height:24px;
+  color:#1f1f1f;
+  font-weight:400;
+}
+.g-subtitle strong{
+  font-weight:500;
+  color:#0b57d0;
+}
+.g-cli-chip{
+  display:none;
+  margin-top:20px;
+  padding:6px 12px;
+  border-radius:8px;
+  background:#f0f4f9;
+  color:#0b57d0;
+  font-size:12.5px;
+  font-weight:500;
+  align-items:center;
+  gap:6px;
+  width:fit-content;
+}
+.g-oauth-box{
+  margin-bottom:20px;
+}
+.g-divider{
+  display:flex;
+  align-items:center;
+  gap:12px;
+  color:#444746;
+  font-size:12px;
+  margin:18px 0;
+}
+.g-divider::before,.g-divider::after{
+  content:"";
+  flex:1;
+  height:1px;
+  background:#e0e2e0;
+}
+.g-field{
+  position:relative;
+  margin-bottom:8px;
+}
+.g-field input{
+  width:100%;
+  height:56px;
+  padding:16px 15px;
+  font-size:16px;
+  line-height:24px;
+  color:#1f1f1f;
+  background:#ffffff;
+  border:1px solid #747775;
+  border-radius:4px;
+  outline:none;
+  font-family:inherit;
+  transition:border-color .15s;
+}
+.g-field input:focus{
+  border:2px solid #0b57d0;
+  padding:15px 14px;
+}
+.g-field input.has-err{
+  border:2px solid #b3261e;
+  padding:15px 14px;
+}
+.g-field label{
+  position:absolute;
+  left:12px;
+  top:50%;
+  transform:translateY(-50%);
+  background:#ffffff;
+  padding:0 4px;
+  color:#444746;
+  font-size:16px;
+  pointer-events:none;
+  transition:all .15s cubic-bezier(.4,0,.2,1);
+}
+.g-field input:focus + label,
+.g-field input:not(:placeholder-shown) + label{
+  top:0;
+  font-size:12px;
+  color:#0b57d0;
+  font-weight:500;
+}
+.g-field input.has-err + label{
+  color:#b3261e;
+}
+.g-domain-hint{
+  font-size:13px;
+  color:#0b57d0;
+  font-weight:500;
+  margin:8px 0 0;
+}
+.g-err{
+  display:none;
+  align-items:center;
+  gap:6px;
+  margin-top:8px;
+  color:#b3261e;
+  font-size:12.5px;
+  line-height:16px;
+}
+.g-guest-note{
+  margin:28px 0 0;
+  font-size:14px;
+  line-height:20px;
+  color:#444746;
+}
+.g-guest-note a{
+  color:#0b57d0;
+  text-decoration:none;
+  font-weight:500;
+}
+.g-guest-note a:hover{
+  text-decoration:underline;
+}
+.g-actions{
+  display:flex;
+  justify-content:flex-end;
+  align-items:center;
+  gap:12px;
+  margin-top:32px;
+}
+.g-btn-text{
+  background:transparent;
+  color:#0b57d0;
+  border:0;
+  border-radius:999px;
+  height:40px;
+  padding:0 16px;
+  font-size:14px;
+  font-weight:500;
+  font-family:inherit;
+  cursor:pointer;
+}
+.g-btn-text:hover{
+  background:rgba(11,87,208,.08);
+}
+.g-btn-next{
+  background:#0b57d0;
+  color:#ffffff;
+  border:0;
+  border-radius:999px;
+  height:40px;
+  padding:0 24px;
+  font-size:14px;
+  font-weight:500;
+  font-family:inherit;
+  cursor:pointer;
+  transition:background .15s,box-shadow .15s;
+}
+.g-btn-next:hover{
+  background:#0842a0;
+  box-shadow:0 1px 3px rgba(0,0,0,.2);
+}
+.g-btn-next:disabled{
+  background:#e0e2e0;
+  color:#8e918f;
+  cursor:default;
+  box-shadow:none;
+}
+.g-user-pill{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  border:1px solid #747775;
+  border-radius:999px;
+  padding:3px 12px 3px 4px;
+  margin-top:12px;
+  font-size:14px;
+  font-weight:500;
+  color:#1f1f1f;
+}
+.g-avatar{
+  width:24px;
+  height:24px;
+  border-radius:50%;
+  background:#0b57d0;
+  color:#ffffff;
+  font-size:12px;
+  font-weight:500;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  text-transform:uppercase;
+}
+.g-success-box{
+  background:#f0f4f9;
+  border-radius:16px;
+  padding:24px;
+}
+.g-success-badge{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  color:#137333;
+  background:#e6f4ea;
+  padding:6px 14px;
+  border-radius:999px;
+  font-size:13px;
+  font-weight:500;
+  margin-bottom:14px;
+}
+.g-footer{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  padding:16px 8px 0;
+  font-size:12px;
+  color:#444746;
+}
+.g-footer-links{
+  display:flex;
+  gap:24px;
+}
+.g-footer-links a{
+  color:#444746;
+  text-decoration:none;
+  padding:4px 0;
+}
+.g-footer-links a:hover{
+  text-decoration:underline;
+}
+"""
+
 SIGNUP_PAGE = f"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Zeno Cloud — Supernova SSO & Session Setup</title><style>{STYLE}</style>
+<title>Sign in - Google Accounts · Zeno</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&display=swap" rel="stylesheet">
+<style>{SIGNUP_STYLE}</style>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-</head><body><main>
-  <div class="brand"><span class="dot"></span> Zeno Video AI · @gosupernova.live SSO</div>
-  <div class="card" id="form">
-    <h1>Sign in to Zeno</h1>
-    <p class="sub">Sign in with your <b>@gosupernova.live</b> / <b>@gosupernova.line</b> Google account. Your session is automatically saved to your local Zeno <code>.env</code> file — zero copy-paste required.</p>
-    <div id="cli-banner" class="banner-cli">⚡ <b>Zeno Local Workspace Connected:</b> Signing in with Google below will automatically save your session into <code>.env</code> and close this tab.</div>
-    <div id="g-signin-wrap" style="display:none;margin:18px 0">
-      <div id="g-signin-btn"></div>
-    </div>
-    <div id="fallback-form">
-      <label for="name">Your Name or @gosupernova.live Email</label>
-      <input id="name" autocomplete="name" placeholder="e.g. Mathini or mathini@gosupernova.live">
-      <div id="codebox" style="display:none">
-        <label for="code">Team code</label>
-        <input id="code" type="password" placeholder="Ask your lead for the code">
+</head><body>
+<!-- Generate Zeno Session -->
+<div class="g-shell">
+  <div class="g-card" id="card">
+    <div class="g-progress" id="progress"></div>
+    <svg class="g-logo" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+      <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+      <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+      <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+    </svg>
+
+    <div class="g-cols" id="form">
+      <div class="g-left">
+        <h1 class="g-heading">Sign in</h1>
+        <p class="g-subtitle">to continue to <strong>Zeno</strong></p>
+        <div id="cli-banner" class="g-cli-chip">
+          <span>●</span> Local Zeno workspace connected
+        </div>
       </div>
-      <button id="go" onclick="make()">Generate &amp; Connect Session</button>
+
+      <div class="g-right">
+        <div id="g-signin-wrap" class="g-oauth-box" style="display:none">
+          <div id="g-signin-btn"></div>
+          <div class="g-divider">or continue with your work email</div>
+        </div>
+
+        <form id="fallback-form" onsubmit="event.preventDefault(); make();" novalidate>
+          <div class="g-field">
+            <input id="name" name="username" type="text" autocomplete="username" spellcheck="false" autocapitalize="none" enterkeyhint="done" placeholder=" " required>
+            <label for="name">Email or name</label>
+          </div>
+          <div id="codebox" class="g-field" style="display:none;margin-top:16px">
+            <input id="code" name="password" type="password" autocomplete="current-password" enterkeyhint="done" placeholder=" ">
+            <label for="code">Team access code</label>
+          </div>
+          <div class="g-err" id="err">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="#b3261e"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+            <span id="err-text"></span>
+          </div>
+          <div class="g-domain-hint">@gosupernova.live · @gosupernova.line</div>
+          <p class="g-guest-note">
+            Signing in automatically connects your local Zeno editor and saves your session to <code>.env</code>.
+          </p>
+          <div class="g-actions">
+            <button type="submit" id="go" class="g-btn-next">Next</button>
+          </div>
+        </form>
+      </div>
     </div>
-    <div class="err" id="err"></div>
+
+    <div class="g-cols" id="result" style="display:none">
+      <div class="g-left">
+        <h1 class="g-heading" id="welcome-title">Welcome</h1>
+        <div class="g-user-pill">
+          <span class="g-avatar" id="user-avatar">Z</span>
+          <span id="user-email">editor@gosupernova.live</span>
+        </div>
+      </div>
+      <div class="g-right">
+        <div class="g-success-box">
+          <div class="g-success-badge">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="#137333"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+            Signed in &amp; saved to .env
+          </div>
+          <p style="margin:0 0 8px;font-size:15px;font-weight:500;color:#1f1f1f">
+            Connected as <span id="user-name">Editor</span>
+          </p>
+          <p id="close-msg" style="margin:0;font-size:13.5px;line-height:20px;color:#444746">
+            Your Zeno session has been automatically saved to your local <code>.env</code> file. This tab will close automatically…
+          </p>
+        </div>
+      </div>
+    </div>
   </div>
 
-  <div class="card" id="result" style="display:none;text-align:center;padding:36px 28px">
-    <div style="display:inline-block;padding:6px 16px;border-radius:999px;background:rgba(16,185,129,.18);color:#6ee7b7;font-weight:700;font-size:14px;margin-bottom:14px">
-      ✓ Sign-In Successful
+  <footer class="g-footer">
+    <div>English (United States)</div>
+    <div class="g-footer-links">
+      <a href="/health" target="_blank" rel="noopener">Status</a>
+      <a href="/admin">Admin</a>
     </div>
-    <h1>Connected to Zeno!</h1>
-    <p class="sub" style="margin-bottom:18px">Your Google account is verified and your session has been automatically saved to your local Zeno <code>.env</code> file.</p>
-    <div class="grid2" style="text-align:left">
-      <div class="kv"><div class="k">Editor</div><div class="v" id="user-name">-</div></div>
-      <div class="kv"><div class="k">Verified Email</div><div class="v" id="user-email">-</div></div>
-    </div>
-    <p id="close-msg" style="color:#9fb0cc;font-size:13px;margin-top:18px">This browser tab will close automatically… (or you can close it now and return to Zeno).</p>
-  </div>
-</main>
+  </footer>
+</div>
 <script>
 const params = new URLSearchParams(window.location.search);
 const rawPort = parseInt(params.get('callback_port') || '0', 10);
 const callbackPort = (rawPort >= 1024 && rawPort <= 65535) ? rawPort : 8765;
 const cliState = params.get('cli_state') || '';
 if (params.get('cli') === '1' || cliState) {{
-  document.getElementById('cli-banner').style.display = 'block';
+  document.getElementById('cli-banner').style.display = 'inline-flex';
+}}
+
+function setLoading(on) {{
+  const card = document.getElementById('card');
+  if (on) card.classList.add('loading');
+  else card.classList.remove('loading');
 }}
 
 function showErr(msg) {{
+  setLoading(false);
   const err = document.getElementById('err');
-  err.textContent = msg;
-  err.style.display = 'block';
+  const txt = document.getElementById('err-text');
+  const inp = document.getElementById('name');
+  txt.textContent = msg;
+  err.style.display = 'flex';
+  if (inp) inp.classList.add('has-err');
+}}
+
+function clearErr() {{
+  document.getElementById('err').style.display = 'none';
+  const inp = document.getElementById('name');
+  if (inp) inp.classList.remove('has-err');
 }}
 
 async function completeAuth(d) {{
+  setLoading(false);
   const origin = window.location.origin;
   const tok = d.key || d.token || '';
-  document.getElementById('user-name').textContent = d.name || d.email || 'Editor';
-  document.getElementById('user-email').textContent = d.email || '';
+  const displayName = d.name || d.email || 'Editor';
+  const email = d.email || '';
+  document.getElementById('user-name').textContent = displayName;
+  document.getElementById('welcome-title').textContent = 'Welcome, ' + displayName.split(' ')[0];
+  document.getElementById('user-email').textContent = email;
+  document.getElementById('user-avatar').textContent = (displayName[0] || 'Z').toUpperCase();
   document.getElementById('form').style.display = 'none';
-  document.getElementById('result').style.display = 'block';
+  document.getElementById('result').style.display = 'grid';
   try {{ window.history.replaceState({{}}, '', '/'); }} catch (e) {{}}
 
-  // Automatically copy token to clipboard so local Zeno CLI/daemon can also ingest it seamlessly
   if (tok && navigator.clipboard && navigator.clipboard.writeText) {{
     try {{ await navigator.clipboard.writeText(tok); }} catch (e) {{}}
   }}
 
-  // Deliver to local Zeno listener on 127.0.0.1:callbackPort
   if (tok && callbackPort) {{
-    const cbGet = `http://127.0.0.1:${{callbackPort}}/callback?token=${{encodeURIComponent(tok)}}&email=${{encodeURIComponent(d.email||'')}}&name=${{encodeURIComponent(d.name||'')}}&cloud_url=${{encodeURIComponent(origin)}}`;
+    const cbGet = `http://127.0.0.1:${{callbackPort}}/callback?token=${{encodeURIComponent(tok)}}&email=${{encodeURIComponent(email)}}&name=${{encodeURIComponent(displayName)}}&cloud_url=${{encodeURIComponent(origin)}}`;
     try {{
       await fetch(`http://127.0.0.1:${{callbackPort}}/callback`, {{
         method: 'POST',
         mode: 'no-cors',
         headers: {{'Content-Type': 'text/plain;charset=utf-8'}},
-        body: JSON.stringify({{token: tok, email: d.email || '', name: d.name || '', cloud_url: origin}})
+        body: JSON.stringify({{token: tok, email: email, name: displayName, cloud_url: origin}})
       }});
     }} catch (e) {{}}
     try {{
@@ -130,14 +514,14 @@ async function completeAuth(d) {{
     }} catch (e) {{}}
   }}
 
-  // Auto-close the browser tab after 1.2 seconds
   setTimeout(() => {{
     try {{ window.open('', '_self', ''); window.close(); }} catch (e) {{}}
   }}, 1200);
 }}
 
 async function onGoogleSignIn(resp) {{
-  document.getElementById('err').style.display = 'none';
+  clearErr();
+  setLoading(true);
   try {{
     const r = await fetch('/api/auth/google', {{
       method: 'POST',
@@ -159,7 +543,6 @@ fetch('/api/auth/config').then(r=>r.json()).then(cfg=>{{
   if (cfg.signup_code_required) document.getElementById('codebox').style.display = 'block';
   if (cfg.google_client_id) {{
     document.getElementById('g-signin-wrap').style.display = 'block';
-    document.getElementById('fallback-form').style.display = 'none';
     const initGsi = () => {{
       if (window.google && google.accounts && google.accounts.id) {{
         google.accounts.id.initialize({{
@@ -168,7 +551,7 @@ fetch('/api/auth/config').then(r=>r.json()).then(cfg=>{{
           auto_select: true
         }});
         google.accounts.id.renderButton(document.getElementById('g-signin-btn'), {{
-          theme: 'filled_blue', size: 'large', width: 360, text: 'signin_with'
+          theme: 'outline', size: 'large', shape: 'pill', width: 340, text: 'continue_with', logo_alignment: 'left'
         }});
       }} else {{
         setTimeout(initGsi, 200);
@@ -179,9 +562,15 @@ fetch('/api/auth/config').then(r=>r.json()).then(cfg=>{{
 }}).catch(()=>{{}});
 
 async function make(){{
-  const err = document.getElementById('err'), btn = document.getElementById('go');
-  err.style.display = 'none'; btn.disabled = true;
+  clearErr();
+  const btn = document.getElementById('go');
   const raw = document.getElementById('name').value.trim();
+  if (!raw) {{
+    showErr('Enter an email or name');
+    return;
+  }}
+  btn.disabled = true;
+  setLoading(true);
   const payload = {{
     name: raw,
     email: raw.includes('@') ? raw : '',
