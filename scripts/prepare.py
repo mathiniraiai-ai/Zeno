@@ -2258,6 +2258,22 @@ def main() -> None:
             "anomalies": [],
         })
 
+    # Auto-pair <stem>.mp4 video with <stem>VO.mp4 voiceover audio when both exist
+    by_stem_upper = {c["stem"].upper(): c for c in clips_data}
+    for c in clips_data:
+        st_up = c["stem"].upper()
+        if st_up.endswith("VO") and len(st_up) > 2:
+            base_up = st_up[:-2].rstrip("_- ")
+            base_c = by_stem_upper.get(base_up)
+            if base_c is not None and len(c.get("hq_words") or []) > len(base_c.get("hq_words") or []):
+                base_c["hq_words"] = c["hq_words"]
+                base_c["base_words"] = c["base_words"]
+                base_c["rms_env"] = c["rms_env"]
+                base_c["macro_silences"] = c["macro_silences"]
+                base_c["micro_dips"] = c["micro_dips"]
+                c["dropped_take"] = True
+                c["anomalies"].append(f"[VO_PAIRED] paired voiceover audio/words into {base_c['stem']}")
+
     # Align clips to script lines & run deterministic anomaly detection + auto-cutting
     match_clips_to_script_lines(clips_data, script_lines)
     apply_speaker_check(clips_data, script_lines)   # before choosing takes: a take with the wrong voice scores lower
