@@ -720,7 +720,7 @@ def build_segment_cache_key(
 
     plan_loudness = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
     payload = {
-        "v": 9,
+        "v": 10,
         "src": _file_mtime_sig(seg["src"]),
         "start": round(float(seg["start"]), 4),
         "end": round(float(seg["end"]), 4),
@@ -1231,12 +1231,12 @@ def build_segment_ffmpeg_args(
         if active_top:
             pip_vis = analyze_clip_vision(src) if src.is_file() else {}
             bg_vis = analyze_clip_vision(peer_src) if peer_src.is_file() else {}
-            fc.append(_build_slot_video_chain(peer_in_label, "[v_bg]", peer_w, peer_h, W, H, fps, exact, peer_focus, 1.0, 1.0, bbox_norm=bg_vis.get("bbox_norm")))
+            fc.append(_build_slot_video_chain(peer_in_label, "[v_bg]", peer_w, peer_h, W, H, fps, exact, peer_focus, 1.0, 1.0, bbox_norm=bg_vis.get("bbox_norm"), exact=True))
             fc.append(_build_slot_video_chain("[0:v]", "[v_pip_raw]", src_w, src_h, pw, ph, fps, exact, [fx, fy], 1.0, 1.0, bbox_norm=pip_vis.get("bbox_norm"), color_filter=color_filter))
         else:
             bg_vis = analyze_clip_vision(src) if src.is_file() else {}
             pip_vis = analyze_clip_vision(peer_src) if peer_src.is_file() else {}
-            fc.append(_build_slot_video_chain("[0:v]", "[v_bg]", src_w, src_h, W, H, fps, exact, [fx, fy], z0, z1, bbox_norm=bg_vis.get("bbox_norm"), color_filter=color_filter))
+            fc.append(_build_slot_video_chain("[0:v]", "[v_bg]", src_w, src_h, W, H, fps, exact, [fx, fy], z0, z1, bbox_norm=bg_vis.get("bbox_norm"), exact=True, color_filter=color_filter))
             fc.append(_build_slot_video_chain(peer_in_label, "[v_pip_raw]", peer_w, peer_h, pw, ph, fps, exact, peer_focus, 1.0, 1.0, bbox_norm=pip_vis.get("bbox_norm")))
 
         fc.append(f"[{mask_idx}:v]scale={pw}:{ph},format=gray[pip_mask]")
