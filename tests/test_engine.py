@@ -307,8 +307,12 @@ L2 S2.mp4 0.12-4.10 layout=split_h slot=right sp=Student tr=smoothleft@0.28 peer
                 srv.server_close()
 
     def test_10_auto_updater_throttle_and_offline_guard(self) -> None:
+        import inspect
         import os
         import auto_updater
+
+        sig = inspect.signature(auto_updater.install_daily_scheduler)
+        self.assertEqual(sig.parameters["hour"].default, 11)
 
         old_val = os.environ.get("ZENO_NO_LIVE")
         try:

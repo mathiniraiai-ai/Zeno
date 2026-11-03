@@ -743,14 +743,14 @@ def main() -> None:
     ap.add_argument("--login", action="store_true", help="Open browser for Google Sign-In and auto-save Zeno Cloud session token")
     ap.add_argument("--whoami", action="store_true", help="Display current logged-in Zeno Cloud editor session")
     ap.add_argument("--update", action="store_true", help="Run git pull + Zeno Cloud brain memory sync immediately")
-    ap.add_argument("--install-schedule", action="store_true", help="Install daily 8:00 AM background auto-update schedule")
+    ap.add_argument("--install-schedule", action="store_true", help="Install daily 11:00 AM background auto-update schedule")
     ap.add_argument("--yes", "-y", action="store_true", help="Auto-confirm the Stage 3 Yes/No gate in standalone mode")
     args = ap.parse_args()
 
     if args.install_schedule:
         import auto_updater
-        res = auto_updater.install_daily_scheduler(hour=8, minute=0)
-        print(f"  [Auto-Update] ✓ Daily 8:00 AM auto-updater configured ({res.get('schedule', 'active')})")
+        res = auto_updater.install_daily_scheduler(hour=11, minute=0)
+        print(f"  [Auto-Update] ✓ Daily 11:00 AM auto-updater configured ({res.get('schedule', 'active')})")
         if not args.inspect and not args.execute and not args.pitch and not args.inputs:
             sys.exit(0)
 

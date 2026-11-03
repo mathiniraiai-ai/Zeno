@@ -1,13 +1,13 @@
-"""Automatic Git Pull & Daily 8:00 AM Update Scheduler for Zeno (`scripts/auto_updater.py`).
+"""Automatic Git Pull & Daily 11:00 AM Update Scheduler for Zeno (`scripts/auto_updater.py`).
 
 Ensures every team PC stays automatically up to date in two ways:
   1. **Pre-Job Auto-Pull**: Whenever an editor starts a new job (`zeno.py --inspect`, `prepare.py`,
      `zeno.py --check`) or when >= 12 hours have elapsed since the last check, Zeno automatically runs
      a fast, safe `git pull --rebase --autostash origin main` (and syncs `brain_memory.json` rules
      from Zeno Cloud) without touching `.env`, `.zeno_session.json`, `input/`, `work/`, or outputs.
-  2. **Daily 8:00 AM OS Scheduler**: Installs a lightweight background job (`launchd` LaunchAgent on
-     macOS with `Hour=8, Minute=0` + `RunAtLoad=true`; Scheduled Task on Windows at `08:00`) so even
-     before the editor opens their IDE, Zeno is already updated to the latest commit.
+  2. **Daily 11:00 AM OS Scheduler**: Installs a lightweight background job (`launchd` LaunchAgent on
+     macOS with `Hour=11, Minute=0` + `RunAtLoad=true`; Scheduled Task on Windows at `11:00`) so even
+     before the editor starts a job, Zeno is already updated to the latest commit.
 """
 from __future__ import annotations
 
@@ -235,8 +235,8 @@ def ensure_latest_update(
     return result
 
 
-def install_daily_scheduler(hour: int = 8, minute: int = 0) -> Dict[str, Any]:
-    """Install a daily 8:00 AM OS background task (macOS LaunchAgent / Windows Scheduled Task)."""
+def install_daily_scheduler(hour: int = 11, minute: int = 0) -> Dict[str, Any]:
+    """Install a daily 11:00 AM OS background task (macOS LaunchAgent / Windows Scheduled Task)."""
     py_bin = _find_python()
     script_path = str(Path(__file__).resolve())
     WORK.mkdir(parents=True, exist_ok=True)
@@ -295,10 +295,10 @@ def install_daily_scheduler(hour: int = 8, minute: int = 0) -> Dict[str, Any]:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Zeno Automatic Git Updater & Daily 8:00 AM Scheduler")
+    ap = argparse.ArgumentParser(description="Zeno Automatic Git Updater & Daily 11:00 AM Scheduler")
     ap.add_argument("--scheduled", action="store_true", help="Run as background scheduled job (logs to work/auto_update.log)")
-    ap.add_argument("--install-schedule", action="store_true", help="Install daily 8:00 AM background auto-update schedule")
-    ap.add_argument("--hour", type=int, default=8, help="Daily schedule hour in 24h format (default: 8 for 8:00 AM)")
+    ap.add_argument("--install-schedule", action="store_true", help="Install daily 11:00 AM background auto-update schedule")
+    ap.add_argument("--hour", type=int, default=11, help="Daily schedule hour in 24h format (default: 11 for 11:00 AM)")
     ap.add_argument("--status", action="store_true", help="Print last auto-update status")
     args = ap.parse_args()
 
