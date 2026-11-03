@@ -306,6 +306,22 @@ L2 S2.mp4 0.12-4.10 layout=split_h slot=right sp=Student tr=smoothleft@0.28 peer
             finally:
                 srv.server_close()
 
+    def test_10_auto_updater_throttle_and_offline_guard(self) -> None:
+        import os
+        import auto_updater
+
+        old_val = os.environ.get("ZENO_NO_LIVE")
+        try:
+            os.environ["ZENO_NO_LIVE"] = "1"
+            res = auto_updater.ensure_latest_update(force=True, quiet=True)
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["status"], "skipped_offline")
+        finally:
+            if old_val is None:
+                os.environ.pop("ZENO_NO_LIVE", None)
+            else:
+                os.environ["ZENO_NO_LIVE"] = old_val
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

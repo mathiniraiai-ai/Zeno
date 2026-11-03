@@ -81,10 +81,11 @@ if (Test-Path ".env") {
     Write-Host "[4/5] Created .env from .env.example"
 }
 
-# 5. Alignment model (Meta wav2vec2, about 360 MB, into models\torch) + automatic Google login + real checks
+# 5. Alignment model (Meta wav2vec2, about 360 MB, into models\torch) + automatic Google login + daily 8 AM auto-updater
 Write-Host "[5/5] Downloading the alignment model (first time only) and checking everything..."
 $ErrorActionPreference = "Continue"
 & .venv\Scripts\python.exe scripts\setup.py --prewarm | Out-Null
+& .venv\Scripts\python.exe scripts\auto_updater.py --install-schedule | Out-Null
 & .venv\Scripts\python.exe scripts\setup.py --whoami | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[Auth] Opening your browser to sign in with Google (@gosupernova.live)..."

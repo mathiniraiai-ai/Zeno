@@ -2005,6 +2005,13 @@ def main() -> None:
     args = ap.parse_args()
     job_start_epoch = time.time()
 
+    # Auto git pull once per new job (throttled to 15 min so if zeno.py --inspect just pulled, it doesn't repeat)
+    try:
+        import auto_updater
+        auto_updater.ensure_latest_update(force=False, min_interval_hours=0.25, quiet=False)
+    except Exception:
+        pass
+
     # Resolve script file
     if args.script:
         script_path = resolve(args.script)
