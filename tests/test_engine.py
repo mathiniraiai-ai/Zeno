@@ -164,6 +164,12 @@ L2 S2.mp4 0.12-4.10 layout=split_h slot=right sp=Student tr=smoothleft@0.28 peer
         for tag in ("TrackItems", "Links", "PreviewItems"):
             for el in broot.iter(tag):
                 self.assertEqual(el.attrib.get("Version"), "1", f"Missing Version='1' on <{tag}> in base_1080x1920.prproj.gz")
+        seq_w = broot.find(".//MZ.Sequence.PreviewFrameSizeWidth")
+        seq_h = broot.find(".//MZ.Sequence.PreviewFrameSizeHeight")
+        self.assertIsNotNone(seq_w)
+        self.assertIsNotNone(seq_h)
+        self.assertEqual(seq_w.text, "720")
+        self.assertEqual(seq_h.text, "1280")
 
         xml_path = Path.home() / "Downloads" / "Zeno Outputs" / "Kannada_Stop_Saying_Girl_On_Scooter.premiere.xml"
         if xml_path.is_file():

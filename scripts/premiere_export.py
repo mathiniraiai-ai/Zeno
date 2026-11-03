@@ -208,8 +208,8 @@ def _collect_timeline_model(
     plan_path: pathlib.Path,
     work_dir: pathlib.Path,
     fps: int = 30,
-    width: int = 1080,
-    height: int = 1920,
+    width: int = 720,
+    height: int = 1280,
 ) -> dict:
     """
     Build a unified multi-track timeline representation from plan.edl / plan dict
@@ -235,7 +235,7 @@ def _collect_timeline_model(
 
     # Video tracks:
     # V1 (index 0): Primary speaker clips
-    # V2 (index 1): Listening partner clips (for split_h / split_v / video_call)
+    # V2 (index 1): Listening partner clips (for split_h / split_v / video_call / top_pip)
     # V3..V5 (index 2..4): Strikethrough "Stop Saying" banners (up to 3 stacked phrases)
     # V6 (index 5): ✓ / ✗ mark PNG overlays (2-pulse end-of-sentence flash)
     v_tracks: list[list[dict]] = [[], [], [], [], [], []]
@@ -247,6 +247,7 @@ def _collect_timeline_model(
     a_tracks: list[list[dict]] = [[], [], [], []]
 
     dur_cache: dict[str, float] = {}
+    dims_cache: dict[str, tuple[int, int]] = {}
 
     def get_media_dur(p: pathlib.Path, is_still: bool = False) -> float:
         if is_still:
@@ -254,10 +255,53 @@ def _collect_timeline_model(
         s = str(p)
         if s not in dur_cache:
             try:
-                dur_cache[s] = max(0.1, float(probe_duration(p)))
+                info = _common.probe(p)
+                dur_cache[s] = max(0.1, float(info.get("duration") or 60.0))
+                if info.get("width") and info.get("height"):
+                    dims_cache[s] = (int(info["width"]), int(info["height"]))
             except Exception:
                 dur_cache[s] = 60.0
         return dur_cache[s]
+
+    def get_media_dims(p: pathlib.Path, is_still: bool = False) -> tuple[int, int]:
+        s = str(p)
+        if s in dims_cache:
+            return dims_cache[s]
+        if is_still:
+            try:
+                with open(p, "rb") as fh:
+                    hdr = fh.read(24)
+                if len(hdr) >= 24 and hdr[:8] == b"\x89PNG\r\n\x1a\n":
+                    iw = int.from_bytes(hdr[16:20], "big")
+                    ih = int.from_bytes(hdr[20:24], "big")
+                    if iw > 0 and ih > 0:
+                        dims_cache[s] = (iw, ih)
+                        return dims_cache[s]
+            except Exception:
+                pass
+            dims_cache[s] = (1080, 1920)
+            return dims_cache[s]
+        try:
+            info = _common.probe(p)
+            if info.get("duration"):
+                dur_cache.setdefault(s, max(0.1, float(info["duration"])))
+            iw = int(info.get("width") or width)
+            ih = int(info.get("height") or height)
+            dims_cache[s] = (iw, ih)
+        except Exception:
+            dims_cache[s] = (width, height)
+        return dims_cache[s]
+
+    def _pip_transform(pw: int, ph: int) -> tuple[float, tuple[float, float], dict | None]:
+        """Compute Scale, Center, and Crop for a top_pip clip of native size (pw, ph) inside a (width, height) sequence."""
+        pip_sc = round((width * 0.6944 / max(1, pw)) * 100.0, 2)
+        pip_ctr = (0.0, -0.38)
+        if pw >= ph:
+            # 16:9 landscape clip (e.g. 1280x720 Robot clip) already matches the 500x280 (16:9) PIP aspect ratio
+            return pip_sc, pip_ctr, None
+        return pip_sc, pip_ctr, {"left": 0.0, "right": 0.0, "top": 28.0, "bottom": 40.5}
+
+    ov_scale_pct = round((width / 1080.0) * 100.0, 2)
 
     def place_sfx(sfx_path: pathlib.Path, start_sec: float, gain_db: float = 0.0, max_dur: float | None = None):
         if not sfx_path or not sfx_path.exists():
@@ -305,6 +349,8 @@ def _collect_timeline_model(
             continue
 
         media_dur = get_media_dur(clip_path, is_still=False)
+        clip_w, clip_h = get_media_dims(clip_path, is_still=False)
+        base_scale = (width / float(clip_w)) if clip_w else 1.0
         layout_mode = str(seg.get("layout", plan.get("preset", "single")) or "single")
         zoom_style = "smooth"
         zoom_at = 0.0
@@ -318,8 +364,8 @@ def _collect_timeline_model(
         vol_db = float(seg.get("gain_db", 0.0) or 0.0)
 
         # Motion & Crop parameters for V1 (with multi-keyframe eased Scale curves & focus Center offset)
-        v1_scale_start = round(z0 * 100.0, 2)
-        v1_scale_end = round(z1 * 100.0, 2)
+        v1_scale_start = round(z0 * base_scale * 100.0, 2)
+        v1_scale_end = round(z1 * base_scale * 100.0, 2)
         scale_kfs: list[tuple[float, float]] = []
         if zoom_style in ("sudden_in", "sudden_out", "flash_zoom") and abs(z1 - z0) > 0.004:
             t0_z = max(0.0, min(dur - 0.05, float(zoom_at)))
@@ -327,16 +373,16 @@ def _collect_timeline_model(
             mid_z = z0 + (z1 - z0) * 0.875
             drift_z = z1 + (0.015 if z1 >= z0 else -0.015)
             scale_kfs = [
-                (0.0, round(z0 * 100.0, 2)),
-                (t0_z, round(z0 * 100.0, 2)),
-                (min(dur, t0_z + d_snap * 0.5), round(mid_z * 100.0, 2)),
-                (min(dur, t0_z + d_snap), round(z1 * 100.0, 2)),
-                (dur, round(drift_z * 100.0, 2)),
+                (0.0, round(z0 * base_scale * 100.0, 2)),
+                (t0_z, round(z0 * base_scale * 100.0, 2)),
+                (min(dur, t0_z + d_snap * 0.5), round(mid_z * base_scale * 100.0, 2)),
+                (min(dur, t0_z + d_snap), round(z1 * base_scale * 100.0, 2)),
+                (dur, round(drift_z * base_scale * 100.0, 2)),
             ]
         elif abs(z1 - z0) > 0.004:
             for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
                 p_ease = 0.5 * (1.0 - math.cos(math.pi * frac))
-                scale_kfs.append((round(frac * dur, 4), round((z0 + (z1 - z0) * p_ease) * 100.0, 2)))
+                scale_kfs.append((round(frac * dur, 4), round((z0 + (z1 - z0) * p_ease) * base_scale * 100.0, 2)))
 
         focus_pt = seg.get("focus") or [0.5, 0.38]
         z_mid = 0.5 * (z0 + z1)
@@ -356,12 +402,12 @@ def _collect_timeline_model(
             else (("robot" in speaker_name) or ("nova" in speaker_name))
         )
         if layout_mode == "split_h":
-            v1_scale_start = v1_scale_end = 100.0
+            v1_scale_start = v1_scale_end = round(base_scale * 100.0, 2)
             scale_kfs = []
             v1_crop = {"left": 25.0, "right": 25.0, "top": 0.0, "bottom": 0.0}
             v1_center = (-0.25 if active_first else 0.25, 0.0)
         elif layout_mode == "split_v":
-            v1_scale_start = v1_scale_end = 100.0
+            v1_scale_start = v1_scale_end = round(base_scale * 100.0, 2)
             scale_kfs = []
             v1_crop = {"left": 0.0, "right": 0.0, "top": 25.0, "bottom": 25.0}
             v1_center = (0.0, -0.25 if active_first else 0.25)
@@ -379,11 +425,8 @@ def _collect_timeline_model(
         })
 
         # In top_pip, V1 is always the full-screen background and V2 is always the top-center PIP window
-        pip_scale = 69.44
-        pip_center = (0.0, -0.38)
-        pip_crop = {"left": 0.0, "right": 0.0, "top": 28.0, "bottom": 40.5}
-
         if layout_mode == "top_pip" and active_first:
+            pip_scale, pip_center, pip_crop = _pip_transform(clip_w, clip_h)
             # Speaking clip is the top PIP window on V2 (linked to A1)
             v2_active_item = {
                 "seg_idx": idx,
@@ -395,6 +438,8 @@ def _collect_timeline_model(
                 "src_in": src_in,
                 "src_out": src_out,
                 "media_dur": media_dur,
+                "clip_w": clip_w,
+                "clip_h": clip_h,
                 "scale_start": pip_scale,
                 "scale_end": pip_scale,
                 "scale_keyframes": [],
@@ -416,6 +461,8 @@ def _collect_timeline_model(
                 "src_in": src_in,
                 "src_out": src_out,
                 "media_dur": media_dur,
+                "clip_w": clip_w,
+                "clip_h": clip_h,
                 "scale_start": v1_scale_start,
                 "scale_end": v1_scale_end,
                 "scale_keyframes": scale_kfs,
@@ -437,6 +484,8 @@ def _collect_timeline_model(
             "src_in": src_in,
             "src_out": src_out,
             "media_dur": media_dur,
+            "clip_w": clip_w,
+            "clip_h": clip_h,
             "gain_db": vol_db,
             "transition": {"type": "crossfade", "dur": 0.045} if idx > 0 else None,
             "link_id": f"link_seg_{idx}",
@@ -457,6 +506,8 @@ def _collect_timeline_model(
             peer_path = _resolve_clip_path(str(peer_clip_ref), plan_path, clip_lookup)
             if peer_path and peer_path.exists():
                 peer_media_dur = get_media_dur(peer_path, is_still=False)
+                peer_w, peer_h = get_media_dims(peer_path, is_still=False)
+                peer_base_scale = (width / float(peer_w)) if peer_w else 1.0
                 p_in = 0.0
                 p_out = min(peer_media_dur, dur)
                 if isinstance(peer_spec, dict):
@@ -469,7 +520,7 @@ def _collect_timeline_model(
                         p_out = min(peer_media_dur, p_in + dur)
                 v2_center = (0.0, 0.0)
                 v2_crop = None
-                v2_scale = 100.0
+                v2_scale = round(peer_base_scale * 100.0, 2)
                 target_v_track = 1
                 if layout_mode == "split_h":
                     v2_crop = {"left": 25.0, "right": 25.0, "top": 0.0, "bottom": 0.0}
@@ -478,21 +529,19 @@ def _collect_timeline_model(
                     v2_crop = {"left": 0.0, "right": 0.0, "top": 25.0, "bottom": 25.0}
                     v2_center = (0.0, 0.25 if active_first else -0.25)
                 elif layout_mode == "video_call":
-                    v2_scale = 28.0
+                    v2_scale = round(peer_base_scale * 28.0, 2)
                     v2_center = (0.30, -0.32)
                 elif layout_mode == "top_pip":
                     if active_first:
                         # Speaking clip is on V2 (top PIP); listening human goes on V1 (full-screen bg)
                         target_v_track = 0
-                        v2_scale = 100.0
+                        v2_scale = round(peer_base_scale * 100.0, 2)
                         v2_center = (0.0, 0.0)
                         v2_crop = None
                     else:
                         # Speaking human is on V1 (full-screen bg); listening robot goes on V2 (top PIP)
                         target_v_track = 1
-                        v2_scale = pip_scale
-                        v2_center = pip_center
-                        v2_crop = pip_crop
+                        v2_scale, v2_center, v2_crop = _pip_transform(peer_w, peer_h)
 
                 rem = dur
                 cur_v2 = t_start
@@ -509,6 +558,8 @@ def _collect_timeline_model(
                         "src_in": p_in,
                         "src_out": p_in + chunk,
                         "media_dur": peer_media_dur,
+                        "clip_w": peer_w,
+                        "clip_h": peer_h,
                         "scale_start": v2_scale,
                         "scale_end": v2_scale,
                         "scale_keyframes": [],
@@ -541,6 +592,7 @@ def _collect_timeline_model(
                 v_slot = min(2 + b_idx, 4)
                 y_off = round((0.52 + b_idx * 0.068) - 0.50, 4)
                 if png_plain.exists() and strike_at > b_at + 0.03:
+                    bn_w, bn_h = get_media_dims(png_plain, is_still=True)
                     v_tracks[v_slot].append({
                         "seg_idx": idx,
                         "name": f"Banner_{b_idx+1}_In_{b_text[:16]}",
@@ -551,14 +603,17 @@ def _collect_timeline_model(
                         "src_in": 0.0,
                         "src_out": strike_at - b_at,
                         "media_dur": 3600.0,
-                        "scale_start": 100.0,
-                        "scale_end": 100.0,
+                        "clip_w": bn_w,
+                        "clip_h": bn_h,
+                        "scale_start": ov_scale_pct,
+                        "scale_end": ov_scale_pct,
                         "center": (0.0, y_off),
                         "crop": None,
                         "opacity_keyframes": None,
                         "link_id": None,
                     })
                 if png_struck.exists() and b_end > strike_at + 0.03:
+                    bn_w, bn_h = get_media_dims(png_struck, is_still=True)
                     v_tracks[v_slot].append({
                         "seg_idx": idx,
                         "name": f"Banner_{b_idx+1}_Strike_{b_text[:16]}",
@@ -569,8 +624,10 @@ def _collect_timeline_model(
                         "src_in": 0.0,
                         "src_out": b_end - strike_at,
                         "media_dur": 3600.0,
-                        "scale_start": 100.0,
-                        "scale_end": 100.0,
+                        "clip_w": bn_w,
+                        "clip_h": bn_h,
+                        "scale_start": ov_scale_pct,
+                        "scale_end": ov_scale_pct,
                         "center": (0.0, y_off),
                         "crop": None,
                         "opacity_keyframes": None,
@@ -582,6 +639,7 @@ def _collect_timeline_model(
             u_png, s_png = ov_assets["strikethrough"][idx]
             delay = float(seg.get("strikethrough_initial_delay", 0.0) or 0.0)
             if u_png and delay > 0.05 and delay < dur:
+                u_w, u_h = get_media_dims(u_png.resolve(), is_still=True)
                 v_tracks[2].append({
                     "seg_idx": idx,
                     "name": u_png.name,
@@ -592,14 +650,17 @@ def _collect_timeline_model(
                     "src_in": 0.0,
                     "src_out": delay,
                     "media_dur": 3600.0,
-                    "scale_start": 100.0,
-                    "scale_end": 100.0,
+                    "clip_w": u_w,
+                    "clip_h": u_h,
+                    "scale_start": ov_scale_pct,
+                    "scale_end": ov_scale_pct,
                     "center": (0.0, 0.0),
                     "crop": None,
                     "opacity_keyframes": None,
                     "link_id": None,
                 })
                 if s_png:
+                    s_w, s_h = get_media_dims(s_png.resolve(), is_still=True)
                     v_tracks[2].append({
                         "seg_idx": idx,
                         "name": s_png.name,
@@ -610,14 +671,17 @@ def _collect_timeline_model(
                         "src_in": 0.0,
                         "src_out": max(0.04, dur - delay),
                         "media_dur": 3600.0,
-                        "scale_start": 100.0,
-                        "scale_end": 100.0,
+                        "clip_w": s_w,
+                        "clip_h": s_h,
+                        "scale_start": ov_scale_pct,
+                        "scale_end": ov_scale_pct,
                         "center": (0.0, 0.0),
                         "crop": None,
                         "opacity_keyframes": None,
                         "link_id": None,
                     })
             elif s_png:
+                s_w, s_h = get_media_dims(s_png.resolve(), is_still=True)
                 v_tracks[2].append({
                     "seg_idx": idx,
                     "name": s_png.name,
@@ -628,8 +692,10 @@ def _collect_timeline_model(
                     "src_in": 0.0,
                     "src_out": dur,
                     "media_dur": 3600.0,
-                    "scale_start": 100.0,
-                    "scale_end": 100.0,
+                    "clip_w": s_w,
+                    "clip_h": s_h,
+                    "scale_start": ov_scale_pct,
+                    "scale_end": ov_scale_pct,
                     "center": (0.0, 0.0),
                     "crop": None,
                     "opacity_keyframes": None,
@@ -671,6 +737,7 @@ def _collect_timeline_model(
                 png_name = "green_flash.png" if kind == "right" else "red_flash.png"
             mk_png = (REPO / "assets" / "marks" / png_name).resolve()
             if mk_png.exists():
+                mk_w, mk_h = get_media_dims(mk_png, is_still=True)
                 v_tracks[5].append({
                     "seg_idx": idx,
                     "name": f"{kind.upper()}_{seg_id}_{mk_png.stem}",
@@ -681,8 +748,10 @@ def _collect_timeline_model(
                     "src_in": 0.0,
                     "src_out": actual_mk_dur,
                     "media_dur": 3600.0,
-                    "scale_start": 100.0,
-                    "scale_end": 100.0,
+                    "clip_w": mk_w,
+                    "clip_h": mk_h,
+                    "scale_start": ov_scale_pct,
+                    "scale_end": ov_scale_pct,
                     "center": (0.0, 0.0),
                     "crop": None,
                     "opacity_keyframes": [
@@ -739,7 +808,7 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
     file_registry: dict[str, str] = {}
     next_file_idx = 1
 
-    def get_file_xml(path: pathlib.Path, media_type: str, media_dur: float) -> str:
+    def get_file_xml(path: pathlib.Path, media_type: str, media_dur: float, clip_w: int = width, clip_h: int = height) -> str:
         nonlocal next_file_idx
         key = str(path.resolve())
         if key in file_registry:
@@ -757,8 +826,8 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
                   <duration>{dur_frames}</duration>
                   <samplecharacteristics>
                     <rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>
-                    <width>{width}</width>
-                    <height>{height}</height>
+                    <width>{clip_w}</width>
+                    <height>{clip_h}</height>
                     <anamorphic>FALSE</anamorphic>
                     <pixelaspectratio>square</pixelaspectratio>
                     <fielddominance>none</fielddominance>
@@ -783,8 +852,8 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
                   <duration>{dur_frames}</duration>
                   <samplecharacteristics>
                     <rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>
-                    <width>{width}</width>
-                    <height>{height}</height>
+                    <width>{clip_w}</width>
+                    <height>{clip_h}</height>
                     <anamorphic>FALSE</anamorphic>
                     <pixelaspectratio>square</pixelaspectratio>
                     <fielddominance>none</fielddominance>
@@ -882,7 +951,13 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
               <mediatype>audio</mediatype>
             </effect>
           </transitionitem>""")
-            file_xml = get_file_xml(item["path"], item["media_type"], item["media_dur"])
+            file_xml = get_file_xml(
+                item["path"],
+                item["media_type"],
+                item["media_dur"],
+                int(item.get("clip_w") or width),
+                int(item.get("clip_h") or height),
+            )
 
             # Optional FCP7 / Premiere <transitionitem> on V1 before clipitem
             if t_idx == 0 and item.get("transition"):
@@ -1045,6 +1120,8 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
                 item["path"],
                 "video" if item["media_type"] == "audio_from_video" else "audio",
                 item["media_dur"],
+                int(item.get("clip_w") or width),
+                int(item.get("clip_h") or height),
             )
             lvl = _db_to_linear(item.get("gain_db", 0.0))
             a_link_xml = ""
@@ -1165,7 +1242,7 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
     height = model["height"]
     total_ticks = max(fps_ticks, _sec_to_ticks(model["total_duration"]))
 
-    # Update Sequence name & duration
+    # Update Sequence name, resolution (720x1280 720p default), & duration
     seq_el = by_id["e897a169-5f00-4dbd-bb6a-311c4a933f39"]
     for name_owner_id in (
         "e897a169-5f00-4dbd-bb6a-311c4a933f39",
@@ -1185,13 +1262,18 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
         ("TL.SQVisibleBaseTime", "0"),
         ("TL.SQTimePerPixel", "0.09"),
         ("MZ.Sequence.VideoTimeDisplayFormat", "101" if fps == 25 else "104"),
+        ("MZ.Sequence.PreviewFrameSizeWidth", str(width)),
+        ("MZ.Sequence.PreviewFrameSizeHeight", str(height)),
     ):
         node = seq_el.find(f".//{tag_name}")
         if node is not None:
             node.text = val_str
 
-    # Locate VideoClipTracks (0..7) and AudioClipTracks (0..7) and set Sequence FrameRate
+    # Locate VideoClipTracks (0..7) and AudioClipTracks (0..7) and set Sequence FrameRate & FrameRect
     v_tg = by_id["167"]
+    v_tg_rect = v_tg.find(".//FrameRect")
+    if v_tg_rect is not None:
+        v_tg_rect.text = f"0,0,{width},{height}"
     for tg_id in ("167", "169"):
         tg_obj = by_id.get(tg_id)
         if tg_obj is not None:
@@ -1221,7 +1303,7 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
     master_registry: dict[str, dict] = {}
     new_elements: list[ET.Element] = []
 
-    def register_media(path: pathlib.Path, media_type: str, media_dur: float) -> dict:
+    def register_media(path: pathlib.Path, media_type: str, media_dur: float, clip_w: int = width, clip_h: int = height) -> dict:
         nonlocal grid_order
         key = str(path.resolve())
         if key in master_registry:
@@ -1259,7 +1341,7 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
                 <FieldTypeIsUncertain>true</FieldTypeIsUncertain>
                 <FrameRate>{fps_ticks}</FrameRate>
                 <Duration>{dur_ticks}</Duration>
-                <FrameRect>0,0,{width},{height}</FrameRect>
+                <FrameRect>0,0,{clip_w},{clip_h}</FrameRect>
                 <AlphaType>1</AlphaType>
             </VideoStream>"""))
             new_elements.append(ET.fromstring(f"""
@@ -1341,7 +1423,7 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
                     <OriginalImageOrientationType>1</OriginalImageOrientationType>
                     <FrameRate>{fps_ticks}</FrameRate>
                     <Duration>{dur_ticks}</Duration>
-                    <FrameRect>0,0,{width},{height}</FrameRect>
+                    <FrameRect>0,0,{clip_w},{clip_h}</FrameRect>
                     <AlphaType>3</AlphaType>
                     <IgnoreAlpha>true</IgnoreAlpha>
                 </VideoStream>"""))
@@ -1673,7 +1755,9 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
             continue
         ti_container = _ensure_track_items_el(v_track_els[t_idx])
         for item_idx, item in enumerate(v_track):
-            reg = register_media(item["path"], item["media_type"], item["media_dur"])
+            item_w = int(item.get("clip_w") or width)
+            item_h = int(item.get("clip_h") or height)
+            reg = register_media(item["path"], item["media_type"], item["media_dur"], item_w, item_h)
             start_ticks = _sec_to_ticks(item["t_start"])
             end_ticks = max(start_ticks + fps_ticks, _sec_to_ticks(item["t_end"]))
             in_ticks = _sec_to_ticks(item["src_in"])
@@ -1720,7 +1804,7 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
                     <SubClip ObjectRef="{sc_id}" />
                 </ClipTrackItem>
                 <ToneMapSettings>{{"peak":-1,"version":3}}</ToneMapSettings>
-                <FrameRect>0,0,{width},{height}</FrameRect>
+                <FrameRect>0,0,{item_w},{item_h}</FrameRect>
                 <PixelAspectRatio>1,1</PixelAspectRatio>
             </VideoClipTrackItem>"""))
             ti_container.append(ET.fromstring(f'<TrackItem Index="{item_idx}" ObjectRef="{vti_id}" />'))
@@ -1734,7 +1818,9 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
             continue
         ti_container = _ensure_track_items_el(a_track_els[t_idx])
         for item_idx, item in enumerate(a_track):
-            reg = register_media(item["path"], item["media_type"], item["media_dur"])
+            item_w = int(item.get("clip_w") or width)
+            item_h = int(item.get("clip_h") or height)
+            reg = register_media(item["path"], item["media_type"], item["media_dur"], item_w, item_h)
             start_ticks = _sec_to_ticks(item["t_start"])
             end_ticks = max(start_ticks + fps_ticks, _sec_to_ticks(item["t_end"]))
             in_ticks = _sec_to_ticks(item["src_in"])
@@ -1846,12 +1932,12 @@ def export_premiere_project(
     out_dir: pathlib.Path | None = None,
     work_dir: pathlib.Path | None = None,
     fps: int = 30,
-    width: int = 1080,
-    height: int = 1920,
+    width: int = 720,
+    height: int = 1280,
 ) -> dict[str, pathlib.Path]:
     """
     Export both `<output_name>.prproj` and `<output_name>.premiere.xml` to `out_dir`
-    (defaulting to `~/Downloads/Zeno Outputs/`).
+    (defaulting to `~/Downloads/Zeno Outputs/` and 720x1280 720p sequence size).
     """
     plan_path = pathlib.Path(plan_path).resolve()
     work_dir = pathlib.Path(work_dir or plan_path.parent).resolve()
@@ -1860,9 +1946,25 @@ def export_premiere_project(
 
     output_name = plan.get("output") or plan.get("output_name") or plan.get("project") or plan_path.parent.name
     stem = pathlib.Path(str(output_name)).stem
-    eff_fps = int(plan.get("fps") or fps)
-    eff_w = int(plan.get("width") or width)
-    eff_h = int(plan.get("height") or height)
+    canvas = plan.get("canvas") or {}
+    eff_fps = int(plan.get("fps") or canvas.get("fps") or fps)
+    eff_w = int(plan.get("premiere_width") or 720)
+    eff_h = int(plan.get("premiere_height") or 1280)
+    if width != 1080 or height != 1920:
+        eff_w, eff_h = int(width), int(height)
+    else:
+        # Auto-match primary V1 Superflow clip resolution (720x1280 default)
+        clip_lookup = _build_clip_lookup(plan, plan_path)
+        for seg in plan.get("segments", []) or []:
+            cref = str(seg.get("src") or seg.get("clip") or "")
+            cpath = _resolve_clip_path(cref, plan_path, clip_lookup)
+            if cpath and cpath.exists():
+                info = _common.probe(cpath)
+                cw = int(info.get("width") or 0)
+                ch = int(info.get("height") or 0)
+                if cw > 0 and ch > cw:
+                    eff_w, eff_h = cw, ch
+                    break
 
     model = _collect_timeline_model(
         plan=plan,
@@ -1892,8 +1994,8 @@ def main():
     ap.add_argument("plan", help="Path to work/<project>/plan.edl or plan.json")
     ap.add_argument("--out-dir", default=None, help="Output directory (defaults to ~/Downloads/Zeno Outputs)")
     ap.add_argument("--fps", type=int, default=30)
-    ap.add_argument("--width", type=int, default=1080)
-    ap.add_argument("--height", type=int, default=1920)
+    ap.add_argument("--width", type=int, default=720)
+    ap.add_argument("--height", type=int, default=1280)
     args = ap.parse_args()
 
     plan_path = pathlib.Path(args.plan).resolve()
