@@ -869,7 +869,46 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
             dur_f = end_f - start_f
             in_f = _sec_to_frames(item["src_in"], fps)
             out_f = in_f + dur_f
+            if t_idx == 0 and item.get("transition") and start_f >= 2:
+                lines.append(f"""          <transitionitem>
+            <rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>
+            <start>{max(0, start_f - 1)}</start>
+            <end>{start_f + 1}</end>
+            <alignment>center</alignment>
+            <effect>
+              <name>Crossfade (Constant Power)</name>
+              <effectid>KGAudioTransition</effectid>
+              <effecttype>transition</effecttype>
+              <mediatype>audio</mediatype>
+            </effect>
+          </transitionitem>""")
             file_xml = get_file_xml(item["path"], item["media_type"], item["media_dur"])
+
+            # Optional FCP7 / Premiere <transitionitem> on V1 before clipitem
+            if t_idx == 0 and item.get("transition"):
+                tr_info = item["transition"]
+                tr_t = str(tr_info.get("type") or "fade").lower()
+                tr_d = float(tr_info.get("dur") or 0.28)
+                half_f = max(2, _sec_to_frames(tr_d * 0.5, fps))
+                if "dip" in tr_t or "flash" in tr_t:
+                    ef_name, ef_id = "Dip to Black", "dip2black"
+                elif any(k in tr_t for k in ("whip", "slide", "smooth")):
+                    ef_name, ef_id = "Band Slide", "bandslide"
+                else:
+                    ef_name, ef_id = "Cross Dissolve", "crossdissolve"
+                lines.append(f"""          <transitionitem>
+            <rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>
+            <start>{max(0, start_f - half_f)}</start>
+            <end>{start_f + half_f}</end>
+            <alignment>center</alignment>
+            <effect>
+              <name>{ef_name}</name>
+              <effectid>{ef_id}</effectid>
+              <effectcategory>Dissolve</effectcategory>
+              <effecttype>transition</effecttype>
+              <mediatype>video</mediatype>
+            </effect>
+          </transitionitem>""")
 
             # Basic Motion filter (with multi-keyframe eased Scale curve)
             s0 = item["scale_start"]

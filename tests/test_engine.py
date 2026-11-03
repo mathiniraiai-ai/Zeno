@@ -157,6 +157,14 @@ L2 S2.mp4 0.12-4.10 layout=split_h slot=right sp=Student tr=smoothleft@0.28 peer
             self.assertEqual(clipped_w, 0)
             self.assertEqual(long_pauses, 0)
 
+        import gzip
+        base_prproj = ROOT / "assets" / "premiere" / "base_1080x1920.prproj.gz"
+        self.assertTrue(base_prproj.is_file())
+        broot = ET.fromstring(gzip.decompress(base_prproj.read_bytes()).decode("utf-8"))
+        for tag in ("TrackItems", "Links", "PreviewItems"):
+            for el in broot.iter(tag):
+                self.assertEqual(el.attrib.get("Version"), "1", f"Missing Version='1' on <{tag}> in base_1080x1920.prproj.gz")
+
         xml_path = Path.home() / "Downloads" / "Zeno Outputs" / "Kannada_Stop_Saying_Girl_On_Scooter.premiere.xml"
         if xml_path.is_file():
             root = ET.parse(xml_path).getroot()
