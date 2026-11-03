@@ -33,7 +33,7 @@ import wave
 from collections import defaultdict, deque
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -399,12 +399,14 @@ def post_learned_rule(
 # ---------------------------------------------------------------- key signup, Google OAuth & admin pages
 NO_STORE = {"Cache-Control": "no-store"}
 _signup_hits: Dict[str, deque] = defaultdict(deque)
+_cli_pending_sessions: Dict[str, Dict[str, Any]] = {}
 
 
 class SignupBody(BaseModel):
     name: str
     email: str = ""   # optional: when empty it is built from the name
     code: str = ""
+    cli_state: str = ""
 
 
 class GoogleAuthBody(BaseModel):
@@ -413,6 +415,20 @@ class GoogleAuthBody(BaseModel):
     code: str = ""            # OAuth2 authorization code
     redirect_uri: str = ""    # Used when exchanging authorization code
     name: str = ""
+    cli_state: str = ""
+
+
+def _store_cli_pending(cli_state: str, ip: str, payload: Dict[str, Any]) -> None:
+    now = time.time()
+    with _hits_lock:
+        expired = [k for k, v in _cli_pending_sessions.items() if now - float(v.get("created_at", 0)) > 600]
+        for k in expired:
+            _cli_pending_sessions.pop(k, None)
+        entry = {**payload, "created_at": now}
+        if cli_state and len(cli_state.strip()) >= 6:
+            _cli_pending_sessions[cli_state.strip()] = entry
+        if ip:
+            _cli_pending_sessions[f"ip:{ip}"] = entry
 
 
 def _client_ip(request: Request) -> str:
@@ -510,6 +526,7 @@ def signup_page() -> HTMLResponse:
 
 @app.post("/api/auth/google")
 def google_auth_login(body: GoogleAuthBody, request: Request) -> JSONResponse:
+    ip = _client_ip(request)
     profile = _verify_google_identity(body)
     email = profile["email"]
     name = profile["name"]
@@ -519,19 +536,36 @@ def google_auth_login(body: GoogleAuthBody, request: Request) -> JSONResponse:
         log.exception("key store unavailable during google auth")
         raise HTTPException(503, "Could not issue key right now, try again shortly")
 
+    out_payload = {
+        "key": res["key"],
+        "token": res["key"],
+        "name": name,
+        "email": email,
+        "prefix": res["prefix"],
+        "key_id": res["key_id"],
+        "picture": profile.get("picture", ""),
+    }
+    _store_cli_pending(body.cli_state, ip, out_payload)
     log.info("google auth key issued for %s <%s>", name, email)
-    return JSONResponse(
-        {
-            "key": res["key"],
-            "token": res["key"],
-            "name": name,
-            "email": email,
-            "prefix": res["prefix"],
-            "key_id": res["key_id"],
-            "picture": profile.get("picture", ""),
-        },
-        headers=NO_STORE,
-    )
+    return JSONResponse(out_payload, headers=NO_STORE)
+
+
+@app.get("/api/auth/cli-poll")
+def poll_cli_session(request: Request, cli_state: str = Query(""), use_ip_fallback: int = Query(0)) -> JSONResponse:
+    ip = _client_ip(request)
+    now = time.time()
+    with _hits_lock:
+        st = cli_state.strip()
+        if st and st in _cli_pending_sessions:
+            entry = _cli_pending_sessions.pop(st)
+            if now - float(entry.get("created_at", 0)) <= 600:
+                return JSONResponse({"ready": True, **entry}, headers=NO_STORE)
+        if use_ip_fallback and ip and f"ip:{ip}" in _cli_pending_sessions:
+            entry = _cli_pending_sessions.get(f"ip:{ip}", {})
+            if now - float(entry.get("created_at", 0)) <= 120:
+                _cli_pending_sessions.pop(f"ip:{ip}", None)
+                return JSONResponse({"ready": True, **entry}, headers=NO_STORE)
+    return JSONResponse({"ready": False}, headers=NO_STORE)
 
 
 @app.post("/api/keys")
@@ -570,8 +604,10 @@ def create_key(body: SignupBody, request: Request) -> JSONResponse:
         log.exception("key store unavailable")
         raise HTTPException(503, "Could not create a key right now, try again shortly")
     _check_signup_rate(ip, record=True)
+    out_payload = {"key": key, "token": key, "name": name, "email": email, "prefix": key[:12]}
+    _store_cli_pending(body.cli_state, ip, out_payload)
     log.info("key created for %s <%s>", name, email)
-    return JSONResponse({"key": key, "token": key, "name": name, "email": email, "prefix": key[:12]}, headers=NO_STORE)
+    return JSONResponse(out_payload, headers=NO_STORE)
 
 
 def _check_admin(

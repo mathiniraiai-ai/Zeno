@@ -55,12 +55,11 @@ SIGNUP_PAGE = f"""<!doctype html><html lang="en"><head>
   <div class="brand"><span class="dot"></span> Zeno Video AI · @gosupernova.live SSO</div>
   <div class="card" id="form">
     <h1>Sign in to Zeno</h1>
-    <p class="sub">Sign in with your <b>@gosupernova.live</b> / <b>@gosupernova.line</b> Google account. When launched from the Zeno installer or CLI, your session token is saved automatically into your local workspace — no copy-paste needed.</p>
-    <div id="cli-banner" class="banner-cli">⚡ <b>Zeno Local CLI Detected:</b> Signing in below will automatically connect and save your session token to your computer.</div>
-    <div id="g-signin-wrap" style="display:none;margin:14px 0">
+    <p class="sub">Sign in with your <b>@gosupernova.live</b> / <b>@gosupernova.line</b> Google account. Your session is automatically saved to your local Zeno <code>.env</code> file — zero copy-paste required.</p>
+    <div id="cli-banner" class="banner-cli">⚡ <b>Zeno Local Workspace Connected:</b> Signing in with Google below will automatically save your session into <code>.env</code> and close this tab.</div>
+    <div id="g-signin-wrap" style="display:none;margin:18px 0">
       <div id="g-signin-btn"></div>
     </div>
-    <div id="divider-or" class="divider" style="display:none"><span>or team name / email sign-in</span></div>
     <div id="fallback-form">
       <label for="name">Your Name or @gosupernova.live Email</label>
       <input id="name" autocomplete="name" placeholder="e.g. Mathini or mathini@gosupernova.live">
@@ -68,38 +67,30 @@ SIGNUP_PAGE = f"""<!doctype html><html lang="en"><head>
         <label for="code">Team code</label>
         <input id="code" type="password" placeholder="Ask your lead for the code">
       </div>
-      <button id="go" onclick="make()">Sign In &amp; Generate Session</button>
+      <button id="go" onclick="make()">Generate &amp; Connect Session</button>
     </div>
     <div class="err" id="err"></div>
   </div>
 
-  <div class="card" id="result" style="display:none">
-    <div id="cli-connected" class="banner-ok" style="display:none">
-      ✓ <b>Connected automatically to Zeno on your computer!</b> Your session token has been saved inside Zeno (<code>.zeno_session.json</code> &amp; <code>.env</code>) — no copy-paste needed. You can return to your terminal now.
+  <div class="card" id="result" style="display:none;text-align:center;padding:36px 28px">
+    <div style="display:inline-block;padding:6px 16px;border-radius:999px;background:rgba(16,185,129,.18);color:#6ee7b7;font-weight:700;font-size:14px;margin-bottom:14px">
+      ✓ Sign-In Successful
     </div>
-    <h1>Editor Dashboard</h1>
-    <p class="sub">Your personal Zeno Cloud session is active. Every edit job automatically logs telemetry and syncs editorial learnings.</p>
-    <div class="grid2">
+    <h1>Connected to Zeno!</h1>
+    <p class="sub" style="margin-bottom:18px">Your Google account is verified and your session has been automatically saved to your local Zeno <code>.env</code> file.</p>
+    <div class="grid2" style="text-align:left">
       <div class="kv"><div class="k">Editor</div><div class="v" id="user-name">-</div></div>
       <div class="kv"><div class="k">Verified Email</div><div class="v" id="user-email">-</div></div>
-      <div class="kv"><div class="k">Session Prefix</div><div class="v" id="key-prefix">-</div></div>
-      <div class="kv"><div class="k">Status</div><div class="v"><span class="pill ok">Active</span></div></div>
     </div>
-    <label>Your Personal Zeno Session Token ID</label>
-    <pre id="tok-box" style="margin-top:4px;font-weight:600;color:#6ee7b7"></pre>
-    <button onclick="copyTok()" id="copytokbtn" style="margin-top:10px">Copy Session Token</button>
-    <details style="margin-top:14px">
-      <summary style="cursor:pointer;color:#9fb0cc;font-size:13px">Show full <code>.env</code> configuration lines</summary>
-      <pre id="env"></pre>
-      <button onclick="copyEnv()" id="copybtn" style="margin-top:10px">Copy .env lines</button>
-    </details>
+    <p id="close-msg" style="color:#9fb0cc;font-size:13px;margin-top:18px">This browser tab will close automatically… (or you can close it now and return to Zeno).</p>
   </div>
 </main>
 <script>
 const params = new URLSearchParams(window.location.search);
 const rawPort = parseInt(params.get('callback_port') || '0', 10);
-const callbackPort = (rawPort >= 1024 && rawPort <= 65535) ? rawPort : 0;
-if (callbackPort) {{
+const callbackPort = (rawPort >= 1024 && rawPort <= 65535) ? rawPort : 8765;
+const cliState = params.get('cli_state') || '';
+if (params.get('cli') === '1' || cliState) {{
   document.getElementById('cli-banner').style.display = 'block';
 }}
 
@@ -114,56 +105,52 @@ async function completeAuth(d) {{
   const tok = d.key || d.token || '';
   document.getElementById('user-name').textContent = d.name || d.email || 'Editor';
   document.getElementById('user-email').textContent = d.email || '';
-  document.getElementById('key-prefix').textContent = (d.prefix || tok.slice(0, 12)) + '...';
-  document.getElementById('tok-box').textContent = tok;
-  document.getElementById('env').textContent =
-    `ZENO_CLOUD_URL=${{origin}}\\nZENO_CLOUD_TOKEN=${{tok}}\\nSCRIPTCUT_CLOUD_URL=${{origin}}\\nSCRIPTCUT_CLOUD_TOKEN=${{tok}}`;
   document.getElementById('form').style.display = 'none';
   document.getElementById('result').style.display = 'block';
   try {{ window.history.replaceState({{}}, '', '/'); }} catch (e) {{}}
 
-  if (callbackPort && tok) {{
+  // Automatically copy token to clipboard so local Zeno CLI/daemon can also ingest it seamlessly
+  if (tok && navigator.clipboard && navigator.clipboard.writeText) {{
+    try {{ await navigator.clipboard.writeText(tok); }} catch (e) {{}}
+  }}
+
+  // Deliver to local Zeno listener on 127.0.0.1:callbackPort
+  if (tok && callbackPort) {{
     const cbGet = `http://127.0.0.1:${{callbackPort}}/callback?token=${{encodeURIComponent(tok)}}&email=${{encodeURIComponent(d.email||'')}}&name=${{encodeURIComponent(d.name||'')}}&cloud_url=${{encodeURIComponent(origin)}}`;
-    let delivered = false;
     try {{
-      const r = await fetch(`http://127.0.0.1:${{callbackPort}}/callback`, {{
+      await fetch(`http://127.0.0.1:${{callbackPort}}/callback`, {{
         method: 'POST',
+        mode: 'no-cors',
         headers: {{'Content-Type': 'text/plain;charset=utf-8'}},
         body: JSON.stringify({{token: tok, email: d.email || '', name: d.name || '', cloud_url: origin}})
       }});
-      if (r.ok) delivered = true;
     }} catch (e) {{}}
-    if (!delivered) {{
-      try {{
-        await fetch(cbGet, {{ method: 'GET', mode: 'no-cors' }});
-        delivered = true;
-      }} catch (e) {{}}
-    }}
-    if (delivered) {{
-      document.getElementById('cli-connected').style.display = 'block';
-    }}
+    try {{
+      await fetch(cbGet, {{ method: 'GET', mode: 'no-cors' }});
+    }} catch (e) {{}}
   }}
+
+  // Auto-close the browser tab after 1.2 seconds
+  setTimeout(() => {{
+    try {{ window.open('', '_self', ''); window.close(); }} catch (e) {{}}
+  }}, 1200);
 }}
 
 async function onGoogleSignIn(resp) {{
   document.getElementById('err').style.display = 'none';
-  const btn = document.getElementById('go');
-  if (btn) {{ btn.disabled = true; btn.textContent = 'Verifying Google Sign-In...'; }}
   try {{
     const r = await fetch('/api/auth/google', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{credential: resp.credential}})
+      body: JSON.stringify({{credential: resp.credential, cli_state: cliState}})
     }});
     const d = await r.json();
     if (!r.ok) {{
-      if (btn) {{ btn.disabled = false; btn.textContent = 'Sign In & Generate Session'; }}
       showErr(d.detail || 'Google sign-in failed');
       return;
     }}
     await completeAuth(d);
   }} catch (e) {{
-    if (btn) {{ btn.disabled = false; btn.textContent = 'Sign In & Generate Session'; }}
     showErr('Network error verifying Google sign-in');
   }}
 }}
@@ -172,12 +159,13 @@ fetch('/api/auth/config').then(r=>r.json()).then(cfg=>{{
   if (cfg.signup_code_required) document.getElementById('codebox').style.display = 'block';
   if (cfg.google_client_id) {{
     document.getElementById('g-signin-wrap').style.display = 'block';
-    document.getElementById('divider-or').style.display = 'flex';
+    document.getElementById('fallback-form').style.display = 'none';
     const initGsi = () => {{
       if (window.google && google.accounts && google.accounts.id) {{
         google.accounts.id.initialize({{
           client_id: cfg.google_client_id,
-          callback: onGoogleSignIn
+          callback: onGoogleSignIn,
+          auto_select: true
         }});
         google.accounts.id.renderButton(document.getElementById('g-signin-btn'), {{
           theme: 'filled_blue', size: 'large', width: 360, text: 'signin_with'
@@ -197,7 +185,8 @@ async function make(){{
   const payload = {{
     name: raw,
     email: raw.includes('@') ? raw : '',
-    code: document.getElementById('code').value
+    code: document.getElementById('code').value,
+    cli_state: cliState
   }};
   try {{
     const r = await fetch('/api/keys', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify(payload)}});
@@ -207,14 +196,6 @@ async function make(){{
   }} catch (e) {{
     showErr('Network error, try again'); btn.disabled = false;
   }}
-}}
-function copyTok(){{
-  navigator.clipboard.writeText(document.getElementById('tok-box').textContent);
-  document.getElementById('copytokbtn').textContent = 'Copied Session Token ✓';
-}}
-function copyEnv(){{
-  navigator.clipboard.writeText(document.getElementById('env').textContent);
-  document.getElementById('copybtn').textContent = 'Copied ✓';
 }}
 </script></body></html>"""
 

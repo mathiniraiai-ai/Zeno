@@ -8,9 +8,12 @@ tokens manually.
 """
 from __future__ import annotations
 
+import argparse
 import html
 import json
 import os
+import re
+import secrets
 import subprocess
 import sys
 import time
@@ -56,9 +59,81 @@ def get_cloud_url(default: str = DEFAULT_CLOUD_URL) -> str:
     return default.rstrip("/")
 
 
-def get_active_session(session_path: Optional[Path] = None) -> Dict[str, Any]:
-    """Load the active session from `.zeno_session.json` or fall back to environment variables."""
+def _read_clipboard_zeno_token() -> str:
+    """If the OS clipboard currently holds a `zeno_...` session token, return it."""
+    if os.environ.get("ZENO_NO_LIVE") == "1":
+        return ""
+    try:
+        if sys.platform == "darwin":
+            r = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=1.0, check=False)
+            raw = (r.stdout or "").strip()
+        elif sys.platform.startswith("win") or os.name == "nt":
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", "Get-Clipboard"],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+                check=False,
+            )
+            raw = (r.stdout or "").strip()
+        else:
+            return ""
+        m = re.search(r"\b(zeno_[A-Za-z0-9_-]{24,80})\b", raw)
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
+def ingest_clipboard_token_if_present(session_path: Optional[Path] = None, write_dotenv: bool = True) -> Optional[Dict[str, Any]]:
+    """If a new `zeno_...` token is in the clipboard (auto-copied by the browser on Google Sign-In), save it to `.env` & `.zeno_session.json`."""
+    clip_tok = _read_clipboard_zeno_token()
+    if not clip_tok:
+        return None
     target = Path(session_path) if session_path else SESSION_FILE
+    if target.is_file():
+        try:
+            existing = json.loads(target.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(existing, dict) and existing.get("token") == clip_tok:
+                sync_session_to_env(existing, write_dotenv=write_dotenv and (session_path is None))
+                return existing
+        except Exception:
+            pass
+    cloud_url = get_cloud_url()
+    email = ""
+    name = ""
+    try:
+        req = urllib.request.Request(
+            f"{cloud_url}/v1/me",
+            headers={"Authorization": f"Bearer {clip_tok}"},
+        )
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            if resp.status == 200:
+                me = json.loads(resp.read().decode("utf-8", errors="replace"))
+                email = str(me.get("email") or "").strip()
+                name = str(me.get("name") or "").strip()
+    except Exception:
+        pass
+    return save_session(
+        token=clip_tok,
+        email=email,
+        name=name,
+        cloud_url=cloud_url,
+        session_path=session_path,
+        write_dotenv=write_dotenv,
+    )
+
+
+def get_active_session(session_path: Optional[Path] = None) -> Dict[str, Any]:
+    """Load the active session from `.zeno_session.json`, clipboard auto-ingest, cloud IP-poll, or environment variables."""
+    target = Path(session_path) if session_path else SESSION_FILE
+    is_default_target = (session_path is None) and (target == SESSION_FILE)
+    live_allowed = os.environ.get("ZENO_NO_LIVE") != "1" and os.environ.get("CLAUDE_EDITOR_OFFLINE") != "1"
+    if is_default_target and live_allowed:
+        try:
+            ensure_background_daemon_running(8765)
+            ingest_clipboard_token_if_present(session_path=None, write_dotenv=True)
+        except Exception:
+            pass
     if target.is_file():
         try:
             data = json.loads(target.read_text(encoding="utf-8", errors="replace"))
@@ -89,6 +164,22 @@ def get_active_session(session_path: Optional[Path] = None) -> Dict[str, Any]:
             "authenticated_at": "",
             "source": "env",
         }
+
+    if is_default_target and live_allowed:
+        try:
+            polled = _poll_cloud_cli_session(get_cloud_url(), "", use_ip_fallback=True)
+            if polled and polled.get("token"):
+                saved = save_session(
+                    token=polled["token"],
+                    email=polled.get("email") or "",
+                    name=polled.get("name") or "",
+                    cloud_url=polled.get("cloud_url") or get_cloud_url(),
+                    write_dotenv=True,
+                )
+                saved["source"] = str(SESSION_FILE.name)
+                return saved
+        except Exception:
+            pass
     return {}
 
 
@@ -430,6 +521,27 @@ def start_callback_server(preferred_port: int = 8765) -> Tuple[_ReuseHTTPServer,
     return srv, int(srv.server_port)
 
 
+def _poll_cloud_cli_session(base_url: str, cli_state: str, use_ip_fallback: bool = True) -> Optional[Dict[str, str]]:
+    """Poll Railway `/api/auth/cli-poll` over HTTPS so login succeeds even if browser blocks localhost fetches."""
+    try:
+        qs = urllib.parse.urlencode({"cli_state": cli_state, "use_ip_fallback": "1" if use_ip_fallback else "0"})
+        url = f"{base_url}/api/auth/cli-poll?{qs}"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            if resp.status == 200:
+                data = json.loads(resp.read().decode("utf-8", errors="replace"))
+                if isinstance(data, dict) and data.get("ready") and data.get("token"):
+                    return {
+                        "token": str(data["token"]).strip(),
+                        "email": str(data.get("email") or "").strip(),
+                        "name": str(data.get("name") or "").strip(),
+                        "cloud_url": base_url,
+                    }
+    except Exception:
+        pass
+    return None
+
+
 def grab_token_via_browser(
     cloud_url: str = "",
     timeout_sec: float = 180.0,
@@ -438,21 +550,35 @@ def grab_token_via_browser(
     session_path: Optional[Path] = None,
     write_dotenv: bool = True,
 ) -> Optional[Dict[str, Any]]:
-    """Launch the browser to the Railway login page, wait for the localhost callback, and save the session."""
+    """Launch the browser to the Railway login page, wait for HTTPS cli-poll / localhost callback / clipboard, and save to `.env`."""
     base_url = (cloud_url or get_cloud_url()).rstrip("/")
+    cli_state = "st_" + secrets.token_urlsafe(18)
     srv, port = start_callback_server(preferred_port=preferred_port)
-    login_url = f"{base_url}/?callback_port={port}&cli=1"
+    login_url = f"{base_url}/?cli_state={cli_state}&callback_port={port}&cli=1"
 
     print(f"  [Zeno Auth] Opening browser for Google Sign-In (@gosupernova.live): {login_url}")
     if open_browser:
         _open_url_in_browser(login_url)
 
     deadline = time.monotonic() + float(timeout_sec)
+    last_poll = 0.0
     try:
         while time.monotonic() < deadline:
             srv.handle_request()
+            res: Optional[Dict[str, str]] = None
             if srv.auth_result and srv.auth_result.get("token"):
                 res = srv.auth_result
+            elif time.monotonic() - last_poll >= 1.0:
+                last_poll = time.monotonic()
+                res = _poll_cloud_cli_session(base_url, cli_state, use_ip_fallback=True)
+                if not res:
+                    clip_saved = ingest_clipboard_token_if_present(session_path=session_path, write_dotenv=write_dotenv)
+                    if clip_saved and clip_saved.get("token"):
+                        who = clip_saved.get("email") or clip_saved.get("name") or "authenticated user"
+                        print(f"  [Zeno Auth] ✓ Session token auto-saved to .env for {who}")
+                        return clip_saved
+
+            if res and res.get("token"):
                 saved = save_session(
                     token=res["token"],
                     email=res.get("email") or "",
@@ -461,13 +587,12 @@ def grab_token_via_browser(
                     session_path=session_path,
                     write_dotenv=write_dotenv,
                 )
-                # Drain any follow-up browser request for 0.25s so fetch() finishes cleanly
                 try:
                     srv.handle_request()
                 except Exception:
                     pass
                 who = saved.get("email") or saved.get("name") or "authenticated user"
-                print(f"  [Zeno Auth] ✓ Session token grabbed & saved automatically for {who} (.zeno_session.json)")
+                print(f"  [Zeno Auth] ✓ Session token grabbed & saved automatically to .env for {who}")
                 return saved
     finally:
         try:
@@ -475,6 +600,78 @@ def grab_token_via_browser(
         except Exception:
             pass
     return None
+
+
+def run_background_callback_daemon(port: int = 8765) -> None:
+    """Always-on lightweight localhost listener on `127.0.0.1:8765` that saves any browser sign-in token straight into `.env`."""
+    try:
+        srv, actual_port = start_callback_server(preferred_port=port)
+    except Exception:
+        return
+    if actual_port != port:
+        try:
+            srv.server_close()
+        except Exception:
+            pass
+        return
+    srv.timeout = 1.0
+    last_bg_check = 0.0
+    while True:
+        try:
+            srv.handle_request()
+            if srv.auth_result and srv.auth_result.get("token"):
+                res = srv.auth_result
+                srv.auth_result = None
+                save_session(
+                    token=res["token"],
+                    email=res.get("email") or "",
+                    name=res.get("name") or "",
+                    cloud_url=res.get("cloud_url") or get_cloud_url(),
+                    write_dotenv=True,
+                )
+            elif time.monotonic() - last_bg_check >= 3.0:
+                last_bg_check = time.monotonic()
+                ingest_clipboard_token_if_present(session_path=None, write_dotenv=True)
+                if not SESSION_FILE.is_file():
+                    polled = _poll_cloud_cli_session(get_cloud_url(), "", use_ip_fallback=True)
+                    if polled and polled.get("token"):
+                        save_session(
+                            token=polled["token"],
+                            email=polled.get("email") or "",
+                            name=polled.get("name") or "",
+                            cloud_url=polled.get("cloud_url") or get_cloud_url(),
+                            write_dotenv=True,
+                        )
+        except KeyboardInterrupt:
+            break
+        except Exception:
+            time.sleep(0.5)
+
+
+def ensure_background_daemon_running(port: int = 8765) -> None:
+    """Ensure the `127.0.0.1:8765` callback listener is running in the background so any browser sign-in saves to `.env`."""
+    if os.environ.get("ZENO_NO_LIVE") == "1":
+        return
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/ping", timeout=0.35) as resp:
+            if resp.status == 200:
+                return
+    except Exception:
+        pass
+    try:
+        kwargs: Dict[str, Any] = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "stdin": subprocess.DEVNULL,
+            "cwd": str(ROOT),
+        }
+        if sys.platform.startswith("win") or os.name == "nt":
+            kwargs["creationflags"] = 0x00000008  # DETACHED_PROCESS
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--daemon"], **kwargs)
+    except Exception:
+        pass
 
 
 def interactive_login(cloud_url: str = "", timeout_sec: float = 180.0) -> bool:
@@ -507,3 +704,31 @@ def ensure_authenticated(
     if not interactive or offline:
         return None
     return grab_token_via_browser(cloud_url=cloud_url, timeout_sec=timeout_sec, open_browser=True)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Zeno Zero-Touch Session Manager")
+    parser.add_argument("--daemon", action="store_true", help="Run background 127.0.0.1:8765 callback listener")
+    parser.add_argument("--login", action="store_true", help="Open browser for Google sign-in and auto-save to .env")
+    parser.add_argument("--ingest-clipboard", action="store_true", help="Auto-save clipboard zeno_ token into .env")
+    parser.add_argument("--whoami", action="store_true", help="Show non-secret session status")
+    args = parser.parse_args()
+
+    if args.daemon:
+        run_background_callback_daemon(8765)
+    elif args.ingest_clipboard:
+        ensure_background_daemon_running(8765)
+        saved = ingest_clipboard_token_if_present(session_path=None, write_dotenv=True)
+        info = get_session_info()
+        print(f"Authenticated: {info['authenticated']} | Email: {info['email'] or 'n/a'} | Source: {info['source']}")
+    elif args.login:
+        ensure_background_daemon_running(8765)
+        ok = interactive_login()
+        sys.exit(0 if ok else 1)
+    else:
+        ensure_background_daemon_running(8765)
+        info = get_session_info()
+        print(f"Authenticated: {info['authenticated']} | Email: {info['email'] or 'n/a'} | Source: {info['source']}")
+
