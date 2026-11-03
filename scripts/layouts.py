@@ -90,6 +90,10 @@ def normalize_layout_name(layout: Optional[str]) -> str:
         "gmeet_grid": "gmeet_grid",
         "gmeet": "gmeet_grid",
         "grid_call": "gmeet_grid",
+        "top_pip": "top_pip",
+        "pip_top": "top_pip",
+        "floating_top": "top_pip",
+        "floating_pip": "top_pip",
     }
     return mapping.get(raw, "single")
 
@@ -199,7 +203,7 @@ def resolve_auto_peers(plan: Dict[str, Any]) -> Dict[str, Any]:
         lay = s["layout"]
         sp = str(s.get("speaker") or "").lower()
 
-        if lay in ("split_v", "split_h", "video_call", "pip_call", "gmeet_grid"):
+        if lay in ("split_v", "split_h", "video_call", "pip_call", "gmeet_grid", "top_pip"):
             if not s.get("slot"):
                 if lay == "split_h":
                     s["slot"] = speaker_slot_h.get(sp, "left" if i % 2 == 0 else "right")
@@ -527,7 +531,7 @@ def resolve_segment_zoom_spec(
     punch-ins) when no explicit zoom is set. Split screens (`split_h`, `split_v`) are locked
     at 100% static (`1.0, 1.0, 'none'`).
     """
-    if normalize_layout_name(seg.get("layout")) in ("split_h", "split_v"):
+    if normalize_layout_name(seg.get("layout")) in ("split_h", "split_v", "top_pip"):
         return 1.0, 1.0, "none", 0.0, exact_dur
 
     z0_raw = seg.get("zoom")
@@ -716,7 +720,7 @@ def build_segment_cache_key(
 
     plan_loudness = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
     payload = {
-        "v": 9,
+        "v": 11,
         "src": _file_mtime_sig(seg["src"]),
         "start": round(float(seg["start"]), 4),
         "end": round(float(seg["end"]), 4),
@@ -766,6 +770,7 @@ def _build_slot_video_chain(
     focus_end: Optional[Sequence[float]] = None,
     color_filter: Optional[str] = None,
     prebuilt_crop_filter: Optional[str] = None,
+    headroom_pct: float = TARGET_HEADROOM_PCT,
 ) -> str:
     """Build an FFmpeg video filter chain that scales and crops `input_label` into
     `(slot_w, slot_h)` with eye-anchored headroom (`14%`) and sub-pixel supersampled zoom.
@@ -790,7 +795,7 @@ def _build_slot_video_chain(
             slot_h=slot_h,
             bbox_norm=bbox_norm,
             focus=[fx, fy],
-            headroom_pct=TARGET_HEADROOM_PCT,
+            headroom_pct=headroom_pct,
         )
         chain.append(crop_info["filter"])
     chain.extend(
@@ -1159,6 +1164,85 @@ def build_segment_ffmpeg_args(
             fc.append(f"[v_main][v_pip]overlay=x={px}:y={py}:eof_action=pass[v_with_pip]")
             fc.append(f"[{chrome_idx}:v]scale={W}:{H},format=rgba[chrome]")
             fc.append(f"[v_with_pip][chrome]overlay=0:0:eof_action=pass,format=yuv420p{v_curr}")
+
+    # ------------------------------------------------------------------
+    # Layout 6: TOP_PIP (Clean Top-Center Floating Rounded Rectangle Window)
+    # ------------------------------------------------------------------
+    elif lay == "top_pip":
+        peer = seg.get("peer") or {}
+        peer_src = resolve(peer.get("src") or seg["src"])
+        peer_info = probe(peer_src) if peer_src.is_file() else {"width": src_w, "height": src_h, "duration": 6.0}
+        peer_w = int(peer_info.get("width") or src_w)
+        peer_h = int(peer_info.get("height") or src_h)
+        peer_focus = list(peer.get("focus") or [0.5, 0.38])
+        still_at = float(peer.get("still_at") if peer.get("still_at") is not None else 0.5)
+        idle_span = peer.get("idle_span")
+
+        peer_idx = next_idx
+        next_idx += 1
+        peer_loop_filter = ""
+        peer_dur = float(peer_info.get("duration") or 6.0)
+        if peer_src.is_file() and peer.get("mode") == "live":
+            inputs.extend(["-ss", f"{float(peer.get('start', 0.0)):.3f}", "-t", f"{dur + 0.5:.3f}", "-i", peer_src])
+        elif peer_src.is_file() and peer.get("mode", "loop") != "still":
+            if isinstance(idle_span, (list, tuple)) and len(idle_span) >= 2 and (float(idle_span[1]) - float(idle_span[0])) >= 0.30:
+                s0 = max(0.0, float(idle_span[0]))
+                s1 = float(idle_span[1])
+                s_dur = max(0.30, s1 - s0)
+            else:
+                s0 = float(peer.get("start", 0.0) or 0.0) % max(0.5, peer_dur)
+                s1 = peer_dur
+                s_dur = max(0.30, peer_dur - s0)
+
+            is_full_listening_clip = (s0 <= 0.15 and abs(s1 - peer_dur) <= 0.25) or (
+                "listen" in peer_src.stem.lower() or "idle" in peer_src.stem.lower() or "extra" in peer_src.stem.lower()
+            )
+            if s_dur >= exact - 0.15:
+                inputs.extend(["-ss", f"{s0:.3f}", "-t", f"{exact + 0.5:.3f}", "-i", peer_src])
+            elif is_full_listening_clip:
+                inputs.extend(["-stream_loop", "-1", "-ss", f"{s0:.3f}", "-i", peer_src])
+                peer_loop_filter = f"trim=0:{exact:.4f},setpts=PTS-STARTPTS"
+            else:
+                inputs.extend(["-ss", f"{s0:.3f}", "-t", f"{s_dur:.3f}", "-i", peer_src])
+                loop_frames = max(2, int(round(s_dur * fps)))
+                peer_loop_filter = f"fps={fps},loop=loop=-1:size={loop_frames}:start=0,setpts=N/({fps}*TB),trim=0:{exact:.4f},setpts=PTS-STARTPTS"
+        elif peer_src.is_file():
+            still_png = _extract_peer_still_png(peer_src, still_at)
+            inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", still_png])
+        else:
+            inputs.extend(["-ss", f"{still_at:.3f}", "-t", f"{exact:.4f}", "-i", peer_src])
+
+        peer_in_label = f"[{peer_idx}:v]"
+        if peer_loop_filter:
+            fc.append(f"[{peer_idx}:v]{peer_loop_filter}[peer_loop_in]")
+            peer_in_label = "[peer_loop_in]"
+
+        pw = even(W * 0.6944)
+        ph = even(H * 0.2188)
+        px = (W - pw) // 2
+        py = int(round(H * 0.0104))
+        prad = max(12, int(round(36 * (W / 1080.0))))
+
+        mask_png = render_pip_mask_png(pw, ph, radius=prad, shape="rounded")
+        mask_idx = next_idx
+        next_idx += 1
+        inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", mask_png])
+
+        active_top = str(seg.get("slot") or "top").lower() in ("top", "slot_a", "a", "0", "pip")
+        if active_top:
+            pip_vis = analyze_clip_vision(src) if src.is_file() else {}
+            bg_vis = analyze_clip_vision(peer_src) if peer_src.is_file() else {}
+            fc.append(_build_slot_video_chain(peer_in_label, "[v_bg]", peer_w, peer_h, W, H, fps, exact, peer_focus, 1.0, 1.0, bbox_norm=bg_vis.get("bbox_norm"), headroom_pct=25.8))
+            fc.append(_build_slot_video_chain("[0:v]", "[v_pip_raw]", src_w, src_h, pw, ph, fps, exact, [fx, fy], 1.0, 1.0, bbox_norm=pip_vis.get("bbox_norm"), color_filter=color_filter))
+        else:
+            bg_vis = analyze_clip_vision(src) if src.is_file() else {}
+            pip_vis = analyze_clip_vision(peer_src) if peer_src.is_file() else {}
+            fc.append(_build_slot_video_chain("[0:v]", "[v_bg]", src_w, src_h, W, H, fps, exact, [fx, fy], z0, z1, bbox_norm=bg_vis.get("bbox_norm"), color_filter=color_filter, headroom_pct=25.8))
+            fc.append(_build_slot_video_chain(peer_in_label, "[v_pip_raw]", peer_w, peer_h, pw, ph, fps, exact, peer_focus, 1.0, 1.0, bbox_norm=pip_vis.get("bbox_norm")))
+
+        fc.append(f"[{mask_idx}:v]scale={pw}:{ph},format=gray[pip_mask]")
+        fc.append("[v_pip_raw]format=yuva420p[v_pip_a];[v_pip_a][pip_mask]alphamerge[v_pip]")
+        fc.append(f"[v_bg][v_pip]overlay=x={px}:y={py}:eof_action=pass,format=yuv420p{v_curr}")
 
     # ------------------------------------------------------------------
     # Optional "Stop Saying" Hook Banners on any segment (21132 3-stack chest-centered style)

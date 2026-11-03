@@ -110,10 +110,10 @@ INTENTIONAL_REDUPLICATIONS = {
 }
 
 
-def _natural_clip_sort_key(p: Path) -> Tuple[int, str]:
+def _natural_clip_sort_key(p: Path) -> Tuple[int, int, str]:
     stem = p.stem
-    m = re.search(r"(\d+)$", stem)
-    return (int(m.group(1)) if m else 999999, stem)
+    nums = [int(x) for x in re.findall(r"\d+", stem)]
+    return (nums[0] if nums else 999999, nums[1] if len(nums) > 1 else 0, stem)
 
 
 def _clean_token(w: str) -> str:
@@ -400,13 +400,13 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
             meta["characters"][cname] = cdesc
             continue
 
-        # 3. Scene heading (e.g. "Scene 1", "SCENE 2 - Canteen")
-        m_scene = re.match(r"^(Scene\s+\d+(?:\s*[-:]\s*.*)?)$", s, re.I)
+        # 3. Scene heading (e.g. "Scene 1", "SCENE 2 - Canteen", "Scene 1: An Indian man...")
+        m_scene = re.match(r"^(Scene\s+\d+)(?:\s*[-:]\s*(.*))?$", s, re.I)
         if m_scene:
             in_characters_block = False
             current_scene = m_scene.group(1).strip()
-            current_visual = ""
-            meta["scenes"].append({"scene": current_scene, "visual": ""})
+            current_visual = (m_scene.group(2) or "").strip()
+            meta["scenes"].append({"scene": current_scene, "visual": current_visual})
             continue
 
         # 4. Scene visual / camera direction block: "[Visual: ...]"
@@ -468,6 +468,12 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
                 text = m_spk.group(3).strip()
             else:
                 text = rest
+            # Extract inline stage directions like "(laughing)" after speaker colon into note
+            m_inline_dir = re.match(r"^\(([^)]+)\)\s*(.+)$", text)
+            if m_inline_dir:
+                dir_note = m_inline_dir.group(1).strip()
+                note = f"{note}; {dir_note}".strip("; ") if note else dir_note
+                text = m_inline_dir.group(2).strip()
 
         quoted = re.findall(r'["“”]([^"“”]+)["“”]', text)
         tokens = [_clean_token(w) for w in re.findall(r"[\w\u0900-\u0D7F']+", text.lower()) if _clean_token(w)]
@@ -682,13 +688,46 @@ def match_clips_to_script_lines(
         return
     beat_lines = [l for l in script_lines if l.get("beat")]
     speech_lines = [l for l in script_lines if not l.get("beat")]
+    short_speech_lines = [l for l in speech_lines if 1 <= len(l.get("tokens", [])) <= 3]
     # clips with (almost) no speech carry the script's silent beats, or serve as listening reaction clips (`peer=`)
     def _is_silent(c: Dict[str, Any]) -> bool:
         ws = c.get("hq_words") or []
         dur = float((c.get("info") or {}).get("duration") or 1.0)
+        rms_env = c.get("rms_env") or []
+        if rms_env:
+            dbs = sorted(db for _, db in rms_env)
+            n_db = len(dbs)
+            rms_p50 = dbs[n_db // 2]
+            rms_p90 = dbs[min(n_db - 1, int(n_db * 0.90))]
+            active_frac = sum(1 for db in dbs if db > -28.0) / max(1, n_db)
+            # Stationary ambient noise guard (e.g. 6.mp4 airplane cabin hum: p90-p50=3.3dB <= 4.2dB, active_frac=0.99 >= 0.90)
+            if (rms_p90 - rms_p50) <= 4.2 and active_frac >= 0.90:
+                if ws:
+                    c["anomalies"].append(
+                        f"[AMBIENT_NOISE_BEAT] {c['stem']}: stationary noise (p90-p50={rms_p90 - rms_p50:.1f}dB, "
+                        f"active={active_frac:.2f}) -> cleared {len(ws)} echoed word(s)"
+                    )
+                    c["hq_words"] = []
+                    c["base_words"] = []
+                    wdir_c = c.get("work_dir")
+                    if wdir_c:
+                        for fn in ("hq_words.json", "words.json"):
+                            try:
+                                write_json(Path(wdir_c) / fn, [])
+                            except Exception:
+                                pass
+                return True
+        if not ws:
+            return True
         speech_sec = sum(float(w["end"]) - float(w["start"]) for w in ws)
         speech_ratio = speech_sec / max(0.1, dur)
-        return not ws or speech_ratio < 0.08 or (len(ws) <= 2 and speech_sec < 0.8)
+        if speech_ratio < 0.08:
+            return True
+        # Protect 1-2 word spoken script lines (e.g. 4.mp4 "Whatever!", 0.79s, matches L4)
+        clip_toks = [_clean_token(w["w"]) for w in ws if _clean_token(w["w"])]
+        if clip_toks and any(_token_recall(sl["tokens"], clip_toks) >= 0.70 for sl in short_speech_lines):
+            return False
+        return len(ws) <= 2 and speech_sec < 0.35
 
     all_silent = [c for c in clips_data if _is_silent(c)]
     for c in all_silent:
@@ -736,13 +775,14 @@ def _match_sequence(
     clips_data: List[Dict[str, Any]],
     script_lines: List[Dict[str, Any]],
 ) -> None:
-    """Deterministically map ordered clips (one per distinct take group) to ordered script lines L1..LM."""
+    """Deterministically map ordered clips (one per distinct take group) to ordered script lines L1..LM,
+    supporting multi-speaker clips that contain [prev line tail] + [short line(s)] + [next line head]."""
     if not script_lines or not clips_data:
         return
 
     line_ptr = 0
     n_lines = len(script_lines)
-    # Track remaining unconsumed tokens of each script line for multi-clip lines (L13, L14, L15)
+    # Track remaining unconsumed tokens of each script line for multi-clip lines
     remaining_tokens: Dict[int, List[str]] = {
         idx: list(sline["tokens"]) for idx, sline in enumerate(script_lines)
     }
@@ -759,58 +799,71 @@ def _match_sequence(
         all_clip_tokens = clip_tokens + [t for t in base_tokens if t not in clip_tokens]
 
         matched_lines: List[Dict[str, Any]] = []
+        consumed_words_est = 0
 
         # 1. Check if previous multi-clip line still has significant unconsumed tail tokens in this clip
         if line_ptr > 0:
             prev_idx = line_ptr - 1
             rem = remaining_tokens.get(prev_idx, [])
             if len(rem) >= 4:
+                nxt_toks = script_lines[line_ptr]["tokens"] if line_ptr < n_lines else []
+                distinct_rem = [rt for rt in rem if max((_word_similarity(rt, nt) for nt in nxt_toks), default=0.0) < 0.75] or rem
                 rem_hits = sum(
-                    1.0 for rt in rem if max((_word_similarity(rt, ct) for ct in all_clip_tokens), default=0.0) >= 0.65
+                    1.0 for rt in distinct_rem if max((_word_similarity(rt, ct) for ct in all_clip_tokens), default=0.0) >= 0.62
                 )
-                if rem_hits / max(1, len(rem)) >= 0.35:
+                if rem_hits / max(1, len(distinct_rem)) >= 0.35:
                     matched_lines.append(script_lines[prev_idx])
+                    consumed_words_est += int(round(rem_hits))
+                    prev_window = clip_tokens[: min(len(clip_tokens), int(round(rem_hits)) + 3)] or all_clip_tokens
                     new_rem = [
-                        rt for rt in rem if max((_word_similarity(rt, ct) for ct in all_clip_tokens), default=0.0) < 0.65
+                        rt for rt in rem if max((_word_similarity(rt, ct) for ct in prev_window), default=0.0) < 0.65
                     ]
                     remaining_tokens[prev_idx] = new_rem
-                    clip["matched_lines"] = matched_lines
-                    continue
+                    if len(new_rem) >= 5 or len(clip_tokens) < consumed_words_est + 2:
+                        clip["matched_lines"] = matched_lines
+                        continue
 
         # 2. Match one or more script lines starting at line_ptr
         for probe_idx in range(line_ptr, min(n_lines, line_ptr + 4)):
             sline = script_lines[probe_idx]
-            stokens = sline["tokens"]
+            stokens = remaining_tokens.get(probe_idx) or sline["tokens"]
             if not stokens:
                 continue
 
+            rem_clip_tokens = clip_tokens[max(0, consumed_words_est - 1) :] if consumed_words_est > 0 else all_clip_tokens
+            if not rem_clip_tokens:
+                break
+
             hits_s = sum(
-                max((_word_similarity(st, ct) for ct in all_clip_tokens), default=0.0)
+                max((_word_similarity(st, ct) for ct in rem_clip_tokens), default=0.0)
                 for st in stokens
-                if max((_word_similarity(st, ct) for ct in all_clip_tokens), default=0.0) >= 0.64
+                if max((_word_similarity(st, ct) for ct in rem_clip_tokens), default=0.0) >= 0.64
             )
             recall_s = hits_s / max(1, len(stokens))
 
-            head_tokens = stokens[: min(4, len(stokens))]
+            head_tokens = stokens[: min(5, len(stokens))]
             head_hits = sum(
-                1.0 for ht in head_tokens if max((_word_similarity(ht, ct) for ct in all_clip_tokens), default=0.0) >= 0.65
+                1.0 for ht in head_tokens if max((_word_similarity(ht, ct) for ct in rem_clip_tokens), default=0.0) >= 0.65
             )
             head_recall = head_hits / max(1, len(head_tokens))
 
             if matched_lines:
-                consumed_words_est = sum(len(ml["tokens"]) for ml in matched_lines)
-                if len(clip_tokens) < consumed_words_est + max(2, len(stokens) // 2):
+                if len(clip_tokens) < consumed_words_est + 2:
                     break
-                if recall_s < 0.48:
+                if not (recall_s >= 0.45 or (head_recall >= 0.60 and hits_s >= 4.0)):
                     break
 
-            if recall_s >= 0.40 or (head_recall >= 0.50 and len(stokens) >= 12 and not matched_lines):
+            if (
+                recall_s >= 0.40
+                or (head_recall >= 0.50 and len(stokens) >= 8)
+                or (matched_lines and head_recall >= 0.60 and hits_s >= 4.0)
+            ):
                 matched_lines.append(sline)
-                # Keep all tokens in stokens that did NOT match this clip as remaining_tokens
                 unmatched = [
-                    st for st in stokens if max((_word_similarity(st, ct) for ct in all_clip_tokens), default=0.0) < 0.66
+                    st for st in stokens if max((_word_similarity(st, ct) for ct in rem_clip_tokens), default=0.0) < 0.66
                 ]
                 remaining_tokens[probe_idx] = unmatched
+                consumed_words_est += max(1, len(stokens) - len(unmatched))
                 line_ptr = probe_idx + 1
                 if len(unmatched) >= 5:
                     break
@@ -833,6 +886,8 @@ def _match_sequence(
             matched_lines = [script_lines[line_ptr]]
             remaining_tokens[line_ptr] = []
             line_ptr += 1
+        elif not matched_lines and n_lines > 0:
+            matched_lines = [script_lines[-1]]
 
         clip["matched_lines"] = matched_lines
 
@@ -853,10 +908,12 @@ def _token_recall(script_tokens: List[str], clip_tokens: List[str], threshold: f
 def _take_score(clip: Dict[str, Any]) -> Tuple[float, float, float]:
     """(score, recall, precision) of one take against its script line(s).
     recall    = how much of the script line was said
-    precision = how much of what was said belongs to the script (fumbles, ad-libs and extra words lower it)."""
+    precision = how much of what was said belongs to the script (fumbles, ad-libs and extra words lower it).
+    Also rewards cleaner acoustic SNR (p90 - p10) and penalizes EOF tail-clipped takes."""
     script_tokens = [t for l in clip.get("matched_lines", []) for t in l["tokens"]]
     wrong = clip.get("wrong_word_idx") or set()   # words the wrong character says will be cut, so they earn no credit
-    clip_tokens = [_clean_token(w["w"]) for i, w in enumerate(clip.get("hq_words", [])) if i not in wrong and _clean_token(w["w"])]
+    words = clip.get("hq_words", [])
+    clip_tokens = [_clean_token(w["w"]) for i, w in enumerate(words) if i not in wrong and _clean_token(w["w"])]
     if not clip_tokens:
         return 0.0, 0.0, 0.0
     if not script_tokens:   # no script to compare with: judge by how much clean speech the take has
@@ -864,7 +921,16 @@ def _take_score(clip: Dict[str, Any]) -> Tuple[float, float, float]:
         return round(len(clip_tokens) * uniq / 100.0, 4), 0.0, round(uniq, 4)
     recall = _token_recall(script_tokens, clip_tokens)
     precision = _token_recall(clip_tokens, script_tokens)
-    return round(recall + 0.35 * precision, 4), recall, precision
+    bonus = 0.0
+    rms_env = clip.get("rms_env") or []
+    if len(rms_env) >= 20:
+        dbs = sorted(db for _, db in rms_env)
+        snr = dbs[int(len(dbs) * 0.90)] - dbs[int(len(dbs) * 0.10)]
+        bonus += min(0.05, max(0.0, (snr - 20.0) * 0.003))
+    dur = float((clip.get("info") or {}).get("duration") or 0.0)
+    if dur > 0 and words and float(words[-1]["end"]) >= dur - 0.03:
+        bonus -= 0.04
+    return round(recall + 0.35 * precision + bonus, 4), recall, precision
 
 
 def _speech_density(clip: Dict[str, Any]) -> float:
@@ -912,22 +978,28 @@ def _expected_speakers(clip: Dict[str, Any]) -> List[Optional[str]]:
         return [lines[0].get("speaker") or None] * len(words)
     out: List[Optional[str]] = []
     ptr = 0
-    for w in words:
+    cur_line_hits = 0
+    for wi, w in enumerate(words):
         tok = _clean_token(w["w"])
-        best_li, best_sim = ptr, 0.0
-        for li in range(ptr, len(lines)):
-            sim = max((_word_similarity(tok, st) for st in lines[li]["tokens"]), default=0.0)
-            if sim > best_sim + 1e-9:
-                best_li, best_sim = li, sim
-        if best_li > ptr and best_sim >= 0.7:
-            ptr = best_li
+        gap = (float(w["start"]) - float(words[wi - 1]["end"])) if wi > 0 else 0.0
+        if ptr + 1 < len(lines):
+            nxt_line = lines[ptr + 1]
+            nxt_head = nxt_line["tokens"][: min(4, len(nxt_line["tokens"]))]
+            nxt_head_sim = max((_word_similarity(tok, st) for st in nxt_head), default=0.0)
+            cur_tail = lines[ptr]["tokens"][-min(6, len(lines[ptr]["tokens"])) :]
+            cur_tail_sim = max((_word_similarity(tok, st) for st in cur_tail), default=0.0)
+            if nxt_head_sim >= 0.72 and (gap >= 0.25 or cur_line_hits >= 2 or nxt_head_sim > cur_tail_sim + 0.05):
+                ptr += 1
+                cur_line_hits = 0
+        cur_line_hits += 1
         out.append(lines[ptr].get("speaker") or None)
     return out
 
 
 def apply_speaker_check(clips_data: List[Dict[str, Any]], script_lines: List[Dict[str, Any]]) -> None:
     """Find dialogue spoken by the wrong character (script says Man, voice is Robot, or the reverse) and mark it to be cut.
-    Sets clip["exclusions"] (time spans to cut) and clip["wrong_word_idx"]. Needs 2+ named speakers in the script."""
+    Sets clip["exclusions"] (time spans to cut) and clip["wrong_word_idx"]. Needs 2+ named speakers in the script.
+    Never amputates legitimate second-speaker turns inside multi-speaker two-shot clips."""
     speakers = {l.get("speaker") for l in script_lines if l.get("speaker")}
     if len(speakers) < 2:
         return
@@ -951,10 +1023,37 @@ def apply_speaker_check(clips_data: List[Dict[str, Any]], script_lines: List[Dic
     n_cut = 0
     for i, info in res["clips"].items():
         c = clips_data[i]
+        matched = c.get("matched_lines") or []
+        clip_speakers = {l.get("speaker") for l in matched if l.get("speaker")}
+        # Guard 1: If clip legitimately covers 2+ speakers, never amputate either speaker's words
+        if len(clip_speakers) >= 2:
+            continue
         dur = float(c["info"].get("duration") or 10.0)
         for sp in info["spans"]:
+            # Guard 1b: Never amputate the entire clip when its words match its assigned script line (>=60% recall)
+            if sp["first"] == 0 and sp["last"] >= len(c["hq_words"]) - 1 and matched:
+                c_toks = [_clean_token(w["w"]) for w in c["hq_words"] if _clean_token(w["w"])]
+                if _token_recall(matched[0]["tokens"], c_toks) >= 0.60:
+                    continue
+            # Guard 2: Check if the heard speaker's span actually matches a nearby script line of another speaker
+            sp_words = c["hq_words"][sp["first"] : sp["last"] + 1]
+            sp_toks = [_clean_token(w["w"]) for w in sp_words if _clean_token(w["w"])]
+            matched_other_line = next(
+                (
+                    sl for sl in script_lines
+                    if sl.get("speaker") and sl.get("speaker") != sp["expected"]
+                    and _token_recall(sl["tokens"], sp_toks) >= 0.45
+                ),
+                None,
+            )
+            if matched_other_line is not None:
+                if matched_other_line not in matched:
+                    matched.append(matched_other_line)
+                    matched.sort(key=lambda l: int(l.get("index", 0)))
+                continue
+
             end = dur if sp["end"] is None else sp["end"]
-            lid = ",".join(l["id"] for l in c.get("matched_lines", [])) or "-"
+            lid = ",".join(l["id"] for l in matched) or "-"
             c.setdefault("exclusions", []).append((float(sp["start"]), float(end)))
             c.setdefault("wrong_word_idx", set()).update(range(sp["first"], sp["last"] + 1))
             c["anomalies"].append(
@@ -1171,9 +1270,52 @@ def detect_clip_anomalies_and_cuts(
         if not words:
             continue
 
+        # Check for Intra-Clip Head Phrase Repeat ([HEAD_REPEAT] e.g. 9.mp4 "నాకు అర్థమైంది. నాకు అర్థమైంది,")
+        head_repeat_cut: Optional[float] = None
+        for plen in (5, 4, 3, 2):
+            if len(words) >= 2 * plen:
+                head_p1 = [_clean_token(w["w"]) for w in words[:plen]]
+                head_p2 = [_clean_token(w["w"]) for w in words[plen : 2 * plen]]
+                if head_p1 == head_p2 and all(head_p1):
+                    p1_end = float(words[plen - 1]["end"])
+                    p2_start = float(words[plen]["start"])
+                    min_t, _ = find_rms_minimum(rms_env, max(0.0, p1_end - 0.08), p2_start + 0.05, prefer_center=False)
+                    head_repeat_cut = round(max(p1_end, min(p2_start - 0.12, min_t)), 2)
+                    rep_str = " ".join(w["w"] for w in words[:plen])
+                    clip["anomalies"].append(
+                        f"[HEAD_REPEAT] '{rep_str}' (0.00-{p1_end:.2f}s false-start cut at {head_repeat_cut:.2f}s)"
+                    )
+                    words = words[plen:]
+                    break
+
+        # Check for stray 1-word boundary bleed / false-start at head ([HEAD_BLEED_CUT] e.g. 10.mp4 'నండి.', 12.mp4 'చాలు.')
+        if head_repeat_cut is None and dup_until == 0.0 and len(words) >= 3 and matched_lines:
+            w0_tok = _clean_token(words[0]["w"])
+            w1_tok = _clean_token(words[1]["w"])
+            first_line_toks = matched_lines[0].get("tokens", [])
+            all_line_toks = [t for ml in matched_lines for t in ml.get("tokens", [])]
+            w0_sim_all = max((_word_similarity(w0_tok, st) for st in all_line_toks), default=0.0)
+            w0_sim_head = max((_word_similarity(w0_tok, st) for st in first_line_toks[:3]), default=0.0)
+            w1_sim_head = max((_word_similarity(w1_tok, st) for st in first_line_toks[:3]), default=0.0)
+            head_gap = float(words[1]["start"]) - float(words[0]["end"])
+            if float(words[0]["start"]) <= 0.35 and (
+                (w0_sim_all < 0.50 and float(words[1]["start"]) >= 0.55)
+                or (head_gap >= 0.45 and w0_sim_head < 0.55 and w1_sim_head >= 0.80)
+            ):
+                min_t, _ = find_rms_minimum(
+                    rms_env, float(words[0]["end"]), float(words[1]["start"]), prefer_center=False
+                )
+                head_repeat_cut = round(max(float(words[0]["end"]), min(float(words[1]["start"]) - 0.12, min_t)), 2)
+                clip["anomalies"].append(
+                    f"[HEAD_BLEED_CUT] '{words[0]['w']}' ({words[0]['start']:.2f}-{words[0]['end']:.2f}s cut at {head_repeat_cut:.2f}s)"
+                )
+                words = words[1:]
+
         # Determine initial clip start (Leading Silence Trim)
         clip_start = 0.0
-        if dup_until > 0.0:
+        if head_repeat_cut is not None:
+            clip_start = head_repeat_cut
+        elif dup_until > 0.0:
             # Find silence immediately after the boundary duplicate word
             post_dup_sil = next(
                 (s for s in silences if s["start"] <= dup_until + 0.15 and s["end"] >= dup_until),
@@ -1432,10 +1574,40 @@ def detect_clip_anomalies_and_cuts(
                 "reason": "full_clean",
             })
 
-    # Pacing Pass: flag / re-energize long static shots (>6.0s) and monotonous equal-length runs
+    # Identify scenes that contain multi-speaker in-frame clips or explicit two-shot / galley / projection staging
+    two_shot_scene_re = re.compile(
+        r"(two[- ]?shot|galley|projection|pops\s+off|talking\s+in\s+the|both|couple|together|side\s+by\s+side)",
+        re.I,
+    )
+    multi_speaker_scenes = {
+        l.get("scene")
+        for c in clips_data
+        if len({l.get("speaker") for l in c.get("matched_lines", []) if l.get("speaker")}) >= 2
+        for l in c.get("matched_lines", [])
+        if l.get("scene")
+    }
+
+    # Pacing Pass: flag / re-energize long static single-speaker shots (>6.0s); never zoom two-shots
     for s_idx, rseg in enumerate(raw_segments):
         seg_dur = round(float(rseg["end"]) - float(rseg["start"]), 2)
-        if seg_dur > 6.0 and float(rseg.get("zoom", 1.0)) == 1.0 and not rseg.get("zoom_to"):
+        c_lines = rseg["clip"].get("matched_lines", [])
+        c_spks = {l.get("speaker") for l in c_lines if l.get("speaker")}
+        c_info = rseg["clip"].get("info") or {}
+        is_two_shot = (
+            len(c_spks) >= 2
+            or int(c_info.get("face_count") or 1) >= 2
+            or c_info.get("shot_type") == "two_shot"
+            or any(
+                l.get("scene") in multi_speaker_scenes
+                or two_shot_scene_re.search(f"{l.get('scene', '')} {l.get('scene_visual', '')} {l.get('speaker', '')}")
+                for l in c_lines
+            )
+        )
+        rseg["is_two_shot"] = is_two_shot
+        if is_two_shot:
+            rseg["zoom"] = 1.0
+            rseg.pop("zoom_to", None)
+        elif seg_dur > 6.0 and float(rseg.get("zoom", 1.0)) == 1.0 and not rseg.get("zoom_to"):
             rseg["zoom_to"] = 1.06
             rseg["clip"]["anomalies"].append(
                 f"[PACING_PASS] {rseg['stem']} ({seg_dur:.2f}s > 6.0s): added dynamic zoom motion so shot never stays static"
@@ -1636,20 +1808,28 @@ def assign_segment_ids_marks_and_layouts(
         # 1. Up to 1-2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside the initial single-character hook
         # 2. Macro layout transition (warm_flash / smoothright) when switching between single and split_h/split_v
         # 3. NEVER place transitions inside two-character split_h / split_v dialogue turns
+        distinct_script_scenes = {l.get("scene") for l in script_lines if l.get("scene")}
         if segments_out:
             prev_seg = segments_out[-1]
             prev_lay = prev_seg.get("layout", "single")
             cur_lay = seg_dict.get("layout", "single")
+            prev_sc = prev_seg.get("scene", "")
+            cur_sc = seg_dict.get("scene", "")
             if prev_lay != cur_lay:
                 seg_dict["transition"] = "warm_flash" if cur_lay in ("split_h", "split_v") else "smoothright"
                 seg_dict["transition_duration"] = 0.35 if cur_lay in ("split_h", "split_v") else 0.28
+            elif len(distinct_script_scenes) >= 2:
+                if prev_sc and cur_sc and prev_sc != cur_sc:
+                    seg_dict["transition"] = "whip_left"
+                    seg_dict["transition_duration"] = 0.28
+                    hook_transition_count += 1
             elif cur_lay == "single" and prev_lay == "single" and hook_transition_count < 2:
                 if Path(str(prev_seg.get("src", ""))).name != Path(str(seg_dict.get("src", ""))).name:
                     seg_dict["transition"] = "whip_left" if hook_transition_count == 0 else "whip_right"
                     seg_dict["transition_duration"] = 0.28
                     hook_transition_count += 1
 
-        # Split screens (split_h / split_v) are 100% static (z=1.0 locked, no zoom-in or zoom-out).
+        # Split screens (split_h / split_v) and two-shots are 100% static (z=1.0 locked, no zoom-in or zoom-out).
         # Single-character live segments (layout == "single") prioritize:
         #   - High preference for the FIRST rapid zoom-in (sudden_in) on the opening segment
         #   - Sudden zoom-in (sudden_in) on Supernova callouts, strong teaching points, or vocal [STRESS] peaks
@@ -1675,8 +1855,27 @@ def assign_segment_ids_marks_and_layouts(
             except Exception:
                 pass
 
-        if layout_mode in ("split_h", "split_v"):
+        two_shot_re = re.compile(
+            r"(two[- ]?shot|galley|projection|pops\s+off|talking\s+in\s+the|both|couple|together|side\s+by\s+side)",
+            re.I,
+        )
+        c_info = (seg.get("clip") or {}).get("info") or {}
+        is_two_shot = bool(
+            seg.get("is_two_shot")
+            or len(spk_list) >= 2
+            or int(c_info.get("face_count") or 1) >= 2
+            or c_info.get("shot_type") == "two_shot"
+            or any(
+                two_shot_re.search(f"{l.get('scene', '')} {l.get('scene_visual', '')} {l.get('speaker', '')}")
+                for l in lines
+            )
+        )
+
+        if layout_mode in ("split_h", "split_v") or is_two_shot:
             seg_dict["zoom"] = 1.0
+            seg_dict.pop("zoom_to", None)
+            seg_dict.pop("zoom_style", None)
+            seg_dict.pop("zoom_at", None)
         else:
             full_line_text = " ".join(l.get("text", "") for l in lines) if lines else note
             callout_at = None
@@ -2058,6 +2257,22 @@ def main() -> None:
             "micro_dips": micro_dips,
             "anomalies": [],
         })
+
+    # Auto-pair <stem>.mp4 video with <stem>VO.mp4 voiceover audio when both exist
+    by_stem_upper = {c["stem"].upper(): c for c in clips_data}
+    for c in clips_data:
+        st_up = c["stem"].upper()
+        if st_up.endswith("VO") and len(st_up) > 2:
+            base_up = st_up[:-2].rstrip("_- ")
+            base_c = by_stem_upper.get(base_up)
+            if base_c is not None and len(c.get("hq_words") or []) > len(base_c.get("hq_words") or []):
+                base_c["hq_words"] = c["hq_words"]
+                base_c["base_words"] = c["base_words"]
+                base_c["rms_env"] = c["rms_env"]
+                base_c["macro_silences"] = c["macro_silences"]
+                base_c["micro_dips"] = c["micro_dips"]
+                c["dropped_take"] = True
+                c["anomalies"].append(f"[VO_PAIRED] paired voiceover audio/words into {base_c['stem']}")
 
     # Align clips to script lines & run deterministic anomaly detection + auto-cutting
     match_clips_to_script_lines(clips_data, script_lines)

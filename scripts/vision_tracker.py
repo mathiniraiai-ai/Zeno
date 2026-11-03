@@ -360,8 +360,9 @@ def compute_slot_crop_filter(
         k = min(MAX_EXTRA_ZOOM, MIN_SLOT_FILL / max(fill_now, 1e-3))
 
     if y1 > y0 and y0 < 0.95:
-        sh_needed = (1.0 - headroom_pct / 100.0) * slot_h / max(0.1, 1.0 - y0)
-        k_head = sh_needed / max(1.0, src_h * s0)
+        sh_needed_bot = (1.0 - headroom_pct / 100.0) * slot_h / max(0.1, 1.0 - y0)
+        sh_needed_top = (headroom_pct / 100.0) * slot_h / max(0.05, y0)
+        k_head = max(sh_needed_bot, sh_needed_top) / max(1.0, src_h * s0)
         if k_head > k:
             k = min(MAX_EXTRA_ZOOM, k_head)
 
@@ -1102,6 +1103,9 @@ def recommend_project_layouts(
     has_chat_cue = bool(
         re.search(r"\[texting\]|\[chat(?:[_\s]*bar)?\]|text\s*message|whatsapp|chat\s*bubble", all_text, re.I)
     )
+    has_inframe_skit_cue = bool(
+        re.search(r"projection\s+pops\s+off|hologram|talking\s+in\s+the\s+galley|two[- ]?shot", all_text, re.I)
+    )
 
     # Inspect clip geometry across clip_map
     unique_clips = list({id(v): v for v in clip_map.values()}.values())
@@ -1120,7 +1124,10 @@ def recommend_project_layouts(
         primary_multi = preset_norm
     else:
         # "auto" or "hybrid"
-        if baked_split_count > len(unique_clips) // 2 and preset_norm == "auto":
+        if (
+            (baked_split_count > len(unique_clips) // 2 or (has_inframe_skit_cue and not has_split_cue) or (two_shot_count >= 3 and landscape_count == 0 and not has_split_cue))
+            and preset_norm == "auto"
+        ):
             resolved_preset = "single"
             primary_multi = "single"
         elif has_chat_cue and not (has_video_call_cue or has_split_cue):

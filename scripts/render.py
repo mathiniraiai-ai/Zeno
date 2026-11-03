@@ -52,6 +52,13 @@ try:
 except Exception:
     verify = None
 
+try:
+    import style_config
+    _TUNING = style_config.get_tuning()
+except Exception:
+    style_config = None
+    _TUNING = {}
+
 EDGE_FADE = 0.012  # tiny audio fade at every cut to avoid clicks
 TRANSITIONS_DIR = Path(__file__).resolve().parent.parent / "assets" / "transitions"
 

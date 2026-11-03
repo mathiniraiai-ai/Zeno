@@ -1,6 +1,6 @@
 # micronarrative (Macro / Micro-Narrative Style Skill)
 
-A short story skit (`60–130s`): a live conversation problem scene, a friend's tip or dialogue continuation, and an AI-teacher split-screen demo with Miss Nova. Learned from reference metrics in [`spec.json`](spec.json) and production-hardened across Zeno's multi-agent harness.
+A short story skit (`60–130s`): a live conversation problem scene, a friend's tip or dialogue continuation, and an AI-teacher split-screen or in-frame 3D hologram demo with Miss Nova. Learned from reference metrics in [`spec.json`](spec.json) and production-hardened across Zeno's multi-agent harness.
 
 ---
 
@@ -17,20 +17,20 @@ A short story skit (`60–130s`): a live conversation problem scene, a friend's 
 
 ## 2. When to Use This Skill
 
-- The script has `Scene N` / `SCENE N` headings, named speakers (`Speaker: line`), a live conversation first half, and a vertical split-screen section with Miss Nova (or two speakers).
-- The user refers to the edit as a **macro narrative** or **micronarrative**.
+- The script has `Scene N` / `SCENE N` headings, named speakers (`Speaker: line`), a live conversation first half, and either a vertical split-screen section or an in-frame 3D hologram / two-shot section with Miss Nova (or two speakers).
+- The user refers to the edit as a **macro narrative**, **micronarrative**, **skit based micro narrative (`1.1`)**, or **hologram (`2.1`)**.
 
 ---
 
-## 3. Split-Screen Handling: Two Distinct Footage Modes
+## 3. Split-Screen & Hologram Two-Shot Handling: Three Distinct Footage Modes
 
-Always check how the split-screen raw footage was generated before assigning layouts in `plan.edl`:
+Always check how the raw footage was generated before assigning layouts in `plan.edl`:
 
 ### Mode A — Pre-Stitched Vertical Split Screen (Google Flow)
 - **How the raw clips look**: Each raw `.mp4` clip coming from **Google Flow** already has the vertical split screen (Character A + Character B side-by-side or stacked) **stitched inside a single video frame** (`720×1280` or `1080×1920`).
 - **How Zeno edits them**:
   - **DO NOT** use `split_h` or `split_v` with `peer=` (which would crop and double-stack an already-split frame).
-  - Match the clips **straight in sequence using `layout=single`**.
+  - Match the clips **straight in sequence using `layout=single`** and lock **`zoom=1.0`**.
   - Cut cleanly from clip to clip at each dialogue turn boundary (`0.10–0.20s` pre-roll before speech onset, `0.03–0.20s` post-roll after speech end).
 
 ### Mode B — Separate Character Clips (HeyGen / Separate Renders)
@@ -39,6 +39,21 @@ Always check how the split-screen raw footage was generated before assigning lay
   - Composite them together using `layout=split_h` (left/right 50/50 vertical split) or `layout=split_v` (top/bottom 50/50 split) with `peer=<partner_clip>@<in>..<out>`.
   - Swap panels cleanly at turn boundaries while keeping the full frame divider locked (`#E1DBE1` thin divider, both panels live).
 
+### Mode C — In-Frame Two-Shot & 3D Hologram Skit (`1.1 Skit based micro narrative` + `2.1 Hologram`)
+- **How the raw clips look**: Portrait `9:16` (`720×1280`) clips where Scene 1 uses single/OTS shots, Scene 2 frames two characters side-by-side in a galley/room two-shot, and Scene 3 features Miss Nova's 3D hologram popping out of a phone in-frame with the learner.
+- **How Zeno edits them**:
+  - Keep **`layout=single`** across all scenes.
+  - Lock **`zoom=1.0`** on all Scene 2 and Scene 3 two-shots and hologram shots so characters near the left/right frame edges and the glowing 3D hologram are never cropped.
+  - Preserve visual action beats (e.g., opening seat-recline/spill hook, silent embarrassment beat `L6`, and the 2.5s hologram pop-out tail at the end of Scene 2).
+
+### Mode D — Top-Center Rounded-Rectangle Floating Window (`top_pip` — Subtopic `1.1` / `3.1`)
+- **How the raw clips look**: Separate portrait `9:16` talking clips for the human learner (`M1.mp4`, `M2.mp4`) and the AI Robot (`R1.mp4`..`r4.mp4`), plus dedicated silent listening clips (`M extra.mp4`, `R extra.mp4`), and optional `<stem>VO.mp4` voiceover audio clips (e.g., `1.2.mp4` video + `1.2VO.mp4` Partner audio).
+- **How Zeno edits them**:
+  - **Voiceover Mux (`<stem>VO.mp4`)**: Mux `<stem>.mp4` video (`0:v:0`) with `<stem>VO.mp4` audio (`1:a:0`) so the listening actor's video carries the clean phone-partner voiceover and word timestamps.
+  - **Strikethrough Cutaway (`3.mp4`)**: Stack 3 red strikethrough pill banners (`banner:"How are you?"@0.18`, `banner:"How was your weekend?"@1.01`, `banner:"How's the weather?"@2.38`) synchronized to each phrase onset + `mark:wrong`.
+  - **Top Floating Window (`layout=top_pip`)**: Full-screen `1080×1920` background shows the human learner (`M1`, `M2`, or `M extra.mp4` looping live when listening), while a clean top-center rounded rectangle (`750×420` at `x=165, y=20, radius=36px`, no phone status-bar chrome) shows the AI Robot (`R1`..`r4`, or `R extra.mp4` looping live when listening).
+  - **Multi-Turn Interleaving & Head-Repeat Cuts**: Split multi-turn clips (`R1.mp4` -> `L12, L14, L16`; `M1.mp4` -> `L13, L15, L17`; `M2.mp4` -> `L19, L21`) at exact inter-turn silence midpoints, and trim head false-starts (e.g., `R2.mp4` first `"कोई बात नहीं!"` `0.00–1.02s` discarded).
+
 ---
 
 ## 4. Scene Structure & Editorial Rules
@@ -46,47 +61,41 @@ Always check how the split-screen raw footage was generated before assigning lay
 1. **First Half — Live Conversation (`Scene 1` Problem + `Scene 2` Tip/Continuation)**:
    - `layout=single`, speaker-follow cuts across wide establishing shots, speaker close-ups, two-shots, and reaction beats.
    - Preserve natural reaction/laughter beats where indicated in the script.
-2. **Second Half — Vertical Split Screen (`Scene 3` AI Teacher Demo)**:
-   - If pre-stitched in Google Flow: `layout=single` (straight cuts matching each turn's pre-stitched clip).
-   - If separate HeyGen clips: `layout=split_h` / `split_v` with `peer=` compositing.
+2. **Second Half — AI Teacher Demo (`Scene 3` Split Screen or Hologram)**:
+   - If pre-stitched in Google Flow or in-frame 3D hologram: `layout=single`, `zoom=1.0`.
+   - If separate HeyGen clips: `layout=split_h` / `split_v` with `peer=` compositing, `zoom=1.0`.
 3. **Where to Zoom vs. Where NOT to Zoom**:
    - **NO Zoom / NO Zoom-Out (`zoom=1.0`)**:
-     - **Never** put zoom-ins or zoom-outs on **pre-stitched split-screen clips** (keeps the split divider and both faces locked in place).
-     - **Never** put zoom on **continuous two-shots** (e.g., Scene 2 tip shot) or on clips that already have camera movement (detected automatically by OpenCV `detect_static_camera_motion()`).
+     - **Never** put zoom-ins or zoom-outs on **pre-stitched split-screen clips**, **in-frame two-shots**, or **3D hologram two-shots**.
+     - **Never** put zoom on clips that already have camera movement (detected automatically by OpenCV `detect_static_camera_motion()`).
    - **Where to Apply Zoom**:
-     - Apply zoom **only** on static single-speaker close-ups/mid-shots in the live conversation or单-speaker turns when needed:
+     - Apply zoom **only** on static single-speaker close-ups/mid-shots in Scene 1 or single-speaker turns when needed:
        - `zoom=1.08` punch-in to mask same-clip jump cuts.
        - 3× supersampled sub-pixel `mild_in` (`1.0->1.06`), `mild_out` (`1.08->1.0`), or `flash_zoom` (`sudden_in` / `sudden_out`) on static single-speaker emphasis lines.
 4. **Where to Put On-Screen Text vs. Where NOT to (`21132` "Stop Saying" Stacked Strikethrough Hook)**:
    - **Put on-screen text ONLY** where the script explicitly cues a "Stop saying..." hook list (e.g., `Stop saying: "What do you mean?", "I don't understand", "Repeat please"`).
-   - **How the `21132` "Stop Saying" Stacked Strikethrough Visual Works (`assets/templates/stop_saying_banners.json`)**:
-     - Placed horizontally centered (`x_norm = 0.50`) at **lower-chest level (`y0_norm = 0.52`, `step_norm = 0.068`)** so the speaker's face is 100% unobstructed.
-     - As the speaker says each phrase (`banner:"What do you mean?"@t1 banner:"I don't understand"@t2 banner:"Repeat please"@t3`), a dark-red gradient pill pops onto the screen, and `0.16s` later a **bold white horizontal strikethrough / dash line slashes across the pill** (`+36px` overshoot on both sides) while the previous struck-through phrases remain stacked above it until the sentence finishes (`0.18s` group fade-out) + subtle red edge flash (`mark_pack: flash`).
-   - **Never** add unrequested subtitles, captions, CTAs, or decorative text where not specified in the script.
+   - **Never** add unrequested decorative text where not specified in the script. Use `subs=ref` when reference-style pill subtitles are requested.
 5. **Where to Show Errors (`✗` / `✓`) vs. Where NOT to**:
-   - **Show `✗` (`wrong`) and `✓` (`right`) marks ONLY** when the script contains an explicit spoken-English learner mistake followed by the teacher's correction and the learner's corrected repeat.
-   - Uses Zeno's **Minimal 2-Pulse End-of-Sentence Flash (`mark_pack: flash`)**:
-     - Triggers **only when the wrong or right sentence finishes speaking**.
-     - Subtle `0.50` alpha Red/Green frame glow (`red_flash.png` / `green_flash.png`) that **flashes 2 times** over `0.56s` (`Pulse 1 → OFF → Pulse 2`) with error buzzer (`+4 dB`) or right ding (`+2.5 dB`).
-   - On narrative/conversational dialogue lines with no explicit learner mistake/correction beat, **do not place `✗` / `✓` marks**.
+   - **Show `✗` (`wrong`) and `✓` (`right`) marks ONLY** when the script contains an explicit spoken-English learner mistake (`[WRONG]`) followed by the teacher's correction (`[RIGHT]`).
+   - Uses Zeno's **Minimal 2-Pulse End-of-Sentence Flash (`mark_pack: flash`)** (`0.56s`, `buzzer.wav` `+4 dB` or `correct_ding.wav` `+2.5 dB`).
 6. **Where Transitions Are Added**:
-   - Placed **at scene boundaries** (e.g., Scene 1 → Scene 2, and Scene 2 Live Conversation → Scene 3 Vertical Split Screen) using `tr=warm_flash@0.38` (or Meta creative transitions: `whip_left`, `whip_right`, `zoom_burst`, `flash_zoom`, `slide_up`).
+   - Placed **at scene boundaries** (e.g., `Scene 1 -> Scene 2` and `Scene 2 -> Scene 3`) using `tr=whip_left@0.28` / `whip_right@0.28` + `whoosh.wav` (or `tr=warm_flash@0.38`), while keeping all intra-scene cuts as clean hard cuts (`tr=cut`).
    - All transitions use **Zero-Audio-Loss (`tpad` video tail cloning + `0.00s` audio concat)** so zero words or syllables are ever swallowed at cuts.
 7. **4-Clip Split-Screen Workflow (2 Talking Clips + 2 Dedicated Listening Clips — Never Static Images)**:
-   - When the user provides **4 clips** for a `split_h` or `split_v` dialogue scene (Character A Talking, Character B Talking, Character A Listening, Character B Listening):
-     - While **Character A (`Robot` / `Miss Nova`, Left)** is speaking (`src="CharacterA_Talking.mp4"`), stitch **Character B's dedicated Listening video clip** on the Right (`peer="CharacterB:CharacterB_Listening.mp4@right"`).
-     - While **Character B (`Human` / `Lady`, Right)** is speaking (`src="CharacterB_Talking.mp4"`), stitch **Character A's dedicated Listening video clip** on the Left (`peer="CharacterA:CharacterA_Listening.mp4@left"`).
-     - [`scripts/layouts.py`](../../scripts/layouts.py) automatically plays and loops the dedicated listening video clip (`-stream_loop -1` + `trim=0:{exact}`) so the listening character is **100% live moving video** at all times (never a static screenshot).
+   - When the user provides **4 clips** for a `split_h` or `split_v` dialogue scene (Character A Talking, Character B Talking, Character A Listening, Character B Listening), [`scripts/layouts.py`](../../scripts/layouts.py) loops the dedicated listening video clip so the listening character is **100% live moving video** at all times.
 
 ---
 
-## 5. Mandatory 5-Agent Parallel Workflow (Plus 10-Agent Deep Pipeline)
+## 5. Mandatory 10-Agent Dedicated Pipeline (and 5-Agent Core Loop)
 
-Every macro/micronarrative edit runs through the **5-Agent Parallel Workflow** codified in [`AGENTS.md`](../../AGENTS.md) and [`agent/DIRECTOR.md`](../../agent/DIRECTOR.md) (scalable to the **10-Agent Deep Pipeline** for multi-feature engineering passes):
-
-1. **Agent 1 — Script Coverage, Concept Brief & Take Auditor**: Verifies 100% verbatim script coverage in order, speaker identity, reaction beats, and `[BEST_TAKE]` selection.
-2. **Agent 2 — Acoustic Pause-Cut & De-Duplication Specialist**: Uses Meta `Wav2Vec2` + `uroman` + `AcousticOnsetVerifier` (`-35ms` consonant pre-attack guard, `+45ms` coda release guard) to remove retakes/repeats and tighten dead air (`>0.85s`) with zero clipped syllables.
-3. **Agent 3 — OpenCV Motion & Dynamic Zoom/Layout Choreographer**: Enforces `layout=single` straight matching on pre-stitched Google Flow split-screen clips, locks `zoom=1.0` on all split-screen/two-shot/moving clips, and applies 3× supersampled zooms only on static single-speaker shots.
-4. **Agent 4 — Transitions, On-Screen Text & Minimal 2-Pulse Marks/SFX Designer**: Places scene-boundary transitions (`warm_flash`), script-cued text banners (only where requested), and end-of-sentence 2-pulse `✗`/`✓` flashes (only where errors/corrections occur).
-5. **Agent 5 — Post-Render Deep Video Analyzer & Auto-Fixer (Mandatory Post-Render Gate)**: Runs after `render.py --verify` to inspect the final `.mp4` locally via Python (`verify.py`, `words.json`, FFmpeg `silencedetect`, 10ms WAV RMS energy, and RGB frame checks) for **0 repeated words**, **0 silences `>1.05s`**, **0 clipped words**, active transitions, and `-11.5 LUFS` (`-1.0 dBTP` cap) Meta Ads loudness—auto-fixing `plan.edl` and re-rendering before delivery if any issue is found.
-6. **1:1 Square Meta Ads Export (`--square`) & Per-Segment `vol=<dB>` Control**: Pass `--square` to `render.py` to also export a `1:1` (`1080×1080`) Square video (Layer 1: `1:1` center-cropped background with 5–10% Gaussian blur `gblur=sigma=18`; Layer 2: full `9:16` clip centered on top). Every raw segment is capped at `-11.5 LUFS` / `-1.0 dBTP` automatically, and any segment can set `vol=+3dB` / `vol=-2dB` in `plan.edl` for exact mid-demo dB adjustments.
+Every subtopic edit from the Master Editing Formats sheet runs through Zeno's **10-Agent Dedicated Pipeline**:
+1. **Agent 1 — Reference Cut, Pacing & Scene Deconstructor**
+2. **Agent 2 — Script & Phonetic Line Mapper**
+3. **Agent 3 — Raw Clip & Best-Take Selector**
+4. **Agent 4 — Acoustic Pause-Cut & De-Duplication Specialist**
+5. **Agent 5 — Layout & Split-Screen / Hologram Choreographer**
+6. **Agent 6 — Dynamic Camera, Zoom & Framing Agent**
+7. **Agent 7 — Overlays, Marks (`✓`/`✗`), Banners & Subtitles Agent**
+8. **Agent 8 — Transitions & SFX Designer**
+9. **Agent 9 — Style Brain & Engine Rule Integrator**
+10. **Agent 10 — Post-Render Deep Video Verifier & Auto-Fixer**
