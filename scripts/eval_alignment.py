@@ -65,11 +65,64 @@ def score(files: list, snap: bool):
         print(summarize("end  ", np.concatenate(all_e)))
 
 
+def _ensure_default_gold_set() -> list[Path]:
+    """Return existing gold JSONs in gold/ or work/gold_synth/, or synthesize a deterministic benchmark."""
+    for candidate_dir in (ROOT / "gold", ROOT / "work" / "gold_synth"):
+        if candidate_dir.is_dir():
+            jsons = []
+            for p in sorted(candidate_dir.glob("*.json")):
+                try:
+                    aud = json.loads(p.read_text(encoding="utf-8")).get("audio", "")
+                    if (ROOT / aud).is_file() or Path(aud).is_file():
+                        jsons.append(p)
+                except Exception:
+                    pass
+            if jsons:
+                return jsons
+
+    import wave
+    synth_dir = ROOT / "work" / "gold_synth"
+    synth_dir.mkdir(parents=True, exist_ok=True)
+    wav_out = synth_dir / "synth_en.wav"
+    json_out = synth_dir / "synth_en.json"
+    sr = 16000
+    specs = [("hello", 0.30, 0.72), ("world", 0.95, 1.42), ("stop", 1.68, 2.08), ("saying", 2.30, 2.82)]
+    dur = 3.20
+    t = np.arange(int(dur * sr), dtype=np.float32) / sr
+    sig = np.zeros_like(t)
+    for idx, (_, ws, we) in enumerate(specs):
+        mask = (t >= ws) & (t <= we)
+        wt = t[mask] - ws
+        env = np.sin(np.pi * wt / max(we - ws, 1e-3)) ** 0.6
+        f0 = 135.0 + 15.0 * idx
+        burst = (
+            0.35 * np.sin(2 * np.pi * f0 * wt)
+            + 0.20 * np.sin(2 * np.pi * 2.0 * f0 * wt)
+            + 0.10 * np.sin(2 * np.pi * 5.0 * f0 * wt)
+        )
+        sig[mask] = (env * burst).astype(np.float32)
+    pcm = np.clip(sig * 32767.0, -32768, 32767).astype(np.int16)
+    with wave.open(str(wav_out), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes(pcm.tobytes())
+    payload = {
+        "audio": str(wav_out.relative_to(ROOT)),
+        "language": "en",
+        "words": [{"w": w, "start": s, "end": e} for w, s, e in specs],
+        "note": "self-contained deterministic synthetic benchmark",
+    }
+    json_out.write_text(json.dumps(payload, indent=1), encoding="utf-8")
+    return [json_out]
+
+
 def main():
     ap = argparse.ArgumentParser()
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    ap.add_argument("--self-test", action="store_true", help="Run self-contained gold-set alignment benchmark")
+    sub = ap.add_subparsers(dest="cmd", required=False)
     s = sub.add_parser("score")
-    s.add_argument("files", nargs="+")
+    s.add_argument("files", nargs="*")
     s.add_argument("--no-snap", action="store_true")
     f = sub.add_parser("from-labels")
     f.add_argument("labels")
@@ -77,8 +130,12 @@ def main():
     f.add_argument("--lang", required=True)
     f.add_argument("--out", required=True)
     a = ap.parse_args()
-    if a.cmd == "score":
-        score(a.files, snap=not a.no_snap)
+    if a.self_test or a.cmd is None:
+        files = _ensure_default_gold_set()
+        score(files, snap=True)
+    elif a.cmd == "score":
+        files = a.files or _ensure_default_gold_set()
+        score(files, snap=not a.no_snap)
     else:
         from_labels(Path(a.labels), a.audio, a.lang, Path(a.out))
 

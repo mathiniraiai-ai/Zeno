@@ -76,18 +76,23 @@ else
   echo "[4/5] Created .env from .env.example"
 fi
 
-# 5. Alignment model (Meta wav2vec2, about 360 MB, into models/torch) + real checks
+# 5. Alignment model (Meta wav2vec2, about 360 MB, into models/torch) + automatic Google login + real checks
 echo "[5/5] Downloading the alignment model (first time only) and checking everything..."
 .venv/bin/python scripts/setup.py --prewarm >/dev/null || true
+
+if ! .venv/bin/python scripts/setup.py --whoami >/dev/null 2>&1; then
+  echo "[Auth] Opening your browser to sign in with Google (@gosupernova.live)..."
+  .venv/bin/python scripts/setup.py --login || true
+fi
+
 .venv/bin/python scripts/setup.py --smoke || true
 
 echo ""
 echo "=============================================="
-if grep -q '^SCRIPTCUT_CLOUD_TOKEN=..*' .env 2>/dev/null; then
-  echo " Done. Zeno is ready."
+if .venv/bin/python scripts/setup.py --whoami >/dev/null 2>&1; then
+  echo " Done. Zeno is signed in and ready!"
 else
-  echo " Almost done: generate your key at"
-  echo "   https://zeno-production-bef7.up.railway.app"
-  echo " and paste it after SCRIPTCUT_CLOUD_TOKEN= in the .env file."
+  echo " Almost done: sign in anytime by running:"
+  echo "   .venv/bin/python scripts/setup.py --login"
 fi
 echo "=============================================="

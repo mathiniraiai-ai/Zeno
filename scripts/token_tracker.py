@@ -150,6 +150,7 @@ def detect_agent_usage(
                         "cached_tokens": cached_in,
                         "output_tokens": edit_out_tok,
                         "total_tokens": edit_in_tok + edit_out_tok,
+                        "token_precision": "exact" if planner_steps else "est",
                         "session_id": Path(path_str).parts[-4] if len(Path(path_str).parts) >= 4 else "unknown",
                     },
                 ))
@@ -204,6 +205,7 @@ def detect_agent_usage(
                     "cached_tokens": cached_in,
                     "output_tokens": out_tok,
                     "total_tokens": eff_in + out_tok,
+                    "token_precision": "exact",
                     "session_id": Path(path_str).stem,
                 },
             ))
@@ -222,6 +224,7 @@ def detect_agent_usage(
             "cached_tokens": 0,
             "output_tokens": 0,
             "total_tokens": 0,
+            "token_precision": "est",
             "session_id": "local",
         }
 
@@ -284,6 +287,155 @@ def collect_clip_telemetry(
             "total_tokens": tot_tok,
         })
     return out
+
+
+def _seg_zoom_repr(seg: Dict[str, Any]) -> str:
+    z0 = float(seg.get("zoom", 1.0) or 1.0)
+    z1 = float(seg.get("zoom_to", z0) or z0)
+    z_style = str(seg.get("zoom_style") or "").strip()
+    z_at = seg.get("zoom_at")
+    if z_style:
+        base = f"{z_style}:{z1:g}" if abs(z0 - 1.0) < 1e-4 else f"{z_style}:{z0:g}->{z1:g}"
+    elif abs(z1 - z0) > 1e-4:
+        base = f"{z0:g}->{z1:g}"
+    else:
+        base = f"{z0:g}"
+    return f"{base}@{float(z_at):.2f}" if z_at is not None else base
+
+
+def _base_line_id(seg_id: str) -> str:
+    m = re.match(r"^(L\d+)", str(seg_id or "").strip(), re.I)
+    return m.group(1).upper() if m else str(seg_id or "").strip()
+
+
+def compute_edl_learning_diff(initial_edl_text: str, final_edl_text: str) -> Dict[str, Any]:
+    """Compare baseline `plan.auto.edl` vs refined `plan.edl` to extract structured editorial learnings."""
+    import edl_parser
+
+    init_plan = edl_parser.parse_edl(initial_edl_text) if initial_edl_text.strip() else {}
+    final_plan = edl_parser.parse_edl(final_edl_text) if final_edl_text.strip() else {}
+
+    init_segs = init_plan.get("segments") or []
+    final_segs = final_plan.get("segments") or []
+    init_by_id = {str(s.get("id")): s for s in init_segs}
+    final_by_id = {str(s.get("id")): s for s in final_segs}
+
+    init_by_line: Dict[str, List[Dict[str, Any]]] = {}
+    for s in init_segs:
+        init_by_line.setdefault(_base_line_id(str(s.get("id"))), []).append(s)
+    final_by_line: Dict[str, List[Dict[str, Any]]] = {}
+    for s in final_segs:
+        final_by_line.setdefault(_base_line_id(str(s.get("id"))), []).append(s)
+
+    take_swaps: List[Dict[str, Any]] = []
+    for line_id, f_list in final_by_line.items():
+        i_list = init_by_line.get(line_id) or []
+        if not i_list:
+            continue
+        i_clips = sorted({Path(str(s.get("src") or "")).name for s in i_list if s.get("src")})
+        f_clips = sorted({Path(str(s.get("src") or "")).name for s in f_list if s.get("src")})
+        if i_clips != f_clips:
+            take_swaps.append({
+                "line_id": line_id,
+                "from_clips": i_clips,
+                "to_clips": f_clips,
+            })
+
+    cut_timing_deltas: List[Dict[str, Any]] = []
+    zoom_changes: List[Dict[str, Any]] = []
+    transition_changes: List[Dict[str, Any]] = []
+    layout_changes: List[Dict[str, Any]] = []
+
+    zoom_dist: Dict[str, int] = {}
+    tr_dist: Dict[str, int] = {}
+    layout_dist: Dict[str, Dict[str, Any]] = {}
+
+    default_init_layout = str(init_plan.get("preset") or "single")
+    default_final_layout = str(final_plan.get("preset") or "single")
+
+    for f_seg in final_segs:
+        sid = str(f_seg.get("id") or "")
+        dur = round(max(0.0, float(f_seg.get("end", 0.0)) - float(f_seg.get("start", 0.0))), 3)
+        lay = str(f_seg.get("layout") or default_final_layout)
+        z_repr = _seg_zoom_repr(f_seg)
+        tr_name = str(f_seg.get("transition") or "cut")
+        tr_dur = f_seg.get("transition_duration")
+        tr_repr = f"{tr_name}@{float(tr_dur):g}" if tr_dur else tr_name
+
+        zoom_dist[z_repr] = zoom_dist.get(z_repr, 0) + 1
+        tr_dist[tr_repr] = tr_dist.get(tr_repr, 0) + 1
+        ld = layout_dist.setdefault(lay, {"segments": 0, "seconds": 0.0})
+        ld["segments"] += 1
+        ld["seconds"] = round(ld["seconds"] + dur, 2)
+
+        i_seg = init_by_id.get(sid)
+        if not i_seg:
+            continue
+
+        ds = round(float(f_seg.get("start", 0.0)) - float(i_seg.get("start", 0.0)), 3)
+        de = round(float(f_seg.get("end", 0.0)) - float(i_seg.get("end", 0.0)), 3)
+        if abs(ds) >= 0.01 or abs(de) >= 0.01:
+            cut_timing_deltas.append({
+                "seg_id": sid,
+                "clip": Path(str(f_seg.get("src") or "")).name,
+                "start_delta_sec": ds,
+                "end_delta_sec": de,
+                "dur_delta_sec": round(de - ds, 3),
+            })
+
+        i_z = _seg_zoom_repr(i_seg)
+        if i_z != z_repr:
+            zoom_changes.append({"seg_id": sid, "from": i_z, "to": z_repr})
+
+        i_tr_name = str(i_seg.get("transition") or "cut")
+        i_tr_dur = i_seg.get("transition_duration")
+        i_tr = f"{i_tr_name}@{float(i_tr_dur):g}" if i_tr_dur else i_tr_name
+        if i_tr != tr_repr:
+            transition_changes.append({"seg_id": sid, "from": i_tr, "to": tr_repr})
+
+        i_lay = str(i_seg.get("layout") or default_init_layout)
+        if i_lay != lay:
+            layout_changes.append({"seg_id": sid, "from": i_lay, "to": lay})
+
+    init_marks = init_plan.get("marks") or []
+    final_marks = final_plan.get("marks") or []
+    wrong_cnt = sum(1 for m in final_marks if str(m.get("type", "")).lower() in ("wrong", "x", "cross", "error"))
+    right_cnt = sum(1 for m in final_marks if str(m.get("type", "")).lower() in ("right", "check", "correct"))
+
+    marks_summary = {
+        "mark_pack": str(final_plan.get("mark_pack") or init_plan.get("mark_pack") or "flash"),
+        "initial_count": len(init_marks),
+        "final_count": len(final_marks),
+        "wrong_count": wrong_cnt,
+        "right_count": right_cnt,
+        "marks": [
+            {"segment": m.get("segment"), "type": m.get("type"), "at": m.get("at"), "sfx": m.get("sfx")}
+            for m in final_marks
+        ],
+    }
+
+    segments_added = [sid for sid in final_by_id if sid not in init_by_id]
+    segments_removed = [sid for sid in init_by_id if sid not in final_by_id]
+
+    has_edits = bool(
+        take_swaps or cut_timing_deltas or zoom_changes or transition_changes
+        or layout_changes or segments_added or segments_removed
+        or len(init_marks) != len(final_marks)
+    )
+
+    return {
+        "has_edits": has_edits,
+        "initial_segments_count": len(init_segs),
+        "final_segments_count": len(final_segs),
+        "segments_added": segments_added,
+        "segments_removed": segments_removed,
+        "take_swaps": take_swaps,
+        "cut_timing_deltas": cut_timing_deltas,
+        "zoom_changes": {"distribution": zoom_dist, "changes": zoom_changes},
+        "transition_changes": {"distribution": tr_dist, "changes": transition_changes},
+        "layout_distribution": {"distribution": layout_dist, "changes": layout_changes},
+        "marks_summary": marks_summary,
+    }
 
 
 def save_prepare_snapshot(
@@ -416,15 +568,58 @@ def finalize_job_telemetry(
     rel_out = str(output_mp4)
     tok_per_min = int(round(a_tot / max(0.25, vid_sec / 60.0)))
 
+    initial_edl_p = proj_dir / "plan.auto.edl"
+    final_edl_p = proj_dir / "plan.edl"
+    initial_edl = initial_edl_p.read_text(encoding="utf-8", errors="ignore") if initial_edl_p.is_file() else ""
+    final_edl = final_edl_p.read_text(encoding="utf-8", errors="ignore") if final_edl_p.is_file() else ""
+    if not initial_edl and final_edl:
+        initial_edl = final_edl
+    try:
+        edl_diff = compute_edl_learning_diff(initial_edl, final_edl)
+    except Exception:
+        edl_diff = {}
+
+    try:
+        import brain_memory
+        learned_rules = brain_memory.load_brain_memory("micronarrative")
+    except Exception:
+        learned_rules = []
+
+    spec_tuning: Dict[str, Any] = {}
+    spec_path = ROOT / "styles" / "micronarrative" / "spec.json"
+    if spec_path.is_file():
+        try:
+            spec_tuning = (read_json(spec_path) or {}).get("tuning") or {}
+        except Exception:
+            spec_tuning = {}
+    assets_used = {
+        "preset": str(plan.get("preset") or "auto"),
+        "mark_pack": str(plan.get("mark_pack") or "flash"),
+        "sfx_pack": str(plan.get("sfx_pack") or "default"),
+        "wrong_sfx_primary": str(plan.get("error_sfx") or spec_tuning.get("wrong_sfx_primary") or "buzzer.wav"),
+        "wrong_sfx_layer": str(spec_tuning.get("wrong_sfx_layer") or "kn20228_wrong_core.mp3"),
+        "right_sfx_primary": str(spec_tuning.get("right_sfx_primary") or "correct_ding.wav"),
+        "right_sfx_layer": str(spec_tuning.get("right_sfx_layer") or "sn_correct.wav"),
+        "whoosh_sfx": str(spec_tuning.get("whoosh_sfx") or "whoosh.wav"),
+    }
+
+    try:
+        import auth_session
+        user_email = auth_session.get_logged_in_email()
+    except Exception:
+        user_email = os.getenv("ZENO_USER_EMAIL", "")
+
     record = {
         "created_at": ts_str,
         "date": date_str,
         "project": project_name,
         "language": lang,
+        "user_email": user_email,
         "job_start_epoch": job_start,
         "job_end_epoch": job_end,
         "agent_name": agent["agent_name"],
         "agent_model": agent["agent_model"],
+        "agent_token_precision": agent.get("token_precision", "est"),
         "agent_context_start": agent.get("context_start", 0),
         "agent_context_end": agent.get("context_end", 0),
         "clips_count": clips_cnt,
@@ -444,6 +639,11 @@ def finalize_job_telemetry(
         "tokens_per_min": tok_per_min,
         "output_mp4": rel_out,
         "clips": clips,
+        "initial_edl": initial_edl,
+        "final_edl": final_edl,
+        "edl_diff": edl_diff,
+        "learned_rules": learned_rules,
+        "assets_used": assets_used,
     }
     write_json(snap_path, record)
 
@@ -508,21 +708,22 @@ def finalize_job_telemetry(
 
 def _format_project_report_md(r: Dict[str, Any]) -> str:
     t_model = r["clips"][0]["transcribe_model"] if r.get("clips") else "gemini-2.5-flash-lite"
+    prec_lbl = "(exact)" if r.get("agent_token_precision") == "exact" else "~(est.)"
     lines = [
         f"# Zeno Token & Raw Clip Telemetry — `{r['project']}`",
         "",
         f"- **Date**: `{r['created_at']}`",
         f"- **AI Agent Harness**: **{r['agent_name']}** | **Model**: `{r['agent_model']}`",
         f"- **Clips Processed**: `{r['clips_count']}` raw clips (`{r['raw_seconds']:.1f}s` raw → `{tc(r['video_seconds'])}` final `{r['output_mp4']}`)",
-        f"- **Video Edit Agent Tokens (This Edit Only)**: `{r['agent_in_tokens']:,}` in / `{r['agent_out_tokens']:,}` out / **`{r['agent_total_tokens']:,}` total** (`~{r['tokens_per_min']:,} agent tokens/min`)",
-        f"- **Gemini Audio Transcription Tokens (Separate)**: `{r['transcribe_in_tokens']:,}` in / `{r['transcribe_out_tokens']:,}` out / **`{r['transcribe_total_tokens']:,}` total** (`{t_model}`)",
+        f"- **Video Edit Agent Tokens (This Edit Only)**: `{r['agent_in_tokens']:,}` in / `{r['agent_out_tokens']:,}` out / **`{r['agent_total_tokens']:,}` total {prec_lbl}** (`~{r['tokens_per_min']:,} agent tokens/min`)",
+        f"- **Gemini Audio Transcription Tokens (Separate)**: `{r['transcribe_in_tokens']:,}` in / `{r['transcribe_out_tokens']:,}` out / **`{r['transcribe_total_tokens']:,}` total (exact)** (`{t_model}`)",
         "",
         "## 1. Separated Token Summary (AI Agent vs. Gemini Audio Transcription)",
         "",
         "| Bucket (Registered Separately) | Harness / Provider | Model | Input Tokens | Output Tokens | Total Tokens | Rate |",
         "|---|---|---|---:|---:|---:|---|",
-        f"| **1. AI Agent (Video Edit Only)** | **{r['agent_name']}** | `{r['agent_model']}` | `{r['agent_in_tokens']:,}` | `{r['agent_out_tokens']:,}` | **`{r['agent_total_tokens']:,}`** | `~{r['tokens_per_min']:,} tok/min` |",
-        f"| **2. Gemini Audio Transcription (Separate)** | **Gemini Cloud API** | `{t_model}` | `{r['transcribe_in_tokens']:,}` | `{r['transcribe_out_tokens']:,}` | **`{r['transcribe_total_tokens']:,}`** | `{r['clips_count']} clips` |",
+        f"| **1. AI Agent (Video Edit Only)** | **{r['agent_name']}** | `{r['agent_model']}` | `{r['agent_in_tokens']:,}` | `{r['agent_out_tokens']:,}` | **`{r['agent_total_tokens']:,}` {prec_lbl}** | `~{r['tokens_per_min']:,} tok/min` |",
+        f"| **2. Gemini Audio Transcription (Separate)** | **Gemini Cloud API** | `{t_model}` | `{r['transcribe_in_tokens']:,}` | `{r['transcribe_out_tokens']:,}` | **`{r['transcribe_total_tokens']:,}` (exact)** | `{r['clips_count']} clips` |",
         "",
         "## 2. Clip-by-Clip Raw Process & Gemini Transcription Breakdown",
         "",
@@ -582,8 +783,14 @@ Full relational history is also stored in local SQLite (`work/zeno_telemetry.db`
 
 
 def _sync_to_cloud(r: Dict[str, Any]) -> bool:
-    url = os.getenv("SCRIPTCUT_CLOUD_URL", "").strip()
-    token = os.getenv("SCRIPTCUT_CLOUD_TOKEN", "").strip()
+    try:
+        import auth_session
+        sess = auth_session.load_session()
+        url = str(sess.get("cloud_url") or auth_session.get_cloud_url()).strip()
+        token = str(sess.get("token") or "").strip()
+    except Exception:
+        url = (os.getenv("ZENO_CLOUD_URL") or os.getenv("SCRIPTCUT_CLOUD_URL") or "").strip()
+        token = (os.getenv("ZENO_CLOUD_TOKEN") or os.getenv("SCRIPTCUT_CLOUD_TOKEN") or "").strip()
     if not url or not token:
         return False
     try:
@@ -597,6 +804,9 @@ def _sync_to_cloud(r: Dict[str, Any]) -> bool:
         return resp.status_code == 200
     except Exception:
         return False
+
+
+_push_to_zeno_cloud = _sync_to_cloud
 
 
 def print_console_summary(r: Dict[str, Any]) -> None:

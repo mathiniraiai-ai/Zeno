@@ -170,10 +170,64 @@ def _strip_offscript_tail_babble(
     return trimmed
 
 
+def _ensure_16k_wav(audio_path: str | Path, work_dir: Optional[str | Path] = None) -> Path:
+    """Ensure audio_path points to a valid 16kHz mono PCM WAV file, never an MP4/MOV container."""
+    raw_p = Path(audio_path)
+    wdir = Path(work_dir) if work_dir else raw_p.parent
+    if raw_p.suffix.lower() == ".wav" and raw_p.is_file():
+        return raw_p
+    candidate_wav = wdir / "audio16k.wav"
+    if candidate_wav.is_file() and candidate_wav.stat().st_size > 44:
+        return candidate_wav
+    if raw_p.is_file():
+        import subprocess
+        wdir.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-i", str(raw_p), "-vn", "-ac", "1", "-ar", "16000",
+                "-c:a", "pcm_s16le", str(candidate_wav),
+            ],
+            check=False,
+        )
+        if candidate_wav.is_file() and candidate_wav.stat().st_size > 44:
+            return candidate_wav
+    return raw_p
+
+
+def _parse_script_path_to_lines(script_path: str | Path) -> List[str]:
+    """Read a script file and strip speaker prefixes (e.g. 'L1 Speaker:') and stage directions."""
+    import re
+    sp = Path(script_path)
+    if not sp.is_file():
+        return parse_target_script(str(script_path))
+    raw_text = sp.read_text(encoding="utf-8", errors="ignore")
+    clean_lines: List[str] = []
+    for raw_line in raw_text.splitlines():
+        s = raw_line.strip()
+        if not s or s.startswith(("#", "//", "---", "--")):
+            continue
+        if re.match(r"^(?:Concept|Visual)\s+(?:Reference|Brief)|^Characters?\s*:?$|^Scene\s+\d+|^\[?\s*Visual\s*:", s, re.I):
+            continue
+        if re.match(r"^[A-Za-z][A-Za-z0-9_ .]{0,24}?\s*(?:\([^)]*\))?\s*:\s*$", s):
+            continue
+        s = re.sub(r"^L?\d+[\.\)]?\s*(?::\s*)?", "", s).strip()
+        if re.match(r"^(?:(?:beat|action)\s*:\s*.+|\(.+\)|\[.+\]|\*.+\*)$", s, re.I):
+            continue
+        s = re.sub(r"^[A-Za-z0-9_ ]{1,22}\s+says:\s*", "", s, flags=re.I)
+        s = re.sub(r"^[A-Za-z][A-Za-z0-9_ ]{0,22}?(?:\s*\([^)]*\))?\s*:\s*", "", s)
+        s = re.sub(r"\s*\[(WRONG|RIGHT)\]\s*$", "", s, flags=re.I)
+        s = re.sub(r"\s*\[[^\]]*\]\s*", " ", s).strip()
+        if s:
+            clean_lines.append(s)
+    return clean_lines
+
+
 def transcribe_and_align_clip(
     wav_path: str | Path,
     lang: str = "auto",
     script_lines: Optional[List[str]] = None,
+    script_path: Optional[str | Path] = None,
     work_dir: Optional[str | Path] = None,
     offline_fallback: bool = False,
 ) -> Dict[str, Any]:
@@ -187,15 +241,18 @@ def transcribe_and_align_clip(
          non-silent audio tails (`[TAIL_BABBLE]`).
       4. Returns `{"words": [{"w": ..., "start": ..., "end": ..., "p": ...}], "language": lang, "tail_noise": [...]}`.
     """
-    wav_p = Path(wav_path)
-    wdir = Path(work_dir) if work_dir else wav_p.parent
+    raw_p = Path(wav_path)
+    wdir = Path(work_dir) if work_dir else raw_p.parent
+    wav_p = _ensure_16k_wav(raw_p, wdir)
 
     parsed_script_lines: Optional[List[str]] = None
     if script_lines:
         if isinstance(script_lines, (str, Path)):
-            parsed_script_lines = parse_target_script(str(script_lines))
+            parsed_script_lines = _parse_script_path_to_lines(script_lines)
         else:
             parsed_script_lines = parse_target_script("\n".join(str(x) for x in script_lines))
+    elif script_path:
+        parsed_script_lines = _parse_script_path_to_lines(script_path)
 
     # 1. Obtain verbatim word list
     if offline_fallback:

@@ -211,6 +211,101 @@ L2 S2.mp4 0.12-4.10 layout=split_h slot=right sp=Student tr=smoothleft@0.28 peer
         self.assertIn("intra_split_transition", bad_summary)
         self.assertIn("intra_split_whoosh", bad_summary)
 
+    def test_7_indic_schwa_deletion_vs_dravidian_retention(self) -> None:
+        from align_engine.phonetics.indic_phonemes import IndicPhoneticMapper
+
+        # Indo-Aryan (Hindi/Marathi/Gujarati/Bengali) word-final inherent schwa ('a') deletion
+        self.assertEqual(IndicPhoneticMapper.transliterate_indic_script("राम"), "raam")
+        self.assertEqual(IndicPhoneticMapper.transliterate_indic_script("बस"), "bas")
+        # Explicit final vowel matra ('aa' = ा) is preserved
+        self.assertEqual(IndicPhoneticMapper.transliterate_indic_script("करना"), "karanaa")
+        # Single-consonant monosyllable retains inherent vowel
+        self.assertEqual(IndicPhoneticMapper.transliterate_indic_script("न"), "na")
+        # Gujarati and Bengali word-final schwa deletion
+        self.assertEqual(IndicPhoneticMapper.transliterate_indic_script("રામ"), "raam")
+        self.assertEqual(IndicPhoneticMapper.transliterate_indic_script("রাম"), "raam")
+        # Dravidian (Kannada & Malayalam) word-final vowel is retained
+        self.assertEqual(IndicPhoneticMapper.transliterate_indic_script("ಅವಳ"), "avala")
+        self.assertTrue(
+            IndicPhoneticMapper.map_to_acoustic_tokens("ಅವಳ", lang="kn", is_native_indic=True, orig_word="ಅವಳ").endswith("A")
+        )
+        self.assertTrue(
+            IndicPhoneticMapper.map_to_acoustic_tokens("राम", lang="hi", is_native_indic=True, orig_word="राम").endswith("M")
+        )
+
+    def test_8_transcribe_and_align_clip_accepts_script_path_and_edl_diff(self) -> None:
+        import inspect
+        import tempfile
+        import align_engine
+        import token_tracker
+
+        sig = inspect.signature(align_engine.transcribe_and_align_clip)
+        self.assertIn("script_path", sig.parameters)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = Path(tmp) / "script.txt"
+            sp.write_text("L1 Nova: Stop saying Girl on Scooter [WRONG]\nL2 Ravi: Say riding a scooter [RIGHT]\n", encoding="utf-8")
+            parsed = align_engine._parse_script_path_to_lines(sp)
+            self.assertEqual(parsed, ["Stop saying Girl on Scooter", "Say riding a scooter"])
+
+        init_edl = (
+            "#canvas 1080x1920@30 preset=single mark_pack=flash\n"
+            "L1 S1.mp4 1.00-4.00 layout=single z=1.0 # Hook\n"
+            "L2 S2.mp4 0.50-3.50 layout=split_h z=1.0 slot=right peer=S1.mp4@1.0 # Line 2\n"
+        )
+        final_edl = (
+            "#canvas 1080x1920@30 preset=single mark_pack=flash\n"
+            "L1 S1.mp4 1.12-3.90 layout=single z=sudden_in:1.08 tr=whip_left@0.28 # Hook\n"
+            "L2 S3.mp4 0.50-3.50 layout=split_h z=1.0 slot=right peer=S1.mp4@1.0 # Line 2 swapped\n"
+        )
+        diff = token_tracker.compute_edl_learning_diff(init_edl, final_edl)
+        self.assertTrue(diff["has_edits"])
+        self.assertEqual(len(diff["take_swaps"]), 1)
+        self.assertEqual(diff["take_swaps"][0]["line_id"], "L2")
+        self.assertEqual(len(diff["cut_timing_deltas"]), 1)
+        self.assertEqual(len(diff["zoom_changes"]["changes"]), 1)
+        self.assertEqual(len(diff["transition_changes"]["changes"]), 1)
+
+    def test_9_auth_session_persistence_and_localhost_callback(self) -> None:
+        import tempfile
+        import threading
+        import urllib.request
+        import auth_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sess_file = Path(tmp) / ".zeno_session.json"
+            env_file = Path(tmp) / ".env"
+            saved = auth_session.save_session(
+                token="zeno_unit_test_tok_123456",
+                email="editor@gosupernova.live",
+                name="Test Editor",
+                cloud_url="https://zeno-production-bef7.up.railway.app",
+                session_path=sess_file,
+                write_dotenv=True,
+                dotenv_path=env_file,
+            )
+            self.assertEqual(saved["email"], "editor@gosupernova.live")
+            loaded = auth_session.get_active_session(session_path=sess_file)
+            self.assertEqual(loaded["token"], "zeno_unit_test_tok_123456")
+
+            # Localhost callback server capture test (simulating browser redirect after Google login)
+            srv, port = auth_session.start_callback_server(preferred_port=0)
+            try:
+                def _send_cb():
+                    url = f"http://127.0.0.1:{port}/callback?token=zeno_browser_cb_999&email=mathini%40gosupernova.live&name=Mathini"
+                    with urllib.request.urlopen(url, timeout=5) as resp:
+                        self.assertEqual(resp.status, 200)
+
+                t = threading.Thread(target=_send_cb)
+                t.start()
+                srv.handle_request()
+                t.join(timeout=5)
+                self.assertIsNotNone(srv.auth_result)
+                self.assertEqual(srv.auth_result["token"], "zeno_browser_cb_999")
+                self.assertEqual(srv.auth_result["email"], "mathini@gosupernova.live")
+            finally:
+                srv.server_close()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

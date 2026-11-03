@@ -81,19 +81,24 @@ if (Test-Path ".env") {
     Write-Host "[4/5] Created .env from .env.example"
 }
 
-# 5. Alignment model (Meta wav2vec2, about 360 MB, into models\torch) + real checks
+# 5. Alignment model (Meta wav2vec2, about 360 MB, into models\torch) + automatic Google login + real checks
 Write-Host "[5/5] Downloading the alignment model (first time only) and checking everything..."
 $ErrorActionPreference = "Continue"
 & .venv\Scripts\python.exe scripts\setup.py --prewarm | Out-Null
+& .venv\Scripts\python.exe scripts\setup.py --whoami | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[Auth] Opening your browser to sign in with Google (@gosupernova.live)..."
+    & .venv\Scripts\python.exe scripts\setup.py --login
+}
 & .venv\Scripts\python.exe scripts\setup.py --smoke
 
 Write-Host ""
 Write-Host "=============================================="
-if (Select-String -Path ".env" -Pattern "^SCRIPTCUT_CLOUD_TOKEN=.+" -Quiet) {
-    Write-Host " Done. Zeno is ready."
+& .venv\Scripts\python.exe scripts\setup.py --whoami | Out-Null
+if ($LASTEXITCODE -eq 0) {
+    Write-Host " Done. Zeno is signed in and ready!"
 } else {
-    Write-Host " Almost done: generate your key at"
-    Write-Host "   https://zeno-production-bef7.up.railway.app"
-    Write-Host " and paste it after SCRIPTCUT_CLOUD_TOKEN= in the .env file."
+    Write-Host " Almost done: sign in anytime by running:"
+    Write-Host "   .venv\Scripts\python.exe scripts\setup.py --login"
 }
 Write-Host "=============================================="

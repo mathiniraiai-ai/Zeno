@@ -232,17 +232,33 @@ class IndicPhoneticMapper:
         """
         Pure-Python G2P transliterator for the Indic Unicode blocks (Devanagari, Bengali/Assamese, Gurmukhi,
         Gujarati, Odia, Tamil, Telugu, Kannada, Malayalam). Input is NFC-normalised and invisible joiners dropped.
+        Applies word-final inherent schwa ('a') deletion for Indo-Aryan blocks (Devanagari, Bengali, Gurmukhi,
+        Gujarati) on multi-character words ending in a non-conjunct bare consonant.
         """
         text = unicodedata.normalize("NFC", text)
         for ch in INVISIBLE_CHARS:
             text = text.replace(ch, "")
         n = len(text)
 
+        schwa_drop_bases = {0x0900, 0x0980, 0x0A00, 0x0A80}
+
         def block(code: int):
             for b in INDIC_BASES:
                 if b <= code <= b + 0x7F:
                     return b
             return None
+
+        def is_indic_word_char(idx: int) -> bool:
+            if idx < 0 or idx >= n:
+                return False
+            code_pt = ord(text[idx])
+            b = block(code_pt)
+            if b is None:
+                return False
+            off = code_pt - b
+            if b == 0x0900 and off == 0x70:  # Devanagari abbreviation sign
+                return False
+            return (0x01 <= off <= 0x63) or (0x70 <= off <= 0x7F)
 
         res = []
         i = 0
@@ -274,7 +290,16 @@ class IndicPhoneticMapper:
                         res.append(cons + (extra_v or INDIC_VOWELS[next_offset]))
                         i = j + 1
                         continue
-                res.append(cons + 'a')
+                # Word-final inherent schwa deletion for Indo-Aryan scripts (hi/mr/bn/pa/gu):
+                # Drop trailing 'a' when at word end, preceded by at least one Indic character
+                # (not a single-consonant monosyllable like "न"/"व"), and not preceded by virama (0x4D).
+                at_word_end = not is_indic_word_char(j)
+                has_prev_word_char = is_indic_word_char(i - 1)
+                preceded_by_virama = i > 0 and (ord(text[i - 1]) - base == 0x4D)
+                if base in schwa_drop_bases and at_word_end and has_prev_word_char and not preceded_by_virama:
+                    res.append(cons)
+                else:
+                    res.append(cons + 'a')
                 i = j
                 continue
 

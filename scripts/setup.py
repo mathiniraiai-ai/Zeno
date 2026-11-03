@@ -168,22 +168,27 @@ def verify_assets() -> bool:
 
 def check_env() -> None:
     print("\n[5/5] Checking Environment & API Configuration...")
+    common.load_dotenv()
+    import auth_session
+    info = auth_session.get_session_info()
     local_env = common.ROOT / ".env"
     sibling_env = common.SCRIPTCUT_ROOT / ".env"
-    has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
-    has_service = bool(os.environ.get("SCRIPTCUT_CLOUD_URL")) and bool(os.environ.get("SCRIPTCUT_CLOUD_TOKEN"))
-    if local_env.is_file():
+    session_file = common.ROOT / ".zeno_session.json"
+    if session_file.is_file():
+        print(f"  [OK] Found active Zeno Cloud session ({session_file.name}: {info.get('email') or info.get('name') or 'authenticated'})")
+    elif local_env.is_file():
         print(f"  [OK] Found local .env ({local_env})")
     elif sibling_env.is_file():
         print(f"  [OK] Using fallback sibling .env ({sibling_env})")
     else:
-        print("  [i] No .env file found. Copy .env.example to .env and add your personal Zeno key.")
-    if has_service:
-        print("  [OK] Transcription configured: Team service key (SCRIPTCUT_CLOUD_URL + SCRIPTCUT_CLOUD_TOKEN)")
-    elif has_gemini:
+        print("  [i] No session or .env found yet. Run: python3 scripts/setup.py --login")
+
+    if info.get("mode") == "zeno_cloud":
+        print(f"  [OK] Transcription configured: Zeno Cloud session ({info.get('source')})")
+    elif info.get("mode") == "gemini_direct":
         print("  [OK] Transcription configured: Direct GEMINI_API_KEY")
     else:
-        print("  [i] Transcription configured: No (offline fallback active)")
+        print("  [i] Transcription configured: No (run: python3 scripts/setup.py --login)")
 
 
 def smoke_test() -> bool:
@@ -225,14 +230,16 @@ def smoke_test() -> bool:
     ok = ok and good
 
     common.load_dotenv()
-    via_service = bool(os.environ.get("SCRIPTCUT_CLOUD_URL") and os.environ.get("SCRIPTCUT_CLOUD_TOKEN"))
-    has_key = bool(os.environ.get("GEMINI_API_KEY")) or via_service
-    if via_service and not os.environ.get("GEMINI_API_KEY"):
-        detail = "team service address and key set (not called)"
-    elif os.environ.get("GEMINI_API_KEY"):
+    import auth_session
+    info = auth_session.get_session_info()
+    has_key = bool(info.get("authenticated"))
+    if info.get("mode") == "zeno_cloud":
+        who = info.get("email") or info.get("name") or "team token"
+        detail = f"Zeno Cloud session active ({who}, source={info.get('source')})"
+    elif info.get("mode") == "gemini_direct":
         detail = "Gemini key set in .env (not called)"
     else:
-        detail = "no key yet. Generate one at the Zeno key page and paste it after SCRIPTCUT_CLOUD_TOKEN= in .env"
+        detail = "not signed in yet. Run: python3 scripts/setup.py --login"
     print(f"  [{'OK' if has_key else 'FAIL'}] Transcription access: {detail}")
     ok = ok and has_key
     return ok
@@ -243,7 +250,31 @@ def main():
     ap.add_argument("--init-venv", action="store_true", help="Create local .venv and install dependencies")
     ap.add_argument("--prewarm", action="store_true", help="Pre-download wav2vec2 checkpoint into models/torch")
     ap.add_argument("--smoke", action="store_true", help="Run real checks: FFmpeg filters, wav2vec2 forward pass, Gemini key")
+    ap.add_argument("--login", action="store_true", help="Open browser for Google Sign-In and auto-save session token")
+    ap.add_argument("--whoami", action="store_true", help="Check active Zeno Cloud / Gemini authentication status")
+    ap.add_argument("--logout", action="store_true", help="Clear saved local Zeno Cloud session token")
     args = ap.parse_args()
+
+    common.load_dotenv()
+    import auth_session
+
+    if args.logout:
+        auth_session.logout()
+        print("  [Zeno Auth] Logged out and cleared local session.")
+        sys.exit(0)
+
+    if args.whoami:
+        info = auth_session.get_session_info()
+        if info.get("authenticated"):
+            who = info.get("email") or info.get("name") or info.get("mode")
+            print(f"  [OK] Signed in ({who} via {info.get('source')})")
+            sys.exit(0)
+        print("  [i] Not signed in. Run: python3 scripts/setup.py --login")
+        sys.exit(1)
+
+    if args.login:
+        ok_login = auth_session.interactive_login()
+        sys.exit(0 if ok_login else 1)
 
     print("=" * 72)
     print(f"Zeno Setup — {platform.system()} {platform.release()} ({platform.machine()})")

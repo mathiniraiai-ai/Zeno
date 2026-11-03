@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # Zeno — Low-Token Operational Manual
 
 Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input/footage/` and a script in `input/script/`, output best takes, pause-snapped cuts, dynamic speaker layouts, and `✓`/`✗` marks + SFX to `~/Downloads/Zeno Outputs/`.
@@ -97,5 +101,34 @@ whoosh.wav | L3 | 0.0 | -10
 ```
 - **SFX (`assets/sfx/`)**: Right: `correct_ding.wav`, `sn_correct.wav`, `w42_right.wav` | Wrong: `buzzer.wav`, `sn_wrong.wav`, `w42_wrong.wav` | Transitions: `whoosh.wav`, `pop.wav`.
 
+## 7. Developing the Zeno code itself (not editing a video)
+
+Use `.venv/bin/python` (Python 3.12; `uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt`, or run `install.command` / `install.bat`). `scripts/zeno.py` re-execs itself into `.venv` automatically.
+
+```bash
+.venv/bin/python -m unittest tests.test_engine                                  # engine regression suite (~0.1 s, no API calls)
+.venv/bin/python -m unittest tests.test_engine.TestZenoEngine.<test_name>       # one test
+.venv/bin/python scripts/setup.py --smoke                                       # env check, never prints keys (--prewarm downloads the 360 MB wav2vec2 weights)
+.venv/bin/python scripts/eval_alignment.py --help                               # score word timing against hand-marked labels
+.venv/bin/python scripts/clean.py [--apply]                                     # free disk (dry run by default; only touches work/ and input/standins|reference)
+python service/test_keys.py                                                     # service: signup/admin/revoke/usage on local SQLite (add --database-url postgresql://... for Postgres)
+python service/test_service.py [--no-live | --url https://<host> --token zeno_...]
+python service/check_prompt_sync.py                                             # must pass after editing either copy of the Gemini prompt
+cd service && uvicorn app:app --port 8000                                       # run the key/transcription service locally
+```
+There is no linter or build step. `tests/test_engine.py` also scores a gold-set plan under `work/` (git-ignored), so that check only runs where the work folder exists.
+
+## 8. Architecture (big picture)
+
+**Director / Engine split.** A thin LLM "Director" (`agent/DIRECTOR.md` + `agent/concepts/*`) only reads small text files and edits `plan.edl`; everything measurable is Python in `scripts/`. This is why the token budget is low: do not move measuring work into prompts. `CLAUDE.md` and `AGENTS.md` (Antigravity/OpenAI) are parallel manuals and must be kept in sync.
+
+**Pipeline** (`scripts/zeno.py` orchestrates; the older `prepare.py` → `render.py` CLI still works): ingest/extract audio → transcribe → align → group takes and match script lines → write `brief.txt` + `plan.edl`/`plan.json` + `pitch_card.md` → Yes/No gate → `render.py` (+ `premiere_export.py`, `verify.py`, token telemetry).
+- `prepare.py` is the large planner: take grouping/scoring, wrong-speaker detection (`speaker_check.py`), silent-beat handling (`motion.py`), cut snapping to 10 ms RMS minima, mark/SFX placement. Per-clip caches live in `work/_clips/<stem>-<fingerprint>`.
+- `edl_parser.py` is the lossless `plan.edl` ⇄ `plan.json` bridge; `render.py` + `layouts.py` turn segments into FFmpeg filter graphs (layouts, zooms, overlay transitions from `assets/transitions/*.json`, marks, SFX, loudness). `vision_tracker.py` (OpenCV/YuNet) drives framing.
+- `scripts/align_engine/` is the alignment stack: Gemini verbatim transcript (`gemini_transcriber.py`) → `guardian.py`/lexicon loanword healing → Indic G2P (`phonetics/`, `uroman/` fallback) → wav2vec2 base CTC (`acoustic.py`, `viterbi.py`) → energy snaps in `onset_verifier.py`. wav2vec2 base (MIT) is the only aligner; MMS (CC-BY-NC) must not come back.
+- Tuning thresholds live in `styles/<name>/spec.json` (`tuning`/`engine` blocks) read through `style_config.py`; learned editor rules persist in `styles/<name>/brain_memory.json` (`brain_memory.py`) and are injected into `brief.txt`. New styles are learned from a reference video with `learn_reference.py` (scan → frames → align → standins).
+
+**Transcription & Editorial Learning Service** (`service/`, FastAPI on Railway, deployed from this folder as its own root): holds the only Gemini key and collects team editorial learnings. Team PCs authenticate once via zero-touch Google OAuth (`python3 scripts/setup.py --login` or `install.command`, which opens the browser for `@gosupernova.live` / `@gosupernova.line` sign-in and automatically saves `.zeno_session.json` + `ZENO_CLOUD_URL` / `ZENO_CLOUD_TOKEN` in `.env`, with legacy `SCRIPTCUT_CLOUD_*` fallback). Keys are stored as SHA-256 hashes in Postgres (SQLite locally) and revocable at `/admin`. `scripts/token_tracker.py` posts per-run telemetry, `plan.auto.edl -> plan.edl` diffs, and `brain_memory.json` rules to `/v1/telemetry`, and `python3 scripts/zeno.py --sync-learnings` syncs shared rules via `/v1/learnings`. `service/prompt.py` is a deliberate copy of the prompt in `gemini_transcriber.py` (Railway only sees `service/`); keep them identical.
+
 ## Secrets (all agents)
-Never open, print, quote or paste `.env` or any key in a chat or log. It holds the user's personal Zeno key (or a Gemini key). To check setup, run `python3 scripts/setup.py --smoke`; it reports [OK]/[FAIL] without showing keys. Read `.env.example` instead if you need the variable names.
+Never open, print, quote or paste `.env`, `.zeno_session.json`, or any key in a chat or log. They hold the user's personal Zeno session token (or a Gemini key). To check setup, run `python3 scripts/setup.py --smoke` or `python3 scripts/setup.py --whoami`; they report [OK]/[FAIL] without showing keys. Read `.env.example` instead if you need the variable names.

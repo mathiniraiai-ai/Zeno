@@ -92,3 +92,61 @@ def format_brain_memory_for_brief(style_name: str = "micronarrative") -> List[st
         txt = r.get("rule", "")
         out.append(f"  - [{rid}] {txt}")
     return out
+
+
+def sync_brain_memory_with_cloud(style_name: str = "micronarrative") -> Dict[str, Any]:
+    """Push local `brain_memory.json` rules to Zeno Cloud (`/v1/learnings/rule`) and pull any new shared team rules."""
+    import auth_session
+    sess = auth_session.load_session()
+    token = str(sess.get("token") or "").strip()
+    cloud_url = str(sess.get("cloud_url") or auth_session.get_cloud_url()).strip().rstrip("/")
+    if not token or not cloud_url:
+        return {"ok": False, "pushed": 0, "pulled": 0, "message": "No active Zeno Cloud session token"}
+
+    local_rules = load_brain_memory(style_name)
+    pushed = 0
+    pulled = 0
+    try:
+        import httpx
+        headers = {"Authorization": f"Bearer {token}"}
+        with httpx.Client(timeout=10.0) as client:
+            for r in local_rules:
+                resp = client.post(
+                    f"{cloud_url}/v1/learnings/rule",
+                    headers=headers,
+                    json={
+                        "rule": r.get("rule", ""),
+                        "category": r.get("category", "editorial"),
+                        "language": r.get("lang", "all"),
+                        "style": style_name,
+                        "source": "sync_learnings",
+                    },
+                )
+                if resp.status_code == 200:
+                    pushed += 1
+
+            get_resp = client.get(f"{cloud_url}/v1/learnings", headers=headers, params={"limit": 100})
+            if get_resp.status_code == 200:
+                data = get_resp.json()
+                cloud_rules = data.get("learned_rules") if isinstance(data, dict) else []
+                existing_texts = {str(x.get("rule", "")).strip().lower() for x in local_rules}
+                for cr in cloud_rules or []:
+                    rtxt = str(cr.get("rule_text") or cr.get("rule") or "").strip()
+                    if rtxt and rtxt.lower() not in existing_texts:
+                        add_brain_memory_rule(
+                            rule_text=rtxt,
+                            category=str(cr.get("category") or "editorial"),
+                            rule_id=str(cr.get("rule_id") or ""),
+                            style_name=style_name,
+                        )
+                        existing_texts.add(rtxt.lower())
+                        pulled += 1
+        return {
+            "ok": True,
+            "pushed": pushed,
+            "pulled": pulled,
+            "message": f"Pushed {pushed} rule(s) to Zeno Cloud and pulled {pulled} new team rule(s).",
+        }
+    except Exception as exc:
+        return {"ok": False, "pushed": pushed, "pulled": pulled, "message": f"Cloud sync warning: {exc}"}
+

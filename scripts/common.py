@@ -72,6 +72,42 @@ def load_dotenv(dotenv_path=None, override=False):
             if override or key not in os.environ:
                 os.environ[key] = val
                 loaded[key] = val
+
+    # Auto-load local zero-copy OAuth session from .zeno_session.json if present
+    session_path = ROOT / ".zeno_session.json"
+    if session_path.is_file():
+        try:
+            sess = json.loads(session_path.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(sess, dict):
+                sess_map = {
+                    "ZENO_CLOUD_TOKEN": str(sess.get("token") or "").strip(),
+                    "SCRIPTCUT_CLOUD_TOKEN": str(sess.get("token") or "").strip(),
+                    "ZENO_CLOUD_URL": str(sess.get("cloud_url") or "").strip(),
+                    "SCRIPTCUT_CLOUD_URL": str(sess.get("cloud_url") or "").strip(),
+                    "ZENO_USER_EMAIL": str(sess.get("email") or "").strip(),
+                    "ZENO_USER_NAME": str(sess.get("name") or "").strip(),
+                }
+                for k, v in sess_map.items():
+                    if v and (override or not os.environ.get(k)):
+                        os.environ[k] = v
+                        loaded[k] = v
+        except Exception:
+            pass
+
+    # Mirror ZENO_CLOUD_URL <-> SCRIPTCUT_CLOUD_URL and ZENO_CLOUD_TOKEN <-> SCRIPTCUT_CLOUD_TOKEN
+    for a, b in (
+        ("ZENO_CLOUD_URL", "SCRIPTCUT_CLOUD_URL"),
+        ("ZENO_CLOUD_TOKEN", "SCRIPTCUT_CLOUD_TOKEN"),
+    ):
+        va = os.environ.get(a, "").strip()
+        vb = os.environ.get(b, "").strip()
+        if va and not vb:
+            os.environ[b] = va
+            loaded[b] = va
+        elif vb and not va:
+            os.environ[a] = vb
+            loaded[a] = vb
+
     return loaded
 
 

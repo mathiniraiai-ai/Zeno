@@ -191,14 +191,74 @@ class _Gemini:
 _gemini = _Gemini()
 
 
+def _allowed_domains() -> List[str]:
+    raw = os.getenv(
+        "ZENO_ALLOWED_EMAIL_DOMAINS",
+        os.getenv("ZENO_ALLOWED_EMAIL_DOMAIN", "gosupernova.live,gosupernova.line"),
+    )
+    domains = [d.strip().lower().lstrip("@") for d in raw.split(",") if d.strip()]
+    for default_dom in ("gosupernova.live", "gosupernova.line"):
+        if default_dom not in domains and raw.strip() in ("", "gosupernova.live", "gosupernova.line"):
+            domains.append(default_dom)
+    return domains or ["gosupernova.live", "gosupernova.line"]
+
+
+def _admin_emails() -> List[str]:
+    raw = os.getenv("ZENO_ADMIN_EMAILS", "")
+    return [e.strip().lower() for e in raw.split(",") if e.strip()]
+
+
+def _is_allowed_email(email: str) -> bool:
+    email = (email or "").strip().lower()
+    if not email or "@" not in email:
+        return False
+    if email in _admin_emails():
+        return True
+    domain = email.rsplit("@", 1)[1]
+    return domain in _allowed_domains()
+
+
 @app.get("/health")
 def health() -> Dict[str, Any]:
     try:
         backend, db_ok = store().backend.split(":")[0], True
     except Exception:
         backend, db_ok = "none", False
-    return {"ok": True, "gemini_configured": bool(_gemini_keys()), "key_store": backend, "key_store_ok": db_ok,
-            "signup_code_required": bool(os.getenv("ZENO_SIGNUP_CODE")), "email_domain": os.getenv("ZENO_ALLOWED_EMAIL_DOMAIN", "gosupernova.live").strip().lstrip("@"), "admin_enabled": bool(os.getenv("ZENO_ADMIN_PASSWORD"))}
+    domains = _allowed_domains()
+    client_id = (os.getenv("ZENO_GOOGLE_CLIENT_ID") or os.getenv("GOOGLE_CLIENT_ID") or "").strip()
+    return {
+        "ok": True,
+        "gemini_configured": bool(_gemini_keys()),
+        "key_store": backend,
+        "key_store_ok": db_ok,
+        "google_oauth_enabled": bool(client_id),
+        "allowed_domains": domains,
+        "signup_code_required": bool(os.getenv("ZENO_SIGNUP_CODE")),
+        "email_domain": domains[0] if domains else "gosupernova.live",
+        "admin_enabled": bool(os.getenv("ZENO_ADMIN_PASSWORD") or client_id or _admin_emails()),
+    }
+
+
+@app.get("/api/auth/config")
+def auth_config() -> Dict[str, Any]:
+    domains = _allowed_domains()
+    client_id = (os.getenv("ZENO_GOOGLE_CLIENT_ID") or os.getenv("GOOGLE_CLIENT_ID") or "").strip()
+    return {
+        "google_client_id": client_id,
+        "google_oauth_enabled": bool(client_id),
+        "allowed_domains": domains,
+        "primary_domain": domains[0] if domains else "gosupernova.live",
+        "signup_code_required": bool(os.getenv("ZENO_SIGNUP_CODE")),
+        "admin_password_enabled": bool(os.getenv("ZENO_ADMIN_PASSWORD")),
+        "admin_allow_domain": os.getenv("ZENO_ADMIN_ALLOW_DOMAIN", "1").strip().lower() in ("1", "true", "yes"),
+    }
+
+
+@app.get("/v1/me")
+def get_me(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    name, key_id = authenticate(authorization)
+    email = store().get_key_email(key_id) if key_id is not None and hasattr(store(), "get_key_email") else ""
+    return {"ok": True, "name": name, "email": email, "key_id": key_id}
 
 
 @app.post("/v1/transcribe")
@@ -251,7 +311,7 @@ def transcribe(
 
 @app.post("/v1/telemetry")
 async def record_telemetry(request: Request, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
-    """Record a completed video edit run (agent name/model, per-clip process & tokens, overall tokens) into Postgres."""
+    """Record a completed video edit run (agent name/model, per-clip process & tokens, EDL diff, learned rules) into Postgres."""
     name, key_id = authenticate(authorization)
     check_rate(name)
     try:
@@ -273,15 +333,86 @@ async def record_telemetry(request: Request, authorization: Optional[str] = Head
     return {"ok": True, "run_id": run_id}
 
 
-# ---------------------------------------------------------------- key signup and admin pages
+class LearnedRuleBody(BaseModel):
+    rule: str = ""
+    rule_text: str = ""
+    category: str = "general"
+    language: str = "all"
+    lang: str = ""
+    style: str = "micronarrative"
+    project: str = ""
+    source: str = "cli_remember"
+    metadata: Dict[str, Any] = {}
+
+
+@app.get("/v1/learnings")
+def get_learnings(
+    language: Optional[str] = None,
+    lang: Optional[str] = None,
+    style: Optional[str] = None,
+    limit: int = 100,
+    authorization: Optional[str] = Header(None),
+    x_admin_password: Optional[str] = Header(None),
+) -> JSONResponse:
+    """Return aggregated editorial learnings across all team runs: learned_rules, edl_diffs, language_patterns, assets_used."""
+    try:
+        authenticate(authorization)
+    except HTTPException:
+        _check_admin(authorization, x_admin_password)
+
+    ks = store()
+    data = ks.get_learnings(limit=limit, lang=lang or language)
+    return JSONResponse(data, headers=NO_STORE)
+
+
+@app.post("/v1/learnings")
+@app.post("/v1/learnings/rule")
+def post_learned_rule(
+    body: LearnedRuleBody,
+    authorization: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    """Store a new learned editorial rule pushed from `zeno.py --remember` into the shared team database."""
+    name, key_id = authenticate(authorization)
+    check_rate(name)
+    rule_text = (body.rule or body.rule_text or "").strip()
+    if not rule_text:
+        raise HTTPException(400, "Rule text cannot be empty")
+    lang_code = (body.lang or body.language or "all").strip() or "all"
+    try:
+        rule_id = store().record_learned_rule(
+            key_id=key_id,
+            editor_name=name,
+            rule=rule_text,
+            category=body.category.strip() or "general",
+            language=lang_code,
+            project=body.project.strip(),
+            source=body.source.strip() or "cli_remember",
+            metadata=body.metadata,
+        )
+    except Exception:
+        log.exception("could not record learned rule")
+        raise HTTPException(503, "Could not store learned rule")
+    log.info("learned_rule id=%s user=%s lang=%s category=%s", rule_id, name, lang_code, body.category)
+    return {"ok": True, "rule_id": rule_id, "editor_name": name, "rule": rule_text, "language": lang_code}
+
+
+# ---------------------------------------------------------------- key signup, Google OAuth & admin pages
 NO_STORE = {"Cache-Control": "no-store"}
 _signup_hits: Dict[str, deque] = defaultdict(deque)
 
 
 class SignupBody(BaseModel):
     name: str
-    email: str = ""   # optional: when empty it is built from the name (the page only asks for the name)
+    email: str = ""   # optional: when empty it is built from the name
     code: str = ""
+
+
+class GoogleAuthBody(BaseModel):
+    credential: str = ""      # Google Identity Services ID token (JWT)
+    access_token: str = ""    # OAuth2 access token
+    code: str = ""            # OAuth2 authorization code
+    redirect_uri: str = ""    # Used when exchanging authorization code
+    name: str = ""
 
 
 def _client_ip(request: Request) -> str:
@@ -304,9 +435,106 @@ def _check_signup_rate(ip: str, record: bool = False) -> None:
             raise HTTPException(429, "Too many keys requested, try again in an hour")
 
 
+def _verify_google_identity(body: GoogleAuthBody) -> Dict[str, str]:
+    """Verify Google ID token / access token / auth code via Google's tokeninfo endpoint using httpx."""
+    import httpx
+
+    id_token = body.credential.strip()
+    access_token = body.access_token.strip()
+    client_id = (os.getenv("ZENO_GOOGLE_CLIENT_ID") or os.getenv("GOOGLE_CLIENT_ID") or "").strip()
+    client_secret = (os.getenv("ZENO_GOOGLE_CLIENT_SECRET") or os.getenv("GOOGLE_CLIENT_SECRET") or "").strip()
+
+    with httpx.Client(timeout=10.0) as client:
+        if body.code.strip() and not id_token and not access_token:
+            if not client_id or not client_secret:
+                raise HTTPException(400, "Google OAuth code exchange is not configured on this server")
+            token_resp = client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "code": body.code.strip(),
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "redirect_uri": body.redirect_uri.strip() or "postmessage",
+                    "grant_type": "authorization_code",
+                },
+            )
+            if token_resp.status_code != 200:
+                raise HTTPException(401, "Invalid Google authorization code")
+            tok_data = token_resp.json()
+            id_token = tok_data.get("id_token", "")
+            access_token = tok_data.get("access_token", "")
+
+        if id_token:
+            resp = client.get("https://oauth2.googleapis.com/tokeninfo", params={"id_token": id_token})
+            if resp.status_code != 200:
+                raise HTTPException(401, "Invalid Google ID token")
+            info = resp.json()
+            if client_id and info.get("aud") != client_id:
+                raise HTTPException(401, "Google ID token audience mismatch")
+        elif access_token:
+            resp = client.get(
+                "https://www.googleapis.com/oauth2/v3/userinfo",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if resp.status_code != 200:
+                raise HTTPException(401, "Invalid Google access token")
+            info = resp.json()
+        else:
+            raise HTTPException(400, "Missing Google credential or access_token")
+
+    email = str(info.get("email") or "").strip().lower()
+    verified = str(info.get("email_verified", "true")).lower() in ("true", "1")
+    if not email or not verified:
+        raise HTTPException(401, "Google account email is not verified")
+
+    if not _is_allowed_email(email):
+        raise HTTPException(403, "Only @gosupernova.live / @gosupernova.line accounts are permitted")
+
+    name = (
+        str(info.get("name") or "").strip()
+        or body.name.strip()
+        or email.split("@", 1)[0].replace(".", " ").title()
+    )
+    return {
+        "email": email,
+        "name": name[:60],
+        "sub": str(info.get("sub") or ""),
+        "picture": str(info.get("picture") or ""),
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 def signup_page() -> HTMLResponse:
     return HTMLResponse(SIGNUP_PAGE, headers=NO_STORE)
+
+
+@app.post("/api/auth/google")
+def google_auth_login(body: GoogleAuthBody, request: Request) -> JSONResponse:
+    ip = _client_ip(request)
+    _check_signup_rate(ip)
+    profile = _verify_google_identity(body)
+    email = profile["email"]
+    name = profile["name"]
+    try:
+        res = store().create_or_get_google_key(name, email, google_sub=profile.get("sub", ""))
+    except Exception:
+        log.exception("key store unavailable during google auth")
+        raise HTTPException(503, "Could not issue key right now, try again shortly")
+
+    _check_signup_rate(ip, record=True)
+    log.info("google auth key issued for %s <%s>", name, email)
+    return JSONResponse(
+        {
+            "key": res["key"],
+            "token": res["key"],
+            "name": name,
+            "email": email,
+            "prefix": res["prefix"],
+            "key_id": res["key_id"],
+            "picture": profile.get("picture", ""),
+        },
+        headers=NO_STORE,
+    )
 
 
 @app.post("/api/keys")
@@ -317,17 +545,26 @@ def create_key(body: SignupBody, request: Request) -> JSONResponse:
     if code and not hmac.compare_digest(body.code.encode(), code.encode()):
         _check_signup_rate(ip, record=True)
         raise HTTPException(403, "Wrong team code")
-    domain = os.getenv("ZENO_ALLOWED_EMAIL_DOMAIN", "gosupernova.live").strip().lower().lstrip("@")
-    name = re.sub(r"\s*@" + re.escape(domain) + r"\s*$", "", body.name.strip(), flags=re.I)   # people may type the whole address
+    domains = _allowed_domains()
+    primary_domain = domains[0] if domains else "gosupernova.live"
+    raw_input = body.name.strip()
+    supplied_email = body.email.strip().lower()
+    if "@" in raw_input and not supplied_email:
+        supplied_email = raw_input.lower()
+        name = raw_input.split("@", 1)[0].replace(".", " ").title()
+    else:
+        name = re.sub(r"\s*@[a-z0-9.-]+\s*$", "", raw_input, flags=re.I)
+
     if not re.fullmatch(r"[^\W\d_][\w .'-]{0,39}", name):
         raise HTTPException(400, "Enter your name (letters, spaces, . ' - only, up to 40)")
-    if body.email.strip():
-        email = body.email.strip().lower()
-    else:   # "Mathinirai Selvan" -> mathinirai.selvan@gosupernova.live
+    if supplied_email:
+        email = supplied_email
+    else:
         local = re.sub(r"[^a-z0-9._-]", "", re.sub(r"\s+", ".", name.lower()))
-        email = f"{local}@{domain}"
-    if not re.fullmatch(r"[a-z0-9._%+-]{1,64}@" + re.escape(domain), email):
-        raise HTTPException(400, f"Type your name the way it appears in your company email (name@{domain})")
+        email = f"{local}@{primary_domain}"
+    if not _is_allowed_email(email) or not re.fullmatch(r"[a-z0-9._%+-]{1,64}@[a-z0-9.-]+", email):
+        allowed_str = " or @".join(domains)
+        raise HTTPException(400, f"Only @{allowed_str} accounts are permitted")
     try:
         key = store().create(name, email)
     except ValueError as exc:
@@ -337,38 +574,78 @@ def create_key(body: SignupBody, request: Request) -> JSONResponse:
         raise HTTPException(503, "Could not create a key right now, try again shortly")
     _check_signup_rate(ip, record=True)
     log.info("key created for %s <%s>", name, email)
-    return JSONResponse({"key": key, "email": email}, headers=NO_STORE)
+    return JSONResponse({"key": key, "token": key, "name": name, "email": email, "prefix": key[:12]}, headers=NO_STORE)
 
 
-def require_admin(authorization: Optional[str]) -> None:
-    password = os.getenv("ZENO_ADMIN_PASSWORD", "")
-    if not password:
-        raise HTTPException(503, "Admin is not enabled. Set ZENO_ADMIN_PASSWORD.")
-    supplied = ""
-    if authorization and authorization.lower().startswith("basic "):
+def _check_admin(
+    authorization: Optional[str] = None,
+    x_admin_password: Optional[str] = None,
+) -> Dict[str, str]:
+    password = os.getenv("ZENO_ADMIN_PASSWORD", "").strip()
+    allow_domain = os.getenv("ZENO_ADMIN_ALLOW_DOMAIN", "1").strip().lower() in ("1", "true", "yes")
+    admin_list = _admin_emails()
+
+    if password and x_admin_password and hmac.compare_digest(x_admin_password.strip().encode(), password.encode()):
+        return {"name": "admin", "email": "admin@gosupernova.live", "via": "password"}
+
+    if password and authorization and authorization.lower().startswith("basic "):
         try:
             supplied = base64.b64decode(authorization[6:]).decode().split(":", 1)[1]
         except Exception:
             supplied = ""
-    if not supplied or not hmac.compare_digest(supplied.encode(), password.encode()):
-        raise HTTPException(401, "Admin password required", headers={"WWW-Authenticate": 'Basic realm="Zeno admin"'})
+        if supplied and hmac.compare_digest(supplied.encode(), password.encode()):
+            return {"name": "admin", "email": "admin@gosupernova.live", "via": "basic"}
+
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        if token.startswith("zeno_"):
+            found = store().lookup(token)
+            if found:
+                key_id, key_name = found[0], found[1]
+                key_email = store().get_key_email(key_id)
+                if key_email and (key_email in admin_list or (allow_domain and _is_allowed_email(key_email))):
+                    return {"name": key_name, "email": key_email, "via": "zeno_key"}
+                raise HTTPException(403, "Your account does not have admin access")
+        elif token.count(".") == 2:
+            profile = _verify_google_identity(GoogleAuthBody(credential=token))
+            email = profile["email"]
+            if email in admin_list or (allow_domain and _is_allowed_email(email)):
+                return {"name": profile["name"], "email": email, "via": "google_jwt"}
+            raise HTTPException(403, "Your Google account does not have admin access")
+
+    if not password and not (os.getenv("ZENO_GOOGLE_CLIENT_ID") or os.getenv("GOOGLE_CLIENT_ID")):
+        raise HTTPException(503, "Admin is not enabled. Set ZENO_ADMIN_PASSWORD or ZENO_GOOGLE_CLIENT_ID.")
+    raise HTTPException(401, "Admin password required", headers={"WWW-Authenticate": 'Basic realm="Zeno admin"'})
+
+
+def require_admin(authorization: Optional[str], x_admin_password: Optional[str] = None) -> None:
+    _check_admin(authorization, x_admin_password)
 
 
 @app.get("/admin", response_class=HTMLResponse)
-def admin_page(authorization: Optional[str] = Header(None)) -> HTMLResponse:
-    require_admin(authorization)
+def admin_page(authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None)) -> HTMLResponse:
+    require_admin(authorization, x_admin_password)
     return HTMLResponse(ADMIN_PAGE, headers=NO_STORE)
 
 
 @app.get("/admin/api/keys")
-def admin_keys(authorization: Optional[str] = Header(None)) -> JSONResponse:
-    require_admin(authorization)
-    return JSONResponse({"keys": store().list(), "runs": store().list_runs()}, headers=NO_STORE)
+def admin_keys(authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None)) -> JSONResponse:
+    require_admin(authorization, x_admin_password)
+    ks = store()
+    return JSONResponse(
+        {"keys": ks.list(), "runs": ks.list_runs(), "learnings": ks.get_learnings(limit=100)},
+        headers=NO_STORE,
+    )
 
 
 @app.post("/admin/api/keys/{key_id}/revoke")
-def admin_revoke(key_id: int, authorization: Optional[str] = Header(None), x_zeno_admin: Optional[str] = Header(None)) -> Dict[str, Any]:
-    require_admin(authorization)
-    if x_zeno_admin != "1":   # the browser resends the password on its own, so a custom header blocks cross-site forms
+def admin_revoke(
+    key_id: int,
+    authorization: Optional[str] = Header(None),
+    x_zeno_admin: Optional[str] = Header(None),
+    x_admin_password: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    require_admin(authorization, x_admin_password)
+    if x_zeno_admin != "1":
         raise HTTPException(400, "Missing admin header")
     return {"revoked": store().revoke(key_id)}

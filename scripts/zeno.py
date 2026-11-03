@@ -101,18 +101,21 @@ def check_system_readiness(quiet: bool = False) -> Tuple[bool, List[Tuple[bool, 
         f"{common.YUNET_MODEL.name} ready" if yunet_ok else "Missing models/face_detection_yunet_2023mar.onnx",
     ))
 
-    # 5. Transcription API Key Presence (Zero-Secret Check via os.path.exists & os.environ booleans)
+    # 5. Transcription API Key / Session Presence (Zero-Secret Check via os.path.exists & os.environ booleans)
+    has_session_file = os.path.exists(ROOT / ".zeno_session.json")
     has_env_file = os.path.exists(ROOT / ".env") or os.path.exists(common.SCRIPTCUT_ROOT / ".env")
     has_key = bool(
-        os.environ.get("ZENO_KEY")
+        has_session_file
+        or os.environ.get("ZENO_CLOUD_TOKEN")
+        or os.environ.get("SCRIPTCUT_CLOUD_TOKEN")
+        or os.environ.get("ZENO_KEY")
         or os.environ.get("GEMINI_API_KEY")
         or os.environ.get("GOOGLE_API_KEY")
-        or os.environ.get("SCRIPTCUT_CLOUD_TOKEN")
     )
     checks.append((
         has_key or has_env_file,
-        "Transcription Key (.env)",
-        "Configured in .env (verified safely)" if (has_key or has_env_file) else "Missing ZENO_KEY / GEMINI_API_KEY in .env",
+        "Zeno Cloud / Gemini Auth",
+        "Connected via .zeno_session.json / .env (verified safely)" if (has_key or has_env_file) else "Run: python3 scripts/setup.py --login",
     ))
 
     # 6. Indic & Latin Fonts
@@ -343,8 +346,25 @@ def build_editorial_pitch_card(work_dir: pathlib.Path, plan_path: pathlib.Path) 
         )
     if best_takes or alt_takes:
         card_lines.append(f"  • Take Selection    : {len(best_takes)} [BEST_TAKE] kept, {len(alt_takes)} [ALT_TAKE] pruned")
+    card_lines.append(
+        f"  • Marks & Audio     : {wrong_count} ✗ Red Flash + {right_count} ✓ Green Flash (2-pulse) | -11.5 LUFS Master"
+    )
+    try:
+        import brain_memory
+        bm_rules = brain_memory.load_brain_memory("micronarrative")
+    except Exception:
+        bm_rules = []
+    if bm_rules:
+        card_lines.append(
+            f"  • Brain Memory      : {len(bm_rules)} permanent editor rule(s) active (styles/micronarrative/brain_memory.json)"
+        )
+        for r in bm_rules[:6]:
+            rid = str(r.get("id") or "RULE")
+            rtxt = str(r.get("rule") or "")
+            if len(rtxt) > 68:
+                rtxt = rtxt[:65] + "..."
+            card_lines.append(f"    🧠 [{rid}] {rtxt}")
     card_lines.extend([
-        f"  • Marks & Audio     : {wrong_count} ✗ Red Flash + {right_count} ✓ Green Flash (2-pulse) | -11.5 LUFS Master",
         "  • Deliverables      :",
         f"    1. 9:16 Master MP4       -> {out_mp4}",
         f"    2. 1:1 Square Meta Ad    -> {out_sq}",
@@ -710,13 +730,47 @@ def main() -> None:
         action="store_true",
         help="List all permanent editorial rules in styles/micronarrative/brain_memory.json",
     )
+    ap.add_argument(
+        "--sync-learnings",
+        action="store_true",
+        help="Sync permanent editorial rules (brain_memory.json) with Zeno Cloud",
+    )
+    ap.add_argument("--login", action="store_true", help="Open browser for Google Sign-In and auto-save Zeno Cloud session token")
+    ap.add_argument("--whoami", action="store_true", help="Display current logged-in Zeno Cloud editor session")
     ap.add_argument("--yes", "-y", action="store_true", help="Auto-confirm the Stage 3 Yes/No gate in standalone mode")
     args = ap.parse_args()
+
+    if args.login:
+        import auth_session
+        ok_login = auth_session.interactive_login()
+        sys.exit(0 if ok_login else 1)
+
+    if args.whoami:
+        import auth_session
+        info = auth_session.get_session_info()
+        if info.get("authenticated"):
+            who = info.get("email") or info.get("name") or info.get("mode")
+            print(f"  [ZENO CLOUD] Signed in as: {who} (source={info.get('source')}) -> {info.get('cloud_url')}")
+        else:
+            print("  [ZENO CLOUD] Not signed in. Run: python3 scripts/zeno.py --login")
+        if not args.inspect and not args.execute and not args.pitch and not args.inputs:
+            sys.exit(0)
+
+    if args.sync_learnings:
+        import brain_memory
+        res = brain_memory.sync_brain_memory_with_cloud("micronarrative")
+        print(f"  [BRAIN MEMORY SYNC] {res.get('message')}")
+        if not args.inspect and not args.execute and not args.pitch and not args.inputs:
+            sys.exit(0)
 
     if args.remember:
         import brain_memory
         entry = brain_memory.add_brain_memory_rule(args.remember)
         print(f"  [BRAIN MEMORY SAVED] [{entry['id']}] {entry['rule']}")
+        try:
+            brain_memory.sync_brain_memory_with_cloud("micronarrative")
+        except Exception:
+            pass
         if not args.inspect and not args.execute and not args.pitch and not args.inputs:
             sys.exit(0)
 

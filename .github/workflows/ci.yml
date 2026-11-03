@@ -1,0 +1,77 @@
+name: Zeno CI & Regression Suite
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Engine, Service & Doc Sync Checks (Python 3.11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg & libsndfile
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg libsndfile1
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            service/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt -r service/requirements.txt
+
+      - name: Run Zeno Engine Regression Suite
+        run: python3 tests/test_engine.py
+
+      - name: Run Service, Google OAuth & Learnings Tests
+        run: |
+          python3 service/test_keys.py
+          python3 service/check_prompt_sync.py
+
+      - name: Prompt & Documentation Sync Check (CLAUDE.md, AGENTS.md, agent/concepts/)
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path(".")
+          claude_md = (root / "CLAUDE.md").read_text(encoding="utf-8")
+          agents_md = (root / "AGENTS.md").read_text(encoding="utf-8")
+
+          required_markers = [
+              "agent/DIRECTOR.md",
+              "~/Downloads/Zeno Outputs/",
+              "[BEST_TAKE]",
+              "[WRONG_SPEAKER]",
+              "20k tokens / min",
+              "scripts/zeno.py --check",
+              "scripts/zeno.py --inspect",
+              "scripts/zeno.py --execute",
+              "Agent 5",
+              ".zeno_session.json",
+          ]
+          for marker in required_markers:
+              assert marker in claude_md, f"Missing core rule marker in CLAUDE.md: {marker}"
+              assert marker in agents_md, f"Missing core rule marker in AGENTS.md: {marker}"
+
+          offenders = []
+          for p in (root / "agent" / "concepts").rglob("*"):
+              if p.is_file() and "mms-300m" in p.read_text(encoding="utf-8", errors="ignore").lower():
+                  offenders.append(str(p))
+          assert not offenders, f"Forbidden 'mms-300m' found in agent/concepts/: {offenders}"
+          print("[OK] CLAUDE.md and AGENTS.md core rules synced; 0 'mms-300m' references in agent/concepts/.")
+          PY

@@ -64,6 +64,34 @@ def _load_env_files() -> None:
             except Exception:
                 pass
 
+    # Auto-load local zero-copy OAuth session from .zeno_session.json if present
+    session_path = PROJECT_ROOT / ".zeno_session.json"
+    if session_path.is_file():
+        try:
+            sess = json.loads(session_path.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(sess, dict):
+                tok = str(sess.get("token") or "").strip()
+                url = str(sess.get("cloud_url") or "").strip()
+                if tok:
+                    os.environ.setdefault("ZENO_CLOUD_TOKEN", tok)
+                    os.environ.setdefault("SCRIPTCUT_CLOUD_TOKEN", tok)
+                if url:
+                    os.environ.setdefault("ZENO_CLOUD_URL", url)
+                    os.environ.setdefault("SCRIPTCUT_CLOUD_URL", url)
+        except Exception:
+            pass
+
+    for a, b in (
+        ("ZENO_CLOUD_URL", "SCRIPTCUT_CLOUD_URL"),
+        ("ZENO_CLOUD_TOKEN", "SCRIPTCUT_CLOUD_TOKEN"),
+    ):
+        va = os.environ.get(a, "").strip()
+        vb = os.environ.get(b, "").strip()
+        if va and not vb:
+            os.environ[b] = va
+        elif vb and not va:
+            os.environ[a] = vb
+
 
 _load_env_files()
 
@@ -201,8 +229,14 @@ class GeminiTranscriber:
         # Put fast, reliable models in rotation: gemini-2.5-flash and gemini-3.5-flash-lite
         default_models = ["gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-flash-lite-latest"]
         self.models = [primary] + [m for m in default_models if m != primary]
-        self.cloud_url = os.getenv("SCRIPTCUT_CLOUD_URL", "").strip()
-        self.cloud_token = os.getenv("SCRIPTCUT_CLOUD_TOKEN", "").strip()
+        self.cloud_url = (
+            os.getenv("ZENO_CLOUD_URL", "").strip()
+            or os.getenv("SCRIPTCUT_CLOUD_URL", "").strip()
+        )
+        self.cloud_token = (
+            os.getenv("ZENO_CLOUD_TOKEN", "").strip()
+            or os.getenv("SCRIPTCUT_CLOUD_TOKEN", "").strip()
+        )
         self.rate_limiter = GeminiRateLimiter.get_instance()
         self._key_idx = 0
         self._model_idx = 0
@@ -215,7 +249,7 @@ class GeminiTranscriber:
             return False
         if os.getenv("SCRIPTCUT_OFFLINE", "").lower() in ("1", "true", "yes"):
             return False
-        return len(self.api_keys) > 0 or bool(self.cloud_url)
+        return len(self.api_keys) > 0 or bool(self.cloud_url and self.cloud_token)
 
     def _get_client(self):
         from google import genai

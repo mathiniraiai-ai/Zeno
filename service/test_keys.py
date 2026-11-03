@@ -100,5 +100,23 @@ admin_data = client.get("/admin/api/keys", headers=basic("admin-pw")).json()
 check("admin API returns stored runs", len(admin_data.get("runs") or []) == 1 and admin_data["runs"][0]["grand_total_tokens"] == 6160)
 h = client.get("/health").json()
 check("health reports store and admin switch", h["key_store_ok"] and h["admin_enabled"], str(h))
+
+# Test Google OAuth domain enforcement (@gosupernova.live & @gosupernova.line allowed, @gmail.com -> 403) and /v1/learnings
+from unittest.mock import patch  # noqa: E402
+
+with patch.object(service, "_verify_google_identity", return_value={"email": "editor@gosupernova.line", "name": "Line Editor", "sub": "123", "picture": ""}):
+    g_ok = client.post("/api/auth/google", json={"credential": "fake.jwt.token"})
+    check("Google OAuth @gosupernova.line issues session key", g_ok.status_code == 200 and g_ok.json().get("key", "").startswith("zeno_"))
+
+g_key = g_ok.json().get("key", "")
+r_rule = client.post("/v1/learnings/rule", headers={"Authorization": f"Bearer {g_key}"}, json={
+    "rule": "Keep split_h static z=1.0 with common headroom",
+    "category": "split_screen",
+    "language": "kn",
+})
+check("POST /v1/learnings/rule stores shared rule", r_rule.status_code == 200 and r_rule.json().get("ok") is True)
+r_lrn = client.get("/v1/learnings", headers={"Authorization": f"Bearer {g_key}"})
+check("GET /v1/learnings returns learned_rules & language_patterns", r_lrn.status_code == 200 and len(r_lrn.json().get("learned_rules") or []) >= 1)
+
 print(f"\n{sum(results)}/{len(results)} checks passed")
 sys.exit(0 if all(results) else 1)

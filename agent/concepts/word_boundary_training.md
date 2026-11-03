@@ -2,7 +2,7 @@
 
 ## 1. Why Speech Starts & Ends Get Cut Off ("Time Stop / Boundary Issue")
 
-1. **CTC Peaky Emission Bias (`WAV2VEC2_ASR_BASE_960H` / `mms-300m`)**:
+1. **CTC Peaky Emission Bias (`WAV2VEC2_ASR_BASE_960H`)**:
    - CTC neural acoustic models emit token probability spikes at the **high-energy vowel nucleus** of a syllable while predicting `<blank>` (`id=0`) during unvoiced/pre-voiced consonant closures (`/k/`, `/t/`, `/p/`, `/s/`, aspirates `/kh/`, `/bh/`) and word-final codas.
    - In Indian languages (Kannada, Tamil, Hindi, Telugu, Malayalam), initial consonant attacks and sentence-final euphonic vowels (`-u` / schwa / nasal release) sit `15–28 dB` below the stressed vowel peak.
    - As a result, raw CTC `w.start` lags **`60–120ms` after** the physical consonant onset, and raw `w.end` terminates **`100–200ms` before** the final syllable finishes decaying.
@@ -36,9 +36,9 @@ Keep the Wav2Vec2 backbone frozen and train a lightweight **Asymmetric Quantile 
 3. **Loss Function (Pinball / Asymmetric Quantile Loss)**:
    - Train $\Delta t_{\text{start}}$ with $\tau = 0.10$ (penalizing early cuts $9\times$ more than extra pre-roll) and $\Delta t_{\text{end}}$ with $\tau = 0.90$ (penalizing early truncation $9\times$ more than extra post-roll).
 
-### Stage 2: Multilingual / Indic Backbone + Entropy-Regularized CTC Fine-Tuning
-1. **Backbone Upgrade**:
-   - Swap `WAV2VEC2_ASR_BASE_960H` for **`facebook/mms-300m`** or **`ai4bharat/indicwav2vec_v1_kannada`** so Indic retroflexes (`ಟ/ಡ/ಣ/ಳ`), aspirates, and geminates are represented natively.
+### Stage 2: Commercial-Safe Multilingual Backbones, VAD Gating & Entropy-Regularized CTC
+1. **Commercial-Safe Backbones & VAD Pre-Gating (MIT / BSD / Apache-2.0 Only)**:
+   - Keep **`WAV2VEC2_ASR_BASE_960H`** (`MIT`) + Indic G2P (`indic_phonemes.py` + `uroman`), or pair with commercial-safe alternatives: **OpenAI Whisper** (`MIT`), **Silero VAD** (`MIT`) / **WebRTC VAD** (`BSD-3-Clause`) for speech-boundary gating, **Gemini Audio API** word/phrase timestamps, and deterministic **10ms RMS + Zero-Crossing Rate (ZCR)** onset/coda refinement (`onset_verifier.py`).
 2. **Peak-Suppression CTC Loss**:
    - Fine-tune on your studio `(audio16k.wav, script.txt)` pairs with **Entropy Regularization**:
      $$\mathcal{L} = \mathcal{L}_{\text{CTC}} - \lambda \sum_{t} H\big(P(y_t \mid x)\big), \quad \lambda = 0.05$$

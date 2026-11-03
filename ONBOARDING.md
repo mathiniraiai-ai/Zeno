@@ -88,7 +88,7 @@ Double-click `update.command` (Mac) or `update.bat` (Windows). It pulls the late
 ## Licences
 - Alignment model: Meta wav2vec2 base (95M), MIT licence, commercial use allowed.
 - Gemini is used under Google's API terms with your team key.
-- Not yet audited: uroman, the YuNet face model, fonts, SFX packs. Check them before sharing outside the company.
+- Bundled third-party components (audited in `LICENSES.md`): `uroman` (MIT), OpenCV `YuNet` face detector (MIT), `Montserrat-ExtraBold.ttf` (SIL OFL 1.1), and `assets/sfx/` (Supernova internal production assets).
 
 ## If something goes wrong
 - `setup.py --smoke` shows a `[FAIL]` line: it names the part (FFmpeg, model, key). Fix that first.

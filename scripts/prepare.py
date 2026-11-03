@@ -567,7 +567,7 @@ def ensure_clip_transcribed(
         if align_engine is not None and hasattr(align_engine, "transcribe_and_align_clip"):
             try:
                 res = align_engine.transcribe_and_align_clip(
-                    resolved_src if resolved_src.is_file() else wav_path,
+                    wav_path,
                     work_dir=work_dir,
                     lang=lang,
                     script_path=script_path,
@@ -576,8 +576,11 @@ def ensure_clip_transcribed(
                     hq_words = res
                 elif isinstance(res, dict) and "words" in res:
                     hq_words = res["words"]
-            except Exception:
-                pass
+                if hq_words:
+                    write_json(hq_path, hq_words)
+                    write_json(words_path, hq_words)
+            except Exception as exc:
+                print(f"  [WARN] align_engine fallback on {clip_stem}: {exc}")
 
         if not hq_words and not base_words:
             # Fallback to transcribe.py
@@ -2111,7 +2114,9 @@ def main() -> None:
     proj_dir.mkdir(parents=True, exist_ok=True)
     (proj_dir / "brief.txt").write_text(brief_text, encoding="utf-8")
     (proj_dir / "plan.edl").write_text(edl_text, encoding="utf-8")
+    (proj_dir / "plan.auto.edl").write_text(edl_text, encoding="utf-8")
     write_json(proj_dir / "plan.json", plan)
+    write_json(proj_dir / "plan.auto.json", plan)
 
     est_tokens = len(brief_text) // 4
     print(f"Prepared {len(clips_data)} clips -> {len(segments)} segments, {len(marks)} marks")

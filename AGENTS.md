@@ -107,5 +107,47 @@ For every editing task (running on **Antigravity** by default or **Claude Code**
    - If any defect is detected, Agent 5 pinpoints the exact segment/timestamp, fixes `plan.edl`, and re-renders before delivery.
 - **CPU & Thermal Guardrail**: Parallel subagents (`Agent 1`–`Agent 4`) must operate strictly on text artifacts (`brief.txt`, `plan.edl`, script files, and cached JSONs) and **must never spawn concurrent Python/OpenCV/Librosa/FFmpeg processes across raw `.mp4` files**. Heavy media commands (`prepare.py`, `render.py`, `verify.py`) run sequentially in the main process with `ZENO_MAX_THREADS=4` and lowered OS priority.
 
+## 6. `plan.edl` Quick Syntax
+
+```text
+# output: output/Kannada_I_am_hungry.mp4
+# canvas: 1080x1920@30
+# preset: hybrid
+# mark_pack: flash
+# loudness: -11.5
+
+# SEGMENTS: id | src | start-end | layout | zoom | transition | extras | note
+L1 | S1 | 1.12-5.48 | single | sudden_in:1.08 | cut | focus=0.5,0.45 | Hook question
+L2 | S2 | 0.85-4.90 | split_v:top=S1@5.48 | 1.0 | cut | active=bottom | Wrong student attempt
+L3 | S3 | 1.05-6.20 | chat_bar | 1.08 | fade:0.3 | label="ನನಗೆ ಹಸಿವಾಗಿದೆ" | Teacher correction
+
+# MARKS: type | segment | at | duration | pos | size | sfx | gain_db
+wrong | L2 | 1.40 | 0.56 | top-right | 0.22 | buzzer.wav | +4
+right | L3 | 2.10 | 0.56 | top-right | 0.22 | correct_ding.wav | +2.5
+
+# SFX: file | segment | at | gain_db
+whoosh.wav | L3 | 0.0 | -2
+```
+
+## 7. Developing the Zeno code itself (not editing a video)
+
+Use `.venv/bin/python` (Python 3.12; or run `install.command` / `install.bat`). `scripts/zeno.py` re-execs itself into `.venv` automatically.
+
+```bash
+.venv/bin/python -m unittest tests.test_engine                                  # engine regression suite
+.venv/bin/python scripts/setup.py --login                                       # zero-copy browser Google login -> saves .zeno_session.json
+.venv/bin/python scripts/setup.py --smoke                                       # env check, never prints keys
+.venv/bin/python scripts/eval_alignment.py --self-test                          # score word timing against gold benchmark
+.venv/bin/python scripts/clean.py [--apply]                                     # free disk
+python3 -m unittest service/test_keys.py service/test_service.py                # service & Google OAuth / learnings unit tests
+python3 service/check_prompt_sync.py                                            # verify service & local Gemini prompt sync
+```
+
+## 8. Architecture (big picture)
+
+**Director / Engine split.** A thin LLM "Director" (`agent/DIRECTOR.md` + `agent/concepts/*`) only reads small text files and edits `plan.edl`; everything measurable is Python in `scripts/`. `CLAUDE.md` and `AGENTS.md` are parallel manuals and must be kept in sync.
+
+**Transcription & Editorial Learning Service** (`service/`, FastAPI on Railway): holds the only Gemini key and collects team editorial learnings. Team PCs authenticate once via zero-touch Google OAuth (`python3 scripts/setup.py --login` or `install.command`, which opens the browser for `@gosupernova.live` / `@gosupernova.line` sign-in and automatically saves `.zeno_session.json` + `ZENO_CLOUD_URL` / `ZENO_CLOUD_TOKEN` in `.env`, with legacy `SCRIPTCUT_CLOUD_*` fallback). `scripts/token_tracker.py` posts per-run telemetry, `plan.auto.edl -> plan.edl` diffs, and `brain_memory.json` rules to `/v1/telemetry`, and `python3 scripts/zeno.py --sync-learnings` syncs shared rules via `/v1/learnings`.
+
 ## Secrets (all agents)
-Never open, print, quote or paste `.env` or any key in a chat or log. It holds the user's personal Zeno key (or a Gemini key). To check setup, run `python3 scripts/setup.py --smoke`; it reports [OK]/[FAIL] without showing keys. Read `.env.example` instead if you need the variable names.
+Never open, print, quote or paste `.env`, `.zeno_session.json`, or any key in a chat or log. They hold the user's personal Zeno session token (or a Gemini key). To check setup, run `python3 scripts/setup.py --smoke` or `python3 scripts/setup.py --whoami`; they report [OK]/[FAIL] without showing keys. Read `.env.example` instead if you need the variable names.
