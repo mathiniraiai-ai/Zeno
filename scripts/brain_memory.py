@@ -81,16 +81,25 @@ def add_brain_memory_rule(
     return new_entry
 
 
-def format_brain_memory_for_brief(style_name: str = "micronarrative") -> List[str]:
-    """Format persistent brain memory rules as compact lines for `brief.txt`."""
+def format_brain_memory_for_brief(style_name: str = "micronarrative", max_chars: int = 1150) -> List[str]:
+    """Format persistent brain memory rules as compact lines for `brief.txt` within `max_chars` budget."""
     rules = load_brain_memory(style_name)
     if not rules:
         return []
     out = ["# BRAIN MEMORY (MANDATORY 15-YEAR EDITOR RULES):"]
-    for r in rules:
-        rid = r.get("id", "RULE")
-        txt = r.get("rule", "")
-        out.append(f"  - [{rid}] {txt}")
+    used = len(out[0])
+    for idx, r in enumerate(rules):
+        rid = str(r.get("id", "RULE"))[:28]
+        txt = re.sub(r"\s+", " ", str(r.get("rule", "")).strip())
+        if len(txt) > 95:
+            txt = txt[:92].rstrip() + "..."
+        line = f"  - [{rid}] {txt}"
+        if used + len(line) + 1 > max_chars:
+            rem = len(rules) - idx
+            out.append(f"  - [+{rem} MORE RULES in styles/{style_name}/brain_memory.json]")
+            break
+        out.append(line)
+        used += len(line) + 1
     return out
 
 
