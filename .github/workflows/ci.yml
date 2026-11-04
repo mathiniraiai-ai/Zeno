@@ -55,13 +55,12 @@ jobs:
           required_markers = [
               "agent/DIRECTOR.md",
               "~/Downloads/Zeno Outputs/",
-              "[BEST_TAKE]",
-              "[WRONG_SPEAKER]",
-              "20k tokens / min",
+              "agent/EDIT_RULES.md",
+              "--check-plan",
+              "50k–70k tokens",
               "scripts/zeno.py --check",
               "scripts/zeno.py --inspect",
               "scripts/zeno.py --execute",
-              "Agent 5",
               ".zeno_session.json",
           ]
           for marker in required_markers:

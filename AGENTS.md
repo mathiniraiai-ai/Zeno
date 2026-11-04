@@ -22,9 +22,8 @@ Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Co
 
 ## 2. Token Budget & Mandatory Reporting
 
-- **Target**: **`12k–18k tokens` per minute of finished video** (`~20k–30k total` for a typical 1.5-min edit).
-- **Strict Ceiling**: **`20k tokens / min`** of finished video.
-- **Early Warning**: Warn the user mid-job if messy footage (excessive retakes, garbled audio, or missing lines) risks exceeding `20k tokens / min`.
+- **Budget**: **`50k–70k tokens` per video**, spent on real editorial decisions.
+- **Mid-Job Warning**: Warn the user immediately if a job risks going over `70k tokens`.
 - **Mandatory End-of-Job Table**: Always output the Token Usage table at the end of every job and append a row to `README.md`:
 
 ```markdown

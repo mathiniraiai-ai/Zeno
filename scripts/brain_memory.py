@@ -2,7 +2,7 @@
 
 Stores and retrieves permanent editorial rules learned from user feedback in
 `styles/<style>/brain_memory.json`, and formats a compact `# BRAIN MEMORY` block
-for injection at the top of `work/<project>/brief.txt` so every fresh Claude Code
+for the top of `work/<project>/line_map.md` so every fresh Claude Code
 or Antigravity session automatically applies all learned editorial rules.
 """
 from __future__ import annotations
@@ -82,7 +82,7 @@ def add_brain_memory_rule(
 
 
 def format_brain_memory_for_brief(style_name: str = "micronarrative", max_chars: int = 1150) -> List[str]:
-    """Format persistent brain memory rules as compact lines for `brief.txt` within `max_chars` budget."""
+    """Format persistent brain memory rules as compact lines for `line_map.md` within `max_chars` budget."""
     rules = load_brain_memory(style_name)
     if not rules:
         return []
