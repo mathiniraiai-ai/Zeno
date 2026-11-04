@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from keystore import KeyStore
@@ -933,6 +933,11 @@ def admin_keys(authorization: Optional[str] = Header(None), x_admin_password: Op
         {"keys": ks.list(), "runs": ks.list_runs(), "learnings": ks.get_learnings(limit=100)},
         headers=NO_STORE,
     )
+
+
+@app.get("/favicon.ico")
+def favicon() -> Response:
+    return Response(status_code=204)
 
 
 @app.get("/usage", response_class=HTMLResponse)
