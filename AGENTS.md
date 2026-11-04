@@ -9,7 +9,7 @@ Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Co
 ## 1. Hard Rules
 
 1. **Strict Workspace Boundary**: Never modify, move, or delete any file outside this Zeno folder (team PCs: `~/Documents/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`). Other projects in `Documents` are strictly off-limits.
-2. **Folders**: Zeno runs from `~/Documents/Zeno` on team PCs (the installer puts it there). Every finished video (`.mp4` + `.timeline.txt`) goes to `~/Downloads/Zeno Outputs/`, never inside the repo. Raw clips can stay in any local folder: pass their path to `prepare.py`.
+2. **Folders**: Zeno runs from `~/Documents/Zeno` on team PCs (the installer puts it there). Every edit is its own job with its own folder: `~/Downloads/Zeno Outputs/<video name>/` holds the reel (9:16), the square (1:1), the timeline, the Premiere files (`.prproj`, `.premiere.xml`), the script and the plan, never inside the repo. The folder is named after the script, or after `--name "<name>"`. A second edit of the same name becomes `<name> (2)`. Raw clips can stay in any local folder: pass their path to `prepare.py`.
 3. **Takes**: The agent chooses the take. `line_map.md` lists every clip stretch that says each line, `facts.md` has each word. Never assume the first, middle or last take is right, and never trust file names or file order: the script is the timeline.
 4. **Speakers**: The agent sets `sp="<name>"` on every segment. `--check-plan` measures the voice in each cut against it and blocks `WRONG VOICE`: pick another take, and if no clip has the right voice, tell the user to reshoot. `voices not checked` means the voices could not be told apart: say so in the report. Reference samples in `input/voices/<Speaker>.wav` make this reliable with few clips.
 5. **Never Read Raw Word JSONs or Python Source**:
@@ -49,7 +49,7 @@ Zeno operates like a **Senior Human Video Editor** in 5 transparent stages with 
 0. **Stage 0 — Edit Bay Readiness Check**: `python3 scripts/zeno.py --check` (prints `[✓] Installed` vs `[✗] Remaining` across all 8 dependencies without reading `.env` secrets).
 1. **Measure (`1 command` + 50s Live Heartbeat)**:
    ```bash
-   python3 scripts/zeno.py --inspect <raw_dir_or_clips> --script <script_path_or_google_doc_url> [--lang <lang>] [--style <name>] [--mark-pack default|glossy|flash|vignette]
+   python3 scripts/zeno.py --inspect <raw_dir_or_clips> --script <script_path_or_google_doc_url> [--lang <lang>] [--style <name>] [--name "<video name>"] [--mark-pack default|glossy|flash|vignette]
    ```
    - `--style <name>`: the style folder this job follows (for example `micronarrative`). Always pass it when the style is known: it writes `# style: <name>` into the plan so the job counts toward the style's readiness level and the team's learning.
    - `<lang>`: `en`, `kn`/`kannada`, `ta`/`tamil`, `hi`/`hindi`, `te`/`telugu`, `ml`/`malayalam`, or `auto`.
@@ -60,7 +60,7 @@ Zeno operates like a **Senior Human Video Editor** in 5 transparent stages with 
    ```bash
    python3 scripts/zeno.py --execute work/<project>/plan.edl [--square] [--loudness -11.5] [--gain-db +2.0]
    ```
-   - Renders `~/Downloads/Zeno Outputs/<name>.mp4` + `<name>_1x1.mp4` (`1080×1080` Square Meta Ad) + `<name>.timeline.txt` + **editable Adobe Premiere Pro project files** (`<name>.prproj` and `<name>.premiere.xml`), repeats the plan check, verifies script order from the words in each cut, `-11.5 LUFS` (`-1.0 dBTP` cap) loudness, and generates `work/<project>/marks_contact_sheet.jpg`. Use `vol=+3dB` on any segment in `plan.edl` for exact mid-video dB boosts.
+   - Renders `~/Downloads/Zeno Outputs/<name>/<name>.mp4` + `<name>_1x1.mp4` (`1080×1080` Square Meta Ad) + `<name>.timeline.txt` + `<name>.script.txt` + `<name>.plan.edl` + **editable Adobe Premiere Pro project files** (`<name>.prproj` and `<name>.premiere.xml`), repeats the plan check, verifies script order from the words in each cut, `-11.5 LUFS` (`-1.0 dBTP` cap) loudness, and generates `work/<project>/marks_contact_sheet.jpg`. Use `vol=+3dB` on any segment in `plan.edl` for exact mid-video dB boosts.
 
 ## 4. Layout Modes, Pre-Stitched Split Screens & Swappable Mark Packs
 

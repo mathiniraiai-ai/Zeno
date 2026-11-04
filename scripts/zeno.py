@@ -443,6 +443,7 @@ def run_inspect(
     preset: str = "auto",
     mark_pack: str = "flash",
     style: str = "",
+    name: str = "",
 ) -> pathlib.Path:
     try:
         import auto_updater
@@ -484,6 +485,7 @@ def run_inspect(
             "--mark-pack",
             mark_pack,
             *(["--style", style] if style else []),
+            *(["--name", name] if name else []),
         ]
 
         env = os.environ.copy()
@@ -583,6 +585,30 @@ def order_gate(plan: dict, plan_path: pathlib.Path) -> str:
     for t in g.get("tighten") or []:
         print(f"[TIGHT] {t}")
     return script_order.format_gate(g) if g["blocked"] else ""
+
+
+def finish_job_folder(plan_path: pathlib.Path) -> Optional[pathlib.Path]:
+    """Put the last pieces into this edit's folder, next to the videos, the square version, the timeline and the Premiere files:
+    the script it was made from and the plan. Returns the folder (None for the old flat layout)."""
+    import shutil
+
+    plan = load_edl(plan_path)
+    out = pathlib.Path(str(plan.get("output") or ""))
+    if not out.name or out.parent == OUTPUT or not out.parent.is_dir():
+        return None
+    folder = out.parent
+    script = plan.get("script")
+    if not script and plan_path.with_name("plan.json").is_file():
+        script = common.read_json(plan_path.with_name("plan.json")).get("script")
+    if script:
+        src = common.resolve(script)
+        if src.is_file():
+            if src.suffix.lower() in (".txt", ".md"):
+                shutil.copy2(src, folder / f"{out.stem}.script.txt")
+            else:
+                (folder / f"{out.stem}.script.txt").write_text(common.read_script_text(src), encoding="utf-8")
+    shutil.copy2(plan_path, folder / f"{out.stem}.plan.edl")
+    return folder
 
 
 def print_next_step(plan_path: pathlib.Path) -> None:
@@ -834,6 +860,7 @@ def main() -> None:
     ap.add_argument("--update", action="store_true", help="Run git pull + Zeno Cloud brain memory sync immediately")
     ap.add_argument("--install-schedule", action="store_true", help="Install daily 11:00 AM background auto-update schedule")
     ap.add_argument("--preflight", action="store_true", help="Run the live pre-job checks (FFmpeg, OpenCV, wav2vec2, Zeno server) and, with --script and inputs, check them too")
+    ap.add_argument("--name", default="", help="Name of this video; all its files go to Zeno Outputs/<name>/ (default: the script's name). Each edit is a new job and folder")
     ap.add_argument("--style", default="", help="Style this job follows (a folder under styles/, for example micronarrative); written into the plan so the job counts toward that style")
     ap.add_argument("--fresh", action="store_true", help="Rebuild every cached transcript and alignment for these clips (rarely needed: caches refresh themselves when the code changes)")
     ap.add_argument("--skip-preflight", action="store_true", help="Development only: skip the pre-job gate. Agents must never use this.")
@@ -957,6 +984,12 @@ def main() -> None:
         )
         if rc == 0:
             common.job_done()
+            try:
+                folder = finish_job_folder(common.resolve(args.execute))
+                if folder:
+                    print(f"\n[JOB FOLDER] Everything for this edit is in: {folder}")
+            except Exception as exc:   # noqa: BLE001  (the videos are already made; this is only tidying)
+                print(f"  ! could not gather the script into the job folder: {exc}")
         sys.exit(rc)
 
     if args.inspect:
@@ -970,6 +1003,7 @@ def main() -> None:
             preset=args.preset,
             mark_pack=args.mark_pack,
             style=args.style,
+            name=args.name,
         )
         print_next_step(plan_path)
         sys.exit(0)
@@ -983,6 +1017,7 @@ def main() -> None:
             preset=args.preset,
             mark_pack=args.mark_pack,
             style=args.style,
+            name=args.name,
         )
         print_next_step(plan_path)
         sys.exit(0)

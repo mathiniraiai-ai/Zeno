@@ -1341,6 +1341,44 @@ class TestScriptIsTheTimeline(unittest.TestCase):
             self.assertTrue(sheet and sheet.is_file())
             self.assertLess(sheet.stat().st_size, 200 * 1024)
 
+    def test_each_edit_gets_its_own_output_folder(self):
+        import tempfile
+        from unittest import mock
+        import common
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(common, "OUTPUT", Path(tmp)):
+            first = common.unique_job_output("W44 Reel: Hindi / Grandma?")
+            self.assertEqual(first.parent.name, "W44 Reel Hindi Grandma")           # no path characters
+            self.assertEqual(first.name, "W44 Reel Hindi Grandma.mp4")
+            self.assertEqual(common.unique_job_output("W44 Reel Hindi Grandma"), first)      # before any render: same job, same folder
+            first.parent.mkdir(parents=True)
+            first.write_bytes(b"x")                                                  # a finished video: the next edit is a new job
+            second = common.unique_job_output("W44 Reel Hindi Grandma")
+            self.assertEqual(second.parent.name, "W44 Reel Hindi Grandma (2)")
+            self.assertEqual(common.job_folder_name("   ...  "), "Zeno edit")
+
+    def test_script_and_plan_are_gathered_into_the_job_folder(self):
+        import os
+        import tempfile
+        from unittest import mock
+
+        os.environ["_ZENO_REEXEC"] = "1"
+        import zeno
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_root = Path(tmp) / "out"
+            job = out_root / "My Reel"
+            job.mkdir(parents=True)
+            script = Path(tmp) / "s.txt"
+            script.write_text("Lady: hello there\n", encoding="utf-8")
+            plan = Path(tmp) / "plan.edl"
+            plan.write_text(f'#output "{job / "My Reel.mp4"}"\n#script {script}\n#canvas 1080x1920@30\n', encoding="utf-8")
+            with mock.patch.object(zeno, "OUTPUT", out_root):
+                folder = zeno.finish_job_folder(plan)
+            self.assertEqual(folder, job)
+            self.assertTrue((job / "My Reel.script.txt").is_file())
+            self.assertTrue((job / "My Reel.plan.edl").is_file())
+
     def test_empty_plan_cannot_render(self):
         from unittest import mock
         import tempfile

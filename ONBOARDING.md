@@ -71,10 +71,13 @@ The agent writes the plan and Zeno checks it: every line present, once, in scrip
 
 ## 5. Render, check, hand over
 
-After Yes: `python scripts/zeno.py --execute work/<project>/plan.edl`. You get, in `~/Downloads/Zeno Outputs/`:
-- `<name>.mp4` (9:16) and `<name>_1x1.mp4` (square Meta ad),
+After Yes: `python scripts/zeno.py --execute work/<project>/plan.edl`. Every edit is its own job with its own folder, `~/Downloads/Zeno Outputs/<video name>/`, named after the script (or after `--name "<name>"` when you give one). Everything for that edit is in it:
+- `<name>.mp4` (9:16 reel) and `<name>_1x1.mp4` (square Meta ad),
 - `<name>.timeline.txt` (every cut and effect),
-- `<name>.prproj` and `<name>.premiere.xml` (open in Adobe Premiere Pro to polish).
+- `<name>.prproj` and `<name>.premiere.xml` (open in Adobe Premiere Pro to polish),
+- `<name>.script.txt` (the script it was made from) and `<name>.plan.edl` (the plan).
+
+A second edit with the same name goes to `<name> (2)`, so nothing is overwritten.
 
 Zeno then checks the video itself: every script line present in order, loudness (-11.5 LUFS), no clipped words or long pauses, ✗/✓ marks visible, split screens steady. **Move finished videos to the shared drive.**
 
@@ -99,7 +102,7 @@ The agent prints a token table and adds a row to `README.md`. After a verified j
 |---|---|---|
 | your footage folder, `input/script/` | raw clips and the script | no (local) |
 | `work/<project>/` | transcript, plan, analysis | no (local, deletable) |
-| `Downloads/Zeno Outputs/` | finished videos (outside the Zeno folder) | **move finished videos to the shared drive** |
+| `Downloads/Zeno Outputs/<video name>/` | one folder per edit: reel, square, timeline, Premiere files, script, plan (outside the Zeno folder) | **move finished videos to the shared drive** |
 | `styles/` | learned styles and format recipes | the owner changes these; you just update |
 
 ## 8. Disk, caches and updates (mostly automatic)

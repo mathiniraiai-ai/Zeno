@@ -1004,6 +1004,12 @@ def discover_clips(raw_args: List[str]) -> List[Tuple[str, str, Path]]:
     return unique
 
 
+def common_unique_output(name: str) -> Path:
+    from common import unique_job_output
+
+    return unique_job_output(name)
+
+
 def common_job_start() -> float:
     from common import job_start_epoch
 
@@ -1023,6 +1029,7 @@ def main() -> None:
         help="Layout preset mode",
     )
     ap.add_argument("--mark-pack", default="flash", help="Swappable ✓/✗ mark overlay pack (flash, vignette, default, glossy)")
+    ap.add_argument("--name", default="", help="Name of this video; its outputs go to Zeno Outputs/<name>/ (default: the script's name)")
     ap.add_argument("--style", default="", help="Style this job follows (a folder under styles/, for example micronarrative). Written into the plan as '#style <name>' so the job counts toward that style's readiness and the team's learning")
     ap.add_argument(
         "--fresh",
@@ -1122,7 +1129,7 @@ def main() -> None:
         "fps": int(round(float(first_info.get("fps") or 24))),
     }
     plan: Dict[str, Any] = {
-        "output": (OUTPUT / f"{project_name}.mp4").as_posix(),
+        "output": common_unique_output(args.name or project_name).as_posix(),
         "script": str(script_path.relative_to(ROOT)) if script_path.is_relative_to(ROOT) else str(script_path),
         "canvas": canvas,
         "preset": args.preset if args.preset != "auto" else "hybrid",

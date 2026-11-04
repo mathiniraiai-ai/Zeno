@@ -642,6 +642,24 @@ def ffmpeg(*args, timeout=180):
 
 
 # ---------------------------------------------------------------------------------------------------- GPU use
+def job_folder_name(name: str) -> str:
+    """A safe folder name from the script or video name: no path characters, no leading dots, not empty."""
+    cleaned = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", " ", str(name or "")).strip().strip(".")
+    cleaned = re.sub(r"\s+", " ", cleaned)[:120].strip()
+    return cleaned or "Zeno edit"
+
+
+def unique_job_output(name: str) -> Path:
+    """`Zeno Outputs/<name>/<name>.mp4`. Every edit is its own job with its own folder: when a folder of that name already holds a finished
+    video, this edit gets `<name> (2)`, `<name> (3)`, and so on. Nothing is created here; the render makes the folder."""
+    base = job_folder_name(name)
+    folder, n = OUTPUT / base, 2
+    while folder.is_dir() and any(f.suffix.lower() in (".mp4", ".prproj") for f in folder.iterdir()):
+        folder = OUTPUT / f"{base} ({n})"
+        n += 1
+    return folder / f"{folder.name}.mp4"
+
+
 JOB_MARKER = WORK / "_job_marker.json"
 
 
