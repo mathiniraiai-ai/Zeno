@@ -104,37 +104,8 @@ whoosh.wav | L3 | 0.0 | -10
 ```
 - **SFX (`assets/sfx/`)**: Right: `correct_ding.wav`, `sn_correct.wav`, `w42_right.wav` | Wrong: `buzzer.wav`, `sn_wrong.wav`, `w42_wrong.wav` | Transitions: `whoosh.wav`, `pop.wav`.
 
-## 7. Developing the Zeno code itself (not editing a video)
-
-Use `.venv/bin/python` (Python 3.12; `uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt`, or run `install.command` / `install.bat`). `scripts/zeno.py` re-execs itself into `.venv` automatically.
-
-```bash
-.venv/bin/python -m unittest tests.test_engine                                  # engine regression suite (~0.1 s, no API calls)
-.venv/bin/python -m unittest tests.test_engine.TestZenoEngine.<test_name>       # one test
-.venv/bin/python scripts/setup.py --smoke                                       # env check, never prints keys (--prewarm downloads the 360 MB wav2vec2 weights)
-.venv/bin/python scripts/eval_alignment.py --help                               # score word timing against hand-marked labels
-.venv/bin/python scripts/knowledge_sync.py pull|push|match "<wording>"                # knowledge kept in the server database (no commit or redeploy for new recipes)
-.venv/bin/python scripts/format_library.py search "<script wording>"                  # look up how a format should look; `extract <video> --id ...` measures a reference locally, no tokens, video not kept
-.venv/bin/python scripts/style_readiness.py [style] [--json]                    # measured readiness level (0-3) of a style from files and tests
-.venv/bin/python scripts/clean.py [--apply]                                     # free disk (dry run by default; only touches work/ and input/standins|reference)
-python service/test_keys.py                                                     # service: signup/admin/revoke/usage on local SQLite (add --database-url postgresql://... for Postgres)
-python service/test_service.py [--no-live | --url https://<host> --token zeno_...]
-python service/check_prompt_sync.py                                             # must pass after editing either copy of the Gemini prompt
-cd service && uvicorn app:app --port 8000                                       # run the key/transcription service locally
-```
-There is no linter or build step. `tests/test_engine.py` also scores a gold-set plan under `work/` (git-ignored), so that check only runs where the work folder exists.
-
-## 8. Architecture (big picture)
-
-**Director / Engine split.** The LLM Director (`agent/DIRECTOR.md`, `agent/EDIT_RULES.md`) makes every editing decision and writes `plan.edl`. Python in `scripts/` only transcribes, measures, checks and renders. Do not add editing decisions back into Python: a measurement or a safety check belongs in the Engine, a choice belongs in `EDIT_RULES.md`. `CLAUDE.md` and `AGENTS.md` (Antigravity/OpenAI) are parallel manuals and must be kept in sync.
-
-**Pipeline** (`scripts/zeno.py` orchestrates): ingest/extract audio → transcribe → align → measure → write `line_map.md` + `facts.md` + clip sheets → the Director writes `plan.edl` → `--check-plan` → Yes/No gate → `render.py` (+ `premiere_export.py`, `verify.py`, token telemetry).
-- `prepare.py` measures: transcripts, 10 ms energy, pauses, silent clips, faces. `script_order.py` holds the candidates per line and the plan checks (order, coverage, cuts, voices via `speaker_check.py`) and moves cuts to the quietest point of their gap. Per-clip caches live in `work/_clips/<stem>-<fingerprint>`.
-- `edl_parser.py` is the lossless `plan.edl` ⇄ `plan.json` bridge; `render.py` + `layouts.py` turn segments into FFmpeg filter graphs (layouts, zooms, overlay transitions from `assets/transitions/*.json`, marks, SFX, loudness). `vision_tracker.py` (OpenCV/YuNet) drives framing.
-- `scripts/align_engine/` is the alignment stack: Gemini verbatim transcript (`gemini_transcriber.py`) → `guardian.py`/lexicon loanword healing → Indic G2P (`phonetics/`, `uroman/` fallback) → wav2vec2 base CTC (`acoustic.py`, `viterbi.py`) → energy snaps in `onset_verifier.py`. wav2vec2 base (MIT) is the only aligner; MMS (CC-BY-NC) must not come back.
-- Tuning thresholds live in `styles/<name>/spec.json` (`tuning`/`engine` blocks) read through `style_config.py`; learned editor rules persist in `styles/<name>/brain_memory.json` (`brain_memory.py`). New styles are learned from a reference video with `learn_reference.py` (scan → frames → align → standins).
-
-**Transcription & Editorial Learning Service** (`service/`, FastAPI on Railway, deployed from this folder as its own root): holds the only Gemini key and collects team editorial learnings. Team PCs authenticate once via zero-touch Google OAuth (`python3 scripts/setup.py --login` or `install.command`, which opens the browser for `@gosupernova.live` sign-in (more domains only via `ZENO_ALLOWED_EMAIL_DOMAINS`) and automatically saves `.zeno_session.json` + `ZENO_CLOUD_URL` / `ZENO_CLOUD_TOKEN` in `.env`, with legacy `SCRIPTCUT_CLOUD_*` fallback). Keys are stored as SHA-256 hashes in Postgres (SQLite locally) and revocable at `/admin`. `scripts/token_tracker.py` posts per-run telemetry, `plan.auto.edl -> plan.edl` diffs, and `brain_memory.json` rules to `/v1/telemetry`, and `python3 scripts/zeno.py --sync-learnings` syncs shared rules via `/v1/learnings`. `service/prompt.py` is a deliberate copy of the prompt in `gemini_transcriber.py` (Railway only sees `service/`); keep them identical.
+## Developing Zeno itself
+When the task is to change Zeno's own code (not to edit a video), read `DEVELOPING.md` first (test commands, architecture, the transcription service, verified status). Never read it during a video edit: it only costs tokens.
 
 ## GPU use (all agents)
 Zeno uses the computer's GPU by itself: the aligner runs on NVIDIA CUDA or the Apple GPU (MPS), and H.264 encoding uses VideoToolbox (Mac), NVENC / Quick Sync / AMF (Windows), each tested with a real encode and falling back to CPU (`libx264`) if it fails. `python3 scripts/gpu_install.py --status` and `setup.py --smoke` show what a computer uses. Force with `ZENO_DEVICE=cpu|cuda|mps` or `ZENO_ENCODER=cpu|h264_nvenc|...`. On Windows the installer (and the daily updater) switches to the CUDA build of torch when `nvidia-smi` finds a driver with CUDA 12.6 or newer; it never overwrites a CUDA torch with the CPU build.

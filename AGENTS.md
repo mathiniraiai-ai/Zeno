@@ -113,64 +113,14 @@ right | L3 | 2.10 | 0.56 | top-right | 0.22 | correct_ding.wav | +2.5
 whoosh.wav | L3 | 0.0 | -2
 ```
 
-## 7. Developing the Zeno code itself (not editing a video)
-
-Use `.venv/bin/python` (Python 3.12; or run `install.command` / `install.bat`). `scripts/zeno.py` re-execs itself into `.venv` automatically.
-
-```bash
-.venv/bin/python -m unittest tests.test_engine                                  # engine regression suite
-.venv/bin/python scripts/setup.py --login                                       # zero-copy browser Google login -> saves .zeno_session.json
-.venv/bin/python scripts/setup.py --smoke                                       # env check, never prints keys
-.venv/bin/python scripts/eval_alignment.py --self-test                          # score word timing against gold benchmark
-.venv/bin/python scripts/knowledge_sync.py pull|push|match "<wording>"                # knowledge kept in the server database (no commit or redeploy for new recipes)
-.venv/bin/python scripts/format_library.py search "<script wording>"                  # look up how a format should look; `extract <video> --id ...` measures a reference locally, no tokens, video not kept
-.venv/bin/python scripts/style_readiness.py [style] [--json]                    # measured readiness level (0-3) of a style from files and tests
-.venv/bin/python scripts/clean.py [--apply]                                     # free disk
-python3 -m unittest service/test_keys.py service/test_service.py                # service & Google OAuth / learnings unit tests
-python3 service/check_prompt_sync.py                                            # verify service & local Gemini prompt sync
-```
-
-## 8. Architecture (big picture)
-
-**Director / Engine split.** A thin LLM "Director" (`agent/DIRECTOR.md` + `agent/concepts/*`) only reads small text files and edits `plan.edl`; everything measurable is Python in `scripts/`. `CLAUDE.md` and `AGENTS.md` are parallel manuals and must be kept in sync.
-
-**Transcription & Editorial Learning Service** (`service/`, FastAPI on Railway): holds the only Gemini key and collects team editorial learnings. Team PCs authenticate once via zero-touch Google OAuth (`python3 scripts/setup.py --login` or `install.command`, which opens the browser for `@gosupernova.live` sign-in (more domains only via `ZENO_ALLOWED_EMAIL_DOMAINS`) and automatically saves `.zeno_session.json` + `ZENO_CLOUD_URL` / `ZENO_CLOUD_TOKEN` in `.env`, with legacy `SCRIPTCUT_CLOUD_*` fallback). `scripts/token_tracker.py` posts per-run telemetry, `plan.auto.edl -> plan.edl` diffs, and `brain_memory.json` rules to `/v1/telemetry`, and `python3 scripts/zeno.py --sync-learnings` syncs shared rules via `/v1/learnings`.
+## Developing Zeno itself
+When the task is to change Zeno's own code (not to edit a video), read `DEVELOPING.md` first (test commands, architecture, the transcription service, verified status). Never read it during a video edit: it only costs tokens.
 
 ## GPU use (all agents)
 Zeno uses the computer's GPU by itself: the aligner runs on NVIDIA CUDA or the Apple GPU (MPS), and H.264 encoding uses VideoToolbox (Mac), NVENC / Quick Sync / AMF (Windows), each tested with a real encode and falling back to CPU (`libx264`) if it fails. `python3 scripts/gpu_install.py --status` and `setup.py --smoke` show what a computer uses. Force with `ZENO_DEVICE=cpu|cuda|mps` or `ZENO_ENCODER=cpu|h264_nvenc|...`. On Windows the installer (and the daily updater) switches to the CUDA build of torch when `nvidia-smi` finds a driver with CUDA 12.6 or newer; it never overwrites a CUDA torch with the CPU build.
 
 ## Caches & confirmations (all agents)
 Never ask the user to clear caches and never delete them by hand (`rm -rf work/...`). Caches under `work/_clips/<stem>-<fingerprint>` refresh themselves: each folder records the engine version that made it (`engine_version.json`), a change to the transcript code (prompt, healing, lexicons) drops that clip's transcript and alignment, a change to the aligner drops only the alignment (the paid transcript stays), and a damaged file is rebuilt. Writes are atomic. Only if a result is wrong for a reason the code cannot see, run the job once with `--fresh`. The only confirmation in a job is the Yes/No before rendering; ask it once, in chat, and do not repeat it after the user says Yes. Disk space is handled by the daily background task (`clean.auto_clean`, only when free disk is under 20 GB); to do it by hand run `python3 scripts/clean.py` (dry run), show the total, ask once, then `python3 scripts/clean.py --apply` as one command.
-
-## Verified status & open improvements (audit of 2026-11-04)
-Checked and passing: all Python files compile; `tests.test_engine` (28), `service/test_keys.py` (60 checks), `service/test_service.py --no-live` (6), prompt sync, JSON validity, shell syntax, `zeno.py --preflight`. Do not treat an item as fixed until it is under "Fixed".
-
-**Fixed**
-- `zeno.py` imports (`--swap-layout`, `--swap-take`, `--error-sfx` no longer crash); a Google Doc link loads only its `?tab=` (a link with no tab is refused).
-- Lexicons have no key with two different values (Tamil `டேக்ஸ்` is "takes"; "tax" is `டாக்ஸ்`).
-- Script reading (`parse_script_file`, also used by `learn_reference.dialogue`): reference, visual, character-list, link and scene-change lines are directions, not dialogue; `Scene changes` / `Back to` / `Cut to` / `Flashback` start a scene and get a transition; `(X Sign and Text Strikethrough)` and `[TEXT: "..." | strike]` become struck-through banners; layout notes such as `floating window ... horizontal split screen` or `Horizontal Split screen Top: Robot | Bottom: Lady 1` set the layout and who sits where; emoji marks (`❌` wrong, `✅` right) become marks; `Speaker: : text`, hyphenated names (`Co-worker 3`) and one name per character (`Robot` = `Female Humanoid Robot`) are handled.
-- `group_takes` uses the script: two clips that each fit a different script line are never takes of one line (a learner repeating the teacher's corrected sentence used to be pruned, which dropped the ✓).
-- Service: name-only signup needs `ZENO_SIGNUP_CODE`; company keys are not admin unless listed in `ZENO_ADMIN_EMAILS` (or `ZENO_ADMIN_ALLOW_DOMAIN=1`); only `gosupernova.live` unless `ZENO_ALLOWED_EMAIL_DOMAINS` says otherwise; Google ID token for our client id only; a revoked key stays revoked after a restart. These need a Railway redeploy of `service/`.
-- Listener rule in every split: the other panel shows the other character from their silent clip (matched by file name, else by looks), walked through turn after turn; panels are read from `Top: A | Bottom: B`, `Name - Left screen` and the character list; no silent clip means a quiet moment (or a held frame) with a `[LISTENER_FALLBACK]` alert; names that appear only in the panel note are merged with the speaker (`Robot` = `Female Humanoid Robot`).
-- Windows with no Git / a ZIP-installed folder: the installers install Git if missing (winget) and run `auto_updater.py --connect-git`, which turns the folder into a normal clone of the private repository without touching any file (the repository is public, so no GitHub account or sign-in is needed); `update.bat`/`update.command` connect instead of stopping; the updater says why it cannot update (`git_missing`, `no_git_repo`) instead of failing silently, and its pull fails fast instead of hanging on a sign-in prompt. Untested on a real Windows PC until the tester reports.
-- `--style <name>` writes `# style: <name>` into the plan (and survives quick tweaks), so jobs count toward a style's readiness level and the team's learning; the gate prints which style the job follows.
-- Pre-job gate (`zeno.py --preflight`, enforced by `--inspect`), `style_readiness.py`, the format library (`styles/formats/`), per-clip engine versions in caches, `--fresh`, automatic low-disk cleanup, the server transcript cache and team format learning (observations, admin approval, `--sync-learnings`).
-- micronarrative now has two references (`variants` in its spec.json): W42 (left/right split, warm flash) and W43 Hindi (top/bottom split with the seam at 0.472 of the height, fast blur whips and a glitch frame, one 91 s split-screen lesson).
-
-**Open**
-- micronarrative is level 1 (RENDER-ONLY) in `style_readiness.py`: nothing is proven on real raw footage, there is no hand-marked gold set, 6 unknowns are open (including whether the transition style is chosen per reel, per scene type or by the script).
-- "Horizontal split screen" is read as a horizontal divider (top and bottom, `split_v`); change `SCRIPT_SPLIT_LAYOUT` in `prepare.py` if the team means the opposite (the W43 reference confirms top and bottom).
-- Only the strike-through on-screen text cue is rendered; the general text format is undefined.
-- The Railway service must be redeployed for `/v1/selftest`, the transcript cache, `/v1/observations` and the security fixes to take effect; no admin page yet for approving formats.
-- The renderer's blur-whip transitions, caption colours and the W43 split seam position (0.472, not 0.5) are measured or seen but not yet reproduced by `layouts.py`.
-
-**Improvements (planned)**
-- Editor scorecard after every render: clipped words, longest pause, A/V offset, shot-length spread, transition count, loudness, text readability, script coverage.
-- J-cuts and L-cuts (audio leads or trails the picture by 4-12 frames) and reaction holds read from the script dialogue.
-- Cut-aware contact sheets with a short text caption per reference, stored in Postgres, for people to review.
-- Daily per-computer preflight with a desktop notification on failure.
-- Measure alignment on a hand-marked gold set with `eval_alignment.py` before changing any threshold; measure editing numbers on the user's best finished videos and confirm with A/B tests.
-- Keep `CLAUDE.md` and `AGENTS.md` in sync with a check script; tests for `render.py` and `layouts.py`; CI on every push; test the Windows installer.
 
 ## Secrets (all agents)
 Never open, print, quote or paste `.env`, `.zeno_session.json`, or any key in a chat or log. They hold the user's personal Zeno session token (or a Gemini key). To check setup, run `python3 scripts/setup.py --smoke` or `python3 scripts/setup.py --whoami`; they report [OK]/[FAIL] without showing keys. Read `.env.example` instead if you need the variable names.
