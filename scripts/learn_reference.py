@@ -154,30 +154,20 @@ DIRECTION_RE = re.compile(r"\(([^)]*)\)")
 
 
 def dialogue(text: str) -> list:
-    """Dialogue lines from a script tab: `Speaker: text`, with scene numbers and (stage directions) split out."""
-    lines, scene, scene_title, notes = [], 0, "", []
-    for raw in text.splitlines():
-        s = raw.strip()
-        if not s or s.startswith("# source:"):
+    """Spoken lines of a script tab, read with the same parser a job uses (prepare._parse_script_raw), so character lists,
+    links, layout notes and mark emojis are never mistaken for dialogue. Silent beats are left out."""
+    import prepare
+
+    _, parsed = prepare._parse_script_raw(text, "reference")
+    out = []
+    for l in parsed:
+        if l.get("beat") or not l.get("text"):
             continue
-        m = SCENE_RE.match(s)
-        if m:
-            scene, scene_title, notes = int(m.group(1)), m.group(2).strip(" —-"), []
-            continue
-        m = SPEAKER_RE.match(s)
-        if m and len(m.group(1).split()) <= 4 and not m.group(1).lower().startswith(("visual", "http")):
-            spoken = m.group(2)
-            directions = [d.strip() for d in DIRECTION_RE.findall(spoken)]
-            spoken = re.sub(r"\s+", " ", DIRECTION_RE.sub("", spoken)).strip()
-            if spoken:
-                lines.append({"id": f"L{len(lines) + 1}", "scene": scene, "scene_title": scene_title,
-                              "speaker": m.group(1).strip(), "text": spoken, "directions": directions,
-                              "notes": notes})
-                notes = []
-            continue
-        if scene:
-            notes.append(s)
-    return lines
+        m = re.search(r"\d+", str(l.get("scene", "")))
+        out.append({"id": f"L{len(out) + 1}", "scene": int(m.group()) if m else 0, "scene_title": l.get("scene_visual", ""),
+                    "speaker": l.get("speaker", ""), "text": l["text"], "directions": [l["note"]] if l.get("note") else [], "notes": [],
+                    "mark": l.get("mark")})
+    return out
 
 
 def _tokens(text: str) -> list:

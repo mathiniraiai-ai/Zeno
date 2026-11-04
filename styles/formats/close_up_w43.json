@@ -1,0 +1,44 @@
+{
+ "id": "close_up_w43",
+ "layout": "single",
+ "description": "Close and medium shots of the speakers outdoors",
+ "measured": {
+  "video": "Reel - W43 - Hindi - AI Only - Micro Narrative - Grandma in Cotton Field - Replication from Telugu - 121s - Prashanth - Hitesh.mp4",
+  "size": "1080x1920",
+  "fps": 60.0,
+  "window_sec": [
+   0.0,
+   28.0
+  ],
+  "frames_sampled": 24,
+  "seam": {
+   "kind": "none",
+   "share_of_frames": 1.0,
+   "position_frac": null
+  },
+  "faces_per_frame_median": 1,
+  "face_width_frac_p25_p50_p75": [
+   0.253,
+   0.273,
+   0.287
+  ],
+  "eye_y_frac_p25_p50_p75": [
+   0.273,
+   0.29,
+   0.354
+  ],
+  "headroom_frac_p25_p50_p75": [
+   0.167,
+   0.192,
+   0.257
+  ],
+  "face_center_x_frac_p25_p50_p75": [
+   0.512,
+   0.525,
+   0.56
+  ],
+  "motion_mean": 0.1365
+ },
+ "confidence": "measured",
+ "source": "measured from Reel - W43 - Hindi - AI Only - Micro Narrative - Grandma in Cotton Field - Replication from Telugu - 121s - Prashanth - Hitesh.mp4 (0.0-28.0 s, 24 frames) on 2026-11-04"
+}

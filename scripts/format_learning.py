@@ -64,6 +64,10 @@ def build_observation(plan: Dict[str, Any], plan_text: str = "", script_text: st
 
 def post_observation(obs: Dict[str, Any]) -> bool:
     """Send to the Zeno server with this computer's key. Quiet and safe: any problem just returns False."""
+    import os
+
+    if os.environ.get("ZENO_NO_OBSERVE") == "1":   # demos and test renders must not count as team jobs
+        return False
     try:
         import auth_session
         import httpx

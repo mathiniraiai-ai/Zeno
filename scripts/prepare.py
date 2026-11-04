@@ -350,7 +350,13 @@ _META_LINE_RE = re.compile(r"^(?:visuals?|reference(?:\s+link)?|ref\s+link|conce
 _CHAR_DEF_RE = re.compile(r"^Character\s*\d*\s*[-–—]\s*(.+)$", re.I)
 # "Scene changes: ...", "Scene changes - ...", "Back to the site, ...", "Cut to ...", "Flashback ..."
 _SCENE_DIR_RE = re.compile(r"^(?:scene\s+chang(?:e|es|ed)|flash\s*back|(?:back|cut)\s+to)\b[\s:,\-–—]*(.*)$", re.I)
-_LAYOUT_CUE_RE = re.compile(r"^(?:rectangle\s+overlay|floating\s+window|split[\s-]*screen|picture[\s-]*in[\s-]*picture)\b", re.I)
+_LAYOUT_CUE_RE = re.compile(r"^(?:rectangle\s+overlay|floating\s+window|(?:(?:horizontal|vertical)\s+)?split[\s-]*screen|picture[\s-]*in[\s-]*picture)\b", re.I)
+# "Ref for visual set up: https://..." / "Reference link : https://...": a label and a link, nothing to say
+_LABELLED_URL_RE = re.compile(r"^[^:]{1,40}:\s*https?://\S+\s*$", re.I)
+# "Top: Robot | Bottom: Lady 1" or "Left: A | Right: B" after a split-screen note
+_PANELS_RE = re.compile(r"(top|left)\s*:\s*(.+?)\s*\|\s*(bottom|right)\s*:\s*(.+)$", re.I)
+_WRONG_MARKS = "❌✗✘❎"
+_RIGHT_MARKS = "✅✓✔☑"
 # a parenthetical that only describes what is happening while people talk, so it is not a silent beat
 _CONTEXT_DIR_RE = re.compile(r"\b(?:is|are)\s+(?:talking|speaking|saying)\b|\btalking\s+to\b|\bwhile\b", re.I)
 # "(X Sign and Text Strikethrough)" after a spoken line: show that line's text struck through in red
@@ -389,9 +395,13 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
     ("Scene changes: ...", "Back to ...") and layout notes ("floating window ... split screen") are read as directions:
     scene changes start a new scene (so a transition is placed), layout notes set `layout_hint` on the lines that follow,
     and a trailing "(X Sign and Text Strikethrough)" strips the cue and sets `strike_text` on that line."""
-    raw = read_script_text(script_path)
+    return _parse_script_raw(read_script_text(script_path), script_path.stem)
+
+
+def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """The parser behind parse_script_file, working on text so reference learning reads scripts exactly like a job does."""
     meta: Dict[str, Any] = {
-        "title": script_path.stem,
+        "title": title,
         "language": "auto",
         "header": "",
         "concept_brief": "",
@@ -406,12 +416,15 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
     scene_no = 1
     current_visual = ""
     current_hint = ""
+    current_panels: Dict[str, str] = {}
     pending_speaker = ""
     pending_note = ""
 
     for raw_line in raw.splitlines():
         s = raw_line.strip()
         if not s:
+            if in_characters_block and meta["characters"]:
+                in_characters_block = False   # the character list ends at the first blank line after it
             continue
         if s.startswith("#"):
             header_lines.append(s.lstrip("#").strip())
@@ -436,7 +449,7 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
             continue
 
         # 1b. Other non-spoken header lines: a bare URL, "Reference link : ...", "Visuals: ..."
-        if _URL_ONLY_RE.match(s):
+        if _URL_ONLY_RE.match(s) or _LABELLED_URL_RE.match(s):
             continue
         if _META_LINE_RE.match(s):
             val_m = s.split(":", 1)[1].strip()
@@ -447,6 +460,11 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
         # 2. Characters heading & character definitions (-- Name -- Description)
         if re.match(r"^Characters?\s*:?\s*$", s, re.I):
             in_characters_block = True
+            continue
+        if (in_characters_block and not s.startswith("--") and not _CHAR_DEF_RE.match(s)
+                and not re.match(r"^Scene\s+\d+", s, re.I) and not _SCENE_DIR_RE.match(s)):   # "Lady 1: A lady in her 60s ..." or just "Female Humanoid Robot"
+            cname, _, cdesc = s.partition(":")
+            meta["characters"][cname.strip()[:40]] = cdesc.strip()
             continue
         m_char = re.match(r"^--\s*([^-]+?)\s*--\s*(.+)$", s)
         if m_char:
@@ -481,6 +499,7 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
             current_scene = f"Scene {scene_no}"
             current_visual = m_scene_dir.group(1).strip(" :-–—") or s
             current_hint = layout_hint_from_direction(current_visual)
+            current_panels = {}
             pending_speaker = pending_note = ""
             meta["scenes"].append({"scene": current_scene, "visual": current_visual})
             continue
@@ -490,6 +509,8 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
             hint_l = layout_hint_from_direction(s)
             if hint_l:
                 current_hint = hint_l
+                m_pan = _PANELS_RE.search(s)
+                current_panels = {m_pan.group(1).lower(): m_pan.group(2).strip(), m_pan.group(3).lower(): m_pan.group(4).strip()} if m_pan else {}
                 continue
 
         # 4. Scene visual / camera direction block: "[Visual: ...]"
@@ -504,7 +525,7 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
             continue
 
         # 5. Standalone speaker line (e.g. "Miss Nova:" or "Ravi (He's speaking in pauses...):")
-        m_standalone_spk = re.match(r"^([A-Za-z][A-Za-z0-9_ .]{0,24}?)\s*(?:\(([^)]*)\))?\s*:\s*$", s)
+        m_standalone_spk = re.match(r"^([A-Za-z](?:[A-Za-z0-9_ .']|(?<=\w)-(?=\w)){0,24}?)\s*(?:\(([^)]*)\))?\s*:\s*$", s)
         if m_standalone_spk:
             in_characters_block = False
             pending_speaker = m_standalone_spk.group(1).strip()
@@ -538,11 +559,15 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
                 rest = rest[: m_strike.start()].strip()
 
         mark = None
+        emoji_marks = [c for c in rest if c in _WRONG_MARKS + _RIGHT_MARKS]
+        if emoji_marks:   # "I am Delhi. ❌" / "I am from Delhi. ✅": the mark the line carries, removed from the spoken text
+            mark = "wrong" if emoji_marks[-1] in _WRONG_MARKS else "right"
+            rest = re.sub("[" + _WRONG_MARKS + _RIGHT_MARKS + "]\ufe0f?", "", rest).strip()
         m_mark = re.search(r"\[(WRONG|RIGHT)\]\s*$", rest, re.I)
         if m_mark:
             mark = m_mark.group(1).lower()
             rest = rest[: m_mark.start()].strip()
-        else:
+        elif mark is None:
             # Also check inline [WRONG] or [RIGHT] inside a composite line
             m_inline = re.search(r"\[(WRONG|RIGHT)\]", rest, re.I)
             if m_inline:
@@ -568,11 +593,11 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
             note = next(g for g in m_beat.groups() if g).strip()
             text = note
         else:
-            m_spk = re.match(r"^([A-Za-z][A-Za-z0-9_ ]{0,22}?)\s*(?:\(([^)]*)\))?\s*:\s*(.+)$", rest)
+            m_spk = re.match(r"^([A-Za-z](?:[A-Za-z0-9_ .']|(?<=\w)-(?=\w)){0,22}?)\s*(?:\(([^)]*)\))?\s*:\s*(.+)$", rest)
             if m_spk and not m_spk.group(1).lower().startswith(("http", "concept", "visual", "scene")):
                 speaker = m_spk.group(1).strip()
                 note = (m_spk.group(2) or note or "").strip()
-                text = m_spk.group(3).strip()
+                text = m_spk.group(3).strip().lstrip(":").strip()
             else:
                 text = rest
             # Extract inline stage directions like "(laughing)" after speaker colon into note
@@ -602,8 +627,20 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
             "note": note,
             "beat": beat,
             "layout_hint": current_hint,
+            "panels": dict(current_panels),
             "strike_text": (strike_override or text) if (strike_cue and not beat) else "",
         })
+
+    names = sorted({l["speaker"] for l in lines if l.get("speaker")} | set(meta["characters"]), key=lambda n: -len(n.split()))
+    canon = {}
+    for n in names:
+        words = set(n.lower().split())
+        longer = next((m for m in names if m != n and len(m.split()) > len(n.split()) and words < set(m.lower().split())), None)
+        if longer:
+            canon[n] = longer
+    for l in lines:
+        l["speaker"] = canon.get(l.get("speaker", ""), l.get("speaker", ""))
+        l["panels"] = {k: canon.get(v, v) for k, v in l.get("panels", {}).items()}
 
     # Auto-infer [WRONG] / [RIGHT] on student lines when followed by teacher feedback ("Almost", "Perfect!", "Nice!", "ನೀವು ಸಿಂಪಲ್ಲಾಗಿ")
     for idx in range(len(lines) - 1):
@@ -766,10 +803,33 @@ def _same_content(a: List[str], b: List[str]) -> float:
 SAME_TAKE_THRESHOLD = 0.72
 
 
-def group_takes(clips_data: List[Dict[str, Any]]) -> None:
+def _best_script_line(tokens: List[str], script_lines: List[Dict[str, Any]]) -> Tuple[int, float]:
+    """(index, score) of the script line a clip's words fit best: the F1 of shared words, so a clip that only repeats a
+    part of a longer line fits its own short line better than the long one."""
+    from collections import Counter
+
+    have = Counter(tokens)
+    best_i, best = -1, 0.0
+    for i, l in enumerate(script_lines):
+        lt = l.get("tokens") or []
+        if not lt or not tokens:
+            continue
+        overlap = sum((have & Counter(lt)).values())
+        prec, rec = overlap / len(tokens), overlap / len(lt)
+        f1 = 0.0 if prec + rec == 0 else 2 * prec * rec / (prec + rec)
+        if f1 > best:
+            best_i, best = i, f1
+    return best_i, best
+
+
+DISTINCT_LINE_MIN_FIT = 0.7
+
+
+def group_takes(clips_data: List[Dict[str, Any]], script_lines: Optional[List[Dict[str, Any]]] = None) -> None:
     """Group clips that say the same thing, in any order and under any file names, so only the best one is used.
     Every clip is compared with every other clip (not just its neighbour). Sets clip["take_group"] to the index of
-    the first clip of its group."""
+    the first clip of its group. When the script is given, two clips that each fit a DIFFERENT script line well are never
+    grouped: a learner repeating the teacher's corrected sentence is a line of its own, not a retake of the teacher's."""
     n = len(clips_data)
     parent = list(range(n))
 
@@ -780,9 +840,13 @@ def group_takes(clips_data: List[Dict[str, Any]]) -> None:
         return i
 
     toks = [_clip_tokens(c) for c in clips_data]
+    fits = [_best_script_line(t, script_lines) for t in toks] if script_lines else [(-1, 0.0)] * n
     for i in range(n):
         for j in range(i + 1, n):
             if min(len(toks[i]), len(toks[j])) >= 2 and _same_content(toks[i], toks[j]) >= SAME_TAKE_THRESHOLD:
+                (li, si), (lj, sj) = fits[i], fits[j]
+                if li >= 0 and lj >= 0 and li != lj and min(si, sj) >= DISTINCT_LINE_MIN_FIT:
+                    continue   # two different script lines, each said well: not takes of one line
                 ri, rj = find(i), find(j)
                 if ri != rj:
                     parent[max(ri, rj)] = min(ri, rj)
@@ -861,7 +925,7 @@ def match_clips_to_script_lines(
     script_lines = speech_lines
     if not clips_data:
         return
-    group_takes(clips_data)
+    group_takes(clips_data, script_lines)
     if not script_lines:
         for c in clips_data:
             c["matched_lines"] = []
@@ -1867,6 +1931,11 @@ def assign_segment_ids_marks_and_layouts(
                 slot_a, slot_b = ("left", "right") if layout_mode == "split_h" else ("top", "bottom")
                 spk_idx = all_speakers.index(cur_spk) if (cur_spk and cur_spk in all_speakers) else (idx % 2)
                 active_slot = slot_a if (spk_idx % 2 == 0) else slot_b
+                # the script said who sits where ("Top: Robot | Bottom: Lady 1"): that wins over the alternating default
+                panels = next((l.get("panels") for l in lines if l.get("panels")), {}) or {}
+                for panel_name, panel_spk in panels.items():
+                    if cur_spk and panel_spk.lower() == cur_spk.lower() and panel_name in (slot_a, slot_b):
+                        active_slot = panel_name
                 peer_slot = slot_b if active_slot == slot_a else slot_a
                 seg_dict["slot"] = active_slot
             else:

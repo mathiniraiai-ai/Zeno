@@ -86,7 +86,7 @@ def assess(style: str, root: Path = ROOT, run_tests: bool = True) -> Dict[str, A
     checks.append(_check("tuning parameters", tuning_n >= 20, f"{tuning_n} (needs 20 or more)"))
 
     refs = spec.get("learned_from")
-    n_refs = len(refs) if isinstance(refs, list) else (1 if refs else 0)
+    n_refs = (len(refs) if isinstance(refs, list) else (1 if refs else 0)) + len(spec.get("variants") or [])
     checks.append(_check("reference videos learned from", n_refs >= 1, str(n_refs)))
 
     rb = spec.get("rebuild_check") or {}

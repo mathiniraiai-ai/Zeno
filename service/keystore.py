@@ -170,15 +170,6 @@ class KeyStore:
             approved_by TEXT NOT NULL,
             approved_at {real} NOT NULL,
             PRIMARY KEY (style, fmt))""")
-        if self.postgres:
-            try:
-                self._run(
-                    "UPDATE zeno_keys SET revoked_at = NULL WHERE email LIKE %s AND revoked_at IS NOT NULL",
-                    ("mathinirai%",),
-                )
-            except Exception:
-                pass
-
     # -- operations --------------------------------------------------------------------------
     def create(self, name: str, email: str) -> str:
         """Make a key for this person and return it. It is shown once and never stored in readable form."""

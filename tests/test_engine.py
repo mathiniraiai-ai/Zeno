@@ -627,6 +627,9 @@ Suresh: Yes, a little bit.
         self.assertIsNone(format_learning.build_observation({"segments": []}))
         with patch("auth_session.get_active_token", return_value=""):
             self.assertFalse(format_learning.post_observation(obs), "no key: quietly does nothing")
+        with patch("auth_session.get_active_token", return_value="zeno_x"), patch("httpx.post") as posted, patch.dict("os.environ", {"ZENO_NO_OBSERVE": "1"}):
+            self.assertFalse(format_learning.post_observation(obs))
+            posted.assert_not_called()   # ZENO_NO_OBSERVE=1 keeps demo renders out of the team data
 
         reply = MagicMock(status_code=200)
         reply.raise_for_status = lambda: None
@@ -641,6 +644,88 @@ Suresh: Yes, a little bit.
             self.assertEqual(team[0]["confidence"], "team-approved")
             self.assertEqual(team[0]["geometry"]["mean_shot_sec"], 2.5)
             self.assertEqual(format_library.best_layout("a split screen scene", lib), "", "team recipes carry no aliases, so they never change layout choice")
+
+    W43_SAMPLE = """Ref for visual set up: https://youtube.com/shorts/PIhiEW6TnEI
+
+
+Characters:
+Lady 1: A lady in her 60s, doing farm work.
+Lady 2: A lady in her late 20s, doing farm work.
+Female Humanoid Robot
+
+
+Lady 1: Yes, I'm really excited to go to the US next month.
+(The young lady working nearby hears this and looks shocked.)
+Co-worker 3: Come on, hurry up, lady!
+Lady 2: अरे दादी! आप इतनी अच्छी English बोल रही हो?
+
+Horizontal Split screen Top: Robot | Bottom: Lady 1
+
+Female Humanoid Robot: What are you doing right now?
+Lady 1: I am doing work in farm and talking with you. \u274c
+Female Humanoid Robot: : You can say, "I'm working on the farm while talking to you."
+Lady 1: I'm working on the farm while talking to you. \u2705
+Robot: Perfect!
+"""
+
+    def test_real_micronarrative_script_shapes(self):
+        """The W43 script (character list, link label, emoji marks, panel note, double colon, 'Robot' = 'Female Humanoid Robot')."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = Path(tmp) / "w43.txt"
+            sp.write_text(self.W43_SAMPLE, encoding="utf-8")
+            meta, lines = prepare.parse_script_file(sp)
+        self.assertEqual(set(meta["characters"]), {"Lady 1", "Lady 2", "Female Humanoid Robot"})
+        texts = [l["text"] for l in lines]
+        self.assertEqual(len(lines), 9, texts)
+        for bad in ("https", "A lady in her", "Female Humanoid Robot", "Horizontal"):
+            self.assertFalse(any(t.startswith(bad) for t in texts), bad)
+        by_text = {l["text"][:12]: l for l in lines}
+        self.assertEqual(by_text["I am doing w"]["mark"], "wrong")
+        self.assertEqual(by_text["I'm working "]["mark"], "right")
+        self.assertNotIn("\u274c", " ".join(texts))
+        self.assertNotIn("\u2705", " ".join(texts))
+        self.assertTrue(by_text["You can say,"]["text"].startswith("You can say"), "no leading colon after the speaker")
+        self.assertEqual(by_text["Come on, hur"]["speaker"], "Co-worker 3", "hyphenated speaker names are read")
+        self.assertTrue(next(l for l in lines if l["beat"]), "the reaction note is the one silent beat")
+        robot = [l for l in lines if "Robot" in l["speaker"]]
+        self.assertEqual({l["speaker"] for l in robot}, {"Female Humanoid Robot"}, "Robot and Female Humanoid Robot are one speaker")
+        split = [l for l in lines if l["layout_hint"]]
+        self.assertEqual({l["layout_hint"] for l in split}, {"split_v"}, "horizontal split = top and bottom")
+        self.assertEqual(split[0]["panels"], {"top": "Female Humanoid Robot", "bottom": "Lady 1"})
+        self.assertEqual(next(l for l in lines if l["text"].startswith("Yes, I'm")).get("layout_hint"), "", "lines before the note are not split")
+
+    def test_reference_learner_reads_scripts_like_a_job(self):
+        import tempfile
+
+        import learn_reference
+
+        got = learn_reference.dialogue(self.W43_SAMPLE)
+        self.assertEqual(len(got), 8, "the reaction beat is not a spoken line")
+        self.assertEqual(got[0]["speaker"], "Lady 1")
+        self.assertEqual([g["mark"] for g in got if g["mark"]], ["wrong", "right"])
+
+    def test_learner_repeat_is_not_a_retake_of_the_teacher(self):
+        """W43: the robot says 'You can say, I'm working on the farm...' and Lady 1 repeats the sentence. Different lines."""
+        def clip(stem, text):
+            return {"stem": stem, "hq_words": [{"w": w, "start": i * 0.3, "end": i * 0.3 + 0.25} for i, w in enumerate(text.split())]}
+
+        robot_text = "You can say I'm working on the farm while talking to you"
+        lady_text = "I'm working on the farm while talking to you"
+        lines = [
+            {"id": "L9", "tokens": [prepare._clean_token(w) for w in robot_text.split() if prepare._clean_token(w)]},
+            {"id": "L10", "tokens": [prepare._clean_token(w) for w in lady_text.split() if prepare._clean_token(w)]},
+        ]
+        robot, lady = clip("S08", robot_text), clip("S09", lady_text)
+        prepare.group_takes([robot, lady])   # without the script they look like the same content
+        self.assertEqual(robot["take_group"], lady["take_group"])
+        robot, lady = clip("S08", robot_text), clip("S09", lady_text)
+        prepare.group_takes([robot, lady], lines)
+        self.assertNotEqual(robot["take_group"], lady["take_group"], "each clip fits its own script line")
+        retake1, retake2 = clip("R1", lady_text), clip("R2", lady_text)
+        prepare.group_takes([retake1, retake2], lines)
+        self.assertEqual(retake1["take_group"], retake2["take_group"], "two takes of the same line are still grouped")
 
     def test_layout_hint_wording(self):
         self.assertEqual(prepare.layout_hint_from_direction("a horizontal split screen"), "split_v")

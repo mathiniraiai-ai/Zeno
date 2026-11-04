@@ -185,7 +185,8 @@
   "whether the listener in split screen is a separate idle clip",
   "how Zeno should choose a reaction shot (scene 1 shot 6) from raw clips",
   "whether a Malayalam scene-1 version uses the same English shot order",
-  "subtitle style (parked)"
+  "subtitle style (parked)",
+  "transition style: warm flash (W42) or fast blur whip (W43): is it chosen per reel, per scene type, or by the script?"
  ],
  "engine": {
   "note": "read by scripts/style_plan.py; everything else in this file is for people and the Director",
@@ -272,5 +273,71 @@
   "flash_frames_mean_diff": "10-18 (a flash wash baked into the reference's subtitle pill and a colour gradient are not reproduced)",
   "audio": "in sync (lag 0), -13.9 LUFS after normalisation",
   "caveat": "stand-ins come from the reference itself, so this proves the render side only; it does not test take selection or clip-to-line matching on real raw footage"
- }
+ },
+ "variants": [
+  {
+   "id": "w43_hi_farm",
+   "reference": "Reel - W43 - Hindi - AI Only - Micro Narrative - Grandma in Cotton Field - Replication from Telugu - 121s (video not committed)",
+   "script_tab": "t.v1r5i0luz71b",
+   "language": "Hindi, with English lines",
+   "duration_sec": 121.72,
+   "size": "1080x1920",
+   "fps": 60,
+   "date": "2026-11-04",
+   "files": "refs/w43_hi_farm/ (map.json: script lines with times and match scores; shots_contact_sheet.jpg)",
+   "structure": [
+    {
+     "scene": 1,
+     "start": 0.0,
+     "end": 30.4,
+     "layout": "single",
+     "cutting": "phone call in a field: close-ups of the grandmother and the young woman; cuts at 3.2, 5.6, 7.2, 19.2, 23.0 s; fast blur (whip) transitions seen at about 11.4, 19.2 and 30.4 s and a glitch frame at about 7.2 s"
+    },
+    {
+     "scene": 2,
+     "start": 30.4,
+     "end": 121.7,
+     "layout": "split_v",
+     "cutting": "ONE continuous top and bottom split screen, 91 s, no cuts: the robot on top, the learner below"
+    }
+   ],
+   "split_v": {
+    "seam_position_frac_of_height": 0.472,
+    "frames_with_seam": 0.96,
+    "faces_per_frame": 2,
+    "face_width_frac_of_width": 0.224,
+    "face_center_x_frac": 0.504,
+    "panels_from_script": {
+     "top": "Female Humanoid Robot",
+     "bottom": "Lady 1"
+    }
+   },
+   "script": {
+    "lines": 24,
+    "spoken": 23,
+    "silent_beats": 1,
+    "all_spoken_lines_matched": true,
+    "match_score_range": [
+     0.97,
+     1.0
+    ],
+    "turn_gap_median_sec": 0.0,
+    "marks": "wrong after L8 and right after L10, written as emoji after the line in the script"
+   },
+   "differs_from_w42": [
+    "transitions are fast blur whips and a glitch frame, not the warm flash",
+    "the split is top and bottom (split_v), not left and right (split_h); the script says so ('Horizontal Split screen Top: Robot | Bottom: Lady 1')",
+    "the seam is at 0.472 of the height, not at the middle",
+    "marks come from emoji in the script, not from tags",
+    "the whole lesson is one split-screen scene; there is no separate two-shot scene",
+    "captions look yellow for English and white for Hindi in the contact sheet (seen, not measured)"
+   ],
+   "not_measured": [
+    "length and curve of the blur transitions (the scanner only found one of three)",
+    "caption font, size and position",
+    "where the wrong/right sounds and flashes fall",
+    "loudness"
+   ]
+  }
+ ]
 }

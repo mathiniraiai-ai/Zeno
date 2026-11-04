@@ -160,5 +160,33 @@ python3 service/check_prompt_sync.py                                            
 ## Caches & confirmations (all agents)
 Never ask the user to clear caches and never delete them by hand (`rm -rf work/...`). Caches under `work/_clips/<stem>-<fingerprint>` refresh themselves: each folder records the engine version that made it (`engine_version.json`), a change to the transcript code (prompt, healing, lexicons) drops that clip's transcript and alignment, a change to the aligner drops only the alignment (the paid transcript stays), and a damaged file is rebuilt. Writes are atomic. Only if a result is wrong for a reason the code cannot see, run the job once with `--fresh`. The only confirmation in a job is the Stage 3 Yes/No before rendering; ask it once, in chat, and do not repeat it after the user says Yes. Disk space is handled by the daily background task (`clean.auto_clean`, only when free disk is under 20 GB); to do it by hand run `python3 scripts/clean.py` (dry run), show the total, ask once, then `python3 scripts/clean.py --apply` as one command.
 
+## Verified status & open improvements (audit of 2026-11-04)
+Checked and passing: all Python files compile; `tests.test_engine` (28), `service/test_keys.py` (60 checks), `service/test_service.py --no-live` (6), prompt sync, JSON validity, shell syntax, `zeno.py --preflight`. Do not treat an item as fixed until it is under "Fixed".
+
+**Fixed**
+- `zeno.py` imports (`--swap-layout`, `--swap-take`, `--error-sfx` no longer crash); a Google Doc link loads only its `?tab=` (a link with no tab is refused).
+- Lexicons have no key with two different values (Tamil `டேக்ஸ்` is "takes"; "tax" is `டாக்ஸ்`).
+- Script reading (`parse_script_file`, also used by `learn_reference.dialogue`): reference, visual, character-list, link and scene-change lines are directions, not dialogue; `Scene changes` / `Back to` / `Cut to` / `Flashback` start a scene and get a transition; `(X Sign and Text Strikethrough)` and `[TEXT: "..." | strike]` become struck-through banners; layout notes such as `floating window ... horizontal split screen` or `Horizontal Split screen Top: Robot | Bottom: Lady 1` set the layout and who sits where; emoji marks (`❌` wrong, `✅` right) become marks; `Speaker: : text`, hyphenated names (`Co-worker 3`) and one name per character (`Robot` = `Female Humanoid Robot`) are handled.
+- `group_takes` uses the script: two clips that each fit a different script line are never takes of one line (a learner repeating the teacher's corrected sentence used to be pruned, which dropped the ✓).
+- Service: name-only signup needs `ZENO_SIGNUP_CODE`; company keys are not admin unless listed in `ZENO_ADMIN_EMAILS` (or `ZENO_ADMIN_ALLOW_DOMAIN=1`); only `gosupernova.live` unless `ZENO_ALLOWED_EMAIL_DOMAINS` says otherwise; Google ID token for our client id only; a revoked key stays revoked after a restart. These need a Railway redeploy of `service/`.
+- Pre-job gate (`zeno.py --preflight`, enforced by `--inspect`), `style_readiness.py`, the format library (`styles/formats/`), per-clip engine versions in caches, `--fresh`, automatic low-disk cleanup, the server transcript cache and team format learning (observations, admin approval, `--sync-learnings`).
+- micronarrative now has two references (`variants` in its spec.json): W42 (left/right split, warm flash) and W43 Hindi (top/bottom split with the seam at 0.472 of the height, fast blur whips and a glitch frame, one 91 s split-screen lesson).
+
+**Open**
+- micronarrative is level 1 (RENDER-ONLY) in `style_readiness.py`: nothing is proven on real raw footage, there is no hand-marked gold set, 6 unknowns are open (including whether the transition style is chosen per reel, per scene type or by the script).
+- Plans do not carry `# style: <name>` yet, so jobs are not counted per style; add a `--style` option.
+- "Horizontal split screen" is read as a horizontal divider (top and bottom, `split_v`); change `SCRIPT_SPLIT_LAYOUT` in `prepare.py` if the team means the opposite (the W43 reference confirms top and bottom).
+- Only the strike-through on-screen text cue is rendered; the general text format is undefined.
+- The Railway service must be redeployed for `/v1/selftest`, the transcript cache, `/v1/observations` and the security fixes to take effect; no admin page yet for approving formats.
+- The renderer's blur-whip transitions, caption colours and the W43 split seam position (0.472, not 0.5) are measured or seen but not yet reproduced by `layouts.py`.
+
+**Improvements (planned)**
+- Editor scorecard after every render: clipped words, longest pause, A/V offset, shot-length spread, transition count, loudness, text readability, script coverage.
+- J-cuts and L-cuts (audio leads or trails the picture by 4-12 frames) and reaction holds read from the script dialogue.
+- Cut-aware contact sheets with a short text caption per reference, stored in Postgres, for people to review.
+- Daily per-computer preflight with a desktop notification on failure.
+- Measure alignment on a hand-marked gold set with `eval_alignment.py` before changing any threshold; measure editing numbers on the user's best finished videos and confirm with A/B tests.
+- Keep `CLAUDE.md` and `AGENTS.md` in sync with a check script; tests for `render.py` and `layouts.py`; CI on every push; test the Windows installer.
+
 ## Secrets (all agents)
 Never open, print, quote or paste `.env`, `.zeno_session.json`, or any key in a chat or log. They hold the user's personal Zeno session token (or a Gemini key). To check setup, run `python3 scripts/setup.py --smoke` or `python3 scripts/setup.py --whoami`; they report [OK]/[FAIL] without showing keys. Read `.env.example` instead if you need the variable names.

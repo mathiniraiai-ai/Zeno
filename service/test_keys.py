@@ -76,6 +76,12 @@ check("revoke without admin header -> 400", client.post(f"/admin/api/keys/{kid}/
 check("revoke without password -> 401", client.post(f"/admin/api/keys/{kid}/revoke", headers={"X-Zeno-Admin": "1"}).status_code == 401)
 check("revoke works", client.post(f"/admin/api/keys/{kid}/revoke", headers={**basic("admin-pw"), "X-Zeno-Admin": "1"}).json() == {"revoked": True})
 check("revoked key stops working at once -> 401", ping(key).status_code == 401)
+# A revoked key must stay revoked across restarts: starting the store must never un-revoke anyone
+import re as _re  # noqa: E402
+_src = (Path(__file__).resolve().parent / "keystore.py").read_text(encoding="utf-8")
+check("the key store never un-revokes a key at startup", not _re.search(r"revoked_at\s*=\s*NULL", _src))
+_reopened = service.KeyStore(sqlite_path=os.environ["ZENO_DB_PATH"]) if hasattr(service, "KeyStore") else None
+check("a revoked key is still revoked after the store is reopened", _reopened is not None and _reopened.lookup(key) is None)
 
 for _ in range(6):
     last = signup(code="x").status_code
