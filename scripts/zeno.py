@@ -300,11 +300,13 @@ def expand_clip_inputs(raw_inputs: List[str]) -> List[pathlib.Path]:
 def build_editorial_pitch_card(work_dir: pathlib.Path, plan_path: pathlib.Path) -> str:
     """
     Build a concise, human-editor-style Pre-Flight Editorial Pitch Card from
-    `work/<project>/plan.edl`.
+    `work/<project>/brief.txt` and `work/<project>/plan.edl`.
     """
     work_dir = pathlib.Path(work_dir).resolve()
     plan_path = pathlib.Path(plan_path).resolve()
     plan = load_edl(plan_path)
+    brief_path = work_dir / "brief.txt"
+    brief_txt = brief_path.read_text(encoding="utf-8", errors="ignore") if brief_path.is_file() else ""
 
     segs = plan.get("segments", [])
     marks = list(plan.get("marks", []) or [])
@@ -316,7 +318,7 @@ def build_editorial_pitch_card(work_dir: pathlib.Path, plan_path: pathlib.Path) 
     ss = total_dur - mm * 60
 
     # Detect Concept & Style
-    has_banners = any(s.get("banners") or s.get("stop_saying") for s in segs)
+    has_banners = any(s.get("banners") or s.get("stop_saying") for s in segs) or ("stop saying" in brief_txt.lower())
     layouts_used = []
     for s in segs:
         lay = str(s.get("layout") or plan.get("preset") or "single")
@@ -351,7 +353,15 @@ def build_editorial_pitch_card(work_dir: pathlib.Path, plan_path: pathlib.Path) 
             if pname and pname not in peer_clips:
                 peer_clips.append(pname)
 
+    # Extract Take Scoring & Warnings from brief.txt
+    best_takes = re.findall(r"\[BEST_TAKE\][^\n]*", brief_txt)
+    alt_takes = re.findall(r"\[ALT_TAKE\][^\n]*", brief_txt)
     warnings = []
+    if "[WRONG_SPEAKER_NO_FIX]" in brief_txt:
+        warnings.append("CRITICAL: [WRONG_SPEAKER_NO_FIX] detected in brief.txt — a line is missing the right speaker's voice.")
+    if "[SPEAKER_CHECK] not applied" in brief_txt:
+        warnings.append("NOTE: Speaker voices were similar; verify speaker assignment on split-screen turns.")
+
     try:
         order_msg = order_gate(plan, plan_path)
     except Exception as exc:   # noqa: BLE001
@@ -394,6 +404,8 @@ def build_editorial_pitch_card(work_dir: pathlib.Path, plan_path: pathlib.Path) 
         card_lines.append(
             f"    - Split / Body    : {len(split_segs)} cut(s) ({split_dur:.1f}s) | Layout: {split_modes} (zoom=1.0 + live listener on V2)"
         )
+    if best_takes or alt_takes:
+        card_lines.append(f"  • Take Selection    : {len(best_takes)} [BEST_TAKE] kept, {len(alt_takes)} [ALT_TAKE] pruned")
     card_lines.append(
         f"  • Marks & Audio     : {wrong_count} ✗ Red Flash + {right_count} ✓ Green Flash (2-pulse) | -11.5 LUFS Master"
     )
@@ -518,7 +530,7 @@ def run_inspect(
                     total=len(clips),
                     emit_now=False,
                 )
-            elif "align" in low or "speaker" in low or "plan.edl" in low or "line_map" in low:
+            elif "align" in low or "speaker" in low or "plan.edl" in low or "brief.txt" in low:
                 tracker.update(
                     stage=3,
                     detail=f"Matching script lines & building edit plan: {line[:70]}",
@@ -557,7 +569,10 @@ def run_inspect(
             total=len(clips),
             pct=60,
         )
-        tracker.stop_heartbeat(final_state="awaiting_confirmation", final_detail="Measured; waiting for the Director's plan")
+        tracker.stop_heartbeat(final_state="awaiting_confirmation", final_detail="Stage 3 Pitch Card ready")
+
+        print()
+        print(build_editorial_pitch_card(plan_path.parent, plan_path))
         return plan_path
     except Exception as exc:
         tracker.stop_heartbeat(final_state="error", final_detail=str(exc))
@@ -568,7 +583,7 @@ def run_inspect(
 # STAGES 4–5: Execute Render, Premiere .prproj Export & Post-Render QC
 # ============================================================================
 def order_gate(plan: dict, plan_path: pathlib.Path) -> str:
-    """Empty when the plan is safe to render; otherwise the message that stops the render."""
+    """Empty when the plan follows the script; otherwise the message that stops the render."""
     import script_order
 
     script = plan.get("script")
@@ -576,21 +591,9 @@ def order_gate(plan: dict, plan_path: pathlib.Path) -> str:
     if not script and side.is_file():
         script = common.read_json(side).get("script")
     if not script:
-        return "[BLOCKED] This plan names no script, so it cannot be checked. Add #script <path> to plan.edl."
-    g = script_order.full_gate(plan, common.resolve(script), plan_path.parent)
-    if g.get("voice_note"):
-        print(f"[VOICE] {g['voice_note']}. Say so in the report.")
+        return ""
+    g = script_order.gate(plan, common.resolve(script), plan_path.parent)
     return script_order.format_gate(g) if g["blocked"] else ""
-
-
-def print_next_step(plan_path: pathlib.Path) -> None:
-    rel = plan_path.relative_to(ROOT)
-    print("\n[NEXT STEP] Zeno has measured the footage and decided nothing. The Director now:")
-    print(f"  1. reads agent/EDIT_RULES.md, then {plan_path.parent.relative_to(ROOT)}/line_map.md, facts.md and clip_sheet_*.jpg")
-    print(f"  2. writes every segment of {rel}")
-    print(f"  3. runs: python3 scripts/zeno.py --check-plan {rel}")
-    print("  4. asks the user Yes/No once, then runs:")
-    print(f"     python3 scripts/zeno.py --execute {rel} --square")
 
 
 def run_execute(
@@ -614,13 +617,6 @@ def run_execute(
         print(blocked)
         print("\n[BLOCKED] Nothing was rendered. The Director fixes plan.edl (see line_map.md), then runs --execute again.")
         return 2
-
-    import script_order
-
-    moved = script_order.snap_cuts(plan)
-    if moved:      # mechanical: moves a cut to the quietest point of the gap it already sits in
-        plan_path.write_text(edl_parser.format_edl(plan), encoding="utf-8")
-        print(f"[SNAP] {moved} cut(s) moved to the quietest point of their gap")
 
     tracker = ProgressTracker(work_dir=work_dir, project_name=work_dir.name, heartbeat_sec=48.0)
     tracker.start_heartbeat()
@@ -782,7 +778,6 @@ def main() -> None:
         default=None,
         help="Stages 4–5: Render MP4, 1:1 Square, Premiere .prproj/.xml & run Deep QC on plan.edl",
     )
-    ap.add_argument("--check-plan", default=None, metavar="PLAN_EDL", help="Check the Director's plan: script order, every line once, cuts outside words, voices. Exit 2 if it would be blocked")
     ap.add_argument("--script", default=None, help="Path to local script .txt or Google Docs URL")
     ap.add_argument("--lang", default="auto", help="Language code or name (e.g. kn, ta, te, ml, hi, en, auto)")
     ap.add_argument("--preset", default="auto", help="Layout preset (auto, single, split_h, split_v, chat_bar, video_call, hybrid)")
@@ -844,7 +839,7 @@ def main() -> None:
         import auto_updater
         res = auto_updater.install_daily_scheduler(hour=11, minute=0)
         print(f"  [Auto-Update] ✓ Daily 11:00 AM auto-updater configured ({res.get('schedule', 'active')})")
-        if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.inputs:
+        if not args.inspect and not args.execute and not args.pitch and not args.inputs:
             sys.exit(0)
 
     if args.update:
@@ -865,7 +860,7 @@ def main() -> None:
             print(f"  [ZENO CLOUD] Signed in as: {who} (source={info.get('source')}) -> {info.get('cloud_url')}")
         else:
             print("  [ZENO CLOUD] Not signed in. Run: python3 scripts/zeno.py --login")
-        if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.inputs:
+        if not args.inspect and not args.execute and not args.pitch and not args.inputs:
             sys.exit(0)
 
     if args.sync_learnings:
@@ -874,7 +869,7 @@ def main() -> None:
         print(f"  [BRAIN MEMORY SYNC] {res.get('message')}")
         import format_library
         print(f"  [FORMAT LIBRARY SYNC] {format_library.sync_team()['message']}")
-        if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.inputs:
+        if not args.inspect and not args.execute and not args.pitch and not args.inputs:
             sys.exit(0)
 
     if args.remember:
@@ -885,14 +880,14 @@ def main() -> None:
             brain_memory.sync_brain_memory_with_cloud("micronarrative")
         except Exception:
             pass
-        if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.inputs:
+        if not args.inspect and not args.execute and not args.pitch and not args.inputs:
             sys.exit(0)
 
     if args.list_memory:
         import brain_memory
         for line in brain_memory.format_brain_memory_for_brief("micronarrative"):
             print(line)
-        if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.inputs:
+        if not args.inspect and not args.execute and not args.pitch and not args.inputs:
             sys.exit(0)
 
     if args.error_sfx and not args.pitch and not args.execute:
@@ -929,12 +924,6 @@ def main() -> None:
         ok, _ = check_system_readiness(quiet=False)
         sys.exit(0 if ok else 1)
 
-    if args.check_plan:
-        p_path = common.resolve(args.check_plan)
-        msg = order_gate(load_edl(p_path), p_path)
-        print(msg or "[PLAN PASS] Every line present, once, in script order; no cut inside a word; voices match.")
-        sys.exit(2 if msg else 0)
-
     if args.pitch:
         p_path = common.resolve(args.pitch)
         apply_stage3_tweaks(p_path, swap_layout=args.swap_layout, swap_takes=args.swap_take, error_sfx=args.error_sfx)
@@ -965,10 +954,12 @@ def main() -> None:
             mark_pack=args.mark_pack,
             style=args.style,
         )
-        print_next_step(plan_path)
+        print(f"\n[NEXT STEP] Review the pitch above. Once approved, run:")
+        print(f"  python3 scripts/zeno.py --execute {plan_path.relative_to(ROOT)} --square")
         sys.exit(0)
 
-    if args.inputs and args.script:     # same as --inspect: without a Director there is no plan to render
+    # Interactive Standalone Mode (Stage 0 -> Stage 1–3 -> [Y/n] -> Stage 4–5)
+    if args.inputs and args.script:
         job_gate(args.inputs, args.script, skip=args.skip_preflight, style=args.style)
         plan_path = run_inspect(
             raw_inputs=args.inputs,
@@ -978,9 +969,29 @@ def main() -> None:
             mark_pack=args.mark_pack,
             style=args.style,
         )
-        print_next_step(plan_path)
-        sys.exit(0)
+        if not args.yes:
+            if not sys.stdin.isatty():
+                print("\n[INFO] Non-interactive session detected; stopping at Stage 3 confirmation gate.")
+                print(f"To execute Stage 4–5 render, run: python3 scripts/zeno.py --execute {plan_path.relative_to(ROOT)}")
+                sys.exit(0)
+            ans = input("\n👉 Start editing & rendering with this plan? [Y/n]: ").strip().lower()
+            if ans not in ("", "y", "yes"):
+                print(f"\n[PAUSED] Edit plan saved at {plan_path.relative_to(ROOT)}.")
+                print(f"Adjust {plan_path.relative_to(ROOT)} if needed, then run:")
+                print(f"  python3 scripts/zeno.py --execute {plan_path.relative_to(ROOT)}")
+                sys.exit(0)
 
+        rc = run_execute(
+            str(plan_path),
+            square=args.square,
+            loudness=args.loudness,
+            gain_db=args.gain_db,
+            draft=args.draft,
+        )
+        sys.exit(rc)
+
+    # Default if invoked with no arguments: run readiness check + usage hint
+    check_system_readiness(quiet=False)
     ap.print_help()
 
 

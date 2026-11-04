@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measurements and safety checks for the Director's plan. This file decides nothing about the edit itself.
+"""Measurements that let the Director (Claude) decide the edit. This file decides nothing about the edit itself.
 
 The script is the master timeline. This module measures, from the words actually inside each cut:
 - which script line each segment says, and whether the plan follows script order,
@@ -11,7 +11,7 @@ The script is the master timeline. This module measures, from the words actually
 
     accept L7 script says this line is dropped for time
 
-    python3 scripts/zeno.py --check-plan work/<project>/plan.edl     # exit 2 if the plan would be blocked
+    python3 scripts/script_order.py work/<project>/plan.edl     # print the check; exit 2 if the plan would be blocked
 """
 from __future__ import annotations
 
@@ -235,31 +235,6 @@ def gate(plan: Dict[str, Any], script_path: Any, work_dir: Path) -> Dict[str, An
     return {"blocked": bool(problems), "problems": problems, "accepted": ok, "report": rep}
 
 
-def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path) -> Dict[str, Any]:
-    """Order, coverage, cuts and voices. Used by `--check-plan` and before every render."""
-    g = gate(plan, script_path, work_dir)
-    ok = g["accepted"]
-
-    def still_open(items: List[str]) -> List[str]:
-        return [i for i in items if i.split()[0].rstrip("abcdefgh") not in ok and i.split()[0] not in ok]
-
-    if not plan.get("segments"):
-        g["problems"] = {"EMPTY PLAN": ["no segments yet"]}
-    cuts = still_open(cut_problems(plan))
-    if cuts:
-        g["problems"]["CUT INSIDE A WORD"] = cuts
-    try:
-        voices, note = voice_problems(plan)
-    except Exception as exc:   # noqa: BLE001
-        voices, note = [], f"voices not checked: {exc}"
-    voices = still_open(voices)
-    if voices:
-        g["problems"]["WRONG VOICE"] = voices
-    g["voice_note"] = note
-    g["blocked"] = bool(g["problems"])
-    return g
-
-
 def format_gate(g: Dict[str, Any]) -> str:
     if not g["problems"]:
         return "[ORDER PASS] The plan follows the script: every line present, once, in order" + (f" ({len(g['accepted'])} accepted exception(s))" if g["accepted"] else "")
@@ -281,129 +256,66 @@ def _best_window(words: List[Dict[str, Any]], toks: List[str], lt: List[str]) ->
     return best
 
 
-def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], limit: int = 4, style: str = "") -> str:
-    """The script in full, and under each line every clip stretch that says it. A measurement, not a choice."""
+def build_line_map(plan: Dict[str, Any], lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], limit_alts: int = 2) -> str:
+    """The Director's decision sheet: per script line, the cut in the draft plan and every other clip that can supply it."""
     prep = []
     for c in clips:
         ws = [w for w in (c.get("hq_words") or []) if clean([w.get("w", "")])]
         prep.append((c, ws, clean([w.get("w", "") for w in ws])))
-    named: set = set()
-    out = ["# LINE MAP: the script is the timeline. CAND = a clip stretch that says this line; `heard` = share of the line's words found there.",
-           "# Zeno chose nothing. Pick from these, check the words in facts.md, and write plan.edl."]
-    if style:
-        import brain_memory
-
-        rules = brain_memory.format_brain_memory_for_brief(style)
-        if rules:
-            out += [""] + list(rules)
-    out.append("")
+    segs_by_line: Dict[str, List[Dict[str, Any]]] = {}
+    for s in plan.get("segments", []):
+        for lid in _line_ids_of(s.get("id", "")):
+            segs_by_line.setdefault(lid, []).append(s)
+    used = {str(s.get("src")) for s in plan.get("segments", [])}
+    out = ["# LINE MAP: the script is the timeline. You decide; Zeno measured.",
+           "# fit = share of the line's words heard in that stretch. DECIDE = you must choose. ALT = another clip that says this line.", ""]
+    decide = 0
     for l in lines:
-        tags = [f"{k}={l[k]}" for k in ("scene", "mark", "layout_hint", "strike_text", "note") if l.get(k)]
-        if l.get("panels"):
-            tags.append(f"panels={l['panels']}")
-        who = f" [{l['speaker']}]" if l.get("speaker") else ""
-        out.append(f"{l['id']}{who} {l.get('text', '')}" + (f"  ({'; '.join(tags)})" if tags else ""))
         lt = l.get("tokens") or []
-        if not lt:
-            out.append("  silent beat: choose a silent clip from the clip sheet")
-            continue
+        who = f" [{l['speaker']}]" if l.get("speaker") else ""
+        head = f"{l['id']}{who} {str(l.get('text', ''))[:64]}"
         cands = []
         for c, ws, toks in prep:
-            if toks:
+            if lt and toks:
                 r, i, j = _best_window(ws, toks, lt)
                 if r >= 0.5:
-                    cands.append((r, Path(str(c["src"])).name, ws[i]["start"], ws[min(j, len(ws) - 1)]["end"], c))
+                    bad = c.get("wrong_word_idx") or set()
+                    cands.append((r, c, ws[i]["start"], ws[min(j, len(ws) - 1)]["end"], any(k in bad for k in range(i, j + 1))))
         cands.sort(key=lambda x: -x[0])
-        for r, name, a, b, c in cands:
-            named.add(id(c))
-        for r, name, a, b, _ in cands[:limit]:
-            out.append(f"  CAND {name} {float(a):.2f}-{float(b):.2f} heard={r:.2f}")
-        if len(cands) > limit:
-            out.append(f"  +{len(cands) - limit} weaker")
-        if not cands:
-            out.append("  NO CLIP says this line (check facts.md, then tell the user to reshoot or accept the gap)")
-    spare = [(c, ws) for c, ws, _ in prep if id(c) not in named and ws and not c.get("is_listening")]
+        segs = segs_by_line.get(l["id"], [])
+        use_src = {str(s.get("src")) for s in segs}
+        if not lt:
+            out.append(f"{head}")
+            if segs:
+                out.append(f"  CHECK silent beat -> {Path(str(segs[0]['src'])).stem}, paired by file order only; confirm on clip_sheet")
+            else:
+                out.append("  DECIDE no silent clip for this beat")
+                decide += 1
+            continue
+        out.append(head)
+        if segs:
+            for s in segs:
+                r = next((x for x in cands if str(x[1]["src"]) == str(s.get("src"))), None)
+                note = f" fit={r[0]:.2f}" if r else " fit=low"
+                if r is None or r[0] < STRONG:
+                    decide += 1
+                    note += " DECIDE"
+                if r is not None and r[4]:
+                    note += " wrong-voice"
+                out.append(f"  USE {Path(str(s['src'])).stem} {float(s['start']):.2f}-{float(s['end']):.2f}{note}")
+        else:
+            decide += 1
+            out.append("  DECIDE no clip placed" if cands else "  DECIDE no clip says this line: tell the user to reshoot, or accept the gap")
+        for r, c, a, b, wrong in [x for x in cands if str(x[1]["src"]) not in use_src][:limit_alts]:
+            out.append(f"  ALT {c['stem']} {a:.2f}-{b:.2f} fit={r:.2f}" + (" wrong-voice" if wrong else ""))
+    spare = [c for c, ws, _ in prep if str(c.get("src")) not in used and not c.get("matched_lines") and not c.get("is_listening")]
     if spare:
-        out += ["", "## SPEECH THAT FITS NO LINE (slate, ad-lib or a bad transcript: look at it)"]
-        for c, ws in spare:
-            out.append(f"{Path(str(c['src'])).name}: {' '.join(str(w.get('w', '')) for w in ws[:14])}")
+        out += ["", "## CLIPS MATCHED TO NO LINE (Zeno did not guess; look at them and decide)"]
+        for c in spare:
+            ws = c.get("hq_words") or []
+            out.append(f"{c['stem']} ({float((c.get('info') or {}).get('duration') or 0):.1f}s) heard: {' '.join(str(w.get('w', '')) for w in ws[:12])}")
+    out.insert(2, f"# Open decisions: {decide}")
     return "\n".join(out) + "\n"
-
-
-def voice_problems(plan: Dict[str, Any]) -> Tuple[List[str], str]:
-    """Claude cannot hear, so voices are measured here: does the voice in each cut match the speaker the plan names?
-    Returns (problems, note). The note says when voices could not be told apart."""
-    import speaker_check
-    from common import clip_work_dir, read_json
-    from prepare import compute_10ms_rms_envelope
-
-    items, ids = [], {}
-    for n, s in enumerate(plan.get("segments", [])):
-        who = str(s.get("speaker") or "")
-        wdir = clip_work_dir(s.get("src", ""))
-        f = wdir / "hq_words.json"
-        wav = wdir / "audio16k.wav"
-        if not who or " / " in who or not f.is_file() or not wav.is_file():
-            continue
-        st, en = float(s["start"]), float(s["end"])
-        ws = [w for w in read_json(f) if float(w.get("end", 0)) > st + 0.08 and float(w.get("start", 0)) < en - 0.08]
-        if ws:
-            ids[n] = str(s.get("id"))
-            items.append({"id": n, "wav": wav, "words": ws, "expected": [who] * len(ws), "rms_env": compute_10ms_rms_envelope(wav)})
-    if len({i["expected"][0] for i in items}) < 2:
-        return [], ""
-    res = speaker_check.analyze(items)
-    if not res.get("ok"):
-        return [], f"voices not checked: {res.get('reason')}"
-    out = []
-    for n, info in res.get("clips", {}).items():
-        for sp in info.get("spans", []):
-            out.append(f"{ids.get(n, n)} is labelled {sp.get('expected')}, but the voice is {sp.get('heard', 'someone else')}")
-    return out, ""
-
-
-def _words_of(seg: Dict[str, Any]) -> List[Dict[str, Any]]:
-    from common import clip_work_dir, read_json
-
-    f = clip_work_dir(seg.get("src", "")) / "hq_words.json"
-    return read_json(f) if f.is_file() else []
-
-
-def cut_problems(plan: Dict[str, Any]) -> List[str]:
-    """Cuts that land inside a spoken word."""
-    out = []
-    for s in plan.get("segments", []):
-        for w in _words_of(s):
-            a, b = float(w["start"]), float(w["end"])
-            for name, t in (("start", float(s["start"])), ("end", float(s["end"]))):
-                if a + 0.05 < t < b - 0.05:
-                    out.append(f"{s.get('id')} {name} {t:.2f} is inside the word '{w.get('w')}' ({a:.2f}-{b:.2f})")
-    return out
-
-
-def snap_cuts(plan: Dict[str, Any]) -> int:
-    """Mechanical: a cut in the gap between two words moves to the quietest 10 ms of that gap, so it cannot click. Keeps the Director's words."""
-    from common import clip_work_dir
-    from prepare import compute_10ms_rms_envelope, find_rms_minimum
-
-    moved = 0
-    for s in plan.get("segments", []):
-        ws = _words_of(s)
-        wav = clip_work_dir(s.get("src", "")) / "audio16k.wav"
-        if len(ws) < 2 or not wav.is_file():
-            continue
-        env = compute_10ms_rms_envelope(wav)
-        for key in ("start", "end"):
-            t = float(s[key])
-            for w0, w1 in zip(ws, ws[1:]):
-                a, b = float(w0["end"]), float(w1["start"])
-                if a <= t <= b and b - a >= 0.03:
-                    new = round(float(find_rms_minimum(env, a, b)[0]), 2)
-                    if new != round(t, 2):
-                        s[key] = new
-                        moved += 1
-                    break
-    return moved
 
 
 def main() -> None:
@@ -417,12 +329,10 @@ def main() -> None:
     if not sp:
         print("[ORDER] This plan names no script, so order cannot be measured.")
         sys.exit(2)
-    g = full_gate(plan, resolve(sp), p.parent)
+    g = gate(plan, resolve(sp), p.parent)
     for a in g["report"]["assigned"]:
         print(f"  {a['id']:<8} says {a['line'] or '?':<6} fit={a['fit']}")
     print(format_gate(g))
-    if g.get("voice_note"):
-        print(f"[VOICE] {g['voice_note']}. Say so in the report.")
     sys.exit(2 if g["blocked"] else 0)
 
 

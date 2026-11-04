@@ -8,7 +8,7 @@ Give it raw footage and a script, and it returns a finished `1080×1920` (or `72
 - **OpenCV Visual Tracking & Dynamic Zooms** — OpenCV face/subject tracking, static-shot motion detection, sub-pixel `flash_zoom` / `sudden_in` on hooks & brand endorsements, and Meta Creative transitions (`whip_left`, `whip_right`, `zoom_burst`, `flash_zoom`, `warm_flash`, `slide_up`)
 - **5 Dynamic Speaker Layouts (+ `hybrid`)** — `single`, `split_v`, `split_h`, `chat_bar`, `video_call`, and `hybrid`
 - **Swappable `✓` / `✗` mark packs + SFX** — minimal 2-pulse end-of-sentence Red/Green flash overlays and strong right/wrong SFX placed automatically from script cues
-- **Claude edits, Zeno renders** — the agent makes every editing decision, at about `50k–70k tokens` per video
+- **75% Lower Token Footprint** — targets **`12k–18k tokens` per minute of finished video** (strict ceiling: `20k tokens / min`, or `~14k–25k tokens` total for a typical 1.5–2 min edit)
 
 New team member? Start with [ONBOARDING.md](ONBOARDING.md).
 
@@ -31,7 +31,7 @@ Third-party components keep their own licenses (see Section 7 of [LICENSE](LICEN
 | `input/footage/` | Raw input video clips (`S1.mp4`, `S2.mp4`, …) | Ignored (`*.mp4`, `.gitkeep` only) |
 | `input/script/` | Script files (`.txt`, `.md`, or `.docx` — read with the standard library, tables supported; converted to `work/_script_cache/<name>.txt`), or saved from chat | Tracked or ignored per project |
 | `output/` | Rendered final MP4 videos (`*.mp4`) + `*.timeline.txt` cut/effect logs | Ignored (`*.mp4`), `*.timeline.txt` optional |
-| `work/` | Per-clip intermediate JSONs (`words.json`, `silences.json`, `info.json`), render cache, plus `line_map.md`, `facts.md`, clip sheets, `plan.edl`, `plan.json`, and `marks_contact_sheet.jpg`. Safe to delete anytime. | **Ignored** (ephemeral local scratch) |
+| `work/` | Per-clip intermediate JSONs (`words.json`, `silences.json`, `info.json`), render cache, plus compact `brief.txt`, `plan.edl`, `plan.json`, and `marks_contact_sheet.jpg`. Safe to delete anytime. | **Ignored** (ephemeral local scratch) |
 | `scripts/` | Python pipeline tools (`setup.py`, `prepare.py`, `align_engine/`, `layouts.py`, `ui_generator.py`, `vision_tracker.py`, `edl_parser.py`, `render.py`, `verify.py`, `transcribe.py`, `script_intake.py`, `learn_reference.py`, `style_plan.py`, `clean.py`, `speaker_check.py`, `preproduce.py`, `motion.py`, `token_tracker.py`, `common.py`) | **Committed** |
 | `assets/sfx/` | Sound effects — Right: `correct_ding.wav`, `sn_correct.wav`, `w42_right.wav`; Wrong: `buzzer.wav`, `sn_wrong.wav`, `w42_wrong.wav`; Transitions: `whoosh.wav`, `pop.wav` | **Committed** |
 | `assets/transitions/` | Measured overlay transitions (`warm_flash.json`), applied over a hard cut by `render.py` | **Committed** |
@@ -89,15 +89,13 @@ python3 scripts/prepare.py input/footage/*.mp4 \
   [--preset auto|single|split_v|split_h|chat_bar|video_call|hybrid] \
   [--mark-pack default|glossy|flash|vignette]
 ```
-- Transcribes clips, aligns every word, measures pauses, faces and silent clips. It decides nothing. It writes:
-  - `work/<project>/line_map.md` (the script, and which clip stretches say each line)
-  - `work/<project>/facts.md` (every word with its time)
-  - `work/<project>/clip_sheet_<n>.jpg` (pictures of every clip)
-  - `work/<project>/plan.edl` (header only)
+- Transcribes clips, runs forced alignment + silence detection, matches takes against the script, prunes retakes/babble, snaps cuts to pauses, and writes:
+  - `work/<project>/brief.txt` (`~900 tokens` — all clips, takes, pauses, and alignments in one compact digest)
+  - `work/<project>/plan.edl` (`~240 tokens` — pipe-delimited Edit Decision List, synced with `plan.json`)
 
-### 2. The agent edits
-- Claude Opus or Sonnet makes every decision by `agent/EDIT_RULES.md` and writes `plan.edl`, about 50k to 70k tokens per video.
-- `python3 scripts/zeno.py --check-plan work/<project>/plan.edl` must pass: script order, every line once, no cut inside a word, voices match.
+### 2. Review Brief & Refine Plan (`1 read + 1 tiny edit`)
+- The agent reads **ONLY** `work/<project>/brief.txt` and `work/<project>/plan.edl` (never raw `words.json` or `scripts/*.py`).
+- Verifies take selection, pause-snapped cut points, layout modes, and `✓`/`✗` mark timing, making a tiny edit to `plan.edl` if needed.
 
 ### 3. Render & Verify (`1 command`)
 ```bash

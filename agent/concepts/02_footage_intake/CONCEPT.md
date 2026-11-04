@@ -9,9 +9,9 @@ The Engine analyses raw clips. You never read its raw JSON.
 | What was said (verbatim, retakes included) | Gemini Flash (`gemini_transcriber.py`) |
 | Exact word times | Meta **wav2vec2 base (95M, MIT licence)** + Indic G2P (`align_engine/`) |
 | Faces, framing | OpenCV YuNet (`vision_tracker.py`) |
-| Which clip stretch says which line (candidates only) | `script_order.py` |
+| Take choice vs script | `difflib` matcher (`script_matcher.py`) |
 
-You read `work/<project>/line_map.md`, `facts.md` and the `clip_sheet_<n>.jpg` files, then write `plan.edl`.
+You read only `work/<project>/brief.txt` and `plan.edl`.
 
 Transcription runs through the team service in `service/` when `SCRIPTCUT_CLOUD_URL` is set (no Gemini key on the PC), otherwise straight to Gemini. If it fails, Zeno prints a WARNING and falls back to a script-only transcript that cannot hear retakes: tell the user.
 
