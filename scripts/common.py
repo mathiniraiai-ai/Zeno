@@ -512,7 +512,8 @@ def engine_versions() -> dict:
         ae = ROOT / "scripts" / "align_engine"
         transcript = [ae / "gemini_transcriber.py", ae / "guardian.py", ae / "lexicon.py", *ae.glob("lexicons/*.py")]
         align = [ae / "acoustic.py", ae / "viterbi.py", ae / "onset_verifier.py", ae / "pipeline.py", ae / "__init__.py", *ae.glob("phonetics/*.py")]
-        _engine_versions.update({"transcript": _source_digest(transcript), "align": _source_digest(align)})
+        _engine_versions.update({"transcript": _source_digest(transcript), "align": _source_digest(align),
+                                 "vision": _source_digest([ROOT / "scripts" / "vision_tracker.py"])})
     return dict(_engine_versions)
 
 
@@ -539,6 +540,13 @@ def ensure_cache_current(wdir) -> list:
             drop.update(DERIVED_BY_TRANSCRIPT + DERIVED_BY_ALIGN)
         elif old.get("align") != now["align"]:
             drop.update(DERIVED_BY_ALIGN)
+    # Face and shot analysis (vision_*.json) depends on vision_tracker.py: a stale "two_shot" from older code once kept a clip out of a split
+    vision_stale = os.environ.get("ZENO_FRESH") == "1" or old is None or old.get("vision") != now.get("vision")
+    removed_vision = []
+    if vision_stale:
+        for f in wdir.glob("vision_*.json"):
+            f.unlink()
+            removed_vision.append(f.name)
     for name in DERIVED_BY_TRANSCRIPT + DERIVED_BY_ALIGN:
         f = wdir / name
         if name.endswith(".json") and f.is_file():
@@ -552,6 +560,7 @@ def ensure_cache_current(wdir) -> list:
         if f.is_file():
             f.unlink()
             removed.append(name)
+    removed += removed_vision
     if old != now or removed:
         write_json(marker, now)
     return removed

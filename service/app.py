@@ -126,7 +126,7 @@ def check_rate(name: str) -> None:
         while q and now - q[0] > 60:
             q.popleft()
         if len(q) >= limit:
-            raise HTTPException(429, "Too many requests, wait a minute")
+            raise HTTPException(429, "Too many requests, wait a minute", headers={"Retry-After": str(max(1, int(60 - (now - q[0])) + 1))})
         q.append(now)
 
 
@@ -391,6 +391,122 @@ def transcribe(
             log.exception("could not record usage")
     log.info("user=%s bytes=%d status=200 model=%s words=%d in_tok=%d out_tok=%d seconds=%.1f%s", name, len(audio), result.get("model_used"), len(result.get("words") or []), in_tok, out_tok, time.time() - started, " WARNING=" + result["warning"] if result.get("warning") else "")
     return result
+
+
+# ---------------------------------------------------------------- knowledge: formats and reference learnings kept in the database
+# Knowledge is published here once and every computer pulls it at the start of a job, so a new format or reference needs
+# no commit and no redeploy. The heavy work (alignment, OpenCV, FFmpeg) stays on each computer; the server only holds
+# what was learned and answers "which format does this scene wording describe?".
+EMBED_MODEL = os.getenv("ZENO_EMBED_MODEL", "gemini-embedding-001")
+
+
+def _embed(text: str) -> Optional[List[float]]:
+    """Embedding of a short text through Gemini, or None when no key or the call fails (matching then uses words only)."""
+    keys = _gemini_keys()
+    if not keys or not text.strip():
+        return None
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=keys[0], http_options=types.HttpOptions(timeout=15000))
+        res = client.models.embed_content(model=EMBED_MODEL, contents=text[:2000])
+        return [float(x) for x in res.embeddings[0].values]
+    except Exception:
+        log.warning("embedding unavailable; matching by words only")
+        return None
+
+
+def _cosine(a: List[float], b: List[float]) -> float:
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na, nb = sum(x * x for x in a) ** 0.5, sum(y * y for y in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def _word_score(query: str, item: Dict[str, Any]) -> float:
+    q = query.lower()
+    names = item["payload"].get("names") or []
+    alias = sum(3.0 for n in names if n and re.search(r"(?<![a-z0-9])" + re.escape(n.lower()) + r"(?![a-z0-9])", q))
+    overlap = len(set(re.findall(r"[a-z0-9]+", q)) & set(re.findall(r"[a-z0-9]+", item["match_text"].lower())))
+    return alias + 0.2 * overlap
+
+
+class KnowledgeBody(BaseModel):
+    payload: Dict[str, Any]
+    text: str = ""   # what the item is about, in words; this is what gets matched and embedded
+
+
+@app.put("/admin/api/knowledge/{kind}/{name:path}")
+def admin_put_knowledge(
+    kind: str, name: str, body: KnowledgeBody,
+    authorization: Optional[str] = Header(None),
+    x_zeno_admin: Optional[str] = Header(None),
+    x_admin_password: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    admin = _check_admin(authorization, x_admin_password)
+    if x_zeno_admin != "1":
+        raise HTTPException(400, "Missing admin header")
+    if kind not in KeyStore.KNOWLEDGE_KINDS:
+        raise HTTPException(400, f"kind must be one of {', '.join(KeyStore.KNOWLEDGE_KINDS)}")
+    if not re.fullmatch(r"[A-Za-z0-9_./-]{1,80}", name) or ".." in name:
+        raise HTTPException(400, "Invalid name")
+    if len(json.dumps(body.payload)) > 200_000:
+        raise HTTPException(413, "Payload too large")
+    text = body.text or " ".join(str(body.payload.get(k, "")) for k in ("description", "when") if body.payload.get(k)) or name
+    match_text = " ".join([text] + [str(n) for n in body.payload.get("names", [])])
+    updated = store().put_knowledge(kind, name, body.payload, match_text, _embed(match_text), admin.get("email") or admin.get("name") or "admin")
+    return {"ok": True, "kind": kind, "name": name, "updated_at": updated}
+
+
+@app.get("/v1/knowledge")
+def get_knowledge(since: float = 0.0, kind: Optional[str] = None, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """Everything published after `since` (a timestamp from the previous call). A computer asks at the start of each job."""
+    authenticate(authorization)
+    return {"now": time.time(), "items": store().knowledge_since(since, kind)}
+
+
+class MatchBody(BaseModel):
+    text: str
+    kind: str = "format"
+    k: int = 3
+
+
+@app.post("/v1/match")
+def match_knowledge(body: MatchBody, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """Which stored format does this scene wording describe? Embedding similarity when the server could embed the text,
+    otherwise alias and word matching. Send only the direction wording (for example 'floating window, horizontal split screen'),
+    never the script, footage or audio."""
+    name, _ = authenticate(authorization)
+    check_rate(name)
+    text = body.text.strip()[:500]
+    if not text or body.kind not in KeyStore.KNOWLEDGE_KINDS:
+        raise HTTPException(400, "Send some wording and a valid kind")
+    items = store().knowledge_for_match(body.kind)
+    qv = _embed(text)
+    if qv:   # an item published while embedding was unavailable gets its embedding now, so one gap never turns off semantic matching
+        for it in items:
+            if it["embedding"] is None:
+                emb = _embed(it["match_text"])
+                if emb:
+                    it["embedding"] = emb
+                    try:
+                        store().set_knowledge_embedding(body.kind, it["name"], emb)
+                    except Exception:
+                        log.exception("could not store embedding")
+    ranked = []
+    for it in items:
+        if qv and it["embedding"]:
+            ranked.append((_cosine(qv, it["embedding"]), "embedding", it))
+        else:
+            ranked.append((_word_score(text, it), "words", it))
+    # Mixed scores are not comparable: if every item could be scored by embedding use that, else use words for all
+    if ranked and any(m == "words" for _, m, _ in ranked):
+        ranked = [(_word_score(text, it), "words", it) for it in items]
+    ranked.sort(key=lambda r: -r[0])
+    return {"matches": [{"name": it["name"], "score": round(sc, 4), "method": m, "layout": it["payload"].get("layout"),
+                         "description": it["payload"].get("description", "")[:200]} for sc, m, it in ranked[: max(1, min(body.k, 10))]]}
 
 
 MIN_FORMAT_JOBS = int(os.getenv("ZENO_FORMAT_MIN_JOBS", "5"))

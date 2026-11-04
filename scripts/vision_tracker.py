@@ -292,6 +292,20 @@ def detect_faces_in_frame(
     return faces
 
 
+def prominent_faces(faces: List[Dict[str, Any]], min_area_ratio: float = 0.4) -> List[Dict[str, Any]]:
+    """Faces that count as people in the shot: a detection with under 40% of the largest face's area is a false positive
+    (a wall picture, a sign, a corner) or a distant bystander. A real two-shot has two faces of comparable size. Measured on
+    the W43 robot clips: the robot's face was 0.47 x 0.35 of the frame and a phantom 'face' in the corner 0.34 x 0.15."""
+    def area(f: Dict[str, Any]) -> float:
+        x0, y0, x1, y1 = f["bbox_norm"]
+        return max(0.0, x1 - x0) * max(0.0, y1 - y0)
+
+    if len(faces) < 2:
+        return faces
+    biggest = max(area(f) for f in faces)
+    return [f for f in faces if biggest > 0 and area(f) >= min_area_ratio * biggest]
+
+
 def detect_baked_split_seam(frame: "np.ndarray") -> Optional[str]:
     """Check if `frame` already has a baked-in horizontal (`split_v_baked`) or
     vertical (`split_h_baked`) split-screen seam along its center line.
@@ -805,7 +819,7 @@ def analyze_clip_vision(
                 seam = detect_baked_split_seam(frame)
                 if seam:
                     baked_seams.append(seam)
-                faces = detect_faces_in_frame(frame, is_bgr=True)
+                faces = prominent_faces(detect_faces_in_frame(frame, is_bgr=True))
                 if faces:
                     sampled_faces.append(faces)
             cap.release()

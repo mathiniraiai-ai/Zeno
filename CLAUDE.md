@@ -116,6 +116,7 @@ Use `.venv/bin/python` (Python 3.12; `uv venv --python 3.12 .venv && uv pip inst
 .venv/bin/python -m unittest tests.test_engine.TestZenoEngine.<test_name>       # one test
 .venv/bin/python scripts/setup.py --smoke                                       # env check, never prints keys (--prewarm downloads the 360 MB wav2vec2 weights)
 .venv/bin/python scripts/eval_alignment.py --help                               # score word timing against hand-marked labels
+.venv/bin/python scripts/knowledge_sync.py pull|push|match "<wording>"                # knowledge kept in the server database (no commit or redeploy for new recipes)
 .venv/bin/python scripts/format_library.py search "<script wording>"                  # look up how a format should look; `extract <video> --id ...` measures a reference locally, no tokens, video not kept
 .venv/bin/python scripts/style_readiness.py [style] [--json]                    # measured readiness level (0-3) of a style from files and tests
 .venv/bin/python scripts/clean.py [--apply]                                     # free disk (dry run by default; only touches work/ and input/standins|reference)

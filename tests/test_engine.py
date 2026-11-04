@@ -548,16 +548,21 @@ Suresh: Yes, a little bit.
             for n in ("gemini_transcript.json", "words.json", "hq_words.json"):
                 put(d, n)
             put(d, "audio16k.wav", "wav")
-            v1 = {"transcript": "t1", "align": "a1"}
+            v1 = {"transcript": "t1", "align": "a1", "vision": "v1"}
+            put(d, "vision_abc123.json")
             with patch.dict(common._engine_versions, v1, clear=True):
-                self.assertEqual(common.ensure_cache_current(d), [], "no marker yet: adopt, delete nothing")
+                self.assertEqual(common.ensure_cache_current(d), ["vision_abc123.json"], "no marker yet: transcripts are adopted, the cheap vision results are rebuilt")
                 self.assertEqual(json.loads((d / "engine_version.json").read_text()), v1)
                 self.assertEqual(common.ensure_cache_current(d), [], "same code: nothing to do")
-            with patch.dict(common._engine_versions, {"transcript": "t1", "align": "a2"}, clear=True):
+            put(d, "vision_abc123.json")
+            with patch.dict(common._engine_versions, {"transcript": "t1", "align": "a1", "vision": "v2"}, clear=True):
+                self.assertEqual(common.ensure_cache_current(d), ["vision_abc123.json"], "vision code changed: only the vision results go")
+                self.assertTrue((d / "words.json").is_file() and (d / "gemini_transcript.json").is_file())
+            with patch.dict(common._engine_versions, {"transcript": "t1", "align": "a2", "vision": "v2"}, clear=True):
                 self.assertEqual(common.ensure_cache_current(d), ["hq_words.json", "words.json"], "aligner changed: only alignment results go")
                 self.assertTrue((d / "gemini_transcript.json").is_file(), "the paid transcript must survive an aligner change")
             put(d, "words.json")
-            with patch.dict(common._engine_versions, {"transcript": "t2", "align": "a2"}, clear=True):
+            with patch.dict(common._engine_versions, {"transcript": "t2", "align": "a2", "vision": "v2"}, clear=True):
                 self.assertIn("gemini_transcript.json", common.ensure_cache_current(d))
                 self.assertFalse((d / "words.json").exists())
                 self.assertTrue((d / "audio16k.wav").is_file(), "audio and info are never dropped")
@@ -581,7 +586,7 @@ Suresh: Yes, a little bit.
             c.write_text("x = 2\n", encoding="utf-8")
             self.assertEqual(common._source_digest([a]), common._source_digest([b]))
             self.assertNotEqual(common._source_digest([a]), common._source_digest([c]))
-        self.assertEqual(set(common.engine_versions()), {"transcript", "align"})
+        self.assertEqual(set(common.engine_versions()), {"transcript", "align", "vision"})
 
     def test_auto_clean_only_when_the_disk_is_nearly_full(self):
         import tempfile
@@ -726,6 +731,170 @@ Robot: Perfect!
         retake1, retake2 = clip("R1", lady_text), clip("R2", lady_text)
         prepare.group_takes([retake1, retake2], lines)
         self.assertEqual(retake1["take_group"], retake2["take_group"], "two takes of the same line are still grouped")
+
+    def test_knowledge_comes_from_the_server_without_a_deploy(self):
+        import json
+        import tempfile
+        from unittest.mock import MagicMock, patch
+
+        import common
+        import format_library
+        import knowledge_sync
+
+        item = {"kind": "format", "name": "split_v", "updated_at": 5.0,
+                "payload": {"id": "split_v", "layout": "split_v", "names": ["horizontal split"], "description": "published on the server"}}
+        reply = MagicMock(status_code=200)
+        reply.raise_for_status = lambda: None
+        reply.json.return_value = {"now": 123.0, "items": [item]}
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            with patch.object(knowledge_sync, "KNOW_DIR", work / "_knowledge"), patch.object(knowledge_sync, "STATE", work / "_knowledge" / "state.json"), \
+                    patch("auth_session.get_active_token", return_value="zeno_x"), patch("auth_session.get_cloud_url", return_value="https://example.test"), \
+                    patch("httpx.get", return_value=reply) as got:
+                self.assertEqual(knowledge_sync.pull()["pulled"], 1)
+                self.assertEqual(json.loads((work / "_knowledge" / "state.json").read_text())["since"], 123.0)
+                knowledge_sync.pull()
+                self.assertEqual(got.call_args.kwargs["params"]["since"], 123.0, "the second pull asks only for what is new")
+            with patch.object(common, "WORK", work):
+                recipes = {r["id"]: r for r in format_library.load_recipes()}
+            self.assertEqual(recipes["split_v"]["description"], "published on the server", "a published recipe replaces the committed one")
+            self.assertIn("split_h", recipes, "committed recipes the server did not replace are kept")
+            with patch("auth_session.get_active_token", return_value=""):
+                self.assertFalse(knowledge_sync.pull()["ok"], "no key: quietly does nothing")
+
+    def test_match_falls_back_to_the_local_library(self):
+        from unittest.mock import patch
+
+        import knowledge_sync
+
+        with patch("auth_session.get_active_token", return_value="zeno_x"), patch("auth_session.get_cloud_url", return_value="https://example.test"), \
+                patch("httpx.post", side_effect=OSError("offline")):
+            res = knowledge_sync.match("a floating window of the robot")
+        self.assertEqual(res["source"], "local")
+        self.assertEqual(res["matches"][0]["layout"], "video_call")
+
+    def test_push_publishes_formats_and_references(self):
+        from unittest.mock import MagicMock, patch
+
+        import knowledge_sync
+
+        items = knowledge_sync.collect_local()
+        kinds = {i["kind"] for i in items}
+        self.assertEqual(kinds, {"format", "reference"})
+        self.assertIn("micronarrative/w43_hi_farm", {i["name"] for i in items if i["kind"] == "reference"})
+        ok = MagicMock(status_code=200)
+        with patch("auth_session.get_active_token", return_value=""), patch("auth_session.get_cloud_url", return_value="https://example.test"), \
+                patch.dict("os.environ", {"ZENO_ADMIN_PASSWORD": "pw"}), patch("httpx.put", return_value=ok) as put:
+            res = knowledge_sync.push()
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["published"], len(items))
+        self.assertEqual(put.call_args.kwargs["headers"]["X-Admin-Password"], "pw")
+        self.assertEqual(put.call_args.kwargs["headers"]["X-Zeno-Admin"], "1")
+        self.assertTrue(put.call_args_list[0].args[0].startswith("https://example.test/admin/api/knowledge/"))
+
+    def test_split_screen_keeps_each_character_in_one_panel(self):
+        """W43: the robot is on top and Lady 1 below for the whole split; the listener is the other panel's character, not Lady 2."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = Path(tmp) / "w43.txt"
+            sp.write_text(self.W43_SAMPLE, encoding="utf-8")
+            _, lines = prepare.parse_script_file(sp)
+        spoken = [l for l in lines if not l["beat"]]
+        clips = [{"stem": f"C{i}", "src": f"input/footage/C{i}.mp4", "info": {"duration": 5.0, "face_count": 1, "shot_type": "single"}, "matched_lines": [l]}
+                 for i, l in enumerate(spoken)]
+        raw = [{"stem": c["stem"], "src": c["src"], "clip": c, "start": 0.0, "end": 3.0, "lines": c["matched_lines"], "lines_override": c["matched_lines"],
+                "words": [{"w": "x", "start": 0.1, "end": 0.5}]} for c in clips]
+        segs, _, _ = prepare.assign_segment_ids_marks_and_layouts(raw, lines, clips, preset="auto", all_clips=clips)
+        split = [s for s in segs if s.get("layout") == "split_v"]
+        self.assertGreaterEqual(len(split), 3)
+        slot_of = {}
+        for s in split:
+            slot_of.setdefault(s["speaker"], set()).add(s["slot"])
+        self.assertEqual(slot_of["Female Humanoid Robot"], {"top"})
+        self.assertEqual(slot_of["Lady 1"], {"bottom"})
+        for s in split:
+            if s["speaker"] == "Lady 1":
+                self.assertEqual(s["peer"]["speaker"], "Female Humanoid Robot", "the listener beside Lady 1 is the robot, not Lady 2")
+                self.assertEqual(s["peer"]["slot"], "top")
+            else:
+                self.assertEqual(s["peer"]["speaker"], "Lady 1")
+                self.assertEqual(s["peer"]["slot"], "bottom")
+        self.assertFalse(any("PANEL_FLIP" in a for c in clips for a in c.get("anomalies", [])))
+
+    def test_short_lines_are_sent_and_never_guessed(self):
+        """W43: a 0.49 s line ("सच में?") was refused by the server, and the offline fallback then gave that one clip the whole script."""
+        import io
+        import tempfile
+        import wave
+
+        from align_engine import gemini_transcriber as gt
+
+        def wav_bytes(seconds, rate=16000):
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(rate)
+                w.writeframes(b"\x01\x00" * int(seconds * rate))
+            return buf.getvalue()
+
+        def seconds_of(data):
+            with wave.open(io.BytesIO(data)) as w:
+                return w.getnframes() / w.getframerate()
+
+        self.assertGreaterEqual(seconds_of(gt._pad_short_wav(wav_bytes(0.488))), 1.2)
+        long_audio = wav_bytes(3.0)
+        self.assertEqual(gt._pad_short_wav(long_audio), long_audio, "audio that is long enough is sent untouched")
+        self.assertEqual(gt._pad_short_wav(b"not a wav"), b"not a wav", "anything unreadable is passed through for the server to judge")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "a.wav"
+            wav.write_bytes(wav_bytes(0.5))
+            many = gt.transcribe_offline_fallback(str(wav), "hi", ["पहली लाइन है", "दूसरी लाइन है", "तीसरी लाइन है"], Path(tmp))
+            self.assertEqual(many["words"], [], "with several script lines nothing says which one this clip speaks")
+            self.assertEqual(many["model_used"], "none")
+            one = gt.transcribe_offline_fallback(str(wav), "hi", ["सच में?"], Path(tmp))
+            self.assertEqual(one["words"], ["सच", "में?"], "with exactly one line the clip is that line")
+
+    def test_phantom_faces_do_not_make_a_two_shot(self):
+        """W43 robot clips: the robot (0.47 x 0.35) plus a phantom corner detection (0.34 x 0.15) was read as a two-shot."""
+        import vision_tracker
+
+        robot = {"bbox_norm": [0.30, 0.20, 0.77, 0.55]}
+        phantom = {"bbox_norm": [0.65, 0.00, 0.99, 0.15]}
+        self.assertEqual(vision_tracker.prominent_faces([robot, phantom]), [robot])
+        a, b = {"bbox_norm": [0.05, 0.2, 0.40, 0.6]}, {"bbox_norm": [0.55, 0.22, 0.88, 0.58]}
+        self.assertEqual(len(vision_tracker.prominent_faces([a, b])), 2, "two people of similar size are still a two-shot")
+        self.assertEqual(vision_tracker.prominent_faces([robot]), [robot])
+
+    def test_cloud_transcription_waits_when_the_server_is_busy(self):
+        import tempfile
+        from unittest.mock import MagicMock, patch
+
+        from align_engine import gemini_transcriber as gt
+
+        busy = MagicMock(status_code=429, headers={"retry-after": "3"})
+        ok = MagicMock(status_code=200, headers={})
+        ok.json.return_value = {"words": ["hello", "world"], "model_used": "stub"}
+        ok.raise_for_status = lambda: None
+        client = MagicMock()
+        client.__enter__.return_value.post.side_effect = [busy, busy, ok]
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "a.wav"
+            import wave
+            with wave.open(str(wav), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                w.writeframes(b"\x01\x00" * 24000)
+            tr = gt.GeminiTranscriber(api_keys=[])
+            tr.cloud_url, tr.cloud_token = "https://example.test", "zeno_x"
+            with patch("httpx.Client", return_value=client), patch("time.sleep") as slept:
+                res = tr._transcribe_via_cloud(str(wav), "en", [])
+        self.assertEqual(res["words"], ["hello", "world"])
+        self.assertEqual(client.__enter__.return_value.post.call_count, 3, "it asked again after each 'too many requests'")
+        self.assertEqual(slept.call_count, 2)
 
     def test_layout_hint_wording(self):
         self.assertEqual(prepare.layout_hint_from_direction("a horizontal split screen"), "split_v")

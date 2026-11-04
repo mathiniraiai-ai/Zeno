@@ -254,6 +254,13 @@ def job_gate(raw_inputs: List[str], script_arg: str, skip: bool = False) -> None
     if res["errors"]:
         print("\n[BLOCKED] The script or footage has a problem, so the edit did not start. Fix the FAIL lines and run again.")
         sys.exit(2)
+    try:   # every job starts with the latest knowledge from the server; no git pull or redeploy is needed for it
+        import format_library
+        import knowledge_sync
+
+        print(f"  [knowledge] {knowledge_sync.pull()['message']}; team formats: {format_library.sync_team()['message']}")
+    except Exception:
+        pass
     print("\n[GATE PASSED] Live checks and inputs are good. Starting the edit.")
 
 

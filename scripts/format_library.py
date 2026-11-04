@@ -33,13 +33,19 @@ MATCH_THRESHOLD = 3.0    # below this, search() still ranks results but best_lay
 
 
 def load_recipes(lib_dir: Path = LIB_DIR) -> List[Dict[str, Any]]:
-    out = []
-    for p in sorted(lib_dir.rglob("*.json")) if lib_dir.is_dir() else []:   # includes team/, the approved team recipes
+    """Committed recipes (including team/, the approved team ones), then recipes published on the Zeno server and pulled at
+    the start of a job (work/_knowledge/format/); a published recipe replaces a committed one with the same id."""
+    paths = sorted(lib_dir.rglob("*.json")) if lib_dir.is_dir() else []
+    if lib_dir == LIB_DIR:
+        paths += sorted((common.WORK / "_knowledge" / "format").glob("*.json"))
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for p in paths:
         try:
-            out.append(json.loads(p.read_text(encoding="utf-8")))
+            r = json.loads(p.read_text(encoding="utf-8"))
         except ValueError:
             continue
-    return out
+        by_id[r.get("id", p.stem)] = r
+    return list(by_id.values())
 
 
 def _words(text: str) -> set:

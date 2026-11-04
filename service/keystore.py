@@ -147,6 +147,16 @@ class KeyStore:
             author_email TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
 
+        # Tables added later live in their own step: if one cannot be created (for example on a database that rejects the
+        # statement) the service still starts, signs people in and transcribes; only that feature reports an error.
+        try:
+            self._init_optional_schema(real, rule_pk)
+        except Exception:
+            import logging
+
+            logging.getLogger("zeno.service").exception("optional tables could not be created; those features are off")
+
+    def _init_optional_schema(self, real: str, rule_pk: str) -> None:
         # Transcripts by audio hash (a retry or a second editor on the same clip costs nothing), and per-job format observations
         self._run(f"""CREATE TABLE IF NOT EXISTS zeno_transcript_cache (
             cache_key TEXT PRIMARY KEY,
@@ -170,6 +180,16 @@ class KeyStore:
             approved_by TEXT NOT NULL,
             approved_at {real} NOT NULL,
             PRIMARY KEY (style, fmt))""")
+        self._run(f"""CREATE TABLE IF NOT EXISTS zeno_knowledge (
+            kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            match_text TEXT NOT NULL DEFAULT '',
+            embedding_json TEXT,
+            updated_by TEXT NOT NULL DEFAULT '',
+            updated_at {real} NOT NULL,
+            PRIMARY KEY (kind, name))""")
+
     # -- operations --------------------------------------------------------------------------
     def create(self, name: str, email: str) -> str:
         """Make a key for this person and return it. It is shown once and never stored in readable form."""
@@ -588,6 +608,34 @@ class KeyStore:
     def approved_formats(self) -> List[Dict[str, Any]]:
         rows = self._run("SELECT style, fmt, stats_json, n_jobs, approved_by, approved_at FROM zeno_format_recipes ORDER BY style, fmt", (), "all")
         return [{"style": r[0], "format": r[1], "stats": json.loads(r[2]), "n_jobs": r[3], "approved_by": r[4], "approved_at": r[5]} for r in rows]
+
+    # -- knowledge (styles, formats, reference learnings) served to every computer without a deploy ---------------------
+    KNOWLEDGE_KINDS = ("format", "reference")
+
+    def put_knowledge(self, kind: str, name: str, payload: Dict[str, Any], match_text: str, embedding: Optional[List[float]], updated_by: str) -> float:
+        now = time.time()
+        self._run("DELETE FROM zeno_knowledge WHERE kind = %s AND name = %s", (kind, name))
+        self._run(
+            "INSERT INTO zeno_knowledge (kind, name, payload_json, match_text, embedding_json, updated_by, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (kind, name, json.dumps(payload, ensure_ascii=False), match_text, json.dumps(embedding) if embedding else None, updated_by[:80], now),
+        )
+        return now
+
+    def knowledge_since(self, since: float = 0.0, kind: Optional[str] = None) -> List[Dict[str, Any]]:
+        sql = "SELECT kind, name, payload_json, updated_at FROM zeno_knowledge WHERE updated_at > %s"
+        params: tuple = (float(since),)
+        if kind:
+            sql += " AND kind = %s"
+            params += (kind,)
+        rows = self._run(sql + " ORDER BY updated_at", params, "all")
+        return [{"kind": r[0], "name": r[1], "payload": json.loads(r[2]), "updated_at": float(r[3])} for r in rows]
+
+    def knowledge_for_match(self, kind: str) -> List[Dict[str, Any]]:
+        rows = self._run("SELECT name, payload_json, match_text, embedding_json FROM zeno_knowledge WHERE kind = %s", (kind,), "all")
+        return [{"name": r[0], "payload": json.loads(r[1]), "match_text": r[2], "embedding": json.loads(r[3]) if r[3] else None} for r in rows]
+
+    def set_knowledge_embedding(self, kind: str, name: str, embedding: List[float]) -> None:
+        self._run("UPDATE zeno_knowledge SET embedding_json = %s WHERE kind = %s AND name = %s", (json.dumps(embedding), kind, name))
 
     def revoke(self, key_id: int) -> bool:
         before = self._run("SELECT COUNT(*) FROM zeno_keys WHERE id = %s AND revoked_at IS NULL", (key_id,), "one")[0]

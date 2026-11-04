@@ -51,3 +51,9 @@ and leaves `GEMINI_API_KEY` empty. Zeno uses the service only when no local Gemi
 - **Transcript cache:** `/v1/transcribe` keys results by the audio's SHA-256, the prompt/model version, the language and the script lines. A repeat (a retry, a second editor on the same clip) is served without calling Gemini and costs no tokens (`"cached": true`). Entries last 30 days; an incomplete transcript is never cached. This stores transcripts server-side, so treat the database as company data.
 - **Formats:** `POST /v1/observations` (a computer's key) stores per-format numbers after a job; `GET /admin/api/formats` lists candidates; `POST /admin/api/formats/<style>/<format>/approve` (admin, needs `X-Zeno-Admin: 1`, at least `ZENO_FORMAT_MIN_JOBS` jobs, default 5); `GET /v1/formats` serves approved recipes.
 - Pre-job check: `POST /v1/selftest` (see scripts/preflight.py).
+
+## Knowledge in the database (no deploy for new recipes)
+`PUT /admin/api/knowledge/<kind>/<name>` (admin, `X-Zeno-Admin: 1`) publishes a format recipe or a reference learning; `GET /v1/knowledge?since=<ts>` returns what is new
+(every computer calls it at the start of a job); `POST /v1/match` answers which format a scene wording describes (Gemini embeddings when available, words otherwise;
+set `ZENO_EMBED_MODEL` to change the model). Embeddings are stored as JSON and compared on the server, so no database extension is needed. New tables are created in a
+protected step: if one fails, sign-in and transcription still start.

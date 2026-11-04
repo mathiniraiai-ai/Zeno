@@ -14,6 +14,7 @@
 4. **On-screen text** — only what the script document asks for (plus auto-extracted `"Stop Saying"` hook banner when opening with `"Stop saying ..."`). → `concepts/05_onscreen_text`
 5. **Edit & Pre-Render Gate (5-Agent Parallel Workflow)** — refine `plan.edl` using Agents 1–4 (`1: Script/Take Auditor`, `2: Pause-Cut & De-Duplication Specialist`, `3: Dynamic Zoom & Layout Choreographer`, `4: Transitions, Strobe Overlays & SFX Designer`), refresh `python3 scripts/zeno.py --pitch work/<project>/plan.edl`, present the **Editorial Pitch Card**, and **ask the user Yes/No** before rendering. After approval, run `python3 scripts/zeno.py --execute work/<project>/plan.edl` (45ms zero-drift audio crossfades, `-48 dBFS` room-tone floor, per-clip RMS gain matching, transcript-intent zooms, `.mp4` + `_1x1.mp4` + `.prproj` + `.premiere.xml`) → **Agent 5** performs local Python deep post-render inspection (verifying 0 repeated dialogues, 0 empty silences `>1.05s`, 0 boundary clicks, `-11.5 LUFS` / `-1.0 dBTP`, active transitions/whoosh SFX, and 2-pulse Red/Green overlays) and auto-fixes if needed.
 6. **Report** — separated Agent vs. Gemini transcription token table + `TOKEN_LEDGER.md` & `README.md` rows. → `concepts/06_token_budget`
+6b. **Team knowledge** — recipes and references pulled from the server at the start of a job; what is learned from all users. → `concepts/09_team_learning`
 7. **Timing looks wrong?** → `concepts/07_alignment_accuracy`
 
 Read only the concept file for the step you are on.

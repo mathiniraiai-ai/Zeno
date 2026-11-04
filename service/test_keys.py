@@ -235,5 +235,48 @@ approved = client.get("/v1/formats", headers=_auth).json()["formats"]
 check("approved recipes are served to computers", len(approved) == 1 and approved[0]["format"] == "split_h" and approved[0]["n_jobs"] == 5, str(approved))
 check("a company key cannot approve -> 403", client.post("/admin/api/formats/micronarrative/split_h/approve", headers={**_auth, "X-Zeno-Admin": "1"}).status_code == 403)
 
+# Knowledge in the database: published once by an admin, pulled by every computer, matched on the server
+def _fake_embed(text):   # a tiny stand-in for Gemini: a word-count vector over a few topic words
+    vocab = ["split", "screen", "video", "call", "floating", "selfie", "top", "bottom", "left", "right", "chat", "bar"]
+    t = text.lower()
+    return [float(t.count(w)) for w in vocab] + [0.01]
+
+
+import knowledge_sync  # noqa: E402
+
+_recipes = knowledge_sync.collect_local()
+check("local knowledge is collected (formats and references)", sum(1 for i in _recipes if i["kind"] == "format") >= 6 and any(i["kind"] == "reference" for i in _recipes))
+_adm = {**basic("admin-pw"), "X-Zeno-Admin": "1"}
+with patch.object(service, "_embed", side_effect=_fake_embed):
+    for it in _recipes:
+        r = client.put(f"/admin/api/knowledge/{it['kind']}/{it['name']}", headers=_adm, json={"payload": it["payload"], "text": it["text"]})
+        assert r.status_code == 200, (it["name"], r.text)
+    check("an admin publishes knowledge without a deploy", True)
+    check("publishing needs an admin -> 403", client.put("/admin/api/knowledge/format/x", headers={**_auth, "X-Zeno-Admin": "1"}, json={"payload": {}}).status_code == 403)
+    check("publishing needs the admin header -> 400", client.put("/admin/api/knowledge/format/x", headers=basic("admin-pw"), json={"payload": {}}).status_code == 400)
+    check("an unknown kind is refused -> 400", client.put("/admin/api/knowledge/script/x", headers=_adm, json={"payload": {}}).status_code == 400)
+    check("a path trick in the name is refused -> 400", client.put("/admin/api/knowledge/format/..%2Fx", headers=_adm, json={"payload": {}}).status_code in (400, 404))
+    pulled = client.get("/v1/knowledge", headers=_auth).json()
+    check("a computer pulls everything published", len(pulled["items"]) == len(_recipes), str(len(pulled["items"])))
+    again = client.get("/v1/knowledge", params={"since": pulled["now"]}, headers=_auth).json()
+    check("a second pull gets only what is new (nothing)", again["items"] == [])
+    client.put("/admin/api/knowledge/format/split_v", headers=_adm, json={"payload": {"id": "split_v", "layout": "split_v", "description": "updated"}, "text": "updated split"})
+    changed = client.get("/v1/knowledge", params={"since": pulled["now"]}, headers=_auth).json()["items"]
+    check("an update reaches computers on their next pull", [i["name"] for i in changed] == ["split_v"] and changed[0]["payload"]["description"] == "updated")
+    m = client.post("/v1/match", headers=_auth, json={"text": "a floating window video call"}).json()["matches"]
+    check("match by embedding picks the video call recipe", m[0]["name"] == "video_call" and m[0]["method"] == "embedding", str(m))
+# one item published while embedding was down is filled in at match time
+_calls_emb = []
+with patch.object(service, "_embed", return_value=None):
+    client.put("/admin/api/knowledge/format/late_item", headers=_adm, json={"payload": {"id": "late_item", "layout": "single", "names": ["late wording"]}, "text": "late wording"})
+with patch.object(service, "_embed", side_effect=_fake_embed):
+    client.post("/v1/match", headers=_auth, json={"text": "floating video call"})
+    check("a missing embedding is filled in when matching", service.store().knowledge_for_match("format") and all(i["embedding"] for i in service.store().knowledge_for_match("format")))
+with patch.object(service, "_embed", return_value=None):
+    m = client.post("/v1/match", headers=_auth, json={"text": "left screen and right screen"}).json()["matches"]
+    check("match falls back to words when the server cannot embed", m[0]["name"] == "split_h" and m[0]["method"] == "words", str(m))
+check("match needs a key -> 401", client.post("/v1/match", json={"text": "x"}).status_code == 401)
+check("match refuses an empty question -> 400", client.post("/v1/match", headers=_auth, json={"text": " "}).status_code == 400)
+
 print(f"\n{sum(results)}/{len(results)} checks passed")
 sys.exit(0 if all(results) else 1)

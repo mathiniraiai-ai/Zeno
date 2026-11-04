@@ -124,8 +124,10 @@ def main():
                 live_transcription(url, token, audio)
         if not a.url:
             other = {"TestB": tokens["TestB"]}["TestB"]
-            codes = [post(other).status_code for _ in range(8)]
+            replies = [post(other) for _ in range(8)]
+            codes = [r.status_code for r in replies]
             check("rate limit -> 429 after 6 requests", 429 in codes and codes.index(429) == 6, str(codes))
+            check("a 429 says how long to wait (Retry-After)", 1 <= int(replies[codes.index(429)].headers.get("retry-after", 0)) <= 61)
     finally:
         if proc:
             proc.terminate()

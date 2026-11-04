@@ -144,6 +144,7 @@ Use `.venv/bin/python` (Python 3.12; or run `install.command` / `install.bat`). 
 .venv/bin/python scripts/setup.py --login                                       # zero-copy browser Google login -> saves .zeno_session.json
 .venv/bin/python scripts/setup.py --smoke                                       # env check, never prints keys
 .venv/bin/python scripts/eval_alignment.py --self-test                          # score word timing against gold benchmark
+.venv/bin/python scripts/knowledge_sync.py pull|push|match "<wording>"                # knowledge kept in the server database (no commit or redeploy for new recipes)
 .venv/bin/python scripts/format_library.py search "<script wording>"                  # look up how a format should look; `extract <video> --id ...` measures a reference locally, no tokens, video not kept
 .venv/bin/python scripts/style_readiness.py [style] [--json]                    # measured readiness level (0-3) of a style from files and tests
 .venv/bin/python scripts/clean.py [--apply]                                     # free disk

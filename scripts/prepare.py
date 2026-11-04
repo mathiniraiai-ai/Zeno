@@ -1916,7 +1916,16 @@ def assign_segment_ids_marks_and_layouts(
         # A layout named in the script ("floating window ... horizontal split screen") applies unless the clip already is a split
         script_hint = next((l.get("layout_hint") for l in lines if l.get("layout_hint")), "")
         if script_hint and layout_mode == "single" and str(preset).lower() in ("auto", "hybrid"):
-            c_shot = str(((seg.get("clip") or {}).get("info") or {}).get("shot_type") or "")
+            c_info_h = ((seg.get("clip") or {}).get("info")) or {}
+            c_shot = str(c_info_h.get("shot_type") or "")
+            if not c_shot and vision_tracker is not None:   # the plan's clip info has no vision data yet: look at the clip (cached on disk)
+                try:
+                    vis = vision_tracker.analyze_clip_vision(resolve(seg["src"]))
+                    c_shot = str(vis.get("shot_type") or "")
+                    c_info_h.setdefault("shot_type", c_shot)
+                    c_info_h.setdefault("face_count", vis.get("face_count"))
+                except Exception:
+                    c_shot = ""
             if "baked" not in c_shot and c_shot != "two_shot":
                 layout_mode = script_hint
                 seg_dict["note"] = f"{seg_dict['note']} [LAYOUT_HINT {script_hint} from script]"
@@ -1926,7 +1935,14 @@ def assign_segment_ids_marks_and_layouts(
         # Auto-populate peer= and alternating speaker slots (left <-> right or top <-> bottom) for split_h / split_v / video_call
         if layout_mode in ("split_h", "split_v", "video_call") and not seg_dict.get("peer"):
             cur_spk = spk_list[0] if spk_list else ""
-            other_spk = next((s for s in all_speakers if s != cur_spk), cur_spk or "Peer")
+            panels_here = next((l.get("panels") for l in lines if l.get("panels")), {}) or {}
+            section = [] if not script_hint else list(dict.fromkeys(l["speaker"] for l in script_lines if l.get("layout_hint") == script_hint and l.get("speaker")))
+            if panels_here and cur_spk:
+                other_spk = next((v for v in panels_here.values() if v.lower() != cur_spk.lower()), None)
+            else:
+                other_spk = None
+            if other_spk is None:
+                other_spk = next((s for s in (section or all_speakers) if s != cur_spk), cur_spk or "Peer")
             if layout_mode in ("split_h", "split_v") and not seg_dict.get("slot"):
                 slot_a, slot_b = ("left", "right") if layout_mode == "split_h" else ("top", "bottom")
                 spk_idx = all_speakers.index(cur_spk) if (cur_spk and cur_spk in all_speakers) else (idx % 2)
@@ -2158,6 +2174,13 @@ def assign_segment_ids_marks_and_layouts(
                 mark_entry["style"] = mark_pack
             marks_out.append(mark_entry)
 
+    panel_of: Dict[str, set] = {}
+    for sd in segments_out:
+        if sd.get("layout") in ("split_v", "split_h") and sd.get("slot") and sd.get("speaker") and " / " not in str(sd["speaker"]):
+            panel_of.setdefault(sd["speaker"], set()).add(sd["slot"])
+    for who, slots in sorted(panel_of.items()):
+        if len(slots) > 1 and clips_data:
+            clips_data[0]["anomalies"].append(f"[PANEL_FLIP] {who} is placed in more than one panel ({', '.join(sorted(slots))}); a character must keep one panel. Check the script's 'Top: ... | Bottom: ...' note")
     return segments_out, marks_out, resolved_preset
 
 

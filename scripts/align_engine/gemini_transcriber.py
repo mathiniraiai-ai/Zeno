@@ -353,14 +353,22 @@ class GeminiTranscriber:
             "language_hint": language_hint or "auto",
             "target_script_lines": json.dumps(list(target_script_lines or [])[:40], ensure_ascii=False),
         }
+        audio_bytes = _pad_short_wav(Path(wav_path).read_bytes())
+        resp = None
         with httpx.Client(timeout=240.0) as http:
-            with open(wav_path, "rb") as fh:
+            for attempt in range(6):
                 resp = http.post(
                     url,
                     headers=headers,
                     data=form_data,
-                    files={"file": (os.path.basename(wav_path), fh, "audio/wav")},
+                    files={"file": (os.path.basename(wav_path), audio_bytes, "audio/wav")},
                 )
+                if resp.status_code not in (429, 503):
+                    break
+                # "too many requests" (20 a minute per person by default) or the server is busy: wait, never fall back to a guess
+                wait = float(resp.headers.get("retry-after") or 15)
+                print(f"[transcribe] server busy ({resp.status_code}); waiting {wait:.0f}s (attempt {attempt + 1}/6)", file=sys.stderr)
+                time.sleep(min(wait, 30.0))
         resp.raise_for_status()
         data = resp.json()
         if data.get("warning"):
@@ -499,6 +507,33 @@ class GeminiTranscriber:
             pass
 
 
+MIN_SEND_SECONDS = 1.2
+
+
+def _pad_short_wav(data: bytes) -> bytes:
+    """A line like "Perfect!" or "सच में?" can be well under a second, and the server refuses audio under 0.5 s. Append silence so
+    every clip is sent; the words are found in the speech and the aligner still works on the original audio."""
+    import io
+    import wave
+
+    try:
+        with wave.open(io.BytesIO(data)) as w:
+            params, frames = w.getparams(), w.readframes(w.getnframes())
+        rate, width, ch = params.framerate, params.sampwidth, params.nchannels
+        need = int(MIN_SEND_SECONDS * rate) - params.nframes
+        if need <= 0:
+            return data
+        out = io.BytesIO()
+        with wave.open(out, "wb") as o:
+            o.setnchannels(ch)
+            o.setsampwidth(width)
+            o.setframerate(rate)
+            o.writeframes(frames + b"\x00" * (need * width * ch))
+        return out.getvalue()
+    except Exception:
+        return data
+
+
 def transcribe_offline_fallback(
     wav_path: str,
     lang: str = "auto",
@@ -564,6 +599,12 @@ def transcribe_offline_fallback(
         from .script_matcher import parse_target_script
 
         parsed = parse_target_script("\n".join(script_lines))
+        if len(parsed) > 1:
+            # Without Gemini nothing says WHICH of the script's lines this clip speaks. Aligning the whole script onto a short clip
+            # produced one "clip" with hundreds of words that then won every take comparison. Leave it untranscribed instead.
+            print(f"[transcribe] WARNING: cannot tell which of the {len(parsed)} script lines {wav_p.name} says without Gemini; "
+                  "leaving it untranscribed instead of guessing. Check the Zeno server connection and run again.", file=sys.stderr)
+            return {"status": "no_transcript", "model_used": "none", "language": lang_code, "full_transcript": "", "words": [], "cues": []}
         words_from_script = [w for line in parsed for w in line.split() if w.strip()]
         if words_from_script:
             return {
