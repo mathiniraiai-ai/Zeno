@@ -641,6 +641,134 @@ def ffmpeg(*args, timeout=180):
     return run([*base, *args], low_priority=True, timeout=timeout)
 
 
+# ---------------------------------------------------------------------------------------------------- GPU use
+def compute_device() -> str:
+    """Where the aligner runs: NVIDIA CUDA, else Apple Silicon MPS, else CPU. `ZENO_DEVICE` (cpu | cuda | mps | auto) forces a choice."""
+    want = os.environ.get("ZENO_DEVICE", "auto").strip().lower()
+    try:
+        import torch
+    except Exception:
+        return "cpu"
+    cuda = torch.cuda.is_available()
+    mps = bool(getattr(torch.backends, "mps", None)) and torch.backends.mps.is_available()
+    if want == "cpu":
+        return "cpu"
+    if want == "cuda":
+        return "cuda" if cuda else "cpu"
+    if want == "mps":
+        return "mps" if mps else "cpu"
+    return "cuda" if cuda else ("mps" if mps else "cpu")
+
+
+def gpu_report() -> dict:
+    """What the GPU situation is, for the pre-job check: the device in use, its name, and a hint when a GPU exists but is not used."""
+    device = compute_device()
+    name, hint = "", ""
+    try:
+        import torch
+
+        if device == "cuda":
+            name = torch.cuda.get_device_name(0)
+        elif device == "mps":
+            name = "Apple GPU"
+            if IS_MAC:
+                try:
+                    name = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True, timeout=3).stdout.strip() or name
+                except Exception:
+                    pass
+        elif IS_WIN and shutil.which("nvidia-smi") and "+cu" not in torch.__version__:
+            hint = "an NVIDIA GPU was found but PyTorch is the CPU build: run install.bat again (it installs the GPU build)"
+        elif os.environ.get("ZENO_DEVICE", "auto").lower() == "cpu":
+            hint = "ZENO_DEVICE=cpu forces the CPU"
+    except Exception:
+        pass
+    return {"device": device, "name": name, "encoder": hardware_encoder() or "libx264", "hint": hint}
+
+
+_HW_ENCODER: dict = {}
+_HW_CANDIDATES = {"darwin": ["h264_videotoolbox"], "win": ["h264_nvenc", "h264_qsv", "h264_amf"], "linux": ["h264_nvenc", "h264_qsv"]}
+
+
+def hardware_encoder() -> str:
+    """The first H.264 hardware encoder that really works on this machine ('' = none): VideoToolbox on a Mac, NVENC / Intel QSV / AMD AMF
+    on Windows. A listed encoder can still be unusable without the GPU, so each one is tried with a real two-frame encode.
+    `ZENO_ENCODER=cpu` turns it off; `ZENO_ENCODER=h264_nvenc` (or another name) forces one."""
+    if "name" in _HW_ENCODER:
+        return _HW_ENCODER["name"]
+    forced = os.environ.get("ZENO_ENCODER", "auto").strip().lower()
+    name = ""
+    if forced not in ("cpu", "libx264", "x264", "off", "0"):
+        key = "darwin" if IS_MAC else ("win" if IS_WIN else "linux")
+        for cand in ([forced] if forced.startswith("h264_") else _HW_CANDIDATES.get(key, [])):
+            try:
+                listed = subprocess.run([str(FFMPEG), "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=10).stdout
+                if cand not in listed:
+                    continue
+                test = subprocess.run([str(FFMPEG), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.3:r=10",
+                                       "-frames:v", "2", "-c:v", cand, "-pix_fmt", "yuv420p", "-f", "null", "-"], capture_output=True, text=True, timeout=30)
+                if test.returncode == 0:
+                    name = cand
+                    break
+            except Exception:
+                continue
+    _HW_ENCODER["name"] = name
+    return name
+
+
+def hw_video_args(name: str, crf: int = 18, draft: bool = False) -> list:
+    """The ffmpeg arguments for one hardware encoder at roughly the quality of x264 `-crf <crf>` (12 = near-lossless intermediate, 18 = final)."""
+    q = 28 if draft else (14 if crf <= 14 else 19)
+    if name == "h264_videotoolbox":
+        return ["-c:v", name, "-b:v", "8M" if draft else "16M", "-allow_sw", "1"]
+    if name == "h264_nvenc":
+        return ["-c:v", name, "-preset", "p3" if draft else "p5", "-rc", "vbr", "-cq", str(q), "-b:v", "0"]
+    if name == "h264_qsv":
+        return ["-c:v", name, "-global_quality", str(q + 2), "-preset", "veryfast" if draft else "medium"]
+    if name == "h264_amf":
+        return ["-c:v", name, "-quality", "speed" if draft else "quality", "-rc", "cqp", "-qp_i", str(q), "-qp_p", str(q + 2)]
+    return ["-c:v", name]
+
+
+def with_hardware_encoder(args, draft: bool = False):
+    """A copy of an ffmpeg argument list with libx264 (and its -preset / -crf / -tune) replaced by the hardware encoder; None when there is
+    no hardware encoder or the arguments do not use libx264."""
+    name = hardware_encoder()
+    a = [str(x) for x in args]
+    if not name or "libx264" not in a:
+        return None
+    try:
+        i = next(k for k in range(len(a) - 1) if a[k] == "-c:v" and a[k + 1] == "libx264")
+    except StopIteration:
+        return None
+    crf = 18
+    if "-crf" in a:
+        try:
+            crf = int(float(a[a.index("-crf") + 1]))
+        except (ValueError, IndexError):
+            pass
+    out, k = a[:i] + hw_video_args(name, crf, draft), i + 2
+    while k < len(a):
+        if a[k] in ("-preset", "-crf", "-tune") and k + 1 < len(a):
+            k += 2
+            continue
+        out.append(a[k])
+        k += 1
+    return out
+
+
+def ffmpeg_encode(*args, timeout=180, draft: bool = False, hardware: bool = True):
+    """Run an ffmpeg command that encodes H.264 on the GPU encoder when the machine has one, and on the CPU (libx264) otherwise or if the
+    GPU encode fails."""
+    if hardware:
+        hw = with_hardware_encoder(args, draft)
+        if hw is not None:
+            try:
+                return ffmpeg(*hw, timeout=timeout)
+            except Exception:
+                pass
+    return ffmpeg(*args, timeout=timeout)
+
+
 def probe(path):
     """Duration, display size (rotation applied), fps and audio presence, parsed from `ffmpeg -i`."""
     resolved = resolve(path)

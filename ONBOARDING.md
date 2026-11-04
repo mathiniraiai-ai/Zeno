@@ -3,7 +3,7 @@
 Zeno turns raw clips and a script into a finished vertical video. An AI agent (Claude Code, Antigravity, or OpenAI) makes the decisions; Python tools on your own computer do the heavy work (audio, cutting, faces, rendering). A small Zeno server transcribes speech, signs you in, and keeps what the team has learned. This page takes you from zero to a first edit.
 
 ## What you need
-- A Mac (Apple Silicon) or a Windows PC (an NVIDIA GPU is optional; CPU works)
+- A Mac (Apple Silicon) or a Windows PC. Zeno uses the GPU automatically (Apple GPU on a Mac; NVIDIA on Windows, CUDA 12.6+ driver) and falls back to CPU if there is none
 - Your company Google account (`@gosupernova.live`)
 - One AI agent set up on your machine (Claude Code, Antigravity, or OpenAI)
 
@@ -23,7 +23,7 @@ Zeno turns raw clips and a script into a finished vertical video. An AI agent (C
 3. The installer asks you nothing and needs no admin password for Zeno itself (installing Git, only if it is missing, makes Windows ask for permission). It:
    - installs `uv`, which brings Python 3.12,
    - uses FFmpeg if the PC already has it, otherwise downloads it into `tools/ffmpeg/`,
-   - creates `.venv` and installs the packages,
+   - creates `.venv` and installs the packages (on a Windows PC with an NVIDIA GPU it installs the GPU build of PyTorch),
    - installs Git if it is missing (Windows) and connects the folder to GitHub, so it can update itself,
    - creates `.env` from the template,
    - downloads the alignment model (Meta wav2vec2, about 360 MB, into `models/torch`),

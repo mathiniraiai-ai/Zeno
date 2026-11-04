@@ -168,6 +168,11 @@ def verify_assets() -> bool:
 
 def check_env() -> None:
     print("\n[5/5] Checking Environment & API Configuration...")
+    g = common.gpu_report()
+    print(f"  [OK] Processing: aligner on {g['device'].upper()}{' (' + g['name'] + ')' if g.get('name') else ''}, video encoder {g['encoder'] or 'CPU (libx264)'}")
+    if g.get("hint"):
+        print(f"       Hint: {g['hint']}")
+
     common.load_dotenv()
     import auth_session
     info = auth_session.get_session_info()

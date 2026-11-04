@@ -257,24 +257,14 @@ def ensure_latest_update(
                 check=False,
             )
             if "requirements.txt" in (diff_r.stdout or ""):
-                py_bin = _find_python()
-                uv_bin = shutil.which("uv")
-                if uv_bin:
-                    subprocess.run(
-                        [uv_bin, "pip", "install", "--python", py_bin, "-r", str(ROOT / "requirements.txt")],
-                        cwd=str(ROOT),
-                        capture_output=True,
-                        timeout=60.0,
-                        check=False,
-                    )
-                else:
-                    subprocess.run(
-                        [py_bin, "-m", "pip", "install", "-q", "-r", str(ROOT / "requirements.txt")],
-                        cwd=str(ROOT),
-                        capture_output=True,
-                        timeout=60.0,
-                        check=False,
-                    )
+                # gpu_install keeps a CUDA torch instead of overwriting it with the CPU build listed in requirements.txt
+                subprocess.run(
+                    [_find_python(), str(ROOT / "scripts" / "gpu_install.py")],
+                    cwd=str(ROOT),
+                    capture_output=True,
+                    timeout=600.0,
+                    check=False,
+                )
         except Exception:
             pass
 

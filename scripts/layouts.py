@@ -35,6 +35,7 @@ from common import (
     _normalize_mark_type,
     clip_work_dir,
     ffmpeg,
+    ffmpeg_encode,
     probe,
     resolve,
     resolve_sfx_asset,
@@ -1364,22 +1365,8 @@ def render_segment_layout(
     args, exact, _ = build_segment_ffmpeg_args(seg, plan, W, H, fps, out, draft)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     use_hw = bool((plan or {}).get("use_hw_accel", True))
-    if use_hw and _has_videotoolbox():
-        vt_args: List[Any] = []
-        i = 0
-        while i < len(args):
-            if args[i] == "-c:v" and i + 5 < len(args) and args[i + 1] == "libx264":
-                vt_args.extend(["-c:v", "h264_videotoolbox", "-b:v", "8M" if draft else "16M", "-allow_sw", "1"])
-                i += 6  # skip -c:v libx264 -preset ... -crf 12
-            else:
-                vt_args.append(args[i])
-                i += 1
-        try:
-            ffmpeg(*vt_args)
-            return exact
-        except Exception:
-            pass
-    ffmpeg(*args)
+    # GPU encoder for this computer (VideoToolbox, NVENC, Quick Sync, AMF) with automatic fallback to libx264.
+    ffmpeg_encode(*args, draft=draft, hardware=use_hw)
     return exact
 
 

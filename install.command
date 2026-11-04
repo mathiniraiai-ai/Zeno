@@ -66,7 +66,7 @@ else
   echo "[3/5] Creating .venv with Python 3.12..."
   uv venv --python 3.12 .venv
 fi
-uv pip install --python .venv/bin/python -r requirements.txt
+.venv/bin/python scripts/gpu_install.py
 
 # 3b. Connect this folder to GitHub if it came from a ZIP, so it can update itself (the repository is public: no GitHub account is needed)
 .venv/bin/python scripts/auto_updater.py --connect-git || echo "      (updates need Git and an internet connection; see ONBOARDING.md)"

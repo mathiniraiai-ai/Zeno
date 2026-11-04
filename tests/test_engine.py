@@ -1193,6 +1193,73 @@ Lady 1: I'm working on the farm while talking to you
         self.assertEqual(out["segments"][0]["src"], "S2")
         self.assertEqual(out["marks"][0]["sfx"], "buzzer.wav")
 
+class TestGpu(unittest.TestCase):
+    """GPU use: device choice, hardware encoder arguments, CUDA torch selection. No GPU is needed to run these."""
+
+    def test_device_can_be_forced_to_cpu(self):
+        import os
+        from unittest import mock
+        import common
+
+        with mock.patch.dict(os.environ, {"ZENO_DEVICE": "cpu"}):
+            self.assertEqual(common.compute_device(), "cpu")
+
+    def test_encoder_args_swap_libx264_for_hardware(self):
+        from unittest import mock
+        import common
+
+        args = ["-i", "a.mp4", "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-c:a", "pcm_s16le", "out.mkv"]
+        for enc, marker in (("h264_videotoolbox", "-allow_sw"), ("h264_nvenc", "-cq"), ("h264_qsv", "-global_quality"), ("h264_amf", "-qp_i")):
+            with mock.patch.object(common, "hardware_encoder", return_value=enc):
+                out = common.with_hardware_encoder(args)
+            self.assertIsNotNone(out)
+            self.assertIn(enc, out)
+            self.assertIn(marker, out)
+            for gone in ("libx264", "-preset" if enc in ("h264_videotoolbox", "h264_amf") else "-crf", "-crf"):
+                self.assertNotIn(gone, out)
+            self.assertEqual(out[-1], "out.mkv")
+            self.assertIn("pcm_s16le", out)
+
+    def test_no_hardware_encoder_means_cpu_path(self):
+        from unittest import mock
+        import common
+
+        with mock.patch.object(common, "hardware_encoder", return_value=""):
+            self.assertIsNone(common.with_hardware_encoder(["-c:v", "libx264", "-crf", "18", "o.mp4"]))
+
+    def test_gpu_encode_failure_falls_back_to_cpu(self):
+        from unittest import mock
+        import common
+
+        calls = []
+
+        def fake(*a, **k):
+            calls.append(a)
+            if "h264_nvenc" in a:
+                raise RuntimeError("no gpu")
+            return "ok"
+
+        with mock.patch.object(common, "hardware_encoder", return_value="h264_nvenc"), mock.patch.object(common, "ffmpeg", side_effect=fake):
+            self.assertEqual(common.ffmpeg_encode("-c:v", "libx264", "-crf", "18", "o.mp4"), "ok")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("libx264", calls[1])
+
+    def test_cuda_wheel_tag_from_driver(self):
+        import gpu_install
+
+        self.assertEqual(gpu_install.cuda_tag("| NVIDIA-SMI 560 Driver Version: 560.94 CUDA Version: 12.6 |"), "cu126")
+        self.assertEqual(gpu_install.cuda_tag("CUDA Version: 12.9"), "cu126")
+        self.assertEqual(gpu_install.cuda_tag("CUDA Version: 13.0"), "cu130")
+        self.assertIsNone(gpu_install.cuda_tag("CUDA Version: 11.8"))
+        self.assertIsNone(gpu_install.cuda_tag(""))
+
+    def test_requirements_refresh_keeps_cuda_torch(self):
+        import gpu_install
+
+        lines = gpu_install.requirements_without_torch(ROOT / "requirements.txt")
+        self.assertFalse([l for l in lines if l.strip().startswith(("torch==", "torchaudio=="))])
+        self.assertTrue(lines)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -61,17 +61,16 @@ if ((Test-Path $ff) -and (Test-Path $fp)) {
     Write-Host "      FFmpeg installed in tools\ffmpeg"
 }
 
-# 3. Python 3.12 virtual environment + packages (CPU build of torch; works on any PC)
+# 3. Python 3.12 virtual environment + packages (uses the NVIDIA GPU when there is one, else CPU)
 if (Test-Path ".venv\Scripts\python.exe") {
     Write-Host "[3/5] .venv exists; updating packages"
 } else {
     Write-Host "[3/5] Creating .venv with Python 3.12..."
     uv venv --python 3.12 .venv
 }
-uv pip install --python .venv\Scripts\python.exe -r requirements.txt
-if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
-    Write-Host "      NVIDIA GPU found. Zeno runs fine on CPU; for GPU speed see the README (optional)."
-}
+# Installs the packages and, when an NVIDIA GPU is present, switches to the CUDA build of torch so the aligner and the encoder use the GPU.
+.venv\Scripts\python.exe scripts\gpu_install.py
+if ($LASTEXITCODE -ne 0) { Write-Host "      Package install reported a problem (see above)."; }
 
 # 3b. Git, so this folder can update itself (also for a copy that came from a ZIP download).
 #     The repository is public: no GitHub account or sign-in is needed.

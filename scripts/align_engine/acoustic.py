@@ -7,6 +7,8 @@ from pathlib import Path
 
 # Keep the alignment weights inside the project (models/torch/hub/checkpoints) instead of ~/.cache.
 os.environ.setdefault("TORCH_HOME", str(Path(__file__).resolve().parents[2] / "models" / "torch"))
+# On Apple Silicon the GPU (MPS) runs this model; an operation MPS does not support runs on the CPU instead of failing.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import numpy as np
 import soundfile as sf
@@ -27,6 +29,29 @@ def _certifi_ssl_context():
         return ssl.create_default_context()
 
 
+def _pick_device() -> str:
+    """NVIDIA CUDA, else Apple Silicon MPS, else CPU (ZENO_DEVICE can force one); see common.compute_device."""
+    try:
+        from common import compute_device
+
+        return compute_device()
+    except Exception:
+        if torch.cuda.is_available():
+            return "cuda"
+        mps = getattr(torch.backends, "mps", None)
+        return "mps" if (mps is not None and mps.is_available()) else "cpu"
+
+
+def _free_gpu_cache(dev: Any) -> None:
+    try:
+        if "cuda" in str(dev):
+            torch.cuda.empty_cache()
+        elif "mps" in str(dev):
+            torch.mps.empty_cache()
+    except Exception:
+        pass
+
+
 class AcousticModel:
     """
     Acoustic Emission Extractor for forced alignment using Meta wav2vec2 base (95M, MIT licence).
@@ -34,7 +59,7 @@ class AcousticModel:
     def __init__(self, device: Optional[str] = None, use_fp16: bool = False):
         self.sample_rate = 16000
         self.torch_model = None
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = device or _pick_device()
         self.use_fp16 = use_fp16 and ("cuda" in str(self.device))
         labels = bundle.get_labels()
         self.dictionary: Dict[str, int] = {c: i for i, c in enumerate(labels)}
@@ -65,11 +90,7 @@ class AcousticModel:
         if self.torch_model is not None:
             del self.torch_model
             self.torch_model = None
-            if torch.cuda.is_available():
-                try:
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
+            _free_gpu_cache(self.device)
             gc.collect()
             try:
                 libc = ctypes.CDLL("libc.so.6")
@@ -102,8 +123,7 @@ class AcousticModel:
             log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)[0].cpu().numpy()
         
         del tensor_wave, logits
-        if "cuda" in str(dev):
-            torch.cuda.empty_cache()
+        _free_gpu_cache(dev)
 
         num_frames = log_probs.shape[0]
         duration_sec = len(raw_waveform) / self.sample_rate
@@ -168,8 +188,7 @@ class AcousticModel:
             log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)[0].cpu().numpy()
             
         del tensor_wave, logits
-        if "cuda" in str(dev):
-            torch.cuda.empty_cache()
+        _free_gpu_cache(dev)
             
         num_frames = log_probs.shape[0]
         slice_duration_sec = len(raw_waveform) / self.sample_rate

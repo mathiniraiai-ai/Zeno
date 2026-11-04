@@ -27,6 +27,7 @@ from common import (  # noqa: E402
     clip_work_dir,
     _normalize_mark_type,
     ffmpeg,
+    ffmpeg_encode,
     probe,
     read_json,
     resolve,
@@ -173,7 +174,7 @@ def render_square_1x1(
         f"[fg_in]scale={fg_w}:{sq}:flags=lanczos[fg];"
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p[vout]"
     )
-    ffmpeg(
+    ffmpeg_encode(
         "-i", src_mp4,
         "-filter_complex", fc,
         "-map", "[vout]",
@@ -263,7 +264,7 @@ def render_segment(seg: Dict[str, Any], W: int, H: int, fps: int, out: Path, dra
         "-c:a", "pcm_s16le",
         out,
     ]
-    ffmpeg(*args)
+    ffmpeg_encode(*args, draft=draft)
     return exact
 
 
@@ -707,7 +708,7 @@ def main() -> None:
     mix = WORK / "_segments" / "mix.mkv"
     fc.append(f"{v}null[vout]")
     fc.append(f"{au}anull[aout]")
-    ffmpeg(
+    ffmpeg_encode(
         *inputs,
         "-filter_complex", ";".join(fc),
         "-map", "[vout]",
@@ -719,6 +720,7 @@ def main() -> None:
         "-pix_fmt", "yuv420p",
         "-c:a", "pcm_s16le",
         mix,
+        draft=bool(a.draft),
     )
     r = ffmpeg("-i", mix, "-af", f"loudnorm=I={loud}:TP={DEFAULT_PEAK_CAP_DB}:LRA=11:print_format=json", "-f", "null", "-")
     meas = json.loads(re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr).group(0))
