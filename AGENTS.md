@@ -37,6 +37,12 @@ Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Co
 
 ## 3. The 5-Stage Interactive Zeno Harness (`scripts/zeno.py`)
 
+**Pre-job gate (mandatory, every job, every agent).** Do not start from a guess and do not start before the user has handed over the inputs:
+1. Run `python3 scripts/zeno.py --preflight`. It runs live checks (FFmpeg, OpenCV face detection on a real frame, the wav2vec2 aligner, and a small WAV sent to the Zeno server, which checks its key store and Gemini). Show the user the PASS/FAIL table.
+2. If every check passes, ask the user one question: "Share the script link (the Google Doc tab) and the footage folder." The footage must be a local folder or files; a Drive or web link is not downloaded, so ask them to download it first. A Google Doc link must end in `?tab=...`; never load a whole document.
+3. Only after the user answers, run `python3 scripts/zeno.py --inspect <footage> --script <script>`. It repeats the live checks, then checks the script (spoken lines, scenes, strike-through text, layout notes) and every clip (readable, has audio) and prints them. If anything fails it stops with `[BLOCKED]` and exits with code 2; fix the listed problem with the user. Never use `--skip-preflight`.
+
+
 Zeno operates like a **Senior Human Video Editor** in 5 transparent stages with a **mandatory Pre-Render Yes/No Approval Gate** and **48–50s live backend progress updates**:
 
 0. **Stage 0 — Edit Bay Readiness Check (On First Clone / Greeting)**:
@@ -138,6 +144,8 @@ Use `.venv/bin/python` (Python 3.12; or run `install.command` / `install.bat`). 
 .venv/bin/python scripts/setup.py --login                                       # zero-copy browser Google login -> saves .zeno_session.json
 .venv/bin/python scripts/setup.py --smoke                                       # env check, never prints keys
 .venv/bin/python scripts/eval_alignment.py --self-test                          # score word timing against gold benchmark
+.venv/bin/python scripts/format_library.py search "<script wording>"                  # look up how a format should look; `extract <video> --id ...` measures a reference locally, no tokens, video not kept
+.venv/bin/python scripts/style_readiness.py [style] [--json]                    # measured readiness level (0-3) of a style from files and tests
 .venv/bin/python scripts/clean.py [--apply]                                     # free disk
 python3 -m unittest service/test_keys.py service/test_service.py                # service & Google OAuth / learnings unit tests
 python3 service/check_prompt_sync.py                                            # verify service & local Gemini prompt sync
@@ -147,10 +155,32 @@ python3 service/check_prompt_sync.py                                            
 
 **Director / Engine split.** A thin LLM "Director" (`agent/DIRECTOR.md` + `agent/concepts/*`) only reads small text files and edits `plan.edl`; everything measurable is Python in `scripts/`. `CLAUDE.md` and `AGENTS.md` are parallel manuals and must be kept in sync.
 
-**Transcription & Editorial Learning Service** (`service/`, FastAPI on Railway): holds the only Gemini key and collects team editorial learnings. Team PCs authenticate once via zero-touch Google OAuth (`python3 scripts/setup.py --login` or `install.command`, which opens the browser for `@gosupernova.live` / `@gosupernova.line` sign-in and automatically saves `.zeno_session.json` + `ZENO_CLOUD_URL` / `ZENO_CLOUD_TOKEN` in `.env`, with legacy `SCRIPTCUT_CLOUD_*` fallback). `scripts/token_tracker.py` posts per-run telemetry, `plan.auto.edl -> plan.edl` diffs, and `brain_memory.json` rules to `/v1/telemetry`, and `python3 scripts/zeno.py --sync-learnings` syncs shared rules via `/v1/learnings`.
+**Transcription & Editorial Learning Service** (`service/`, FastAPI on Railway): holds the only Gemini key and collects team editorial learnings. Team PCs authenticate once via zero-touch Google OAuth (`python3 scripts/setup.py --login` or `install.command`, which opens the browser for `@gosupernova.live` sign-in (more domains only via `ZENO_ALLOWED_EMAIL_DOMAINS`) and automatically saves `.zeno_session.json` + `ZENO_CLOUD_URL` / `ZENO_CLOUD_TOKEN` in `.env`, with legacy `SCRIPTCUT_CLOUD_*` fallback). `scripts/token_tracker.py` posts per-run telemetry, `plan.auto.edl -> plan.edl` diffs, and `brain_memory.json` rules to `/v1/telemetry`, and `python3 scripts/zeno.py --sync-learnings` syncs shared rules via `/v1/learnings`.
 
 ## Caches & confirmations (all agents)
 Never ask the user to clear caches and never delete them by hand (`rm -rf work/...`). Caches under `work/` are keyed per file (`<stem>-<fingerprint>`), so they are safe to reuse and stale ones are never picked up. The only confirmation in a job is the Stage 3 Yes/No before rendering; ask it once, in chat, and do not repeat it after the user says Yes. If disk space runs low, run `python3 scripts/clean.py` (dry run), show the total, ask once, then run `python3 scripts/clean.py --apply` as one command.
+
+## Verified status & open improvements (audit of 2026-11-04)
+Checked: all 73 Python files compile, `tests.test_engine` (10 tests), `service/test_keys.py` (31 checks), `service/test_service.py --no-live` (6 checks), prompt sync, JSON validity, shell syntax and `zeno.py --check` all pass. Do not treat these as fixed until the item is removed from this list.
+
+**Fixed on 2026-11-04** (each has a test in `tests/test_engine.py` or `service/test_keys.py`; deploy `service/` for the security items to take effect)
+1. `scripts/zeno.py` now imports `edl_parser`, `Path` and `json`; `--swap-layout`, `--swap-take` and `--error-sfx` no longer crash.
+2. Tamil `டேக்ஸ்` is "takes" only (the duplicate "tax" entry was removed; "tax" is `டாக்ஸ்`). Kannada duplicate keys removed. A test fails if a lexicon key has two different values.
+3. Script cues are read by `parse_script_file`: reference/visual/character lines and `Scene changes` / `Back to` / `Cut to` / `Flashback` lines are directions, not spoken lines (Joel's W44 script went from 36 "lines" to 26 real ones, which removes false "missing lines"); `Scene changes` starts a new scene so a `whip_left` transition is placed; a trailing `(X Sign and Text Strikethrough)` or `[TEXT: "..." | strike]` becomes a red struck-through banner; a "floating window / horizontal split screen" note sets `layout_hint` for the lines that follow (a clip that is already a split stays `single`). A parenthetical like `(Suresh is talking to his Partner)` is scene context, not a silent beat.
+4. Service: `POST /api/keys` needs `ZENO_SIGNUP_CODE` (otherwise 403); company keys are not admin unless `ZENO_ADMIN_EMAILS` lists them or `ZENO_ADMIN_ALLOW_DOMAIN=1`; only `gosupernova.live` is allowed unless `ZENO_ALLOWED_EMAIL_DOMAINS` says otherwise; Google sign-in accepts only an ID token whose audience is our client id, with a verified email.
+
+**Open**
+- "Horizontal split screen" in a script is read as a horizontal divider (top and bottom panels, `split_v`) and "vertical split" as left and right (`split_h`); change `SCRIPT_SPLIT_LAYOUT` in `prepare.py` if the team means the opposite.
+- The general on-screen text format (plain text, positions, `✓`) is still undefined; only the strike-through cue is rendered. Other `[TEXT: ...]` options are parsed and ignored.
+- The segment-level changes were tested on synthetic segments, not on a full render of Joel's footage.
+
+**Improvements (planned)**
+- Editor scorecard after every render: clipped words, longest pause, A/V offset, shot-length spread, transition count, loudness, text readability, script coverage (pass/fail each).
+- J-cuts and L-cuts (audio leads or trails the picture by 4–12 frames) and reaction holds read from the script dialogue.
+- Measure editing numbers (pause, shot length, zoom, transition spacing) on the user's best finished videos and ads, then keep them in `styles/<name>/spec.json`; confirm any pattern with an A/B test before making it a rule.
+- Measure alignment on a hand-marked gold set with `eval_alignment.py` before changing any onset or end threshold.
+- On-screen text cue format (proposed, awaiting the user's confirmation): `[TEXT: "..." | strike | x]`, and accept the wording `(X Sign and Text Strikethrough)`.
+- Keep `CLAUDE.md` and `AGENTS.md` in sync with a small check script; tests for `render.py` and `layouts.py`; CI that runs the unit tests and prompt sync on every push; test the Windows installer.
 
 ## Secrets (all agents)
 Never open, print, quote or paste `.env`, `.zeno_session.json`, or any key in a chat or log. They hold the user's personal Zeno session token (or a Gemini key). To check setup, run `python3 scripts/setup.py --smoke` or `python3 scripts/setup.py --whoami`; they report [OK]/[FAIL] without showing keys. Read `.env.example` instead if you need the variable names.

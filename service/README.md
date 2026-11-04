@@ -14,7 +14,9 @@ Dashboard labels can change; follow the idea if a name differs. Railway detects 
 3. Under **Variables**, add:
    - `GEMINI_API_KEY` = your Gemini key (lives only here)
    - `DATABASE_URL` = reference the existing Postgres service's `DATABASE_URL` (Railway's "Add Reference" button)
-   - `ZENO_SIGNUP_CODE` = optional team code asked on the key page. If you leave it unset, anyone who can open the page can generate a key (fine if only the hub links to it, but then keep the address private and watch `/admin`)
+   - `ZENO_GOOGLE_CLIENT_ID` = the OAuth Web client id (Google Auth Platform); people sign in with Google, only `ZENO_ALLOWED_EMAIL_DOMAINS` (default `gosupernova.live`) is accepted
+   - `ZENO_ADMIN_EMAILS` = comma-separated emails that may open `/admin` with their key (company keys are not admin unless `ZENO_ADMIN_ALLOW_DOMAIN=1`)
+   - `ZENO_SIGNUP_CODE` = team code for the old name-only signup (`POST /api/keys`). Unset means that signup is off (403); Google sign-in does not need it
    - `ZENO_ADMIN_PASSWORD` = password for `/admin` (admin is off until set)
 4. Under **Networking**, generate a public domain. That is the address your team uses.
 5. Open the domain: the signup page is at `/`, the admin page at `/admin` (browser asks for the password; any username).

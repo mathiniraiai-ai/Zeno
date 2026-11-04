@@ -1,0 +1,19 @@
+{
+ "id": "selfie",
+ "layout": "single",
+ "names": [
+  "selfie",
+  "selfie style",
+  "selfie video",
+  "talking to camera",
+  "vlog"
+ ],
+ "description": "One person close to the camera, face large and centred, handheld feel. Full frame, no panels.",
+ "when": "a single speaker addressing the viewer, hooks and testimonials",
+ "geometry": {
+  "canvas": "1080x1920",
+  "zoom": "1.0 with a quick 1.08 punch-in on key words"
+ },
+ "confidence": "defined",
+ "source": "Zeno manuals (single layout); not yet measured on a selfie reference video"
+}

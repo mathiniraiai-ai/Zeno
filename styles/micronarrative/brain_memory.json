@@ -1,6 +1,6 @@
 {
   "style": "micronarrative",
-  "updated_at": "2026-11-03",
+  "updated_at": "2026-11-04",
   "rules": [
     {
       "id": "HOOK_FIRST_ZOOM_IN",
@@ -66,6 +66,11 @@
       "id": "INTERLEAVED_MULTITURN_AND_HEAD_REPEAT_CUTS",
       "category": "cutting",
       "rule": "When single-character clips (e.g. R1.mp4, M1.mp4, M2.mp4) contain multiple alternating dialogue turns separated by silent listening gaps, split them at each inter-turn silence midpoint to interleave with the partner's turns, and trim false-start head repeats (e.g. R2.mp4 0.00-1.02s)."
+    },
+    {
+      "id": "rule_60aba46b87d5aac9",
+      "category": "transitions",
+      "rule": "Place 1 to 2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside a single-character hook; keep intra-clip splits as clean jump cuts (tr=cut, zero whoosh spam)."
     }
   ]
 }

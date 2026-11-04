@@ -1,0 +1,23 @@
+{
+ "id": "video_call",
+ "layout": "video_call",
+ "names": [
+  "video call",
+  "facetime",
+  "floating window",
+  "picture in picture",
+  "picture-in-picture",
+  "pip",
+  "rectangle overlay",
+  "calling on video"
+ ],
+ "description": "The active speaker fills the frame; the other person sits in a small rounded card (picture-in-picture) near the top.",
+ "when": "a remote call, or a character shown on someone's phone",
+ "geometry": {
+  "canvas": "1080x1920",
+  "card": "rounded rectangle, top area",
+  "main": "full frame"
+ },
+ "confidence": "defined",
+ "source": "Zeno layout definition (layouts.py, assets/templates/video_call_pip.json); not yet measured on a reference video"
+}

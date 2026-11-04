@@ -1,0 +1,62 @@
+{
+ "id": "split_h",
+ "layout": "split_h",
+ "names": [
+  "vertical split screen",
+  "vertical split",
+  "left and right",
+  "left screen",
+  "right screen",
+  "side by side",
+  "side-by-side"
+ ],
+ "description": "Two full-height panels side by side with a thin light divider. Both people stay on screen; the listener is not dimmed.",
+ "when": "two characters in a back-and-forth, for example a learner and an AI teacher",
+ "geometry": {
+  "canvas": "1080x1920",
+  "left_w": 536,
+  "divider_w": 4,
+  "right_w": 540,
+  "divider_colour": "#E1DBE1",
+  "zoom": "locked at 1.0"
+ },
+ "confidence": "measured",
+ "source": "measured from micronarrative_rebuild.mp4 (37.0-93.0 s, 24 frames) on 2026-11-04",
+ "measured": {
+  "video": "micronarrative_rebuild.mp4",
+  "size": "720x1280",
+  "fps": 24.0,
+  "window_sec": [
+   37.0,
+   93.0
+  ],
+  "frames_sampled": 24,
+  "seam": {
+   "kind": "split_h_baked",
+   "share_of_frames": 1.0,
+   "position_frac": 0.499
+  },
+  "faces_per_frame_median": 2,
+  "face_width_frac_p25_p50_p75": [
+   0.35,
+   0.356,
+   0.367
+  ],
+  "eye_y_frac_p25_p50_p75": [
+   0.332,
+   0.338,
+   0.344
+  ],
+  "headroom_frac_p25_p50_p75": [
+   0.207,
+   0.217,
+   0.222
+  ],
+  "face_center_x_frac_p25_p50_p75": [
+   0.253,
+   0.281,
+   0.766
+  ],
+  "motion_mean": 0.0627
+ }
+}

@@ -343,8 +343,51 @@ def detect_vocal_stress_words(
     return scored[:max_peaks]
 
 
+# --- Script cues that are directions or on-screen text, not spoken dialogue ---------------------------------------
+_URL_ONLY_RE = re.compile(r"^https?://\S+$", re.I)
+_META_LINE_RE = re.compile(r"^(?:visuals?|reference(?:\s+link)?|ref\s+link|concept)\s*:", re.I)
+_CHAR_DEF_RE = re.compile(r"^Character\s*\d*\s*[-–—]\s*(.+)$", re.I)
+# "Scene changes: ...", "Scene changes - ...", "Back to the site, ...", "Cut to ...", "Flashback ..."
+_SCENE_DIR_RE = re.compile(r"^(?:scene\s+chang(?:e|es|ed)|flash\s*back|(?:back|cut)\s+to)\b[\s:,\-–—]*(.*)$", re.I)
+_LAYOUT_CUE_RE = re.compile(r"^(?:rectangle\s+overlay|floating\s+window|split[\s-]*screen|picture[\s-]*in[\s-]*picture)\b", re.I)
+# a parenthetical that only describes what is happening while people talk, so it is not a silent beat
+_CONTEXT_DIR_RE = re.compile(r"\b(?:is|are)\s+(?:talking|speaking|saying)\b|\btalking\s+to\b|\bwhile\b", re.I)
+# "(X Sign and Text Strikethrough)" after a spoken line: show that line's text struck through in red
+_STRIKE_CUE_RE = re.compile(r"\s*[\(\[][^\)\]]*strike[^\)\]]*[\)\]]\s*$", re.I)
+# "[TEXT: \"phrase\" | strike | x]": explicit on-screen text cue (only the strike option is rendered so far)
+_TEXT_CUE_RE = re.compile(r"\s*\[\s*TEXT\s*:\s*(?P<body>[^\]]*)\]\s*$", re.I)
+# "horizontal split screen" means the divider line runs horizontally (top / bottom panels); "vertical split" is left / right
+SCRIPT_SPLIT_LAYOUT = {"horizontal": "split_v", "vertical": "split_h", "default": "split_v"}
+
+
+def layout_hint_from_direction(text: str) -> str:
+    """Layout named in a script direction (`split_v`, `split_h`, `video_call`, `chat_bar`) or '' when it names none.
+    "split" wording wins ("floating window ... more like a horizontal split screen" is a split); other wording is looked up in
+    the format library (styles/formats/), and the older keyword rule stays as a fallback."""
+    t = (text or "").lower()
+    if re.search(r"\bsplit\b", t):
+        key = "vertical" if re.search(r"\bvertical", t) else "horizontal" if re.search(r"\bhorizontal", t) else "default"
+        return SCRIPT_SPLIT_LAYOUT[key]
+    try:
+        import format_library
+
+        lib = format_library.best_layout(t)
+    except Exception:   # a broken recipe file must never stop an edit
+        lib = ""
+    if lib and lib != "single":
+        return lib
+    if re.search(r"floating\s+window|picture[\s-]*in[\s-]*picture|\bpip\b|rectangle\s+overlay", t):
+        return "video_call"
+    return ""
+
+
 def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """Parse script file into metadata header (concept_ref, visual_ref, characters, scenes) and structured script lines L1..LN."""
+    """Parse script file into metadata header (concept_ref, visual_ref, characters, scenes) and structured script lines L1..LN.
+
+    Only spoken lines (and silent beats) become script lines. Reference/visual notes, character definitions, scene changes
+    ("Scene changes: ...", "Back to ...") and layout notes ("floating window ... split screen") are read as directions:
+    scene changes start a new scene (so a transition is placed), layout notes set `layout_hint` on the lines that follow,
+    and a trailing "(X Sign and Text Strikethrough)" strips the cue and sets `strike_text` on that line."""
     raw = read_script_text(script_path)
     meta: Dict[str, Any] = {
         "title": script_path.stem,
@@ -359,7 +402,9 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
 
     in_characters_block = False
     current_scene = "Scene 1"
+    scene_no = 1
     current_visual = ""
+    current_hint = ""
     pending_speaker = ""
     pending_note = ""
 
@@ -389,6 +434,15 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
                 meta["concept_brief"] = (meta["concept_brief"] + " | " + val_c).strip(" |")
             continue
 
+        # 1b. Other non-spoken header lines: a bare URL, "Reference link : ...", "Visuals: ..."
+        if _URL_ONLY_RE.match(s):
+            continue
+        if _META_LINE_RE.match(s):
+            val_m = s.split(":", 1)[1].strip()
+            if re.match(r"visuals?\b", s, re.I) and val_m and not re.search(r"https?://", val_m, re.I):
+                meta["concept_brief"] = (meta["concept_brief"] + " | " + val_m).strip(" |")
+            continue
+
         # 2. Characters heading & character definitions (-- Name -- Description)
         if re.match(r"^Characters?\s*:?\s*$", s, re.I):
             in_characters_block = True
@@ -399,15 +453,43 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
             cdesc = m_char.group(2).strip()
             meta["characters"][cname] = cdesc
             continue
+        m_char_def = _CHAR_DEF_RE.match(s)
+        if m_char_def:   # "Character 1 - A man(Suresh) in his late 20s ..." / "Character 2 - Boss, middle aged man"
+            cdesc = m_char_def.group(1).strip()
+            m_cname = re.search(r"\(([^)]+)\)", cdesc)
+            cname = (m_cname.group(1).strip() if m_cname else re.split(r"[,(]", cdesc, 1)[0].strip()) or "Character"
+            meta["characters"][cname] = cdesc
+            continue
 
         # 3. Scene heading (e.g. "Scene 1", "SCENE 2 - Canteen", "Scene 1: An Indian man...")
         m_scene = re.match(r"^(Scene\s+\d+)(?:\s*[-:]\s*(.*))?$", s, re.I)
         if m_scene:
             in_characters_block = False
             current_scene = m_scene.group(1).strip()
+            scene_no = int(re.search(r"\d+", current_scene).group())
             current_visual = (m_scene.group(2) or "").strip()
+            current_hint = layout_hint_from_direction(current_visual)
             meta["scenes"].append({"scene": current_scene, "visual": current_visual})
             continue
+
+        # 3b. Scene-change direction ("Scene changes: ...", "Back to the site, ...", "Cut to ...", "Flashback ...") starts a new scene
+        m_scene_dir = _SCENE_DIR_RE.match(s)
+        if m_scene_dir and not (re.match(r"^(?:back|cut)\s+to\b", s, re.I) and ":" in s):
+            in_characters_block = False
+            scene_no += 1
+            current_scene = f"Scene {scene_no}"
+            current_visual = m_scene_dir.group(1).strip(" :-–—") or s
+            current_hint = layout_hint_from_direction(current_visual)
+            pending_speaker = pending_note = ""
+            meta["scenes"].append({"scene": current_scene, "visual": current_visual})
+            continue
+
+        # 3c. Layout note ("Rectangle overlay, floating window ..., horizontal split screen ...") applies to the lines that follow
+        if _LAYOUT_CUE_RE.match(s) and not re.match(r"^[A-Za-z][A-Za-z0-9_ ]{0,22}:\s", s):
+            hint_l = layout_hint_from_direction(s)
+            if hint_l:
+                current_hint = hint_l
+                continue
 
         # 4. Scene visual / camera direction block: "[Visual: ...]"
         m_vis_dir = re.match(r"^\[?\s*Visual\s*:\s*(.+?)\]?\s*$", s, re.I)
@@ -438,6 +520,22 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
             lid = f"L{len(lines) + 1}"
             rest = s
 
+        # On-screen text cue at the end of a spoken line: strip it so the spoken text matches the transcript
+        strike_cue = False
+        strike_override = ""
+        m_text_cue = _TEXT_CUE_RE.search(rest)
+        if m_text_cue:
+            parts_t = [p.strip() for p in m_text_cue.group("body").split("|")]
+            strike_cue = any(re.fullmatch(r"strike(?:through|[\s-]*out)?", p, re.I) for p in parts_t[1:])
+            quoted_t = re.match(r'^["“]([^"”]+)["”]$', parts_t[0]) if parts_t else None
+            strike_override = quoted_t.group(1).strip() if quoted_t else ""
+            rest = rest[: m_text_cue.start()].strip()
+        else:
+            m_strike = _STRIKE_CUE_RE.search(rest)
+            if m_strike:
+                strike_cue = True
+                rest = rest[: m_strike.start()].strip()
+
         mark = None
         m_mark = re.search(r"\[(WRONG|RIGHT)\]\s*$", rest, re.I)
         if m_mark:
@@ -456,6 +554,14 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
         beat = False
 
         m_beat = re.match(r"^(?:(?:beat|action)\s*:\s*(.+)|\((.+)\)|\[(.+)\]|\*(.+)\*)$", rest, re.I)
+        if m_beat and not speaker:
+            ctx_text = next(g for g in m_beat.groups() if g).strip()
+            if _CONTEXT_DIR_RE.search(ctx_text):
+                # "(Suresh is talking to his Partner on his phone)" describes the scene while people talk; it is not a silent beat
+                current_visual = ctx_text
+                if meta["scenes"]:
+                    meta["scenes"][-1]["visual"] = ctx_text
+                continue
         if m_beat and not speaker:
             beat = True
             note = next(g for g in m_beat.groups() if g).strip()
@@ -494,6 +600,8 @@ def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str,
             "phonetic_tokens": phonetic_tokens,
             "note": note,
             "beat": beat,
+            "layout_hint": current_hint,
+            "strike_text": (strike_override or text) if (strike_cue and not beat) else "",
         })
 
     # Auto-infer [WRONG] / [RIGHT] on student lines when followed by teacher feedback ("Almost", "Perfect!", "Nice!", "ನೀವು ಸಿಂಪಲ್ಲಾಗಿ")
@@ -1737,6 +1845,13 @@ def assign_segment_ids_marks_and_layouts(
             seg_dict["scene"] = scene_name
 
         layout_mode = seg_layout_map.get(base_lid, resolved_preset if resolved_preset != "auto" else "single")
+        # A layout named in the script ("floating window ... horizontal split screen") applies unless the clip already is a split
+        script_hint = next((l.get("layout_hint") for l in lines if l.get("layout_hint")), "")
+        if script_hint and layout_mode == "single" and str(preset).lower() in ("auto", "hybrid"):
+            c_shot = str(((seg.get("clip") or {}).get("info") or {}).get("shot_type") or "")
+            if "baked" not in c_shot and c_shot != "two_shot":
+                layout_mode = script_hint
+                seg_dict["note"] = f"{seg_dict['note']} [LAYOUT_HINT {script_hint} from script]"
         if layout_mode and layout_mode != "single":
             seg_dict["layout"] = layout_mode
 
@@ -1803,6 +1918,18 @@ def assign_segment_ids_marks_and_layouts(
                         "at": 0.0,
                         "duration": round(min(dur, 4.2), 2),
                     }]
+
+        # "(X Sign and Text Strikethrough)" lines: show each phrase as a red pill that pops in and is struck through
+        strike_lines = [l for l in lines if l.get("strike_text")]
+        if strike_lines and not seg_dict.get("banners"):
+            seg_ws = seg.get("words") or []
+            strike_banners = []
+            for k, l in enumerate(strike_lines):
+                at_k = round(0.15 + k * 0.65, 2)
+                if len(strike_lines) == 1 and seg_ws:
+                    at_k = round(max(0.05, float(seg_ws[0]["start"]) - float(seg["start"])), 2)
+                strike_banners.append({"kind": "strike_text", "text": str(l["strike_text"]).strip(), "at": at_k})
+            seg_dict["banners"] = strike_banners
 
         # Auto-assign intentional transitions:
         # 1. Up to 1-2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside the initial single-character hook

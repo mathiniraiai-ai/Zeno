@@ -7,8 +7,10 @@ Run locally:   uvicorn app:app --port 8000   (from the service/ folder)
 Environment:
     GEMINI_API_KEY (and optional GEMINI_API_KEY_1..4)   the Gemini key(s), kept secret
     DATABASE_URL         Postgres address (Railway: reference the Postgres service). Without it a local SQLite file is used.
-    ZENO_SIGNUP_CODE     optional team code asked on the key page; when unset, anyone who can open the page can generate a key
-    ZENO_ALLOWED_EMAIL_DOMAIN  only emails at this domain can generate a key (default gosupernova.live)
+    ZENO_GOOGLE_CLIENT_ID  OAuth Web client id; Google sign-in (ID token for this client only) is how people get a key
+    ZENO_SIGNUP_CODE     team code for the old name-only signup; when unset that signup is refused (403)
+    ZENO_ALLOWED_EMAIL_DOMAINS  comma-separated email domains allowed to sign in (default gosupernova.live)
+    ZENO_ADMIN_EMAILS    emails that may open /admin with their key; ZENO_ADMIN_ALLOW_DOMAIN=1 makes every company key admin (default off)
     ZENO_MAX_SIGNUPS_PER_HOUR  cap on keys created per hour across everyone (default 30)
     ZENO_ADMIN_PASSWORD  password for /admin (list, usage, revoke); /admin is off when unset
     ZENO_API_TOKENS      optional extra keys "name:sha256hex,name2:sha256hex" (make them with make_token.py)
@@ -192,15 +194,10 @@ _gemini = _Gemini()
 
 
 def _allowed_domains() -> List[str]:
-    raw = os.getenv(
-        "ZENO_ALLOWED_EMAIL_DOMAINS",
-        os.getenv("ZENO_ALLOWED_EMAIL_DOMAIN", "gosupernova.live,gosupernova.line"),
-    )
+    """Email domains allowed to sign in: gosupernova.live unless ZENO_ALLOWED_EMAIL_DOMAINS lists others (comma-separated)."""
+    raw = os.getenv("ZENO_ALLOWED_EMAIL_DOMAINS") or os.getenv("ZENO_ALLOWED_EMAIL_DOMAIN") or "gosupernova.live"
     domains = [d.strip().lower().lstrip("@") for d in raw.split(",") if d.strip()]
-    for default_dom in ("gosupernova.live", "gosupernova.line"):
-        if default_dom not in domains and raw.strip() in ("", "gosupernova.live", "gosupernova.line"):
-            domains.append(default_dom)
-    return domains or ["gosupernova.live", "gosupernova.line"]
+    return domains or ["gosupernova.live"]
 
 
 def _admin_emails() -> List[str]:
@@ -250,7 +247,7 @@ def auth_config() -> Dict[str, Any]:
         "primary_domain": domains[0] if domains else "gosupernova.live",
         "signup_code_required": bool(os.getenv("ZENO_SIGNUP_CODE")),
         "admin_password_enabled": bool(os.getenv("ZENO_ADMIN_PASSWORD")),
-        "admin_allow_domain": os.getenv("ZENO_ADMIN_ALLOW_DOMAIN", "1").strip().lower() in ("1", "true", "yes"),
+        "admin_allow_domain": os.getenv("ZENO_ADMIN_ALLOW_DOMAIN", "0").strip().lower() in ("1", "true", "yes"),
     }
 
 
@@ -259,6 +256,61 @@ def get_me(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
     name, key_id = authenticate(authorization)
     email = store().get_key_email(key_id) if key_id is not None and hasattr(store(), "get_key_email") else ""
     return {"ok": True, "name": name, "email": email, "key_id": key_id}
+
+
+_ping_cache: Dict[str, Any] = {"at": 0.0, "result": None}
+
+
+def _gemini_ping() -> Dict[str, Any]:
+    """One tiny text request to the first model, so we know the Gemini key and the network path work (cached for 60 s)."""
+    now = time.time()
+    if _ping_cache["result"] is not None and now - _ping_cache["at"] < 60:
+        return _ping_cache["result"]
+    keys = _gemini_keys()
+    if not keys:
+        res: Dict[str, Any] = {"ok": False, "detail": "no Gemini key is configured on the server"}
+    else:
+        try:
+            from google import genai
+            from google.genai import types
+
+            t0 = time.time()
+            client = genai.Client(api_key=keys[0], http_options=types.HttpOptions(timeout=15000))
+            reply = client.models.generate_content(model=MODELS[0], contents="Reply with the single word: ok")
+            res = {"ok": bool((reply.text or "").strip()), "detail": f"{MODELS[0]} answered in {time.time() - t0:.1f}s"}
+        except Exception as exc:
+            res = {"ok": False, "detail": f"Gemini call failed ({type(exc).__name__})"}
+    _ping_cache.update(at=now, result=res)
+    return res
+
+
+@app.post("/v1/selftest")
+def selftest(file: Optional[UploadFile] = File(None), authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """Pre-job check from a team PC: is my key accepted, does a small WAV pass the same checks as a real upload,
+    is the key store up, and can the server reach Gemini. It does not transcribe, so it costs almost nothing."""
+    name, _key_id = authenticate(authorization)
+    check_rate(name)
+    checks: List[Dict[str, Any]] = [{"name": "key accepted", "ok": True, "detail": f"signed in as {name}"}]
+
+    if file is not None:
+        limit = int(float(os.getenv("ZENO_MAX_UPLOAD_MB", "25")) * 1024 * 1024)
+        audio = file.file.read(limit + 1)
+        try:
+            with wave.open(io.BytesIO(audio)) as wf:
+                secs, rate = wf.getnframes() / float(wf.getframerate()), wf.getframerate()
+            wav_ok = len(audio) <= limit and secs >= 0.5
+            detail = f"{secs:.1f}s at {rate} Hz, {len(audio) // 1024} KB received"
+        except Exception:
+            wav_ok, detail = False, "the server could not read the WAV that was sent"
+        checks.append({"name": "audio upload accepted", "ok": wav_ok, "detail": detail})
+
+    try:
+        checks.append({"name": "key store", "ok": True, "detail": store().backend.split(":")[0]})
+    except Exception:
+        checks.append({"name": "key store", "ok": False, "detail": "unavailable"})
+    ping = _gemini_ping()
+    checks.append({"name": "Gemini reachable", "ok": ping["ok"], "detail": ping["detail"]})
+    return {"ok": all(c["ok"] for c in checks), "checks": checks}
 
 
 @app.post("/v1/transcribe")
@@ -411,7 +463,6 @@ class SignupBody(BaseModel):
 
 class GoogleAuthBody(BaseModel):
     credential: str = ""      # Google Identity Services ID token (JWT)
-    access_token: str = ""    # OAuth2 access token
     code: str = ""            # OAuth2 authorization code
     redirect_uri: str = ""    # Used when exchanging authorization code
     name: str = ""
@@ -452,17 +503,18 @@ def _check_signup_rate(ip: str, record: bool = False) -> None:
 
 
 def _verify_google_identity(body: GoogleAuthBody) -> Dict[str, str]:
-    """Verify Google ID token / access token / auth code via Google's tokeninfo endpoint using httpx."""
+    """Verify a Google ID token (or exchange an auth code for one) and check it was issued to this app's client id."""
     import httpx
 
     id_token = body.credential.strip()
-    access_token = body.access_token.strip()
     client_id = (os.getenv("ZENO_GOOGLE_CLIENT_ID") or os.getenv("GOOGLE_CLIENT_ID") or "").strip()
     client_secret = (os.getenv("ZENO_GOOGLE_CLIENT_SECRET") or os.getenv("GOOGLE_CLIENT_SECRET") or "").strip()
+    if not client_id:
+        raise HTTPException(503, "Google sign-in is not configured on this server")
 
     with httpx.Client(timeout=10.0) as client:
-        if body.code.strip() and not id_token and not access_token:
-            if not client_id or not client_secret:
+        if body.code.strip() and not id_token:
+            if not client_secret:
                 raise HTTPException(400, "Google OAuth code exchange is not configured on this server")
             token_resp = client.post(
                 "https://oauth2.googleapis.com/token",
@@ -476,35 +528,23 @@ def _verify_google_identity(body: GoogleAuthBody) -> Dict[str, str]:
             )
             if token_resp.status_code != 200:
                 raise HTTPException(401, "Invalid Google authorization code")
-            tok_data = token_resp.json()
-            id_token = tok_data.get("id_token", "")
-            access_token = tok_data.get("access_token", "")
-
-        if id_token:
-            resp = client.get("https://oauth2.googleapis.com/tokeninfo", params={"id_token": id_token})
-            if resp.status_code != 200:
-                raise HTTPException(401, "Invalid Google ID token")
-            info = resp.json()
-            if client_id and info.get("aud") != client_id:
-                raise HTTPException(401, "Google ID token audience mismatch")
-        elif access_token:
-            resp = client.get(
-                "https://www.googleapis.com/oauth2/v3/userinfo",
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-            if resp.status_code != 200:
-                raise HTTPException(401, "Invalid Google access token")
-            info = resp.json()
-        else:
-            raise HTTPException(400, "Missing Google credential or access_token")
+            id_token = token_resp.json().get("id_token", "")
+        if not id_token:
+            raise HTTPException(400, "Missing Google credential")
+        resp = client.get("https://oauth2.googleapis.com/tokeninfo", params={"id_token": id_token})
+        if resp.status_code != 200:
+            raise HTTPException(401, "Invalid Google ID token")
+        info = resp.json()
+        if info.get("aud") != client_id:
+            raise HTTPException(401, "Google ID token audience mismatch")
 
     email = str(info.get("email") or "").strip().lower()
-    verified = str(info.get("email_verified", "true")).lower() in ("true", "1")
+    verified = str(info.get("email_verified", "false")).lower() in ("true", "1")
     if not email or not verified:
         raise HTTPException(401, "Google account email is not verified")
 
     if not _is_allowed_email(email):
-        raise HTTPException(403, "Only @gosupernova.live / @gosupernova.line accounts are permitted")
+        raise HTTPException(403, "Only " + " / ".join("@" + d for d in _allowed_domains()) + " accounts are permitted")
 
     name = (
         str(info.get("name") or "").strip()
@@ -571,9 +611,11 @@ def poll_cli_session(request: Request, cli_state: str = Query(""), use_ip_fallba
 @app.post("/api/keys")
 def create_key(body: SignupBody, request: Request) -> JSONResponse:
     code = os.getenv("ZENO_SIGNUP_CODE", "")
+    if not code:
+        raise HTTPException(403, "Name-only signup is off. Sign in with Google on the Zeno page.")
     ip = _client_ip(request)
     _check_signup_rate(ip)
-    if code and not hmac.compare_digest(body.code.encode(), code.encode()):
+    if not hmac.compare_digest(body.code.encode(), code.encode()):
         _check_signup_rate(ip, record=True)
         raise HTTPException(403, "Wrong team code")
     domains = _allowed_domains()
@@ -615,7 +657,7 @@ def _check_admin(
     x_admin_password: Optional[str] = None,
 ) -> Dict[str, str]:
     password = os.getenv("ZENO_ADMIN_PASSWORD", "").strip()
-    allow_domain = os.getenv("ZENO_ADMIN_ALLOW_DOMAIN", "1").strip().lower() in ("1", "true", "yes")
+    allow_domain = os.getenv("ZENO_ADMIN_ALLOW_DOMAIN", "0").strip().lower() in ("1", "true", "yes")
     admin_list = _admin_emails()
 
     if password and x_admin_password and hmac.compare_digest(x_admin_password.strip().encode(), password.encode()):

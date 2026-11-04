@@ -1,0 +1,22 @@
+{
+ "id": "split_v",
+ "layout": "split_v",
+ "names": [
+  "horizontal split screen",
+  "horizontal split",
+  "top and bottom",
+  "top screen",
+  "bottom screen",
+  "one above the other"
+ ],
+ "description": "Two panels stacked top and bottom (1080x960 each) with a divider. The speaking panel is full brightness, the other is slightly dimmed.",
+ "when": "two-character Q&A where each person comes from a separate clip",
+ "geometry": {
+  "canvas": "1080x1920",
+  "panel": "1080x960",
+  "zoom": "locked at 1.0",
+  "headroom_pct": 25.8
+ },
+ "confidence": "defined",
+ "source": "Zeno layout definition (layouts.py); not yet measured on a reference video"
+}

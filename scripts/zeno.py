@@ -17,6 +17,7 @@ Modes:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pathlib
 import re
@@ -26,7 +27,9 @@ import urllib.request
 from typing import List, Optional, Tuple
 
 import common
+import edl_parser
 from edl_parser import load_edl
+from pathlib import Path
 from progress import ProgressTracker
 
 # Auto-switch into the project's .venv Python if invoked via system python3
@@ -190,7 +193,7 @@ def check_system_readiness(quiet: bool = False) -> Tuple[bool, List[Tuple[bool, 
 # Google Doc & Input Clip Resolution
 # ============================================================================
 def resolve_script_input(script_arg: str) -> pathlib.Path:
-    """Resolve a local script path or auto-download a Google Docs URL to input/script/."""
+    """Resolve a local script path, or save ONE tab/heading of a Google Doc link to input/script/ (never the whole document)."""
     s = (script_arg or "").strip()
     m = GDOC_RE.search(s)
     if not m:
@@ -199,27 +202,59 @@ def resolve_script_input(script_arg: str) -> pathlib.Path:
             raise FileNotFoundError(f"Script file not found: {s}")
         return p
 
+    import script_intake
+
     doc_id = m.group(1)
-    export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
+    info = script_intake.parse_doc_url(s)
+    if not info.get("tab") and not info.get("heading"):
+        raise ValueError(
+            "This Google Doc link has no tab or heading, so it would load every language in the document. "
+            "Open the tab that holds this script and share that link (it ends with ?tab=t.xxxx)."
+        )
+    try:
+        text, _note = script_intake.fetch_google_doc(s)
+    except SystemExit as exc:   # script_intake exits with a message when the section is missing
+        raise RuntimeError(str(exc)) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not download Google Doc ({doc_id}): {exc}. Ensure link sharing is set to 'Anyone with the link can view'."
+        ) from exc
+    if len(text.strip()) < 10:
+        raise RuntimeError("The linked tab is empty.")
     out_dir = ROOT / "input" / "script"
     out_dir.mkdir(parents=True, exist_ok=True)
-    dest = out_dir / f"gdoc_{doc_id[:12]}.txt"
+    key = re.sub(r"[^A-Za-z0-9]+", "_", info.get("tab") or info.get("heading") or "")[:24]
+    dest = out_dir / f"gdoc_{doc_id[:12]}_{key}.txt"
+    dest.write_text(text.replace("\r\n", "\n"), encoding="utf-8")
+    return dest
 
-    req = urllib.request.Request(export_url, headers={"User-Agent": "Zeno-Editor/1.0"})
+
+def job_gate(raw_inputs: List[str], script_arg: str, skip: bool = False) -> None:
+    """Nothing starts until the live checks pass and the script and footage the user gave have been checked."""
+    import preflight
+
+    if skip:
+        print("\n[WARN] --skip-preflight: live checks and input validation skipped (development only).")
+        return
+    print("\n== Pre-job gate: live checks ==")
+    checks = preflight.run_system_checks()
+    preflight.print_checks(checks)
+    if not preflight.save_state(checks):
+        print("\n[BLOCKED] A live check failed, so the edit did not start. Fix the FAIL lines above and run again.")
+        sys.exit(2)
+    print("\n== Pre-job gate: your script and footage ==")
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            txt = resp.read().decode("utf-8-sig", errors="replace").replace("\r\n", "\n")
-        if len(txt.strip()) < 10:
-            raise RuntimeError("Downloaded Google Doc is empty.")
-        dest.write_text(txt, encoding="utf-8")
-        return dest
+        script_path = resolve_script_input(script_arg)
     except Exception as exc:
-        if dest.is_file() and dest.stat().st_size > 10:
-            return dest
-        raise RuntimeError(
-            f"Could not download Google Doc ({doc_id}): {exc}. "
-            "Ensure link sharing is set to 'Anyone with the link can view'."
-        ) from exc
+        print(f"  [FAIL] script: {exc}")
+        print("\n[BLOCKED] The script could not be loaded, so the edit did not start.")
+        sys.exit(2)
+    res = preflight.validate_inputs(script_path, raw_inputs)
+    preflight.print_inputs_report(res)
+    if res["errors"]:
+        print("\n[BLOCKED] The script or footage has a problem, so the edit did not start. Fix the FAIL lines and run again.")
+        sys.exit(2)
+    print("\n[GATE PASSED] Live checks and inputs are good. Starting the edit.")
 
 
 def expand_clip_inputs(raw_inputs: List[str]) -> List[pathlib.Path]:
@@ -744,6 +779,8 @@ def main() -> None:
     ap.add_argument("--whoami", action="store_true", help="Display current logged-in Zeno Cloud editor session")
     ap.add_argument("--update", action="store_true", help="Run git pull + Zeno Cloud brain memory sync immediately")
     ap.add_argument("--install-schedule", action="store_true", help="Install daily 11:00 AM background auto-update schedule")
+    ap.add_argument("--preflight", action="store_true", help="Run the live pre-job checks (FFmpeg, OpenCV, wav2vec2, Zeno server) and, with --script and inputs, check them too")
+    ap.add_argument("--skip-preflight", action="store_true", help="Development only: skip the pre-job gate. Agents must never use this.")
     ap.add_argument("--yes", "-y", action="store_true", help="Auto-confirm the Stage 3 Yes/No gate in standalone mode")
     args = ap.parse_args()
 
@@ -810,6 +847,21 @@ def main() -> None:
         if not args.inspect and not args.inputs:
             sys.exit(0)
 
+    if args.preflight:
+        import preflight
+
+        print("\nZeno pre-job checks (live)")
+        checks = preflight.run_system_checks()
+        preflight.print_checks(checks)
+        passed = preflight.save_state(checks)
+        print("\nSYSTEM: " + ("ALL CHECKS PASSED. Ask the user for the script link and the footage, then run --inspect." if passed else "NOT READY. Fix the FAIL lines above and run --preflight again."))
+        if passed and args.script and args.inputs:
+            res = preflight.validate_inputs(resolve_script_input(args.script), args.inputs)
+            print("\nYour inputs")
+            preflight.print_inputs_report(res)
+            passed = not res["errors"]
+        sys.exit(0 if passed else 1)
+
     if args.check and not args.inspect and not args.execute and not args.pitch and not args.inputs:
         try:
             import auto_updater
@@ -840,7 +892,7 @@ def main() -> None:
     if args.inspect:
         if not args.inputs or not args.script:
             ap.error("--inspect requires <raw_dir_or_clips> and --script <path_or_gdoc_url>")
-        check_system_readiness(quiet=False)
+        job_gate(args.inputs, args.script, skip=args.skip_preflight)
         plan_path = run_inspect(
             raw_inputs=args.inputs,
             script_arg=args.script,
@@ -854,7 +906,7 @@ def main() -> None:
 
     # Interactive Standalone Mode (Stage 0 -> Stage 1–3 -> [Y/n] -> Stage 4–5)
     if args.inputs and args.script:
-        check_system_readiness(quiet=False)
+        job_gate(args.inputs, args.script, skip=args.skip_preflight)
         plan_path = run_inspect(
             raw_inputs=args.inputs,
             script_arg=args.script,

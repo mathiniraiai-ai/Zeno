@@ -1,0 +1,18 @@
+{
+ "id": "chat_bar",
+ "layout": "chat_bar",
+ "names": [
+  "chat bar",
+  "prompt bar",
+  "text bar",
+  "chat message"
+ ],
+ "description": "Full-frame speaker with a frosted glass bar that shows the phrase being taught.",
+ "when": "language drills such as how to say a phrase",
+ "geometry": {
+  "canvas": "1080x1920",
+  "bar": "frosted, label text"
+ },
+ "confidence": "defined",
+ "source": "Zeno layout definition (layouts.py); not yet measured on a reference video"
+}

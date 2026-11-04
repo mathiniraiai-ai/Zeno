@@ -44,3 +44,11 @@ Then compare frame by frame with the reference. Clean frames should differ by on
 
 ## Model
 Use the strongest tier for this step. It runs once per style.
+
+## Keep knowledge, not footage (format library)
+Reference and sample footage is never committed and no model reads its frames. Measure it locally with OpenCV and keep only the numbers:
+```bash
+python3 scripts/format_library.py extract <video> --id split_h --layout split_h --start 37 --end 93 --names "vertical split screen,side by side" --description "..." [--thumbs]
+python3 scripts/format_library.py show split_h        # about 100 tokens: what an agent reads
+```
+The recipe in `styles/formats/<id>.json` records the seam position, faces per frame, face size, eye line, headroom and motion, with `confidence` `measured` or `defined` (a layout rule not yet measured on a reference). The script directs the edit: `prepare.py` looks up the scene wording in this library (a "split" in the wording still wins) to choose the layout. Recipe numbers do not yet drive the renderer; `layouts.py` still owns the geometry.

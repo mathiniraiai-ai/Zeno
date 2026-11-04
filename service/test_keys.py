@@ -82,8 +82,9 @@ for _ in range(6):
 check("wrong-code attempts are rate limited -> 429", last == 429)
 os.environ.pop("ZENO_SIGNUP_CODE")
 service._signup_hits.clear()
-check("with no team code set, name + company email is enough", client.post("/api/keys", json={"name": "Ravi", "email": "Ravi@GoSupernova.live"}).status_code == 200)
+check("with no team code set, name-only signup is refused -> 403", client.post("/api/keys", json={"name": "Ravi", "email": "Ravi@GoSupernova.live"}).status_code == 403)
 check("health says no code required", client.get("/health").json()["signup_code_required"] is False)
+os.environ["ZENO_SIGNUP_CODE"] = "team-code"
 
 r2 = client.post("/api/keys", json={"name": "Mathinirai Selvan", "code": "team-code"})
 check("name only -> email built as first.last@gosupernova.live", r2.status_code == 200 and r2.json()["email"] == "mathinirai.selvan@gosupernova.live", str(r2.json()))
@@ -101,12 +102,40 @@ check("admin API returns stored runs", len(admin_data.get("runs") or []) == 1 an
 h = client.get("/health").json()
 check("health reports store and admin switch", h["key_store_ok"] and h["admin_enabled"], str(h))
 
-# Test Google OAuth domain enforcement (@gosupernova.live & @gosupernova.line allowed, @gmail.com -> 403) and /v1/learnings
-from unittest.mock import patch  # noqa: E402
+# Google sign-in: ID token only, our own client id, company domain only (default gosupernova.live), no admin by domain
+from unittest.mock import MagicMock, patch  # noqa: E402
 
-with patch.object(service, "_verify_google_identity", return_value={"email": "editor@gosupernova.line", "name": "Line Editor", "sub": "123", "picture": ""}):
-    g_ok = client.post("/api/auth/google", json={"credential": "fake.jwt.token"})
-    check("Google OAuth @gosupernova.line issues session key", g_ok.status_code == 200 and g_ok.json().get("key", "").startswith("zeno_"))
+os.environ["ZENO_GOOGLE_CLIENT_ID"] = "client-123.apps.googleusercontent.com"
+
+
+def google_reply(**info):
+    base = {"aud": "client-123.apps.googleusercontent.com", "email": "editor@gosupernova.live", "email_verified": "true", "name": "Live Editor", "sub": "123"}
+    base.update(info)
+    fake = MagicMock()
+    fake.__enter__.return_value.get.return_value = MagicMock(status_code=200, json=lambda: base)
+    return patch("httpx.Client", return_value=fake)
+
+
+def google_login(**info):
+    with google_reply(**info):
+        return client.post("/api/auth/google", json={"credential": "fake.jwt.token"})
+
+
+g_ok = google_login()
+check("Google OAuth @gosupernova.live issues session key", g_ok.status_code == 200 and g_ok.json().get("key", "").startswith("zeno_"))
+check("Google token for another app (wrong audience) -> 401", google_login(aud="someone-elses-client").status_code == 401)
+check("Google account outside the company domain -> 403", google_login(email="x@gmail.com").status_code == 403)
+check("@gosupernova.line is no longer allowed by default -> 403", google_login(email="editor@gosupernova.line").status_code == 403)
+check("unverified Google email -> 401", google_login(email_verified="false").status_code == 401)
+with patch.dict(os.environ, {"ZENO_ALLOWED_EMAIL_DOMAINS": "gosupernova.live,partner.example"}):
+    check("extra domain works when listed in ZENO_ALLOWED_EMAIL_DOMAINS", google_login(email="a@partner.example").status_code == 200)
+with google_reply():
+    check("access_token alone is not accepted -> 400", client.post("/api/auth/google", json={"access_token": "ya29.x"}).status_code == 400)
+with patch.dict(os.environ, {"ZENO_GOOGLE_CLIENT_ID": ""}):
+    check("Google sign-in off without a client id -> 503", client.post("/api/auth/google", json={"credential": "fake.jwt.token"}).status_code == 503)
+check("a company key is not admin by default -> 403", client.get("/admin/api/keys", headers={"Authorization": "Bearer " + g_ok.json()["key"]}).status_code == 403)
+with patch.dict(os.environ, {"ZENO_ADMIN_EMAILS": "editor@gosupernova.live"}):
+    check("an email listed in ZENO_ADMIN_EMAILS is admin", client.get("/admin/api/keys", headers={"Authorization": "Bearer " + g_ok.json()["key"]}).status_code == 200)
 
 g_key = g_ok.json().get("key", "")
 r_rule = client.post("/v1/learnings/rule", headers={"Authorization": f"Bearer {g_key}"}, json={
@@ -117,6 +146,22 @@ r_rule = client.post("/v1/learnings/rule", headers={"Authorization": f"Bearer {g
 check("POST /v1/learnings/rule stores shared rule", r_rule.status_code == 200 and r_rule.json().get("ok") is True)
 r_lrn = client.get("/v1/learnings", headers={"Authorization": f"Bearer {g_key}"})
 check("GET /v1/learnings returns learned_rules & language_patterns", r_lrn.status_code == 200 and len(r_lrn.json().get("learned_rules") or []) >= 1)
+
+# Pre-job self-test: a small WAV plus a Gemini ping; needs a valid key
+import io as _io, wave as _wave  # noqa: E402
+
+_buf = _io.BytesIO()
+with _wave.open(_buf, "wb") as _w:
+    _w.setnchannels(1); _w.setsampwidth(2); _w.setframerate(16000); _w.writeframes(b"\x00\x00" * 16000)
+_auth = {"Authorization": "Bearer " + g_ok.json()["key"]}
+with patch.object(service, "_gemini_ping", return_value={"ok": True, "detail": "stub answered"}):
+    st = client.post("/v1/selftest", headers=_auth, files={"file": ("probe.wav", _buf.getvalue(), "audio/wav")})
+    check("selftest passes with a small WAV", st.status_code == 200 and st.json()["ok"] is True and any(c["name"] == "audio upload accepted" and c["ok"] for c in st.json()["checks"]), str(st.json()))
+    bad = client.post("/v1/selftest", headers=_auth, files={"file": ("probe.wav", b"not audio", "audio/wav")})
+    check("selftest fails when the audio cannot be read", bad.status_code == 200 and bad.json()["ok"] is False)
+check("selftest needs a key -> 401", client.post("/v1/selftest").status_code == 401)
+with patch.object(service, "_gemini_ping", return_value={"ok": False, "detail": "no Gemini key is configured on the server"}):
+    check("selftest reports a Gemini problem", client.post("/v1/selftest", headers=_auth).json()["ok"] is False)
 
 print(f"\n{sum(results)}/{len(results)} checks passed")
 sys.exit(0 if all(results) else 1)

@@ -341,5 +341,248 @@ L2 S2.mp4 0.12-4.10 layout=split_h slot=right sp=Student tr=smoothleft@0.28 peer
                 os.environ["ZENO_NO_LIVE"] = old_val
 
 
+    # ------------------------------------------------------------------ script cues, lexicons, zeno.py tweaks
+    W44_SAMPLE = """Visuals: Construction worker(Suresh) surprises with his perfect English
+Reference link : https://example.com/ref.mp4
+Characters
+Character 1 - A man(Suresh) in his late 20s
+Character 2 - Boss, middle aged man
+Scene 1 - Suresh on a construction site
+(Suresh is talking to his Partner on his phone)
+Suresh: Hello, I practise English.
+Partner: Great!
+Scene changes: Suresh working on the site while talking to his boss
+Boss: What did you say?
+Scene changes - Suresh in another frame, doing other work while saying :
+How are you?  (X Sign and Text Strikethrough)
+How's the weather?  (X Sign and Text Strikethrough)
+Back to the construction site, Talking to his boss
+Boss: Wow!
+Rectangle overlay, floating window of female robot, More like a horizontal split screen
+Female robot : Do you speak English?
+Suresh: Yes, a little bit.
+"""
+
+    def test_script_directions_are_not_spoken_lines(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = Path(tmp) / "w44.txt"
+            sp.write_text(self.W44_SAMPLE, encoding="utf-8")
+            meta, lines = prepare.parse_script_file(sp)
+        spoken = [l["text"] for l in lines]
+        self.assertEqual(len(lines), 8, spoken)
+        for bad in ("Visuals", "Reference", "Character", "Scene changes", "Back to", "Rectangle"):
+            self.assertFalse(any(t.startswith(bad) for t in spoken), bad)
+        self.assertEqual(set(meta["characters"]), {"Suresh", "Boss"})
+        self.assertIn("Construction worker", meta["concept_brief"])
+        scenes = {l["text"][:8]: l["scene"] for l in lines}
+        self.assertEqual(scenes["Hello, I"], "Scene 1")
+        self.assertEqual(scenes["What did"], "Scene 2")
+        self.assertEqual(scenes["How are "], "Scene 3")
+        self.assertEqual(scenes["Wow!"], "Scene 4")
+        strike = [l for l in lines if l["strike_text"]]
+        self.assertEqual([l["strike_text"] for l in strike], ["How are you?", "How's the weather?"])
+        self.assertNotIn("Strikethrough", " ".join(spoken))
+        self.assertTrue(all(not l["beat"] for l in lines), "a talking-while-scene note must not become a silent beat")
+        hinted = [l["id"] for l in lines if l["layout_hint"]]
+        self.assertEqual([l["layout_hint"] for l in lines if l["layout_hint"]], ["split_v"] * 2)
+        self.assertEqual(hinted, [lines[-2]["id"], lines[-1]["id"]])
+
+    def test_script_cues_reach_the_plan(self):
+        """Scene changes get a transition, strike lines get banners, a script split applies unless the clip is already split."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = Path(tmp) / "w44.txt"
+            sp.write_text(self.W44_SAMPLE, encoding="utf-8")
+            _, lines = prepare.parse_script_file(sp)
+
+        def clip(stem, info=None):
+            return {"stem": stem, "src": f"input/footage/{stem}.mp4", "info": info or {"duration": 12.0, "face_count": 1}, "matched_lines": []}
+
+        def raw_for(clips, ls):
+            return [{"stem": clips[i % len(clips)]["stem"], "src": clips[i % len(clips)]["src"], "clip": clips[i % len(clips)],
+                     "start": 1.0, "end": 4.0, "lines": [l], "lines_override": [l], "words": [{"w": "x", "start": 1.2, "end": 1.6}]}
+                    for i, l in enumerate(ls)]
+
+        clips = [clip("S1"), clip("S2"), clip("S3")]
+        segs, _, _ = prepare.assign_segment_ids_marks_and_layouts(raw_for(clips, lines), lines, clips, preset="auto")
+        by_id = {s["id"]: s for s in segs}
+        self.assertEqual(by_id["L3"]["transition"], "whip_left")   # Scene 1 -> 2
+        self.assertEqual(by_id["L4"]["transition"], "whip_left")   # into the strike-through sequence
+        self.assertEqual([b["text"] for b in by_id["L4"]["banners"]], ["How are you?"])
+        self.assertEqual([b["text"] for b in by_id["L5"]["banners"]], ["How's the weather?"])
+        self.assertEqual(by_id["L7"]["layout"], "split_v")
+        self.assertEqual(by_id["L1"].get("layout", "single"), "single")
+
+        baked = [clip("B1", {"duration": 12.0, "face_count": 2, "shot_type": "split_v_baked"})]
+        s2, _, _ = prepare.assign_segment_ids_marks_and_layouts(raw_for(baked, lines[-1:]), lines, baked, preset="auto")
+        self.assertEqual(s2[0].get("layout", "single"), "single")
+
+    def test_style_readiness_levels(self):
+        import json
+        import tempfile
+
+        import style_readiness
+
+        spec = {k: {"x": 1} for k in style_readiness.REQUIRED_SECTIONS}
+        spec["tuning"] = {f"p{i}": i for i in range(25)}
+        spec["learned_from"] = {"reference_video": "ref.mp4"}
+        spec["rebuild_check"] = {"scene1_clean_mean_diff": 1.8, "scene2_clean_mean_diff": 2.0, "scene3_clean_mean_diff": 3.3,
+                                 "audio": "in sync (lag 0)", "frames": "100 vs 100"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sdir = root / "styles" / "demo"
+            sdir.mkdir(parents=True)
+            (root / "work").mkdir()
+            (sdir / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
+            self.assertEqual(style_readiness.assess("demo", root, run_tests=False)["level"], 1)   # reproduced, nothing on real footage
+            for i in range(3):   # three real jobs tagged to the style -> pilot
+                (root / "work" / f"job{i}").mkdir()
+                (root / "work" / f"job{i}" / "plan.edl").write_text("# style: demo\n", encoding="utf-8")
+            self.assertEqual(style_readiness.assess("demo", root, run_tests=False)["level"], 2)
+            spec["rebuild_check"]["scene3_clean_mean_diff"] = 9.0   # reference no longer reproduced
+            (sdir / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
+            self.assertEqual(style_readiness.assess("demo", root, run_tests=False)["level"], 0)
+            self.assertEqual(style_readiness.assess("missing", root, run_tests=False)["level"], 0)
+
+    def test_preflight_validates_script_and_footage(self):
+        import subprocess
+        import tempfile
+
+        import common
+        import preflight
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_p = Path(tmp)
+            clip = tmp_p / "S1.mp4"
+            subprocess.run([str(common.resolve_ffmpeg()), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=64x64:d=1:r=24",
+                            "-f", "lavfi", "-i", "sine=f=440:d=1", "-shortest", "-pix_fmt", "yuv420p", str(clip)], check=True)
+            script = tmp_p / "s.txt"
+            script.write_text(self.W44_SAMPLE, encoding="utf-8")
+            ok = preflight.validate_inputs(script, [str(tmp_p)])
+            self.assertEqual(ok["errors"], [])
+            self.assertEqual(ok["report"]["footage"]["clips"], 1)
+            self.assertEqual(ok["report"]["script"]["spoken_lines"], 8)
+            self.assertEqual(ok["report"]["script"]["strike_text_lines"], 2)
+            bad = preflight.validate_inputs(script, [str(tmp_p / "missing"), "https://drive.google.com/drive/folders/abc"])
+            self.assertEqual(len(bad["errors"]), 2)
+            empty = tmp_p / "empty.txt"
+            empty.write_text("Visuals: only notes\n", encoding="utf-8")
+            self.assertIn("the script has no spoken lines", preflight.validate_inputs(empty, [str(tmp_p)])["errors"])
+
+    def test_job_gate_blocks_until_checks_pass(self):
+        import os
+        from unittest.mock import patch
+
+        os.environ["_ZENO_REEXEC"] = "1"
+        import preflight
+        import zeno
+
+        with patch.object(preflight, "run_system_checks", return_value=[(False, "Zeno server", "cannot reach")]), \
+                patch.object(preflight, "save_state", return_value=False):
+            with self.assertRaises(SystemExit) as ctx:
+                zeno.job_gate(["clips"], "script.txt")
+        self.assertEqual(ctx.exception.code, 2)
+        with patch.object(preflight, "run_system_checks", return_value=[(True, "FFmpeg", "ok")]), \
+                patch.object(preflight, "save_state", return_value=True), \
+                patch.object(zeno, "resolve_script_input", side_effect=FileNotFoundError("Script file not found: x")):
+            with self.assertRaises(SystemExit) as ctx:
+                zeno.job_gate(["clips"], "x")
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_google_doc_link_needs_a_tab(self):
+        import os
+
+        os.environ["_ZENO_REEXEC"] = "1"
+        import zeno
+
+        with self.assertRaises(ValueError):
+            zeno.resolve_script_input("https://docs.google.com/document/d/1abcDEFghiJKLmnop/edit")
+
+    def test_format_library_lookup_and_measure(self):
+        import subprocess
+        import tempfile
+
+        import common
+        import format_library
+
+        names = {r["id"] for r in format_library.load_recipes()}
+        self.assertTrue({"split_h", "split_v", "video_call", "chat_bar", "selfie", "close_up"} <= names)
+        self.assertEqual(format_library.best_layout("they are on a video call"), "video_call")
+        self.assertEqual(format_library.best_layout("left screen and right screen"), "split_h")
+        self.assertEqual(format_library.best_layout("the robot shows it on a prompt bar"), "chat_bar")
+        self.assertEqual(format_library.best_layout("an airpipe pipeline of work"), "", "'pip' must not match inside other words")
+        self.assertEqual(format_library.best_layout("he walks in"), "")
+        # the parser uses the library for wording the old rule did not know, and split wording still wins
+        self.assertEqual(prepare.layout_hint_from_direction("They talk over a video call"), "video_call")
+        self.assertEqual(prepare.layout_hint_from_direction("selfie style, he talks to camera"), "", "single-layout recipes add no panel")
+        self.assertEqual(prepare.layout_hint_from_direction("floating window, more like a horizontal split screen"), "split_v")
+        for r in format_library.load_recipes():
+            self.assertLess(len(format_library.recipe_text(r)) / 4, 220, f"{r['id']} is too long for an agent to read cheaply")
+        with tempfile.TemporaryDirectory() as tmp:
+            vid = Path(tmp) / "seam.mp4"
+            subprocess.run([str(common.resolve_ffmpeg()), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=100x320:d=1:r=12",
+                            "-f", "lavfi", "-i", "color=c=white:s=100x320:d=1:r=12", "-filter_complex", "hstack", "-pix_fmt", "yuv420p", str(vid)], check=True)
+            m = format_library.measure_video(vid, n_frames=6)
+            lib = Path(tmp) / "lib"
+            r = format_library.extract(vid, "demo", "split_h", ["demo split"], "demo", "", 0.0, None, False, lib_dir=lib)
+        self.assertEqual(m["seam"]["kind"], "split_h_baked")
+        self.assertAlmostEqual(m["seam"]["position_frac"], 0.5, delta=0.02)
+        self.assertEqual(r["confidence"], "measured")
+
+    def test_layout_hint_wording(self):
+        self.assertEqual(prepare.layout_hint_from_direction("a horizontal split screen"), "split_v")
+        self.assertEqual(prepare.layout_hint_from_direction("a vertical split screen"), "split_h")
+        self.assertEqual(prepare.layout_hint_from_direction("floating window of the robot"), "video_call")
+        self.assertEqual(prepare.layout_hint_from_direction("he walks in"), "")
+
+    def test_text_cue_strike_option(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = Path(tmp) / "t.txt"
+            sp.write_text('Suresh: Never say this [TEXT: "I am Delhi" | strike | x]\nSuresh: Plain line [TEXT: "Hi" | top]\n', encoding="utf-8")
+            _, lines = prepare.parse_script_file(sp)
+        self.assertEqual(lines[0]["strike_text"], "I am Delhi")
+        self.assertEqual(lines[0]["text"], "Never say this")
+        self.assertEqual(lines[1]["strike_text"], "")
+        self.assertEqual(lines[1]["text"], "Plain line")
+
+    def test_lexicons_have_no_conflicting_duplicate_keys(self):
+        """A key listed twice with different values silently keeps the later one (Tamil 'takes' became 'tax')."""
+        import ast
+
+        for path in sorted((ROOT / "scripts" / "align_engine" / "lexicons").glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Dict):
+                    seen: dict = {}
+                    for k, v in zip(node.keys, node.values):
+                        if isinstance(k, ast.Constant) and isinstance(v, ast.Constant):
+                            seen.setdefault(k.value, set()).add(v.value)
+                    conflicts = sorted(k for k, vals in seen.items() if len(vals) > 1)
+                    self.assertEqual(conflicts, [], f"{path.name} gives different values to {conflicts}")
+
+    def test_zeno_stage3_tweaks_run(self):
+        import os
+        import tempfile
+
+        os.environ["_ZENO_REEXEC"] = "1"   # importing zeno must not re-launch the test process
+        import zeno
+
+        plan = {"preset": "hybrid", "segments": [{"id": "L1", "src": "S1", "start": 0.0, "end": 2.0, "layout": "split_v"}],
+                "marks": [{"type": "wrong", "segment": "L1", "at": 1.0, "duration": 0.56}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            pp = Path(tmp) / "plan.edl"
+            pp.write_text(edl_parser.format_edl(plan), encoding="utf-8")
+            zeno.apply_stage3_tweaks(pp, swap_layout="single", swap_takes=["L1=S2"], error_sfx="buzzer.wav")
+            out = edl_parser.load_edl(pp)
+        self.assertEqual(out["preset"], "single")
+        self.assertEqual(out["segments"][0]["src"], "S2")
+        self.assertEqual(out["marks"][0]["sfx"], "buzzer.wav")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

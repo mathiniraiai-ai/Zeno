@@ -18,7 +18,10 @@ User arguments (if provided): `$ARGUMENTS`
 
 ## Execution Steps
 
-0. **Readiness (first run only)**: `python3 scripts/zeno.py --check`
+0. **Pre-job gate (every job, before anything else)**:
+   - Run `python3 scripts/zeno.py --preflight` and show the PASS/FAIL table. If anything fails, stop and fix it with the user.
+   - If all pass and the user has not given them yet, ask: "Share the script link (Google Doc tab) and the footage folder." Do not start without both. Footage must be local; Drive/web links are not downloaded.
+   - `--inspect` then checks the script and each clip again and stops with `[BLOCKED]` on any problem. Never use `--skip-preflight`.
 
 1. **Inspect (`1 command`, Stages 1–3)**:
    - Clips can live in any folder. If the user pasted the script in chat, save it to `input/script/<project>.txt` first.
