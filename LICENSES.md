@@ -12,3 +12,5 @@ All models, libraries, fonts, and audio/visual assets bundled in or downloaded b
 | **Sound Effects (`assets/sfx/`)** | `assets/sfx/*.wav`, `assets/sfx/*.mp3` | **Supernova Proprietary & Synthesized Audio** (`LICENSE` Sec. 7) | Yes (Internal) | Supernova production packs (`sn_*`, `kn20228_*`, `w42_*`, `whoosh.wav`) and synthesized cues (`buzzer.wav`, `correct_ding.wav`, `click.wav`, `ding.wav`, `pop.wav`, `riser.wav`). |
 | **Visual Marks & Templates** | `assets/marks/`, `assets/overlays/`, `assets/premiere/` | **Supernova Proprietary** | Yes (Internal) | Generated programmatically via Pillow/NumPy or authored in-house. |
 | **Python Runtime Dependencies** | `requirements.txt`, `service/requirements.txt` | **BSD-3 / Apache-2.0 / MIT / HPND / ISC / MPL-2.0** | Yes | Permissive commercial-safe open-source licenses. |
+
+- `silero-vad` (Silero Team, MIT): speech detection over background noise, installed from PyPI by `scripts/gpu_install.py` (not stored in the repository).

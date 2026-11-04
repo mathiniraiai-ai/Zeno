@@ -18,7 +18,7 @@ Zeno transcribes, measures and renders. **You, the Director, make every editing 
 7. **Self-review.** Read your plan against the script once as an editor would: does each cut land, does anyone speak twice, does the eye have somewhere to go? Then run `python3 scripts/zeno.py --check-plan work/<project>/plan.edl` until it passes.
 
 ## Cuts: tight, never laggy (times from `facts.md`, seconds in the clip)
-- **Use the real sound, not only the word times.** `facts.md` lists `voiced` spans (measured from the audio) and flags `TIMING WRONG` words: believe the voiced spans over a flagged word. In a clip with constant background noise (selfie on a road) the whole clip counts as voiced: use word times there.
+- **Use the real sound, not only the word times.** `facts.md` lists `speech` spans (a voice detector that works over background noise) and `voiced` spans (loudness). It flags `NO SPEECH under '<word>'` and `TIMING WRONG` words: believe the spans over a flagged word and never build a cut on it. In a noisy clip (selfie on a road) `voiced` covers the whole clip and is useless: use `speech`.
 - Start **0.06 to 0.10 s** before the first kept word and end **0.08 to 0.12 s** after the last. Never inside a word (the check blocks it). A cut in a gap is nudged by at most 0.12 s to its quietest point.
 - **Silence across a join** (end of one cut + start of the next) must be **0.20 s or less**. A split-screen conversation is back to back: hand over on the breath, not after a gap.
 - **Pauses inside a cut:** cut any pause over **0.30 s** inside one speaker's turn (split into `L5a`/`L5b`, `z=1.08` on the second half to hide the jump). Keep a breath of 0.30 s or less. Pauses of 1.35 s or more are always dead air.

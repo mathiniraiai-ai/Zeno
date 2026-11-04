@@ -271,6 +271,12 @@ class KaviooAcousticPipeline:
 
         # 5. Custom Viterbi Dynamic Programming Alignment
         silent = self.onset_verifier.silent_runs(raw_waveform)
+        try:
+            from . import vad
+
+            silent = vad.merge_runs(silent, vad.nonspeech_runs(vad.speech_spans(raw_waveform), duration_sec))   # also finds silence under noise
+        except Exception:
+            pass
         viterbi_words = self.viterbi.align(log_probs_for_viterbi, token_ids, word_spans_meta, time_per_frame, silent_spans=silent)
 
         # 6. Acoustic Onset Verification Layer
@@ -280,7 +286,7 @@ class KaviooAcousticPipeline:
             refined_active_words = self.onset_verifier.extend_ends_to_energy(refined_active_words, raw_waveform)
         else:
             refined_active_words = viterbi_words
-        refined_active_words = self.onset_verifier.clamp_words_to_sound(refined_active_words, raw_waveform)   # no word edge in silence
+        refined_active_words = self.onset_verifier.clamp_words_to_sound(refined_active_words, raw_waveform, extra_runs=silent)   # no word edge in silence
 
         # 7. Reconstruct 100% 1:1 Output matching input_words length exactly
         final_words: List[Dict[str, Any]] = []

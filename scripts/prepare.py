@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import array
 import glob
+import json
 import math
 import os
 import re
@@ -852,6 +853,33 @@ def words_in_silence(words: List[Dict[str, Any]], rms_env: List[Tuple[float, flo
     return out
 
 
+def _speech_spans_of(c: Dict[str, Any]) -> List[Tuple[float, float]]:
+    """Where someone talks in this clip, cached next to its audio. [] when the voice detector is not installed."""
+    wav = Path(c.get("work_dir") or "") / "audio16k.wav"
+    if not wav.is_file():
+        return []
+    cache = wav.parent / "speech_spans.json"
+    sig = [wav.stat().st_size, int(wav.stat().st_mtime)]
+    try:
+        d = json.loads(cache.read_text(encoding="utf-8"))
+        if d.get("sig") == sig:
+            return [tuple(x) for x in d["spans"]]
+    except (OSError, ValueError, KeyError):
+        pass
+    try:
+        import soundfile as sf
+        from align_engine import vad
+
+        if not vad.available():
+            return []
+        y, _ = sf.read(str(wav), dtype="float32")
+        spans = vad.speech_spans(y)
+        write_json(cache, {"sig": sig, "spans": spans})
+        return spans
+    except Exception:
+        return []
+
+
 def _silent_clip_owner(c: Dict[str, Any], clips_data: List[Dict[str, Any]]) -> str:
     """For a silent clip: which speaking clip shows the same person and place, by colour layout (a measurement, not a decision)."""
     if vision_tracker is None:
@@ -911,6 +939,13 @@ def format_facts(clips_data: List[Dict[str, Any]]) -> str:
         pauses = [f"{float(s['start']):.2f}-{float(s['end']):.2f}" for s in c.get("macro_silences") or []]
         if pauses:
             out.append("  pauses: " + " ".join(pauses))
+        spoken = _speech_spans_of(c)
+        if spoken:
+            out.append("  speech (voice detector, works over noise): " + " ".join(f"{a:.2f}-{b:.2f}" for a, b in spoken))
+            for w in ws:
+                mid = (float(w["start"]) + float(w["end"])) / 2
+                if not any(a - 0.08 <= mid <= b + 0.08 for a, b in spoken):
+                    out.append(f"  ! NO SPEECH under '{w['w']}' ({float(w['start']):.2f}-{float(w['end']):.2f}): likely a transcription ghost or a mistimed word; do not build a cut on it")
         env = c.get("rms_env") or []
         if env:
             out.append("  voiced (real sound, measured from the audio): " + " ".join(f"{a:.2f}-{b:.2f}" for a, b in voiced_spans(env)))

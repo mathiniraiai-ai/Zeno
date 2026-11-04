@@ -1315,6 +1315,18 @@ class TestScriptIsTheTimeline(unittest.TestCase):
             self.assertFalse((Path(tmp) / "m.json").exists())
             self.assertGreaterEqual(common.job_start_epoch(), t1)
 
+    def test_voice_detector_helpers_and_safe_fallback(self):
+        from unittest import mock
+        from align_engine import vad
+
+        runs = vad.nonspeech_runs([(0.6, 3.3), (3.5, 4.3), (4.9, 7.0), (7.9, 9.7)], 10.03)
+        self.assertIn((7.06, 7.84), runs)                               # the 0.9 s pause, pulled in by 0.06 s each side
+        self.assertNotIn((3.3, 3.5), [(round(a, 1), round(b, 1)) for a, b in runs])   # a 0.2 s gap is too short to count
+        self.assertEqual(vad.merge_runs([(1, 2), (1.5, 3)], [(5, 6)]), [(1, 3), (5, 6)])
+        with mock.patch.object(vad, "_model", return_value=None):
+            self.assertEqual(vad.speech_spans(__import__("numpy").zeros(32000, dtype="float32")), [])    # not installed: nothing changes
+        self.assertEqual(vad.nonspeech_runs([], 10.0), [])
+
     def test_empty_plan_cannot_render(self):
         from unittest import mock
         import tempfile

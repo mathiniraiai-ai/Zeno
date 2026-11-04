@@ -6,7 +6,7 @@ the exact physical vocal onset time and prevent early-trigger artifacts.
 
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
-from typing import List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple
 
 
 class AcousticOnsetVerifier:
@@ -271,11 +271,11 @@ class AcousticOnsetVerifier:
                 i += 1
         return runs
 
-    def clamp_words_to_sound(self, words: List[Dict[str, Any]], waveform: np.ndarray) -> List[Dict[str, Any]]:
+    def clamp_words_to_sound(self, words: List[Dict[str, Any]], waveform: np.ndarray, extra_runs: Optional[List[Tuple[float, float]]] = None) -> List[Dict[str, Any]]:
         """Last check on every word: a word's start and end must lie where there is sound. An end that runs into silence is
         pulled back to the last sound inside the word; a start in silence moves to the first sound. A word with no sound
         anywhere inside it is flagged `no_sound` (its time cannot be trusted). Never lengthens a word."""
-        runs = self.silent_runs(waveform)
+        runs = sorted(set(self.silent_runs(waveform)) | set(extra_runs or []))
         if not runs or not words:
             return words
         out = []

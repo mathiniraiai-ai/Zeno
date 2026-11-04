@@ -76,8 +76,16 @@ def install_requirements() -> int:
     if "+cu" in installed_torch(_py()):
         tmp = Path(tempfile.mkdtemp()) / "requirements_no_torch.txt"
         tmp.write_text("\n".join(requirements_without_torch(req)) + "\n", encoding="utf-8")
-        return _uv("-r", str(tmp))
-    return _uv("-r", str(req))
+        rc = _uv("-r", str(tmp))
+    else:
+        rc = _uv("-r", str(req))
+    # Silero VAD (MIT, 2 MB): finds speech over background noise. Installed without its own dependencies (they would add onnxruntime,
+    # which Zeno does not use). Optional: if this fails, Zeno works exactly as before.
+    try:
+        _uv("--no-deps", "silero-vad==6.2.3")
+    except Exception:
+        pass
+    return rc
 
 
 def ensure_cuda_torch() -> str:
