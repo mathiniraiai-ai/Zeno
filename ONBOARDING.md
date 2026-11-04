@@ -1,97 +1,123 @@
 # Zeno — Team Onboarding
 
-Zeno turns raw clips and a script into a finished vertical video. An AI agent (Claude Code, Antigravity, or OpenAI) makes the decisions; the Python tools do the heavy work. This page gets you from zero to a first edit.
+Zeno turns raw clips and a script into a finished vertical video. An AI agent (Claude Code, Antigravity, or OpenAI) makes the decisions; Python tools on your own computer do the heavy work (audio, cutting, faces, rendering). A small Zeno server transcribes speech, signs you in, and keeps what the team has learned. This page takes you from zero to a first edit.
 
 ## What you need
 - A Mac (Apple Silicon) or a Windows PC (an NVIDIA GPU is optional; CPU works)
-- Transcription access: normally your personal key: open https://zeno-production-bef7.up.railway.app (or the Zeno card in the hub), type your name, click Generate, and paste the key into `.env` (two lines, see below); alternatively your own Gemini API key
+- Your company Google account (`@gosupernova.live`)
 - One AI agent set up on your machine (Claude Code, Antigravity, or OpenAI)
 
-## 1. Install (once, one double-click, about 5 minutes)
+## 1. Install (once, about 5 minutes, nothing to type)
 
-1. Clone the Zeno folder into **`Documents/Zeno`** (or unzip/clone anywhere — the installer automatically places it in **`Documents/Zeno`**, where Zeno always runs, and creates **`Downloads/Zeno Outputs`** for finished videos):
+1. Clone Zeno into **`Documents/Zeno`**:
    ```bash
    cd ~/Documents
    git clone https://github.com/mathiniraiai-ai/Zeno.git
    ```
 2. Double-click the installer:
-   - **Mac:** `install.command`. The first time, macOS may block it: right-click it, choose **Open**, then **Open** again.
+   - **Mac:** `install.command` (first time: right-click it, choose **Open**, then **Open** again).
    - **Windows:** `install.bat`.
-3. Wait for "Done" or "Almost done". The installer, with no admin password and no Homebrew:
+3. The installer asks you nothing and needs no admin password. It:
    - installs `uv`, which brings Python 3.12,
    - uses FFmpeg if the PC already has it, otherwise downloads it into `tools/ffmpeg/`,
-   - creates `.venv` and installs everything in `requirements.txt`,
+   - creates `.venv` and installs the packages,
    - creates `.env` from the template,
-   - downloads the alignment model (Meta wav2vec2, about 360 MB, into `models/torch`) and runs the real checks.
-4. Open https://zeno-production-bef7.up.railway.app (or the Zeno card in the hub), type your name, click **Generate**, and paste the key after `SCRIPTCUT_CLOUD_TOKEN=` in `.env`.
-5. Double-click the installer again. Every line should say `[OK]`.
+   - downloads the alignment model (Meta wav2vec2, about 360 MB, into `models/torch`),
+   - sets up a daily background update (11:00 AM) that also frees disk space when it is nearly full,
+   - runs real checks, and
+   - **opens your browser for Google sign-in.** Sign in with your `@gosupernova.live` account. Your personal key is saved on your computer automatically; there is nothing to copy or paste.
+4. Every line should end in `[OK]`. If the browser did not open, run `python scripts/setup.py --login`; to see who you are signed in as, run `python scripts/setup.py --whoami`.
 
-Running the installer again is always safe; it skips what is already there. Never commit or share `.env`.
-
-## 2. Make a video
+Running the installer again is always safe; it skips what is already there. Never commit or share `.env` or `.zeno_session.json`.
 
 Wherever this page says `python`, use the project's Python: `.venv/bin/python` on Mac, `.venv\Scripts\python` on Windows.
 
-Start a **fresh agent session for each video** (it keeps token use low), open this folder, and tell the agent what you have. The agent reads `agent/DIRECTOR.md` and follows it. The steps underneath are:
+## 2. Before every video: the checks and the one question
 
-1. **Check the Edit Bay (Stage 0):**
-   `python scripts/zeno.py --check`
-   Confirms `.venv`, FFmpeg, OpenCV/Pillow/SciPy, YuNet face tracker, `.env` key presence, Indic/UI fonts, SFX/Marks/Premiere `.prproj` shell, and `~/Downloads/Zeno Outputs/`.
-2. **Ingest, Transcribe, Match & Pitch (Stages 1–3):**
-   `python scripts/zeno.py --inspect <raw_dir_or_clips> --script "<google_doc_url_or_path>" [--lang auto]`
-   Extracts 16kHz audio, transcribes word timings, scores best takes, auto-pairs silent listening clips (`peer=`) for `split_h`/`split_v`, and generates `work/<project>/brief.txt`, `work/<project>/plan.edl`, and `work/<project>/pitch_card.md` (with a 50s live progress heartbeat in `work/<project>/progress.json`).
-3. **Review & Approve the Editorial Pitch Card (Stage 3 Gate):**
-   Review `pitch_card.md` and `plan.edl` (optionally quick-tweaking via `--swap-layout` or `--swap-take`), then confirm Yes/No before rendering.
-4. **Render, Export Premiere `.prproj` & Verify (Stages 4–5):**
-   `python scripts/zeno.py --execute work/<project>/plan.edl`
-   Renders `~/Downloads/Zeno Outputs/<name>.mp4` (`9:16`), `<name>_1x1.mp4` (`1:1` Square Meta Ad), `<name>.timeline.txt`, and editable Adobe Premiere Pro project files (`<name>.prproj` and `<name>.premiere.xml`), then runs deterministic post-render verification.
+Start a **new agent session for each video** (it keeps token use low), open the Zeno folder, and say you want to edit a video. The agent reads `agent/DIRECTOR.md` and does this, in this order:
 
-Languages are mixed freely: native words stay native, English words stay English. `--lang` names the main native language.
+1. **Live checks** (`python scripts/zeno.py --preflight`). The agent shows you a PASS/FAIL table:
+   - FFmpeg runs its filters and loudness tool.
+   - OpenCV decodes a real frame and runs the face detector.
+   - The wav2vec2 aligner loads and processes a second of audio.
+   - A small audio file goes to the Zeno server, which checks your key, its database, and that Gemini answers.
 
-Clips can stay where they are: give the agent the folder path (for example `~/Desktop/shoot_31oct/`) instead of copying them into `input/footage/`.
+   If anything fails, nothing starts. Fix the line marked FAIL first.
+2. **One question.** If everything passes, the agent asks for exactly two things:
+   - the **script link**: the Google Doc **tab** for this video (the link ends in `?tab=…`; a link without a tab is refused so the other languages are never loaded), and
+   - the **footage folder**: a folder on your computer (Drive or web links are not downloaded; download them first).
+3. **Nothing starts before you answer.** Then `python scripts/zeno.py --inspect <footage folder> --script "<script link>" [--lang auto]` repeats the live checks and measures what you gave it: the script (spoken lines, scenes, speakers, silent beats, split-screen notes, strike-through lines) and every clip (readable? has audio? how long?). It stops with `[BLOCKED]` and says why if something is wrong.
 
-Zeno transcribes every clip. Clips that say the same thing are treated as takes of one line, whatever they are named and wherever they are in the folder, even if there are 5 copies of the same audio or video. It scores them all and keeps exactly one, the best. The others are listed as `[ALT_TAKE]` in the brief with their scores, so the agent (or you) can swap one in.
+## 3. What Zeno measures, and what it decides from it
 
-If the script names the speakers (`L2 Robot: ...`), Zeno checks every line is spoken by the right character. A line spoken by the wrong one is cut, and the same line is taken from another clip where the right character says it. Optional: put a 10 to 30 second sample of each character in `input/voices/` (`Man.wav`, `Robot.wav`) so it works reliably even with few clips.
+| Measured | Decided from it |
+|---|---|
+| The words in each clip (Gemini, through the server; Hindi, Kannada, English and mixes) | which clips are takes of the same line, and the best take |
+| The exact time of every word (wav2vec2) | where to cut, so no word is clipped |
+| Silences and breaths (10 ms energy) | tighter pauses, cuts inside pauses |
+| Each voice against the script's speakers | a line said by the wrong character is cut and replaced from another clip |
+| Faces: how many, how big, where the eyes are (OpenCV) | framing, zooms, and whether a clip already contains a split screen |
+| Silent clips | the picture shown for the character who is listening (see section 6) |
+| The script itself | layout, transitions at scene changes, ✗ and ✓ marks, strike-through text |
 
-**No clips yet?** Zeno can write the Veo shot JSON and first-frame prompt for every script line (`scripts/preproduce.py`, see `agent/concepts/08_preproduction`). Save the generated clips as `<reel-code>_D-1.mp4`, `_D-2.mp4`, ... and run the normal edit.
+The result is three short files in `work/<project>/`: `brief.txt`, `plan.edl` and `pitch_card.md` (about 2,000 tokens together). The agent reads only these, not the raw data.
 
-**Silent moments in the script:** write them as `(Man takes out his phone)` or note a reaction on a line, `L4 Man (laughs mockingly): ...`. Zeno keeps those moments instead of trimming them.
+## 4. Approve the plan (one Yes/No)
 
-## 3. What works today
-- **5-Stage Interactive Zeno Harness (`scripts/zeno.py`)**: Stage 0 readiness check (`--check`), Stages 1–3 ingest/transcribe/match/pitch (`--inspect` + 50s live heartbeat), Stage 3 Pre-Render Yes/No Approval Gate (`pitch_card.md` + `--swap-layout` / `--swap-take`), and Stages 4–5 render + Premiere Pro export + deep QC (`--execute`).
-- **Human-Like Editing Engine**: 10ms RMS breath-envelope cuts, rhythm-aware pause tightening, 45ms zero-drift audio crossfades + `-48 dBFS` room-tone floor bridging, per-clip RMS gain matching + single master 2-pass `-11.5 LUFS` / `-1.0 dBTP` loudness mastering, transcript-intent zooms & deadband-smoothed focus pan, kinetic-gated `whoosh.wav` SFX, and 2-pulse `flash`/`vignette` `✓`/`✗` marks.
-- **4-Clip Split-Screen Talking + Live Listening Video (`styles/micronarrative/`)**: Auto-detects silent listening clips (`*_listening.*` or 0-word clips) and pairs them as live moving `peer=` streams on `split_h`/`split_v`, plus auto-extracts stacked `"Stop Saying"` hook banners.
-- **Adobe Premiere Pro `.prproj` + `.premiere.xml` Export**: Exports native GZIP-compressed `.prproj` and FCP7 `.premiere.xml` files with multi-keyframe eased Scale curves, Center focus offsets, video/audio `<transitionitem>` dissolves, and sequence `<marker>` cues.
+The agent shows you the **editorial pitch card**: which clips are used, the layouts, transitions, marks, and any alerts. It may make small fixes in `plan.edl` (you can also ask for `--swap-layout` or `--swap-take`). Then it asks **one** Yes/No question. Nothing renders before a Yes, and it does not ask again afterwards.
+
+## 5. Render, check, hand over
+
+After Yes: `python scripts/zeno.py --execute work/<project>/plan.edl`. You get, in `~/Downloads/Zeno Outputs/`:
+- `<name>.mp4` (9:16) and `<name>_1x1.mp4` (square Meta ad),
+- `<name>.timeline.txt` (every cut and effect),
+- `<name>.prproj` and `<name>.premiere.xml` (open in Adobe Premiere Pro to polish).
+
+Zeno then checks the video itself: every script line present in order, loudness (-11.5 LUFS), no clipped words or long pauses, ✗/✓ marks visible, split screens steady. **Move finished videos to the shared drive.**
+
+The agent prints a token table and adds a row to `README.md`. After a verified job, Zeno sends the team server only numbers (shot lengths, zooms, transitions per minute), never your script, footage or video; an admin approves before a recipe changes for everyone.
+
+## 6. Writing scripts and preparing clips so Zeno understands them
+
+- **Who speaks:** `Lady 1: …`. A `Characters:` list at the top is fine; it is not read as dialogue.
+- **Marks:** put ❌ or ✅ after a line (or `[WRONG]` / `[RIGHT]`). The mark appears at the end of that sentence.
+- **Scene changes:** `Scene changes: …`, `Back to …`, `Cut to …` and `Flashback …` start a new scene and get a transition.
+- **Strike-through text:** end a line with `(X Sign and Text Strikethrough)` and the line's words appear struck through in red.
+- **Split screen:** write who sits where: `Top: Robot | Bottom: Lady 1`, or `Woman - Right screen | Miss Nova - Left screen`. "Horizontal split" means top and bottom; "vertical split" means left and right.
+- **Silent moments:** `(Man takes out his phone)`, or a reaction on a line: `L4 Man (laughs mockingly): …`.
+- **Silent listening clips (important for splits):** while one character speaks, the other panel shows the other character, silent and listening. Left speaks, right listens; right speaks, left listens; the same for top and bottom. Save each character's silent clip with their name in the file name, for example `Robot_listening.mp4` or `Lady1_idle.mp4`. Without one, Zeno uses a quiet moment from that character's own clip and flags `[LISTENER_FALLBACK]` in the brief.
+- **Takes:** clips that say the same thing are takes of one line, whatever they are called. Zeno keeps the best and lists the others as `[ALT_TAKE]`. A learner repeating the teacher's corrected sentence is a line of its own, not a retake.
+- **No clips yet?** Zeno can write the Veo shot JSON and first-frame prompt for every script line (`scripts/preproduce.py`, see `agent/concepts/08_preproduction`). Name the generated clips `<reel-code>_D-1.mp4`, `_D-2.mp4`, … and run the normal edit.
 - Burned-in subtitles in client footage are ignored for now.
 
-## 4. Where files go
+## 7. Where files go
 
 | Folder | What | Share? |
 |---|---|---|
-| `input/footage/`, `input/script/` | your raw clips and script | no (local) |
+| your footage folder, `input/script/` | raw clips and the script | no (local) |
 | `work/<project>/` | transcript, plan, analysis | no (local, deletable) |
 | `Downloads/Zeno Outputs/` | finished videos (outside the Zeno folder) | **move finished videos to the shared drive** |
-| `styles/` | learned styles | owner changes these; you just `git pull` |
+| `styles/` | learned styles and format recipes | the owner changes these; you just update |
 
-## 5. Keep your disk small
-Each 90-second video leaves about 330 MB of intermediates. Clean up weekly:
-```bash
-python scripts/clean.py            # shows what would go
-python scripts/clean.py --apply    # deletes it
-```
-It removes the render cache and old work files. It never touches `Downloads/Zeno Outputs/`, `styles/`, your raw footage or scripts.
-
-## 6. Stay up to date
-Double-click `update.command` (Mac) or `update.bat` (Windows). It pulls the latest Zeno and refreshes packages; your `.env`, clips, `work/` and `Downloads/Zeno Outputs/` are never touched. Do not edit `styles/`, `agent/` or `scripts/` yourself; tell the owner what you need.
+## 8. Disk, caches and updates (mostly automatic)
+- **Caches refresh themselves.** When Zeno's code changes, old transcripts and analysis are rebuilt on the next job. You are never asked to clear a cache. Only if a result is wrong for a reason you cannot see, ask the agent to run the job once with `--fresh`.
+- **Disk:** each 90-second video leaves about 330 MB of intermediates. The daily task frees space when the disk is nearly full; to do it yourself run `python scripts/clean.py` (shows what would go) and then `python scripts/clean.py --apply`.
+- **Updates:** Zeno updates itself daily and before each job. You can also double-click `update.command` (Mac) or `update.bat` (Windows). New format recipes from the team arrive at the start of each job without any update. Do not edit `styles/`, `agent/` or `scripts/` yourself; tell the owner what you need.
 
 ## Licences
 - Alignment model: Meta wav2vec2 base (95M), MIT licence, commercial use allowed.
-- Gemini is used under Google's API terms with your team key.
+- Gemini is used under Google's API terms through the Zeno server (the Gemini key never reaches your computer).
 - Bundled third-party components (audited in `LICENSES.md`): `uroman` (MIT), OpenCV `YuNet` face detector (MIT), `Montserrat-ExtraBold.ttf` (SIL OFL 1.1), and `assets/sfx/` (Supernova internal production assets).
+- Zeno itself is under the Supernova Internal Use License (`LICENSE`).
 
 ## If something goes wrong
-- `setup.py --smoke` shows a `[FAIL]` line: it names the part (FFmpeg, model, key). Fix that first.
+- A check shows `[FAIL]` in the pre-job table: it names the part (FFmpeg, face detector, aligner, or the server). Fix that first. "not signed in" or "key rejected": run `python scripts/setup.py --login`.
+- `[BLOCKED]` after you gave the script and footage: read the line below it (a link with no `?tab=`, an unreadable clip, a script with no spoken lines).
 - Google Doc says private: ask for "anyone with the link can view".
-- Out of disk: run `scripts/clean.py --apply`.
-- A transcript looks wrong: tell the agent the video, the line, and what you hear.
+- A transcript or a cut looks wrong: tell the agent the video, the line and what you hear.
+- Out of disk: `python scripts/clean.py --apply`.
+
+## Known limits (be aware on your first jobs)
+- The micronarrative style has been learned from two reference videos; full jobs on real raw footage are just starting, so tell the owner what looks off.
+- The Windows installer has not been tested on a real Windows PC yet.
+- Footage must be a local folder; links are not downloaded.

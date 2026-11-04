@@ -76,7 +76,7 @@ else
   echo "[4/5] Created .env from .env.example"
 fi
 
-# 5. Alignment model (Meta wav2vec2, about 360 MB, into models/torch) + automatic Google login + daily 8 AM auto-updater
+# 5. Alignment model (Meta wav2vec2, about 360 MB, into models/torch) + automatic Google login + daily 11 AM auto-updater
 echo "[5/5] Downloading the alignment model (first time only) and checking everything..."
 .venv/bin/python scripts/setup.py --prewarm >/dev/null || true
 .venv/bin/python scripts/auto_updater.py --install-schedule || true
