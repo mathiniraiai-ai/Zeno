@@ -47,6 +47,9 @@ from usage_page import USAGE_PAGE
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("zeno.service")
+# httpx logs every request URL at INFO, and the Google sign-in check puts the user's ID token in its URL: keep tokens out of the logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Lite first: on a 93 s clip gemini-2.5-flash timed out every time while lite answered in about 4 s with a complete transcript.
 MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", "gemini-3.5-flash-lite,gemini-2.5-flash,gemini-flash-lite-latest").split(",") if m.strip()]
@@ -278,7 +281,7 @@ _ping_cache: Dict[str, Any] = {"at": 0.0, "result": None}
 
 
 def _gemini_ping() -> Dict[str, Any]:
-    """One tiny text request to the first model, so we know the Gemini key and the network path work (cached for 60 s)."""
+    """One tiny text request, trying each model in turn, so we know the Gemini key and the network path work (cached for 60 s)."""
     now = time.time()
     if _ping_cache["result"] is not None and now - _ping_cache["at"] < 60:
         return _ping_cache["result"]
@@ -290,10 +293,22 @@ def _gemini_ping() -> Dict[str, Any]:
             from google import genai
             from google.genai import types
 
-            t0 = time.time()
-            client = genai.Client(api_key=keys[0], http_options=types.HttpOptions(timeout=15000))
-            reply = client.models.generate_content(model=MODELS[0], contents="Reply with the single word: ok")
-            res = {"ok": bool((reply.text or "").strip()), "detail": f"{MODELS[0]} answered in {time.time() - t0:.1f}s"}
+            res = {"ok": False, "detail": "no model answered"}
+            failed = []
+            for model in MODELS:   # same order as a real transcription: one busy model must not fail the whole check
+                t0 = time.time()
+                try:
+                    client = genai.Client(api_key=keys[0], http_options=types.HttpOptions(timeout=15000))
+                    reply = client.models.generate_content(model=model, contents="Reply with the single word: ok")
+                    if (reply.text or "").strip():
+                        note = f" ({', '.join(failed)} did not answer)" if failed else ""
+                        res = {"ok": True, "detail": f"{model} answered in {time.time() - t0:.1f}s{note}"}
+                        break
+                    failed.append(model)
+                except Exception:
+                    failed.append(model)
+            else:
+                res = {"ok": False, "detail": f"Gemini call failed on every model ({', '.join(failed)})"}
         except Exception as exc:
             res = {"ok": False, "detail": f"Gemini call failed ({type(exc).__name__})"}
     _ping_cache.update(at=now, result=res)
