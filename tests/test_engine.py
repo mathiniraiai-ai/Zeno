@@ -532,6 +532,116 @@ Suresh: Yes, a little bit.
         self.assertAlmostEqual(m["seam"]["position_frac"], 0.5, delta=0.02)
         self.assertEqual(r["confidence"], "measured")
 
+    def test_cache_refreshes_itself_when_code_changes(self):
+        import json
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        import common
+
+        def put(d, name, data="{}"):
+            (d / name).write_text(data, encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            for n in ("gemini_transcript.json", "words.json", "hq_words.json"):
+                put(d, n)
+            put(d, "audio16k.wav", "wav")
+            v1 = {"transcript": "t1", "align": "a1"}
+            with patch.dict(common._engine_versions, v1, clear=True):
+                self.assertEqual(common.ensure_cache_current(d), [], "no marker yet: adopt, delete nothing")
+                self.assertEqual(json.loads((d / "engine_version.json").read_text()), v1)
+                self.assertEqual(common.ensure_cache_current(d), [], "same code: nothing to do")
+            with patch.dict(common._engine_versions, {"transcript": "t1", "align": "a2"}, clear=True):
+                self.assertEqual(common.ensure_cache_current(d), ["hq_words.json", "words.json"], "aligner changed: only alignment results go")
+                self.assertTrue((d / "gemini_transcript.json").is_file(), "the paid transcript must survive an aligner change")
+            put(d, "words.json")
+            with patch.dict(common._engine_versions, {"transcript": "t2", "align": "a2"}, clear=True):
+                self.assertIn("gemini_transcript.json", common.ensure_cache_current(d))
+                self.assertFalse((d / "words.json").exists())
+                self.assertTrue((d / "audio16k.wav").is_file(), "audio and info are never dropped")
+                put(d, "words.json", "{not json")
+                self.assertEqual(common.ensure_cache_current(d), ["words.json"], "a damaged file is rebuilt")
+                put(d, "words.json")
+                with patch.dict(os.environ, {"ZENO_FRESH": "1"}):
+                    self.assertEqual(common.ensure_cache_current(d), ["words.json"], "--fresh drops everything derived")
+            common.write_json(d / "x.json", {"a": 1})
+            self.assertFalse(list(d.glob("*.tmp")), "writes leave no temp file behind")
+
+    def test_engine_version_ignores_comment_edits(self):
+        import tempfile
+
+        import common
+
+        with tempfile.TemporaryDirectory() as tmp:
+            a, b, c = (Path(tmp) / n for n in ("a.py", "b.py", "c.py"))
+            a.write_text("x = 1\n", encoding="utf-8")
+            b.write_text("# a new comment\n\nx = 1\n", encoding="utf-8")
+            c.write_text("x = 2\n", encoding="utf-8")
+            self.assertEqual(common._source_digest([a]), common._source_digest([b]))
+            self.assertNotEqual(common._source_digest([a]), common._source_digest([c]))
+        self.assertEqual(set(common.engine_versions()), {"transcript", "align"})
+
+    def test_auto_clean_only_when_the_disk_is_nearly_full(self):
+        import tempfile
+
+        import clean
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seg = root / "work" / "_segments"
+            seg.mkdir(parents=True)
+            (seg / "old.mp4").write_bytes(b"x" * 1000)
+            self.assertFalse(clean.auto_clean(root, min_free_gb=0.0)["ran"])
+            self.assertTrue((seg / "old.mp4").exists())
+            res = clean.auto_clean(root, min_free_gb=1e9)
+            self.assertTrue(res["ran"])
+            self.assertFalse((seg / "old.mp4").exists())
+
+    def test_format_observation_and_team_sync(self):
+        import tempfile
+        from unittest.mock import MagicMock, patch
+
+        import format_learning
+        import format_library
+
+        plan = {"segments": [
+            {"id": "L1", "start": 0.0, "end": 3.0, "layout": "single", "zoom_style": "sudden_in", "zoom": 1.0, "zoom_to": 1.08},
+            {"id": "L2", "start": 3.0, "end": 5.0, "layout": "split_h", "transition": "warm_flash@0.35"},
+            {"id": "L3", "start": 5.0, "end": 9.0, "layout": "split_h", "banners": [{"text": "x"}]},
+            {"id": "L4", "start": 9.0, "end": 9.0, "layout": "single"},   # zero length: ignored
+        ], "marks": [{"type": "wrong", "segment": "L3", "at": 1.0}]}
+        obs = format_learning.build_observation(plan, "# style: micronarrative\n", "the script", verified=True)
+        self.assertEqual(obs["style"], "micronarrative")
+        self.assertEqual(obs["script_hash"], format_learning.build_observation(plan, "", "the script")["script_hash"])
+        self.assertNotIn("the script", str(obs), "the script text itself is never sent")
+        by = {f["format"]: f for f in obs["formats"]}
+        self.assertEqual(by["single"]["segments"], 1)
+        self.assertEqual(by["single"]["zoom_in_share"], 1.0)
+        self.assertEqual(by["split_h"]["segments"], 2)
+        self.assertEqual(by["split_h"]["mean_shot_sec"], 3.0)
+        self.assertEqual(by["split_h"]["marks"], 1)
+        self.assertEqual(by["split_h"]["strike_banners"], 1)
+        self.assertGreater(by["split_h"]["transitions_per_min"], 0)
+        self.assertIsNone(format_learning.build_observation({"segments": []}))
+        with patch("auth_session.get_active_token", return_value=""):
+            self.assertFalse(format_learning.post_observation(obs), "no key: quietly does nothing")
+
+        reply = MagicMock(status_code=200)
+        reply.raise_for_status = lambda: None
+        reply.json.return_value = {"formats": [{"style": "micronarrative", "format": "split_h", "n_jobs": 5, "approved_by": "ed@x",
+                                                "stats": {"mean_shot_sec": {"p25": 2.0, "median": 2.5, "p75": 3.0}}}]}
+        with tempfile.TemporaryDirectory() as tmp, patch("auth_session.get_active_token", return_value="zeno_x"), \
+                patch("auth_session.get_cloud_url", return_value="https://example.test"), patch("httpx.get", return_value=reply):
+            lib = Path(tmp)
+            res = format_library.sync_team(lib)
+            self.assertEqual(res["pulled"], 1)
+            team = [r for r in format_library.load_recipes(lib) if r["id"] == "team_micronarrative_split_h"]
+            self.assertEqual(team[0]["confidence"], "team-approved")
+            self.assertEqual(team[0]["geometry"]["mean_shot_sec"], 2.5)
+            self.assertEqual(format_library.best_layout("a split screen scene", lib), "", "team recipes carry no aliases, so they never change layout choice")
+
     def test_layout_hint_wording(self):
         self.assertEqual(prepare.layout_hint_from_direction("a horizontal split screen"), "split_v")
         self.assertEqual(prepare.layout_hint_from_direction("a vertical split screen"), "split_h")

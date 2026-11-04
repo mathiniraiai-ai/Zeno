@@ -800,6 +800,13 @@ def main() -> None:
     except Exception:
         pass
 
+    # 8) per-format numbers for the team format library (numbers only; never the script, footage or video)
+    try:
+        import format_learning
+        format_learning.observe_job(plan_path, plan, verified=bool(a.verify))
+    except Exception:
+        pass
+
 
 if __name__ == "__main__":
     main()

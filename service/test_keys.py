@@ -163,5 +163,71 @@ check("selftest needs a key -> 401", client.post("/v1/selftest").status_code == 
 with patch.object(service, "_gemini_ping", return_value={"ok": False, "detail": "no Gemini key is configured on the server"}):
     check("selftest reports a Gemini problem", client.post("/v1/selftest", headers=_auth).json()["ok"] is False)
 
+# Transcript cache: the same audio, prompt and script lines never reach Gemini twice
+_calls = []
+
+
+def _fake_gemini(audio, prompt, duration):
+    _calls.append(1)
+    return {"words": ["hello", "world"], "model_used": "stub", "usage": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60}}
+
+
+def transcribe(lang="ml", lines="[]", wav=None):
+    return client.post("/v1/transcribe", headers=_auth, files={"file": ("a.wav", wav or _buf.getvalue(), "audio/wav")},
+                       data={"language_hint": lang, "target_script_lines": lines})
+
+
+with patch.object(service._gemini, "transcribe", side_effect=_fake_gemini):
+    first, second = transcribe(), transcribe()
+    check("transcript cache: second identical request is served without Gemini", len(_calls) == 1 and second.json().get("cached") is True and second.json()["usage"]["total_tokens"] == 0, str(second.json()))
+    check("transcript cache: first answer is untouched", first.status_code == 200 and not first.json().get("cached"))
+    transcribe(lang="kn")
+    transcribe(lines='["a different script line"]')
+    check("transcript cache: another language or script line is a new request", len(_calls) == 3)
+_calls.clear()
+
+
+def _warn_gemini(audio, prompt, duration):
+    _calls.append(1)
+    return {"words": ["x"], "warning": "incomplete", "model_used": "stub"}
+
+
+_other = _io.BytesIO()
+with _wave.open(_other, "wb") as _w2:
+    _w2.setnchannels(1); _w2.setsampwidth(2); _w2.setframerate(16000); _w2.writeframes(b"\x01\x00" * 16000)
+with patch.object(service._gemini, "transcribe", side_effect=_warn_gemini):
+    transcribe(wav=_other.getvalue()); transcribe(wav=_other.getvalue())
+    check("transcript cache: an incomplete transcript is never cached", len(_calls) == 2)
+
+# Per-job format observations -> candidates -> approval -> approved recipes
+def observe(script_hash, verified=True, seconds=2.5, fmt="split_h"):
+    return client.post("/v1/observations", headers=_auth, json={"style": "micronarrative", "script_hash": script_hash, "verified": verified, "video_seconds": 60,
+                       "formats": [{"format": fmt, "segments": 4, "seconds": seconds * 4, "mean_shot_sec": seconds}]})
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import format_learning  # noqa: E402
+
+_real = format_learning.build_observation({"segments": [{"id": "L1", "start": 0, "end": 3, "layout": "split_h"}], "marks": []}, "# style: micronarrative\n", "script", True)
+check("what the client builds is accepted by the server", client.post("/v1/observations", headers=_auth, json=_real).status_code == 200, str(_real))
+check("observation needs a key -> 401", client.post("/v1/observations", json={}).status_code in (401, 422))
+check("a bad script hash is refused -> 400", observe("not hex!").status_code == 400)
+for i, sec in enumerate([2.0, 2.2, 2.4, 2.6]):
+    observe(f"{i + 1:08x}", seconds=sec)
+observe("00000001", seconds=9.0)            # the same script again counts once
+observe("000000aa", verified=False)         # unverified jobs are ignored
+_admin = {**basic("admin-pw"), "X-Zeno-Admin": "1"}
+agg = client.get("/admin/api/formats", headers=basic("admin-pw")).json()
+row = next(r for r in agg["formats"] if r["format"] == "split_h")
+check("candidates count distinct verified scripts only", row["n_jobs"] == 5, str(row))
+check("candidate stats are medians; a re-rendered script is counted once, newest render", row["stats"]["mean_shot_sec"]["median"] == 2.6 and row["stats"]["mean_shot_sec"]["p25"] == 2.4, str(row["stats"]))
+with patch.object(service, "MIN_FORMAT_JOBS", 6):
+    check("approval needs enough jobs -> 409", client.post("/admin/api/formats/micronarrative/split_h/approve", headers=_admin).status_code == 409)
+check("approval works at the minimum number of jobs", client.post("/admin/api/formats/micronarrative/split_h/approve", headers=_admin).status_code == 200)
+check("approval needs the admin header -> 400", client.post("/admin/api/formats/micronarrative/split_h/approve", headers=basic("admin-pw")).status_code == 400)
+approved = client.get("/v1/formats", headers=_auth).json()["formats"]
+check("approved recipes are served to computers", len(approved) == 1 and approved[0]["format"] == "split_h" and approved[0]["n_jobs"] == 5, str(approved))
+check("a company key cannot approve -> 403", client.post("/admin/api/formats/micronarrative/split_h/approve", headers={**_auth, "X-Zeno-Admin": "1"}).status_code == 403)
+
 print(f"\n{sum(results)}/{len(results)} checks passed")
 sys.exit(0 if all(results) else 1)

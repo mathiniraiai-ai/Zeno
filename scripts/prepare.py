@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
+    ensure_cache_current,
     DEFAULT_SFX,
     FFMPEG,
     OUTPUT,
@@ -638,6 +639,9 @@ def ensure_clip_transcribed(
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Ensure info.json, audio16k.wav, and hq_words.json / words.json exist for a clip."""
     work_dir.mkdir(parents=True, exist_ok=True)
+    stale = ensure_cache_current(work_dir)
+    if stale:
+        print(f"  [cache] {clip_stem}: rebuilding {', '.join(stale)} (code changed or file damaged)")
     info_path = work_dir / "info.json"
     wav_path = work_dir / "audio16k.wav"
     hq_path = work_dir / "hq_words.json"
@@ -2323,12 +2327,19 @@ def main() -> None:
     )
     ap.add_argument("--mark-pack", default="flash", help="Swappable ✓/✗ mark overlay pack (flash, vignette, default, glossy)")
     ap.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Rebuild every cached transcript and alignment for these clips (rarely needed: caches update themselves when the code changes)",
+    )
+    ap.add_argument(
         "--clean-raw-json",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Keep work/ lean by preventing raw intermediate JSON bloat",
     )
     args = ap.parse_args()
+    if args.fresh:
+        os.environ["ZENO_FRESH"] = "1"
     job_start_epoch = time.time()
 
     # Auto git pull once per new job (throttled to 15 min so if zeno.py --inspect just pulled, it doesn't repeat)

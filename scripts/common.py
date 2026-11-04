@@ -481,6 +481,81 @@ def resolve(p) -> Path:
 CLIP_CACHE = WORK / "_clips"
 _fingerprints: dict = {}
 
+# Results kept per clip, by what produced them. A change to the code that makes them invalidates them without asking anyone.
+DERIVED_BY_TRANSCRIPT = ("gemini_transcript.json", "transcript.txt")
+DERIVED_BY_ALIGN = ("words.json", "hq_words.json", "align.json")
+_engine_versions: dict = {}
+
+
+def _source_digest(paths) -> str:
+    """Hash of source files with blank lines and # comments left out, so a comment edit does not invalidate caches."""
+    import hashlib
+
+    h = hashlib.sha1()
+    for p in sorted(str(x) for x in paths):
+        try:
+            text = Path(p).read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            t = line.strip()
+            if t and not t.startswith("#"):
+                h.update(t.encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()[:10]
+
+
+def engine_versions() -> dict:
+    """{'transcript': ..., 'align': ...}: the transcript version covers the prompt, healing and lexicons; the align
+    version covers the aligner. An aligner change therefore never triggers new Gemini calls."""
+    if not _engine_versions:
+        ae = ROOT / "scripts" / "align_engine"
+        transcript = [ae / "gemini_transcriber.py", ae / "guardian.py", ae / "lexicon.py", *ae.glob("lexicons/*.py")]
+        align = [ae / "acoustic.py", ae / "viterbi.py", ae / "onset_verifier.py", ae / "pipeline.py", ae / "__init__.py", *ae.glob("phonetics/*.py")]
+        _engine_versions.update({"transcript": _source_digest(transcript), "align": _source_digest(align)})
+    return dict(_engine_versions)
+
+
+def ensure_cache_current(wdir) -> list:
+    """Drop cached results that older code produced (or that are damaged) so they are rebuilt. Silent: nobody is asked.
+
+    A folder with no version marker is adopted as current (nothing is deleted on the first update); from then on a change
+    to the transcript code drops transcript and alignment results, a change to the aligner drops only alignment results.
+    `ZENO_FRESH=1` (the --fresh flag) drops everything derived. Returns the file names removed."""
+    wdir = Path(wdir)
+    if not wdir.is_dir():
+        return []
+    now = engine_versions()
+    marker = wdir / "engine_version.json"
+    try:
+        old = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = None
+    drop = set()
+    if os.environ.get("ZENO_FRESH") == "1":
+        drop.update(DERIVED_BY_TRANSCRIPT + DERIVED_BY_ALIGN)
+    elif old is not None:
+        if old.get("transcript") != now["transcript"]:
+            drop.update(DERIVED_BY_TRANSCRIPT + DERIVED_BY_ALIGN)
+        elif old.get("align") != now["align"]:
+            drop.update(DERIVED_BY_ALIGN)
+    for name in DERIVED_BY_TRANSCRIPT + DERIVED_BY_ALIGN:
+        f = wdir / name
+        if name.endswith(".json") and f.is_file():
+            try:
+                json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                drop.add(name)
+    removed = []
+    for name in sorted(drop):
+        f = wdir / name
+        if f.is_file():
+            f.unlink()
+            removed.append(name)
+    if old != now or removed:
+        write_json(marker, now)
+    return removed
+
 
 def clip_work_dir(src) -> Path:
     """Cache folder for one source clip: work/_clips/<stem>-<fingerprint>.
@@ -585,8 +660,12 @@ def probe(path):
 
 
 def write_json(path, data):
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    """Write JSON so a crash or a second process never leaves a half-written file behind."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, p)
 
 
 def _docx_to_text(path: Path) -> str:

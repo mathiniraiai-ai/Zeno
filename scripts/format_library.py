@@ -34,7 +34,7 @@ MATCH_THRESHOLD = 3.0    # below this, search() still ranks results but best_lay
 
 def load_recipes(lib_dir: Path = LIB_DIR) -> List[Dict[str, Any]]:
     out = []
-    for p in sorted(lib_dir.glob("*.json")) if lib_dir.is_dir() else []:
+    for p in sorted(lib_dir.rglob("*.json")) if lib_dir.is_dir() else []:   # includes team/, the approved team recipes
         try:
             out.append(json.loads(p.read_text(encoding="utf-8")))
         except ValueError:
@@ -181,10 +181,43 @@ def extract(video: Path, rid: str, layout: str, names: List[str], description: s
     return r
 
 
+def sync_team(lib_dir: Path = LIB_DIR) -> Dict[str, Any]:
+    """Copy the recipes an editor approved on the Zeno server into styles/formats/team/. Local measured recipes are never touched."""
+    try:
+        import auth_session
+        import httpx
+
+        token, base = auth_session.get_active_token(), auth_session.get_cloud_url().rstrip("/")
+        if not token:
+            return {"ok": False, "message": "not signed in (python3 scripts/setup.py --login)"}
+        r = httpx.get(base + "/v1/formats", headers={"Authorization": f"Bearer {token}"}, timeout=15.0)
+        if r.status_code == 404:
+            return {"ok": True, "pulled": 0, "message": "the server has no team formats yet"}
+        r.raise_for_status()
+        formats = r.json().get("formats", [])
+    except Exception as exc:   # noqa: BLE001
+        return {"ok": False, "message": f"could not reach the server ({type(exc).__name__})"}
+    layouts = {"single", "split_h", "split_v", "video_call", "chat_bar"}
+    for f in formats:
+        rid = f"team_{f['style']}_{f['format']}"
+        st = f.get("stats", {})
+        mean = st.get("mean_shot_sec", {})
+        write_recipe({
+            "id": rid, "layout": f["format"] if f["format"] in layouts else "single", "names": [],
+            "description": (f"Seen in {f['n_jobs']} approved team jobs of style {f['style']}: shots of {mean.get('p25', '?')} to {mean.get('p75', '?')} s "
+                            f"(median {mean.get('median', '?')} s)."),
+            "when": f"format {f['format']} in style {f['style']}",
+            "geometry": {k: v.get("median") for k, v in st.items() if k in ("mean_shot_sec", "zoom_in_share", "transitions_per_min", "strike_banners")},
+            "confidence": "team-approved", "source": f"{f['n_jobs']} team jobs, approved by {f.get('approved_by', '?')}",
+        }, lib_dir / "team")
+    return {"ok": True, "pulled": len(formats), "message": f"{len(formats)} approved team format(s) synced"}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Format library: measure, store and look up how video formats should look")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list")
+    sub.add_parser("sync", help="copy team-approved recipes from the Zeno server")
     s = sub.add_parser("search"); s.add_argument("query")
     sh = sub.add_parser("show"); sh.add_argument("id")
     e = sub.add_parser("extract")
@@ -193,7 +226,9 @@ def main() -> None:
     e.add_argument("--start", type=float, default=0.0); e.add_argument("--end", type=float, default=None)
     e.add_argument("--thumbs", action="store_true", help="also save 3 tiny JPEGs (about 8 KB each) for a person to look at")
     a = ap.parse_args()
-    if a.cmd == "list":
+    if a.cmd == "sync":
+        print(sync_team()["message"])
+    elif a.cmd == "list":
         for r in load_recipes():
             print(f"{r['id']:<12} layout={r['layout']:<10} {r.get('confidence', 'defined'):<9} {r.get('description', '')[:70]}")
     elif a.cmd == "search":

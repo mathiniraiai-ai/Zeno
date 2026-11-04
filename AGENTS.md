@@ -158,29 +158,7 @@ python3 service/check_prompt_sync.py                                            
 **Transcription & Editorial Learning Service** (`service/`, FastAPI on Railway): holds the only Gemini key and collects team editorial learnings. Team PCs authenticate once via zero-touch Google OAuth (`python3 scripts/setup.py --login` or `install.command`, which opens the browser for `@gosupernova.live` sign-in (more domains only via `ZENO_ALLOWED_EMAIL_DOMAINS`) and automatically saves `.zeno_session.json` + `ZENO_CLOUD_URL` / `ZENO_CLOUD_TOKEN` in `.env`, with legacy `SCRIPTCUT_CLOUD_*` fallback). `scripts/token_tracker.py` posts per-run telemetry, `plan.auto.edl -> plan.edl` diffs, and `brain_memory.json` rules to `/v1/telemetry`, and `python3 scripts/zeno.py --sync-learnings` syncs shared rules via `/v1/learnings`.
 
 ## Caches & confirmations (all agents)
-Never ask the user to clear caches and never delete them by hand (`rm -rf work/...`). Caches under `work/` are keyed per file (`<stem>-<fingerprint>`), so they are safe to reuse and stale ones are never picked up. The only confirmation in a job is the Stage 3 Yes/No before rendering; ask it once, in chat, and do not repeat it after the user says Yes. If disk space runs low, run `python3 scripts/clean.py` (dry run), show the total, ask once, then run `python3 scripts/clean.py --apply` as one command.
-
-## Verified status & open improvements (audit of 2026-11-04)
-Checked: all 73 Python files compile, `tests.test_engine` (10 tests), `service/test_keys.py` (31 checks), `service/test_service.py --no-live` (6 checks), prompt sync, JSON validity, shell syntax and `zeno.py --check` all pass. Do not treat these as fixed until the item is removed from this list.
-
-**Fixed on 2026-11-04** (each has a test in `tests/test_engine.py` or `service/test_keys.py`; deploy `service/` for the security items to take effect)
-1. `scripts/zeno.py` now imports `edl_parser`, `Path` and `json`; `--swap-layout`, `--swap-take` and `--error-sfx` no longer crash.
-2. Tamil `டேக்ஸ்` is "takes" only (the duplicate "tax" entry was removed; "tax" is `டாக்ஸ்`). Kannada duplicate keys removed. A test fails if a lexicon key has two different values.
-3. Script cues are read by `parse_script_file`: reference/visual/character lines and `Scene changes` / `Back to` / `Cut to` / `Flashback` lines are directions, not spoken lines (Joel's W44 script went from 36 "lines" to 26 real ones, which removes false "missing lines"); `Scene changes` starts a new scene so a `whip_left` transition is placed; a trailing `(X Sign and Text Strikethrough)` or `[TEXT: "..." | strike]` becomes a red struck-through banner; a "floating window / horizontal split screen" note sets `layout_hint` for the lines that follow (a clip that is already a split stays `single`). A parenthetical like `(Suresh is talking to his Partner)` is scene context, not a silent beat.
-4. Service: `POST /api/keys` needs `ZENO_SIGNUP_CODE` (otherwise 403); company keys are not admin unless `ZENO_ADMIN_EMAILS` lists them or `ZENO_ADMIN_ALLOW_DOMAIN=1`; only `gosupernova.live` is allowed unless `ZENO_ALLOWED_EMAIL_DOMAINS` says otherwise; Google sign-in accepts only an ID token whose audience is our client id, with a verified email.
-
-**Open**
-- "Horizontal split screen" in a script is read as a horizontal divider (top and bottom panels, `split_v`) and "vertical split" as left and right (`split_h`); change `SCRIPT_SPLIT_LAYOUT` in `prepare.py` if the team means the opposite.
-- The general on-screen text format (plain text, positions, `✓`) is still undefined; only the strike-through cue is rendered. Other `[TEXT: ...]` options are parsed and ignored.
-- The segment-level changes were tested on synthetic segments, not on a full render of Joel's footage.
-
-**Improvements (planned)**
-- Editor scorecard after every render: clipped words, longest pause, A/V offset, shot-length spread, transition count, loudness, text readability, script coverage (pass/fail each).
-- J-cuts and L-cuts (audio leads or trails the picture by 4–12 frames) and reaction holds read from the script dialogue.
-- Measure editing numbers (pause, shot length, zoom, transition spacing) on the user's best finished videos and ads, then keep them in `styles/<name>/spec.json`; confirm any pattern with an A/B test before making it a rule.
-- Measure alignment on a hand-marked gold set with `eval_alignment.py` before changing any onset or end threshold.
-- On-screen text cue format (proposed, awaiting the user's confirmation): `[TEXT: "..." | strike | x]`, and accept the wording `(X Sign and Text Strikethrough)`.
-- Keep `CLAUDE.md` and `AGENTS.md` in sync with a small check script; tests for `render.py` and `layouts.py`; CI that runs the unit tests and prompt sync on every push; test the Windows installer.
+Never ask the user to clear caches and never delete them by hand (`rm -rf work/...`). Caches under `work/_clips/<stem>-<fingerprint>` refresh themselves: each folder records the engine version that made it (`engine_version.json`), a change to the transcript code (prompt, healing, lexicons) drops that clip's transcript and alignment, a change to the aligner drops only the alignment (the paid transcript stays), and a damaged file is rebuilt. Writes are atomic. Only if a result is wrong for a reason the code cannot see, run the job once with `--fresh`. The only confirmation in a job is the Stage 3 Yes/No before rendering; ask it once, in chat, and do not repeat it after the user says Yes. Disk space is handled by the daily background task (`clean.auto_clean`, only when free disk is under 20 GB); to do it by hand run `python3 scripts/clean.py` (dry run), show the total, ask once, then `python3 scripts/clean.py --apply` as one command.
 
 ## Secrets (all agents)
 Never open, print, quote or paste `.env`, `.zeno_session.json`, or any key in a chat or log. They hold the user's personal Zeno session token (or a Gemini key). To check setup, run `python3 scripts/setup.py --smoke` or `python3 scripts/setup.py --whoami`; they report [OK]/[FAIL] without showing keys. Read `.env.example` instead if you need the variable names.

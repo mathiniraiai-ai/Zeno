@@ -46,3 +46,8 @@ and leaves `GEMINI_API_KEY` empty. Zeno uses the service only when no local Gemi
 ## Tests
 `python service/test_keys.py` checks signup, admin, revoke and usage (no Gemini call; add `--database-url postgresql://...` to use a real Postgres).
 `python service/test_service.py` starts the service locally and checks health, wrong keys, bad files, size limit, rate limit, and a real transcription through the repo's own client. It makes one Gemini call using the key in your `.env`.
+
+## Transcript cache and team formats
+- **Transcript cache:** `/v1/transcribe` keys results by the audio's SHA-256, the prompt/model version, the language and the script lines. A repeat (a retry, a second editor on the same clip) is served without calling Gemini and costs no tokens (`"cached": true`). Entries last 30 days; an incomplete transcript is never cached. This stores transcripts server-side, so treat the database as company data.
+- **Formats:** `POST /v1/observations` (a computer's key) stores per-format numbers after a job; `GET /admin/api/formats` lists candidates; `POST /admin/api/formats/<style>/<format>/approve` (admin, needs `X-Zeno-Admin: 1`, at least `ZENO_FORMAT_MIN_JOBS` jobs, default 5); `GET /v1/formats` serves approved recipes.
+- Pre-job check: `POST /v1/selftest` (see scripts/preflight.py).

@@ -780,9 +780,12 @@ def main() -> None:
     ap.add_argument("--update", action="store_true", help="Run git pull + Zeno Cloud brain memory sync immediately")
     ap.add_argument("--install-schedule", action="store_true", help="Install daily 11:00 AM background auto-update schedule")
     ap.add_argument("--preflight", action="store_true", help="Run the live pre-job checks (FFmpeg, OpenCV, wav2vec2, Zeno server) and, with --script and inputs, check them too")
+    ap.add_argument("--fresh", action="store_true", help="Rebuild every cached transcript and alignment for these clips (rarely needed: caches refresh themselves when the code changes)")
     ap.add_argument("--skip-preflight", action="store_true", help="Development only: skip the pre-job gate. Agents must never use this.")
     ap.add_argument("--yes", "-y", action="store_true", help="Auto-confirm the Stage 3 Yes/No gate in standalone mode")
     args = ap.parse_args()
+    if args.fresh:
+        os.environ["ZENO_FRESH"] = "1"   # prepare.py runs as a child process and reads this
 
     if args.install_schedule:
         import auto_updater
@@ -816,6 +819,8 @@ def main() -> None:
         import brain_memory
         res = brain_memory.sync_brain_memory_with_cloud("micronarrative")
         print(f"  [BRAIN MEMORY SYNC] {res.get('message')}")
+        import format_library
+        print(f"  [FORMAT LIBRARY SYNC] {format_library.sync_team()['message']}")
         if not args.inspect and not args.execute and not args.pitch and not args.inputs:
             sys.exit(0)
 

@@ -33,6 +33,7 @@ import threading
 import time
 import wave
 from collections import defaultdict, deque
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
@@ -48,6 +49,20 @@ log = logging.getLogger("zeno.service")
 
 # Lite first: on a 93 s clip gemini-2.5-flash timed out every time while lite answered in about 4 s with a complete transcript.
 MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", "gemini-3.5-flash-lite,gemini-2.5-flash,gemini-flash-lite-latest").split(",") if m.strip()]
+def _prompt_version() -> str:
+    """Changes whenever the transcription prompt or the model order does, so a cached transcript is never reused after either."""
+    h = hashlib.sha1(",".join(MODELS).encode())
+    try:
+        for line in (Path(__file__).parent / "prompt.py").read_text(encoding="utf-8").splitlines():
+            t = line.strip()
+            if t and not t.startswith("#"):
+                h.update(t.encode("utf-8"))
+    except OSError:
+        pass
+    return h.hexdigest()[:10]
+
+
+PROMPT_VERSION = _prompt_version()
 app = FastAPI(title="Zeno transcription service", docs_url=None, redoc_url=None, openapi_url=None)
 
 
@@ -343,11 +358,28 @@ def transcribe(
         raise HTTPException(400, "target_script_lines must be a JSON list of strings")
 
     started = time.time()
+    cache_key = "|".join([
+        hashlib.sha256(audio).hexdigest(), PROMPT_VERSION, language_hint or "auto",
+        hashlib.sha256(json.dumps(lines, ensure_ascii=False).encode("utf-8")).hexdigest()[:16],
+    ])
+    result = None
     try:
-        result = _gemini.transcribe(audio, build_transcribe_prompt(lines, language_hint=language_hint or "auto"), duration)
-    except HTTPException as exc:
-        log.info("user=%s bytes=%d status=%d seconds=%.1f", name, len(audio), exc.status_code, time.time() - started)
-        raise
+        cached = store().get_cached_transcript(cache_key)
+        if cached:   # same audio, prompt and script lines: no Gemini call, no tokens
+            result = {**cached, "cached": True, "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}}
+    except Exception:
+        log.exception("transcript cache unavailable")
+    if result is None:
+        try:
+            result = _gemini.transcribe(audio, build_transcribe_prompt(lines, language_hint=language_hint or "auto"), duration)
+        except HTTPException as exc:
+            log.info("user=%s bytes=%d status=%d seconds=%.1f", name, len(audio), exc.status_code, time.time() - started)
+            raise
+        if result.get("words") and not result.get("warning"):   # an incomplete transcript is never cached
+            try:
+                store().put_cached_transcript(cache_key, result)
+            except Exception:
+                log.exception("could not cache transcript")
     usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
     in_tok = int(usage.get("input_tokens") or 0)
     out_tok = int(usage.get("output_tokens") or 0)
@@ -359,6 +391,79 @@ def transcribe(
             log.exception("could not record usage")
     log.info("user=%s bytes=%d status=200 model=%s words=%d in_tok=%d out_tok=%d seconds=%.1f%s", name, len(audio), result.get("model_used"), len(result.get("words") or []), in_tok, out_tok, time.time() - started, " WARNING=" + result["warning"] if result.get("warning") else "")
     return result
+
+
+MIN_FORMAT_JOBS = int(os.getenv("ZENO_FORMAT_MIN_JOBS", "5"))
+
+
+class FormatMetric(BaseModel):
+    format: str
+    segments: float = 0
+    seconds: float = 0
+    mean_shot_sec: float = 0
+    zoom_in_share: float = 0
+    transitions_per_min: float = 0
+    marks: float = 0
+    strike_banners: float = 0
+
+
+class ObservationBody(BaseModel):
+    style: str
+    script_hash: str
+    verified: bool = False
+    video_seconds: float = 0
+    formats: List[FormatMetric]
+
+
+@app.post("/v1/observations")
+def add_observation(body: ObservationBody, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """After a job: the numbers (never the script or footage) for each format the plan used."""
+    name, key_id = authenticate(authorization)
+    check_rate(name)
+    style = re.sub(r"[^a-z0-9_-]", "", body.style.lower())[:40] or "unspecified"
+    if len(body.formats) > 12 or not re.fullmatch(r"[0-9a-f]{8,64}", body.script_hash):
+        raise HTTPException(400, "Invalid observation")
+    formats = [f.model_dump() for f in body.formats]
+    for f in formats:
+        f["format"] = re.sub(r"[^a-z0-9_-]", "", f["format"].lower())[:30] or "?"
+    try:
+        store().add_format_observation(key_id, style, body.script_hash, body.verified, body.video_seconds, {"formats": formats})
+    except Exception:
+        log.exception("could not store observation")
+        raise HTTPException(503, "Could not store observation")
+    return {"ok": True}
+
+
+@app.get("/v1/formats")
+def approved_formats(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """Recipes an editor has approved. Computers copy these into styles/formats/team/."""
+    authenticate(authorization)
+    return {"formats": store().approved_formats()}
+
+
+@app.get("/admin/api/formats")
+def admin_formats(authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None)) -> JSONResponse:
+    require_admin(authorization, x_admin_password)
+    return JSONResponse({"min_jobs": MIN_FORMAT_JOBS, "formats": store().aggregate_formats()}, headers=NO_STORE)
+
+
+@app.post("/admin/api/formats/{style}/{fmt}/approve")
+def admin_approve_format(
+    style: str, fmt: str,
+    authorization: Optional[str] = Header(None),
+    x_zeno_admin: Optional[str] = Header(None),
+    x_admin_password: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    admin = _check_admin(authorization, x_admin_password)
+    if x_zeno_admin != "1":
+        raise HTTPException(400, "Missing admin header")
+    row = next((r for r in store().aggregate_formats() if r["style"] == style and r["format"] == fmt), None)
+    if row is None:
+        raise HTTPException(404, "No observations for that format")
+    if row["n_jobs"] < MIN_FORMAT_JOBS:
+        raise HTTPException(409, f"Needs {MIN_FORMAT_JOBS} jobs with different scripts; has {row['n_jobs']}")
+    store().approve_format(style, fmt, row["stats"], row["n_jobs"], admin.get("email") or admin.get("name") or "admin")
+    return {"approved": True, "n_jobs": row["n_jobs"]}
 
 
 @app.post("/v1/telemetry")

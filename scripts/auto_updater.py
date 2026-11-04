@@ -335,6 +335,15 @@ def main() -> None:
                 fp.write(f"[{res.get('last_checked_iso')}] status={res.get('status')} head={res.get('head')} msg={res.get('message')}\n")
         except Exception:
             pass
+        try:   # daily housekeeping: frees space only when the disk is nearly full, never asks
+            import clean
+
+            cres = clean.auto_clean()
+            if cres.get("ran"):
+                with LOG_FILE.open("a", encoding="utf-8") as fp:
+                    fp.write(f"[auto-clean] freed {cres['freed_mb']} MB (free disk was {cres['free_gb_before']} GB)\n")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

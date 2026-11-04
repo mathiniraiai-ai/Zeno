@@ -17,6 +17,7 @@ What it removes (all can be rebuilt):
 It never touches: Downloads/Zeno Outputs/, output/, styles/, assets/, models/, scripts/, input/footage/, input/script/, .env.
 """
 import argparse
+import os
 import shutil
 import sys
 import time
@@ -85,6 +86,21 @@ def safe_delete(path: Path, root: Path) -> None:
         shutil.rmtree(path)
     else:
         path.unlink()
+
+
+def auto_clean(root: Path = ROOT, min_free_gb: float = None, days: float = 14.0, purge_days: float = 90.0) -> dict:
+    """The no-questions cleanup run by the daily background task: does nothing unless free disk is under `min_free_gb`
+    (default 20, or ZENO_MIN_FREE_GB), then applies the normal age rules. Stand-ins and reference videos are left alone."""
+    limit = float(min_free_gb if min_free_gb is not None else os.environ.get("ZENO_MIN_FREE_GB", "20"))
+    free_gb = shutil.disk_usage(root).free / 1e9
+    if free_gb >= limit:
+        return {"ran": False, "free_gb": round(free_gb, 1)}
+    freed = 0
+    for _, path, n in plan_cleanup(root, days, purge_days, False, False, time.time()):
+        if path.exists():
+            safe_delete(path, root)
+            freed += n
+    return {"ran": True, "free_gb_before": round(free_gb, 1), "freed_mb": round(freed / 1e6, 1)}
 
 
 def main():

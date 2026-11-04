@@ -492,7 +492,9 @@ class GeminiTranscriber:
                 "usage": res.get("usage") or {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
             }
             cache_file.parent.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp = cache_file.with_name(cache_file.name + ".tmp")
+            tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, cache_file)
         except Exception:
             pass
 

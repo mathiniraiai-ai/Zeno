@@ -146,6 +146,30 @@ class KeyStore:
             lang TEXT DEFAULT 'all',
             author_email TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+
+        # Transcripts by audio hash (a retry or a second editor on the same clip costs nothing), and per-job format observations
+        self._run(f"""CREATE TABLE IF NOT EXISTS zeno_transcript_cache (
+            cache_key TEXT PRIMARY KEY,
+            result_json TEXT NOT NULL,
+            hits INTEGER NOT NULL DEFAULT 0,
+            created_at {real} NOT NULL)""")
+        self._run(f"""CREATE TABLE IF NOT EXISTS zeno_format_observations (
+            id {rule_pk},
+            key_id INTEGER,
+            style TEXT NOT NULL,
+            script_hash TEXT NOT NULL,
+            verified INTEGER NOT NULL DEFAULT 0,
+            video_seconds {real} NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL,
+            created_at {real} NOT NULL)""")
+        self._run(f"""CREATE TABLE IF NOT EXISTS zeno_format_recipes (
+            style TEXT NOT NULL,
+            fmt TEXT NOT NULL,
+            stats_json TEXT NOT NULL,
+            n_jobs INTEGER NOT NULL,
+            approved_by TEXT NOT NULL,
+            approved_at {real} NOT NULL,
+            PRIMARY KEY (style, fmt))""")
         if self.postgres:
             try:
                 self._run(
@@ -507,6 +531,72 @@ class KeyStore:
                     item[target_col] = fallback
             out.append(item)
         return out
+
+    # -- transcript cache --------------------------------------------------------------------
+    TRANSCRIPT_TTL_DAYS = 30
+
+    def get_cached_transcript(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        row = self._run("SELECT result_json, created_at FROM zeno_transcript_cache WHERE cache_key = %s", (cache_key,), "one")
+        if not row or time.time() - float(row[1]) > self.TRANSCRIPT_TTL_DAYS * 86400:
+            return None
+        self._run("UPDATE zeno_transcript_cache SET hits = hits + 1 WHERE cache_key = %s", (cache_key,))
+        return json.loads(row[0])
+
+    def put_cached_transcript(self, cache_key: str, result: Dict[str, Any]) -> None:
+        now = time.time()
+        self._run(
+            "INSERT INTO zeno_transcript_cache (cache_key, result_json, created_at) VALUES (%s, %s, %s) "
+            "ON CONFLICT (cache_key) DO UPDATE SET result_json = excluded.result_json, created_at = excluded.created_at",
+            (cache_key, json.dumps(result, ensure_ascii=False), now),
+        )
+        self._run("DELETE FROM zeno_transcript_cache WHERE created_at < %s", (now - self.TRANSCRIPT_TTL_DAYS * 86400,))
+
+    # -- format observations and recipes -----------------------------------------------------
+    def add_format_observation(self, key_id: Optional[int], style: str, script_hash: str, verified: bool, video_seconds: float, payload: Dict[str, Any]) -> None:
+        self._run(
+            "INSERT INTO zeno_format_observations (key_id, style, script_hash, verified, video_seconds, payload_json, created_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (key_id, style, script_hash, 1 if verified else 0, float(video_seconds), json.dumps(payload, ensure_ascii=False), time.time()),
+        )
+
+    def aggregate_formats(self, limit: int = 5000) -> List[Dict[str, Any]]:
+        """Per (style, format): how many distinct jobs (distinct scripts, verified only) and the median and quartiles of each metric."""
+        rows = self._run("SELECT style, script_hash, payload_json FROM zeno_format_observations WHERE verified = 1 ORDER BY id DESC LIMIT %s", (int(limit),), "all")
+        groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for style, script_hash, payload_json in rows:
+            try:
+                payload = json.loads(payload_json)
+            except ValueError:
+                continue
+            for f in payload.get("formats") or []:
+                g = groups.setdefault((style, f.get("format", "?")), {"scripts": set(), "metrics": {}})
+                if script_hash in g["scripts"]:
+                    continue   # a re-render of the same script counts once
+                g["scripts"].add(script_hash)
+                for k, v in f.items():
+                    if k != "format" and isinstance(v, (int, float)):
+                        g["metrics"].setdefault(k, []).append(float(v))
+        approved = {(r[0], r[1]): r[3] for r in self._run("SELECT style, fmt, stats_json, approved_at FROM zeno_format_recipes", (), "all")}
+        out = []
+        for (style, fmt), g in sorted(groups.items()):
+            stats = {}
+            for k, vals in g["metrics"].items():
+                v = sorted(vals)
+                pick = lambda q: round(v[min(len(v) - 1, int(q * (len(v) - 1) + 0.5))], 3)
+                stats[k] = {"p25": pick(0.25), "median": pick(0.5), "p75": pick(0.75)}
+            out.append({"style": style, "format": fmt, "n_jobs": len(g["scripts"]), "stats": stats, "approved_at": approved.get((style, fmt))})
+        return out
+
+    def approve_format(self, style: str, fmt: str, stats: Dict[str, Any], n_jobs: int, approved_by: str) -> None:
+        self._run("DELETE FROM zeno_format_recipes WHERE style = %s AND fmt = %s", (style, fmt))
+        self._run(
+            "INSERT INTO zeno_format_recipes (style, fmt, stats_json, n_jobs, approved_by, approved_at) VALUES (%s, %s, %s, %s, %s, %s)",
+            (style, fmt, json.dumps(stats, ensure_ascii=False), int(n_jobs), approved_by[:80], time.time()),
+        )
+
+    def approved_formats(self) -> List[Dict[str, Any]]:
+        rows = self._run("SELECT style, fmt, stats_json, n_jobs, approved_by, approved_at FROM zeno_format_recipes ORDER BY style, fmt", (), "all")
+        return [{"style": r[0], "format": r[1], "stats": json.loads(r[2]), "n_jobs": r[3], "approved_by": r[4], "approved_at": r[5]} for r in rows]
 
     def revoke(self, key_id: int) -> bool:
         before = self._run("SELECT COUNT(*) FROM zeno_keys WHERE id = %s AND revoked_at IS NULL", (key_id,), "one")[0]
