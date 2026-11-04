@@ -1,14 +1,13 @@
 # 06 · Token budget & automated telemetry
 
-**Goal:** 15–20k tokens per minute of finished video. Earlier fully-Claude edits ran about 70k.
-CLAUDE.md sets the working numbers: target 12–18k, ceiling 20k.
+**Budget:** 50k to 70k tokens per video. The Director makes every editing decision, so spend tokens on looking properly.
 
-## How to stay under budget
-- The Engine does the work. You read `brief.txt` (~900 tokens) and `plan.edl` (~240 tokens), plus one contact-sheet image.
+## How to spend them
+- Read `line_map.md`, `facts.md` and every clip sheet in full, then write `plan.edl` yourself.
 - One script tab, never the whole document.
 - A fresh session for each video. Unused connectors off.
-- Cheaper tier by default (for example Sonnet 5.5). Strongest tier (for example Opus 5.5) only for learning a new style. Same budget for any agent.
-- Warn the user mid-job if retakes or messy footage risk passing 20k per minute.
+- Sonnet 5.5 or Opus 5.5. Opus for messy footage, or when a plan fails its check twice.
+- Warn the user mid-job if the job risks passing 70k.
 
 ## Automated per-clip & per-agent token tracking (`scripts/token_tracker.py`)
 `prepare.py` and `render.py` call `scripts/token_tracker.py` automatically:

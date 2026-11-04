@@ -52,23 +52,22 @@ Start a **new agent session for each video** (it keeps token use low), open the 
    - the **footage folder**: a folder on your computer (Drive or web links are not downloaded; download them first).
 3. **Nothing starts before you answer.** Then `python scripts/zeno.py --inspect <footage folder> --script "<script link>" [--lang auto] [--style micronarrative]` repeats the live checks and measures what you gave it: the script (spoken lines, scenes, speakers, silent beats, split-screen notes, strike-through lines) and every clip (readable? has audio? how long?). It stops with `[BLOCKED]` and says why if something is wrong. It also prints which style the job follows; `--style <name>` makes the job count toward that style and the team's learning.
 
-## 3. What Zeno measures, and what it decides from it
+## 3. What Zeno measures, and what the agent decides
 
-| Measured | Decided from it |
+Zeno does the mechanical work: it transcribes, measures and renders. **The AI agent (Claude Opus or Sonnet) makes every editing decision.**
+
+| Zeno measures | The agent decides from it |
 |---|---|
-| The words in each clip (Gemini, through the server; Hindi, Kannada, English and mixes) | which clips are takes of the same line, and the best take |
-| The exact time of every word (wav2vec2) | where to cut, so no word is clipped |
-| Silences and breaths (10 ms energy) | tighter pauses, cuts inside pauses |
-| Each voice against the script's speakers | a line said by the wrong character is cut and replaced from another clip |
-| Faces: how many, how big, where the eyes are (OpenCV) | framing, zooms, and whether a clip already contains a split screen |
-| Silent clips | the picture shown for the character who is listening (see section 6) |
-| The script itself | layout, transitions at scene changes, ✗ and ✓ marks, strike-through text |
+| The words in each clip (Gemini, through the server) and the exact time of every word (wav2vec2) | which clip says which line, the best take, where to cut |
+| Silences and breaths | which pauses to cut |
+| Faces, framing, silent clips, plus a picture sheet of every clip | layouts, zooms, listeners in split screens |
+| The script itself | transitions, ✗ and ✓ marks, strike-through text |
 
-The result is three short files in `work/<project>/`: `brief.txt`, `plan.edl` and `pitch_card.md` (about 2,000 tokens together). The agent reads only these, not the raw data.
+**The script is the timeline.** File names and file order do not affect the edit. A job uses about 50,000 to 70,000 tokens.
 
 ## 4. Approve the plan (one Yes/No)
 
-The agent shows you the **editorial pitch card**: which clips are used, the layouts, transitions, marks, and any alerts. It may make small fixes in `plan.edl` (you can also ask for `--swap-layout` or `--swap-take`). Then it asks **one** Yes/No question. Nothing renders before a Yes, and it does not ask again afterwards.
+The agent writes the plan and Zeno checks it: every line present, once, in script order; no cut inside a word; each voice matches its character. A plan that fails is not rendered. Then the agent shows you the plan and asks **one** Yes/No. Nothing renders before a Yes, and it does not ask again afterwards.
 
 ## 5. Render, check, hand over
 
@@ -89,8 +88,8 @@ The agent prints a token table and adds a row to `README.md`. After a verified j
 - **Strike-through text:** end a line with `(X Sign and Text Strikethrough)` and the line's words appear struck through in red.
 - **Split screen:** write who sits where: `Top: Robot | Bottom: Lady 1`, or `Woman - Right screen | Miss Nova - Left screen`. "Horizontal split" means top and bottom; "vertical split" means left and right.
 - **Silent moments:** `(Man takes out his phone)`, or a reaction on a line: `L4 Man (laughs mockingly): …`.
-- **Silent listening clips (important for splits):** while one character speaks, the other panel shows the other character, silent and listening. Left speaks, right listens; right speaks, left listens; the same for top and bottom. Save each character's silent clip with their name in the file name, for example `Robot_listening.mp4` or `Lady1_idle.mp4`. Without one, Zeno uses a quiet moment from that character's own clip and flags `[LISTENER_FALLBACK]` in the brief.
-- **Takes:** clips that say the same thing are takes of one line, whatever they are called. Zeno keeps the best and lists the others as `[ALT_TAKE]`. A learner repeating the teacher's corrected sentence is a line of its own, not a retake.
+- **Silent listening clips (important for splits):** while one character speaks, the other panel shows the other character, silent and listening. Left speaks, right listens; right speaks, left listens; the same for top and bottom. Save each character's silent clip with their name in the file name, for example `Robot_listening.mp4` or `Lady1_idle.mp4`. Without one, the agent uses a quiet moment from that character's own clip and tells you.
+- **Takes:** clips that say the same thing are takes of one line, whatever they are called. The agent compares them and uses the best. A learner repeating the teacher's corrected sentence is a line of its own, not a retake.
 - **No clips yet?** Zeno can write the Veo shot JSON and first-frame prompt for every script line (`scripts/preproduce.py`, see `agent/concepts/08_preproduction`). Name the generated clips `<reel-code>_D-1.mp4`, `_D-2.mp4`, … and run the normal edit.
 - Burned-in subtitles in client footage are ignored for now.
 

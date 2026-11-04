@@ -4,15 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # Zeno — Low-Token Operational Manual
 
-Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input/footage/` and a script in `input/script/`, output best takes, pause-snapped cuts, dynamic speaker layouts, and `✓`/`✗` marks + SFX to `~/Downloads/Zeno Outputs/`.
+Script-led AI video editing harness (`1080x1920` MP4). Zeno only transcribes, measures and renders. **The agent (Claude Opus or Sonnet) makes every editing decision and writes `plan.edl`**, following `agent/EDIT_RULES.md`. Finished videos go to `~/Downloads/Zeno Outputs/`.
 
-**Agent entry point**: read `agent/DIRECTOR.md` first. It sets the decision loop and points to one concept file per topic in `agent/concepts/` (script intake, footage intake, style library, reference learning, on-screen text, token budget). Learned styles live in `styles/<name>/`. A style may allow captions or extra graphics only if its own `SKILL.md` says so; otherwise rule 4 below applies.
+**Agent entry point**: read `agent/DIRECTOR.md` first, then `agent/EDIT_RULES.md` (how to make every decision). DIRECTOR sets the loop and points to one concept file per topic in `agent/concepts/` (script intake, footage intake, style library, reference learning, on-screen text, token budget). Learned styles live in `styles/<name>/`. A style may allow captions or extra graphics only if its own `SKILL.md` says so; otherwise rule 4 below applies.
 
 ## 1. Hard Rules
 1. **Workspace Isolation**: Never modify any files outside this Zeno folder (team PCs: `~/Documents/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`). Never touch other projects in `Documents`.
 2. **Folders**: Zeno runs from `~/Documents/Zeno` on team PCs (the installer puts it there). Every finished video (`.mp4` + `.timeline.txt`) goes to `~/Downloads/Zeno Outputs/`, never inside the repo. Raw clips can stay in any local folder: pass their path to `prepare.py`.
-3. **Takes**: Every clip is transcribed. Clips that say the same thing are takes of one line, whatever their file names, their order, or even if the audio or video is identical (2, 3 or 5 copies): `prepare.py` scores all of them and keeps exactly ONE (`[BEST_TAKE]`); the others are listed as `[ALT_TAKE]` with scores in `brief.txt`. Never assume the first, middle or last take is right: check the scores and swap a take in `plan.edl` if needed.
-4. **Speakers**: The script names who speaks each line (`L2 Robot: ...`). `prepare.py` measures the voices and cuts any line spoken by the wrong character (`[WRONG_SPEAKER]` in `brief.txt`), then looks in every clip, including unused takes, for that line said by the right character and splices it in (`[FILL]`). `[WRONG_SPEAKER_NO_FIX]` means no clip has the right voice saying it: tell the user to reshoot. `[SPEAKER_CHECK] not applied` means the voices could not be told apart: say so in the report. Reference samples in `input/voices/<Speaker>.wav` make this reliable with few clips.
+3. **Takes**: The agent chooses the take. `line_map.md` lists every clip stretch that says each line, `facts.md` has each word. Never assume the first, middle or last take is right, and never trust file names or file order: the script is the timeline.
+4. **Speakers**: The agent sets `sp="<name>"` on every segment. `--check-plan` measures the voice in each cut against it and blocks `WRONG VOICE`: pick another take, and if no clip has the right voice, tell the user to reshoot. `voices not checked` means the voices could not be told apart: say so in the report. Reference samples in `input/voices/<Speaker>.wav` make this reliable with few clips.
 5. **Never Read Raw JSONs or Python Source**:
    - **Never** read `work/*/words.json`, `work/*/silences.json`, or `work/*/align.json` unless debugging a specific word timing.
    - **Never** read `scripts/*.py` during normal edits. Use the 3-step CLI workflow and `plan.edl` syntax below.
@@ -20,9 +20,8 @@ Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input
 7. **Clean Editorial Style**: No B-roll, no unrequested captions, no CTAs, no extra graphics.
 
 ## 2. Token Budget & Mandatory Reporting
-- **Target**: **`12k–18k tokens` per minute of finished video** (`~20k–30k total` for a typical 1.5-min edit).
-- **Strict Ceiling**: **`20k tokens / min`** of finished video.
-- **Mid-Job Warning**: Warn the user immediately if messy footage or excessive retakes risk exceeding `20k tokens / min`.
+- **Budget**: **`50k–70k tokens` per video**, spent on real editorial decisions.
+- **Mid-Job Warning**: Warn the user immediately if a job risks going over `70k tokens`.
 - **Mandatory End-of-Job Output**: Print the Token Usage table at the end of every job **and** append a row to `README.md`:
 
 ```markdown
@@ -31,7 +30,7 @@ Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input
 | YYYY-MM-DD | **<Language> – "<Title>"** (<N> clips, <M> script lines): <MM:SS> final, <K> ✓/✗ marks → `~/Downloads/Zeno Outputs/<name>.mp4` | <start> → <end> | ~<delta> | <start>% → <end>% | <start>% → <end>% |
 ```
 
-## 3. The 5-Stage Interactive Zeno Harness (`scripts/zeno.py`)
+## 3. The Job (`scripts/zeno.py`)
 
 **Pre-job gate (mandatory, every job, every agent).** Do not start from a guess and do not start before the user has handed over the inputs:
 1. Run `python3 scripts/zeno.py --preflight`. It runs live checks (FFmpeg, OpenCV face detection on a real frame, the wav2vec2 aligner, and a small WAV sent to the Zeno server, which checks its key store and Gemini). Show the user the PASS/FAIL table.
@@ -39,23 +38,22 @@ Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input
 3. Only after the user answers, run `python3 scripts/zeno.py --inspect <footage> --script <script>`. It repeats the live checks, then checks the script (spoken lines, scenes, strike-through text, layout notes) and every clip (readable, has audio) and prints them. If anything fails it stops with `[BLOCKED]` and exits with code 2; fix the listed problem with the user. Never use `--skip-preflight`.
 
 
-0. **Stage 0 — Edit Bay Readiness Check**:
-   `python3 scripts/zeno.py --check` (prints `[✓] Installed` vs `[✗] Remaining` across all 8 dependencies without reading `.env` secrets).
-1. **Stages 1–3 — Ingest, Transcribe, Match & Pitch (`1 command` + 50s Live Heartbeat)**:
+**The job, step by step**
+0. **Stage 0 — Edit Bay Readiness Check**: `python3 scripts/zeno.py --check` (prints `[✓] Installed` vs `[✗] Remaining` across all 8 dependencies without reading `.env` secrets).
+1. **Measure (`1 command` + 50s Live Heartbeat)**:
    ```bash
-   python3 scripts/zeno.py --inspect <raw_dir_or_clips> --script <script_path_or_google_doc_url> [--lang <lang>] [--style <name>] [--preset auto|single|split_v|split_h|chat_bar|video_call|hybrid] [--mark-pack default|glossy|flash|vignette]
+   python3 scripts/zeno.py --inspect <raw_dir_or_clips> --script <script_path_or_google_doc_url> [--lang <lang>] [--style <name>] [--mark-pack default|glossy|flash|vignette]
    ```
-   - `--style <name>`: the style folder this job follows (for example `micronarrative`). Always pass it when the style is known: it writes `# style: <name>` into the plan so the job counts toward the style's readiness level (`scripts/style_readiness.py`) and the team's learning.
+   - `--style <name>`: the style folder this job follows (for example `micronarrative`). Always pass it when the style is known: it writes `# style: <name>` into the plan so the job counts toward the style's readiness level and the team's learning.
    - `<lang>`: `en`, `kn`/`kannada`, `ta`/`tamil`, `hi`/`hindi`, `te`/`telugu`, `ml`/`malayalam`, or `auto`.
-   - Emits live stage progress every ~48s (`work/<project>/progress.json` / `python3 scripts/progress.py`). Schedule a 50s timer while running in the background so the user gets live stage updates in chat.
-2. **Stage 3 Gate — Refine Plan & Ask Yes/No Before Rendering (`Mandatory Stop`)**:
-   - Read **ONLY** `work/<project>/brief.txt`, `work/<project>/plan.edl`, and `work/<project>/pitch_card.md`.
-   - Refine `work/<project>/plan.edl` using Agents 1–4, refresh the pitch card (`python3 scripts/zeno.py --pitch work/<project>/plan.edl`), **present the Editorial Pitch Card**, and **ask the user Yes/No** before rendering.
-3. **Stages 4–5 — Render, Premiere `.prproj` Export & Verify (`1 command` after Yes)**:
+   - Writes `work/<project>/line_map.md`, `facts.md`, `clip_sheet_<n>.jpg`, and `plan.edl` with a header and **no segments**. Progress every ~48s (`work/<project>/progress.json` / `python3 scripts/progress.py`).
+2. **Edit (the agent decides everything)**: follow `agent/EDIT_RULES.md`: read the line map, facts and clip sheets, write every segment of `plan.edl`, then run `python3 scripts/zeno.py --check-plan work/<project>/plan.edl` until it passes. It blocks lines out of script order, missing or said twice, cuts inside a word, and a voice that does not match `sp=`. A deliberate exception goes in `work/<project>/decisions.txt` (`accept L2 <reason>`).
+3. **Stop and ask**: show the user the plan and ask Yes/No once before rendering.
+4. **Render, Premiere `.prproj` Export & Verify (`1 command` after Yes)**:
    ```bash
    python3 scripts/zeno.py --execute work/<project>/plan.edl [--square] [--loudness -11.5] [--gain-db +2.0]
    ```
-   - Renders `~/Downloads/Zeno Outputs/<name>.mp4` + `<name>_1x1.mp4` (`1080×1080` Square Meta Ad) + `<name>.timeline.txt` + **editable Adobe Premiere Pro project files** (`<name>.prproj` and `<name>.premiere.xml`), runs deterministic script coverage & `-11.5 LUFS` (`-1.0 dBTP` cap) loudness check, and generates `work/<project>/marks_contact_sheet.jpg`. Use `vol=+3dB` on any segment in `plan.edl` for exact mid-video dB boosts, or run `python3 scripts/premiere_export.py work/<project>/plan.edl` standalone.
+   - Renders `~/Downloads/Zeno Outputs/<name>.mp4` + `<name>_1x1.mp4` (`1080×1080` Square Meta Ad) + `<name>.timeline.txt` + **editable Adobe Premiere Pro project files** (`<name>.prproj` and `<name>.premiere.xml`), repeats the plan check, verifies script order from the words in each cut, `-11.5 LUFS` (`-1.0 dBTP` cap) loudness, and generates `work/<project>/marks_contact_sheet.jpg`. Use `vol=+3dB` on any segment in `plan.edl` for exact mid-video dB boosts.
 
 ## 4. The 5 Dynamic Layout Modes, Pre-Stitched Split Screens & Swappable Mark Packs
 
@@ -78,14 +76,9 @@ Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input
 - Custom: Place `right.png` & `wrong.png` in `assets/marks/<pack>/`.
 - **Skill Links**: [`.agent/skills/video-edit/SKILL.md`](.agent/skills/video-edit/SKILL.md) | [`styles/micronarrative/SKILL.md`](styles/micronarrative/SKILL.md) | [`agent/DIRECTOR.md`](agent/DIRECTOR.md) | [`agent/concepts/word_boundary_training.md`](agent/concepts/word_boundary_training.md)
 
-## 5. Mandatory 5-Agent Parallel Workflow & Agent 5 Deep Post-Render Analyzer
+## 5. One Director, Full Review
 
-Assign at least **5 specialized agents** per editing task (defaulting to **Antigravity** or **Claude Code**):
-1. **Agent 1 (`Script Coverage & Take Auditor`)**: Audits 100% script coverage, speaker identity, and best takes.
-2. **Agent 2 (`Pause-Cut & De-Duplication Specialist`)**: Removes repeated dialogues/words/false starts and cuts internal silences (`>0.85s`).
-3. **Agent 3 (`Dynamic Zoom & Layout Choreographer`)**: Applies punch-ins (`z=1.08`), push-ins (`z=1.0->1.06`), pull-outs (`z=1.08->1.0`), and layouts.
-4. **Agent 4 (`Transitions, Rapid-Strobe Overlays & SFX Designer`)**: Applies transitions (`smoothleft`, `smoothright`, `warm_flash`, `fade`) + `whoosh.wav` (`-2 dB`) and rapid-strobe full-frame Red/Green PNG overlays + strong error/right SFX.
-5. **Agent 5 (`Post-Render Deep Video Analyzer & Auto-Fixer`)**: After `render.py` completes, inspects the complete rendered video locally via Python (`verify.py`, `words.json` timestamps, FFmpeg `silencedetect`, WAV RMS energy, and RGB frame checks — without external API calls) to catch and fix any repeated dialogues, empty silences, or missing transitions/SFX/overlays.
+The agent makes all decisions in one pass, in the order given by `agent/EDIT_RULES.md`: timeline, takes, speakers, cuts, layouts, motion, transitions, marks, then a self-review as an editor. After rendering, `verify.py` checks the result locally (order, clipped words, pauses, loudness, marks, split rules). Read its output, look at `marks_contact_sheet.jpg`, fix `plan.edl` and render again if anything fails.
 
 ## 6. `plan.edl` Quick Syntax
 
@@ -132,10 +125,10 @@ There is no linter or build step. `tests/test_engine.py` also scores a gold-set 
 
 ## 8. Architecture (big picture)
 
-**Director / Engine split.** A thin LLM "Director" (`agent/DIRECTOR.md` + `agent/concepts/*`) only reads small text files and edits `plan.edl`; everything measurable is Python in `scripts/`. This is why the token budget is low: do not move measuring work into prompts. `CLAUDE.md` and `AGENTS.md` (Antigravity/OpenAI) are parallel manuals and must be kept in sync.
+**Director / Engine split.** The LLM Director (`agent/DIRECTOR.md`, `agent/EDIT_RULES.md`) makes every editing decision and writes `plan.edl`. Python in `scripts/` only transcribes, measures, checks and renders. Do not add editing decisions back into Python: a measurement or a safety check belongs in the Engine, a choice belongs in `EDIT_RULES.md`. `CLAUDE.md` and `AGENTS.md` (Antigravity/OpenAI) are parallel manuals and must be kept in sync.
 
-**Pipeline** (`scripts/zeno.py` orchestrates; the older `prepare.py` → `render.py` CLI still works): ingest/extract audio → transcribe → align → group takes and match script lines → write `brief.txt` + `plan.edl`/`plan.json` + `pitch_card.md` → Yes/No gate → `render.py` (+ `premiere_export.py`, `verify.py`, token telemetry).
-- `prepare.py` is the large planner: take grouping/scoring, wrong-speaker detection (`speaker_check.py`), silent-beat handling (`motion.py`), cut snapping to 10 ms RMS minima, mark/SFX placement. Per-clip caches live in `work/_clips/<stem>-<fingerprint>`.
+**Pipeline** (`scripts/zeno.py` orchestrates): ingest/extract audio → transcribe → align → measure → write `line_map.md` + `facts.md` + clip sheets → the Director writes `plan.edl` → `--check-plan` → Yes/No gate → `render.py` (+ `premiere_export.py`, `verify.py`, token telemetry).
+- `prepare.py` measures: transcripts, 10 ms energy, pauses, silent clips, faces. `script_order.py` holds the candidates per line and the plan checks (order, coverage, cuts, voices via `speaker_check.py`) and moves cuts to the quietest point of their gap. Per-clip caches live in `work/_clips/<stem>-<fingerprint>`.
 - `edl_parser.py` is the lossless `plan.edl` ⇄ `plan.json` bridge; `render.py` + `layouts.py` turn segments into FFmpeg filter graphs (layouts, zooms, overlay transitions from `assets/transitions/*.json`, marks, SFX, loudness). `vision_tracker.py` (OpenCV/YuNet) drives framing.
 - `scripts/align_engine/` is the alignment stack: Gemini verbatim transcript (`gemini_transcriber.py`) → `guardian.py`/lexicon loanword healing → Indic G2P (`phonetics/`, `uroman/` fallback) → wav2vec2 base CTC (`acoustic.py`, `viterbi.py`) → energy snaps in `onset_verifier.py`. wav2vec2 base (MIT) is the only aligner; MMS (CC-BY-NC) must not come back.
 - Tuning thresholds live in `styles/<name>/spec.json` (`tuning`/`engine` blocks) read through `style_config.py`; learned editor rules persist in `styles/<name>/brain_memory.json` (`brain_memory.py`) and are injected into `brief.txt`. New styles are learned from a reference video with `learn_reference.py` (scan → frames → align → standins).
@@ -146,7 +139,7 @@ There is no linter or build step. `tests/test_engine.py` also scores a gold-set 
 Zeno uses the computer's GPU by itself: the aligner runs on NVIDIA CUDA or the Apple GPU (MPS), and H.264 encoding uses VideoToolbox (Mac), NVENC / Quick Sync / AMF (Windows), each tested with a real encode and falling back to CPU (`libx264`) if it fails. `python3 scripts/gpu_install.py --status` and `setup.py --smoke` show what a computer uses. Force with `ZENO_DEVICE=cpu|cuda|mps` or `ZENO_ENCODER=cpu|h264_nvenc|...`. On Windows the installer (and the daily updater) switches to the CUDA build of torch when `nvidia-smi` finds a driver with CUDA 12.6 or newer; it never overwrites a CUDA torch with the CPU build.
 
 ## Caches & confirmations (all agents)
-Never ask the user to clear caches and never delete them by hand (`rm -rf work/...`). Caches under `work/_clips/<stem>-<fingerprint>` refresh themselves: each folder records the engine version that made it (`engine_version.json`), a change to the transcript code (prompt, healing, lexicons) drops that clip's transcript and alignment, a change to the aligner drops only the alignment (the paid transcript stays), and a damaged file is rebuilt. Writes are atomic. Only if a result is wrong for a reason the code cannot see, run the job once with `--fresh`. The only confirmation in a job is the Stage 3 Yes/No before rendering; ask it once, in chat, and do not repeat it after the user says Yes. Disk space is handled by the daily background task (`clean.auto_clean`, only when free disk is under 20 GB); to do it by hand run `python3 scripts/clean.py` (dry run), show the total, ask once, then `python3 scripts/clean.py --apply` as one command.
+Never ask the user to clear caches and never delete them by hand (`rm -rf work/...`). Caches under `work/_clips/<stem>-<fingerprint>` refresh themselves: each folder records the engine version that made it (`engine_version.json`), a change to the transcript code (prompt, healing, lexicons) drops that clip's transcript and alignment, a change to the aligner drops only the alignment (the paid transcript stays), and a damaged file is rebuilt. Writes are atomic. Only if a result is wrong for a reason the code cannot see, run the job once with `--fresh`. The only confirmation in a job is the Yes/No before rendering; ask it once, in chat, and do not repeat it after the user says Yes. Disk space is handled by the daily background task (`clean.auto_clean`, only when free disk is under 20 GB); to do it by hand run `python3 scripts/clean.py` (dry run), show the total, ask once, then `python3 scripts/clean.py --apply` as one command.
 
 ## Secrets (all agents)
 Never open, print, quote or paste `.env`, `.zeno_session.json`, or any key in a chat or log. They hold the user's personal Zeno session token (or a Gemini key). To check setup, run `python3 scripts/setup.py --smoke` or `python3 scripts/setup.py --whoami`; they report [OK]/[FAIL] without showing keys. Read `.env.example` instead if you need the variable names.

@@ -86,16 +86,6 @@ Always check how the raw footage was generated before assigning layouts in `plan
 
 ---
 
-## 5. Mandatory 10-Agent Dedicated Pipeline (and 5-Agent Core Loop)
+## 5. Who decides
 
-Every subtopic edit from the Master Editing Formats sheet runs through Zeno's **10-Agent Dedicated Pipeline**:
-1. **Agent 1 — Reference Cut, Pacing & Scene Deconstructor**
-2. **Agent 2 — Script & Phonetic Line Mapper**
-3. **Agent 3 — Raw Clip & Best-Take Selector**
-4. **Agent 4 — Acoustic Pause-Cut & De-Duplication Specialist**
-5. **Agent 5 — Layout & Split-Screen / Hologram Choreographer**
-6. **Agent 6 — Dynamic Camera, Zoom & Framing Agent**
-7. **Agent 7 — Overlays, Marks (`✓`/`✗`), Banners & Subtitles Agent**
-8. **Agent 8 — Transitions & SFX Designer**
-9. **Agent 9 — Style Brain & Engine Rule Integrator**
-10. **Agent 10 — Post-Render Deep Video Verifier & Auto-Fixer**
+The Director makes every decision in one pass, by `agent/EDIT_RULES.md` and this style's rules.

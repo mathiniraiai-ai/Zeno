@@ -89,13 +89,15 @@ python3 scripts/prepare.py input/footage/*.mp4 \
   [--preset auto|single|split_v|split_h|chat_bar|video_call|hybrid] \
   [--mark-pack default|glossy|flash|vignette]
 ```
-- Transcribes clips, runs forced alignment + silence detection, matches takes against the script, prunes retakes/babble, snaps cuts to pauses, and writes:
-  - `work/<project>/brief.txt` (`~900 tokens` — all clips, takes, pauses, and alignments in one compact digest)
-  - `work/<project>/plan.edl` (`~240 tokens` — pipe-delimited Edit Decision List, synced with `plan.json`)
+- Transcribes clips, aligns every word, measures pauses, faces and silent clips. It decides nothing. It writes:
+  - `work/<project>/line_map.md` (the script, and which clip stretches say each line)
+  - `work/<project>/facts.md` (every word with its time)
+  - `work/<project>/clip_sheet_<n>.jpg` (pictures of every clip)
+  - `work/<project>/plan.edl` (header only)
 
-### 2. Review Brief & Refine Plan (`1 read + 1 tiny edit`)
-- The agent reads **ONLY** `work/<project>/brief.txt` and `work/<project>/plan.edl` (never raw `words.json` or `scripts/*.py`).
-- Verifies take selection, pause-snapped cut points, layout modes, and `✓`/`✗` mark timing, making a tiny edit to `plan.edl` if needed.
+### 2. The agent edits
+- Claude Opus or Sonnet makes every decision by `agent/EDIT_RULES.md` and writes `plan.edl`, about 50k to 70k tokens per video.
+- `python3 scripts/zeno.py --check-plan work/<project>/plan.edl` must pass: script order, every line once, no cut inside a word, voices match.
 
 ### 3. Render & Verify (`1 command`)
 ```bash
