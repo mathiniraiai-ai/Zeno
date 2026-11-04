@@ -1111,6 +1111,7 @@ Lady 1: I'm working on the farm while talking to you
                 self.assertEqual((zipdir / ".env").read_text(), "SECRET=1\n", "the secret is untouched")
                 self.assertEqual((zipdir / "work" / "keep.txt").read_text(), "mine\n")
                 self.assertEqual(g(zipdir, "status", "--porcelain").stdout.strip(), "", "the files already match the repository")
+                self.assertEqual(g(zipdir, "config", "core.fileMode").stdout.strip(), "false", "lost executable flags are not edits")
                 self.assertEqual(auto_updater.connect_to_git(zipdir, remote=str(remote))["status"], "already_connected")
 
                 (seed / "scripts" / "tool.py").write_text("v2\n", encoding="utf-8")

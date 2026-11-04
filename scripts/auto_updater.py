@@ -69,6 +69,7 @@ def connect_to_git(root: Path = None, remote: str = "", branch: str = "main") ->
 
     try:
         run("init", "-q")
+        run("config", "core.fileMode", "false")   # a ZIP loses the executable flag; that must not look like a local edit
         run("remote", "add", "origin", remote)
         fetched = run("fetch", "--depth", "1", "origin", branch)
         if fetched.returncode != 0:
