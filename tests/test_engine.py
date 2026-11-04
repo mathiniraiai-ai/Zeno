@@ -1262,6 +1262,18 @@ class TestScriptIsTheTimeline(unittest.TestCase):
         self.assertEqual(problems, [])
         self.assertIn("check by ear", note)
 
+    def test_snapping_never_moves_a_cut_across_a_long_gap(self):
+        from unittest import mock
+        import script_order
+
+        ws = [{"w": "a", "start": 1.0, "end": 1.4}, {"w": "b", "start": 5.0, "end": 5.4}]
+        env = [(round(i * 0.01, 2), -140.0) for i in range(700)]      # a 3.6 s gap of digital silence: every point is "quietest"
+        plan = {"segments": [{"id": "L1", "src": "a", "start": 4.9, "end": 6.0}]}
+        with self._with_words(ws), mock.patch("common.clip_work_dir", return_value=Path("/nonexistent")), \
+             mock.patch("prepare.compute_10ms_rms_envelope", return_value=env), mock.patch.object(Path, "is_file", return_value=True):
+            script_order.snap_cuts(plan)
+        self.assertGreaterEqual(plan["segments"][0]["start"], 4.9 - script_order.SNAP_REACH_SEC - 1e-6)
+
     def test_empty_plan_cannot_render(self):
         from unittest import mock
         import tempfile

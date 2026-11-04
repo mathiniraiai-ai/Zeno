@@ -28,6 +28,7 @@ FIT_MIN = 0.40        # below this a segment is not proven to say a line
 TIE = 0.08            # lines this close to the best fit are treated as equally likely (repeated wording in a script)
 HEARD_MIN = 0.50      # share of a line's words that must be heard for the line to count as present
 STRONG = 0.55         # evidence needed to call a segment out of order from its words alone
+SNAP_REACH_SEC = 0.12   # a cut may move at most this far to reach a quiet point
 REPEAT_RECALL = 0.8   # two separate segments that each hold this much of a line say it twice
 
 
@@ -437,7 +438,9 @@ def snap_cuts(plan: Dict[str, Any]) -> int:
             for w0, w1 in zip(ws, ws[1:]):
                 a, b = float(w0["end"]), float(w1["start"])
                 if a <= t <= b and b - a >= 0.03:
-                    new = round(float(find_rms_minimum(env, a, b)[0]), 2)
+                    # only a small nudge: in a long gap (or digital silence) the quietest point can be seconds away, which adds dead air
+                    lo, hi = max(a, t - SNAP_REACH_SEC), min(b, t + SNAP_REACH_SEC)
+                    new = round(float(find_rms_minimum(env, lo, hi)[0]), 2)
                     if new != round(t, 2):
                         s[key] = new
                         moved += 1

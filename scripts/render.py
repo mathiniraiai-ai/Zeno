@@ -496,31 +496,56 @@ def main() -> None:
         inputs += ["-i", f]
         fc.append(f"[{i}:v]settb=AVTB,setpts=PTS-STARTPTS[sv{i}]")
         fc.append(f"[{i}:a]asetpts=PTS-STARTPTS[sa{i}]")
-    v, au = "[sv0]", "[sa0]"
+    au = "[sa0]"
     acc = durs[0]
     xf_audio_dur = 0.045  # 45ms constant-power/triangular audio crossfade (zero drift via apad)
     for i in range(1, len(segs)):
-        s = segs[i]
-        nv, na = f"[v{i}]", f"[a{i}]"
-        if s["_tr"] == "cut":
-            fc.append(f"{v}[sv{i}]concat=n=2:v=1:a=0{nv}")
-            fc.append(f"{au}apad=pad_dur={xf_audio_dur:.4f}[ap{i}]")
-            fc.append(f"[ap{i}][sa{i}]acrossfade=d={xf_audio_dur:.4f}:c1=tri:c2=tri{na}")
-            acc += durs[i]
-        else:
-            tr_name = s["_tr"]
+        na = f"[a{i}]"
+        fc.append(f"{au}apad=pad_dur={xf_audio_dur:.4f}[ap{i}]")
+        fc.append(f"[ap{i}][sa{i}]acrossfade=d={xf_audio_dur:.4f}:c1=tri:c2=tri{na}")
+        acc += durs[i]
+        au = na
+
+    # Video: one concat of every cut. A transition is a small xfade of ONLY the last frames of one cut with the first frames of the
+    # next (each input starts at 0, offset 0), so it cannot move or lose any other footage, and the total length stays the sum of the cuts.
+    # (A long chain of xfade filters with computed offsets silently dropped all footage after the second whip.)
+    nsegs = len(segs)
+    frames = [max(1, round(durs[i] * fps)) for i in range(nsegs)]
+    half = [0] * nsegs         # frames each side of the join INTO segment i (0 = plain cut)
+    for i in range(1, nsegs):
+        if segs[i]["_tr"] != "cut":
+            half[i] = max(2, min(round(segs[i]["_d"] * fps / 2.0), frames[i - 1] // 2, frames[i] // 2))
+    parts: List[str] = []
+    for i in range(nsegs):
+        head = half[i]
+        tail = half[i + 1] if i + 1 < nsegs else 0
+        uses = ["bd"] + (["hd"] if head else []) + (["tl"] if tail else [])
+        fc.append(f"[sv{i}]split={len(uses)}" + "".join(f"[{u}{i}]" for u in uses))
+        if i and head:
+            tr_name = segs[i]["_tr"]
             meta_spec = _META_TRANSITIONS.get(tr_name)
             xfade_tr = meta_spec["xfade"] if meta_spec else tr_name
-            k_half = max(2, round(s["_d"] * fps / 2.0))
-            d_xfade = (2 * k_half) / float(fps)
-            offset_xfade = max(0.0, acc - (k_half / float(fps)))
-            fc.append(f"{v}tpad=stop_mode=clone:stop={k_half},fps={fps}[xa{i}]")
-            fc.append(f"[sv{i}]tpad=start_mode=clone:start={k_half + 1},fps={fps}[xb{i}]")
-            fc.append(f"[xa{i}][xb{i}]xfade=transition={xfade_tr}:duration={d_xfade:.4f}:offset={offset_xfade:.4f}{nv}")
-            fc.append(f"{au}apad=pad_dur={xf_audio_dur:.4f}[ap{i}]")
-            fc.append(f"[ap{i}][sa{i}]acrossfade=d={xf_audio_dur:.4f}:c1=tri:c2=tri{na}")
-            acc += durs[i]
-        v, au = nv, na
+            # xfade is only predictable on full-length inputs, so give it the whole previous and next cut, then keep exactly the window
+            # around the join (2*head frames). Inputs are padded with clones so the transition has footage on both sides.
+            off_f = frames[i - 1] - head
+            fc.append(f"[hd{i}]tpad=start_mode=clone:start={head},fps={fps}[hh{i}]")
+            fc.append(
+                f"[tt{i - 1}][hh{i}]xfade=transition={xfade_tr}:duration={(2 * head) / float(fps):.4f}:offset={off_f / float(fps):.4f},"
+                f"trim=start_frame={off_f}:end_frame={off_f + 2 * head},setpts=PTS-STARTPTS,settb=AVTB,fps={fps}[x{i}]"
+            )
+            parts.append(f"[x{i}]")
+        if tail:
+            fc.append(f"[tl{i}]tpad=stop_mode=clone:stop={2 * tail},fps={fps}[tt{i}]")
+        fc.append(f"[bd{i}]trim=start_frame={head}:end_frame={frames[i] - tail},setpts=PTS-STARTPTS[body{i}]")
+        parts.append(f"[body{i}]")
+    # the join transition belongs between the previous body and this one: order parts as body(i-1), x(i), body(i)
+    ordered: List[str] = []
+    for i in range(nsegs):
+        if i and half[i]:
+            ordered.append(f"[x{i}]")
+        ordered.append(f"[body{i}]")
+    fc.append("".join(ordered) + f"concat=n={len(ordered)}:v=1:a=0[vcat]")
+    v = "[vcat]"
 
     # 2b) overlay transitions (warm flash) and Meta Creative optical motion/flash polish around join_t
     flash_chain: List[str] = []

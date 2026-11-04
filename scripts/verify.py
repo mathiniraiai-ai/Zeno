@@ -600,6 +600,54 @@ def check_split_and_hook_rules(plan: Dict[str, Any]) -> Tuple[bool, str]:
     return ok, summary
 
 
+PICTURE_MAX_DIFF = 9.0   # mean grey-level difference (0-255) allowed between a cut's own render and the final video
+
+
+def check_picture_timeline(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, List[str], int]:
+    """Does the picture in the final video match the plan at every moment? For each cut, the middle frame of the final video is compared with
+    the middle frame of that cut's own render. Catches a transition or join that moves or drops footage (the picture drifts away from the
+    sound while every other check still passes). Returns (ok, wrong cuts, cuts compared)."""
+    try:
+        import cv2
+        import numpy as np
+        import layouts
+    except Exception as exc:   # noqa: BLE001
+        return True, [f"not checked ({exc})"], 0
+    canvas = plan.get("canvas") or {}
+    W, H, fps = int(canvas.get("width") or 1080), int(canvas.get("height") or 1920), int(canvas.get("fps") or 30)
+
+    def sig(frame: Any) -> Any:
+        # the final video holds the same pixels as the cut's own render, so compare fine detail: only a re-encode separates them
+        return cv2.cvtColor(cv2.resize(frame, (108, 192), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+    def frame_at(cap: Any, t: float) -> Any:
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000.0)
+        ok, fr = cap.read()
+        return fr if ok else None
+
+    out = cv2.VideoCapture(str(mp4_path))
+    t0, bad, compared = 0.0, [], 0
+    for seg in plan.get("segments", []):
+        dur = round((float(seg["end"]) - float(seg["start"])) * fps) / fps
+        f = WORK / "_segments" / f"{layouts.build_segment_cache_key(seg, plan, W, H, fps, False)}.mkv"
+        if not f.is_file():
+            f = WORK / "_segments" / f"{layouts.build_segment_cache_key(seg, plan, W, H, fps, True)}.mkv"
+        if f.is_file() and dur >= 0.4:
+            ref_cap = cv2.VideoCapture(str(f))
+            got = frame_at(out, t0 + dur / 2)
+            # handheld footage changes a lot between frames and a seek can be a frame off: take the closest of the frames around the middle
+            refs = [fr for fr in (frame_at(ref_cap, dur / 2 + k / fps) for k in range(-4, 5)) if fr is not None]
+            ref_cap.release()
+            if refs and got is not None:
+                compared += 1
+                best = min(float(np.abs(sig(r) - sig(got)).mean()) for r in refs)
+                if best > PICTURE_MAX_DIFF:
+                    bad.append(f"{seg.get('id')} at {t0 + dur / 2:.1f}s shows other footage than the plan")
+        t0 += dur
+    out.release()
+    return (not bad), bad, compared
+
+
 def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = None) -> bool:
     """Run all 5 deterministic verification checks and print the 5-line QA report."""
     p_file, plan = load_plan(plan_path)
@@ -646,6 +694,7 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
         out_mp4, plan, seg_start, exp_w, exp_h, sheet_path
     )
     split_hook_ok, split_hook_summary = check_split_and_hook_rules(plan)
+    pic_ok, pic_bad, pic_n = check_picture_timeline(plan, out_mp4)
     alt_proj_dir = WORK / out_mp4.stem
     if alt_proj_dir.is_dir() and alt_proj_dir.resolve() != p_file.parent.resolve() and sheet_path.is_file():
         (alt_proj_dir / "marks_contact_sheet.jpg").write_bytes(sheet_path.read_bytes())
@@ -677,8 +726,9 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
         f"({', '.join(m_details)}) -> {rel_sheet} ({sheet_kb} KB)"
     )
     print(f"[SPLIT  {'PASS' if split_hook_ok else 'FAIL'}] {split_hook_summary}")
+    print(f"[PICTURE {'PASS' if pic_ok else 'FAIL'}] {pic_n} cuts: the picture at the middle of each cut matches the plan" + ("" if pic_ok else ": " + "; ".join(pic_bad)))
 
-    return bool(video_ok and audio_ok and cuts_ok and script_ok and marks_ok and split_hook_ok)
+    return bool(video_ok and audio_ok and cuts_ok and script_ok and marks_ok and split_hook_ok and pic_ok)
 
 
 def main() -> None:

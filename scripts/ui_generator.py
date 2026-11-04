@@ -935,6 +935,7 @@ def render_stop_saying_banner_png(
     uppercase: bool = True,
     with_strike: bool = True,
     dashed_strike: bool = False,
+    cross_icon: bool = False,
 ) -> Path:
     """Render a crossed-out red pill "Stop Saying" hook banner PNG (21132 / 20228 style),
     supporting both un-struck (`with_strike=False` for initial pop-in) and struck-through
@@ -946,7 +947,7 @@ def render_stop_saying_banner_png(
     if uppercase:
         label = label.upper()
 
-    style_key = f"{label}|{font_px}|{box_h}|{pad_x}|{radius}|{strike_overshoot}|{strike_px}|{with_strike}|{dashed_strike}"
+    style_key = f"{label}|{font_px}|{box_h}|{pad_x}|{radius}|{strike_overshoot}|{strike_px}|{with_strike}|{dashed_strike}|{cross_icon}"
     digest = hashlib.sha1(style_key.encode("utf-8")).hexdigest()[:14]
     UI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     out_path = UI_CACHE_DIR / f"stop_say_{digest}.png"
@@ -955,7 +956,8 @@ def render_stop_saying_banner_png(
 
     font = load_ui_font(int(font_px), label, bold=True)
     left, top, bw, bh = _text_bbox_wh(font, label)
-    box_w = max(80, bw + 2 * int(pad_x))
+    icon = int(box_h * 0.44) if cross_icon else 0          # a drawn X (the font has no emoji glyph) after the words
+    box_w = max(80, bw + 2 * int(pad_x) + (icon + 22 if cross_icon else 0))
     over = int(strike_overshoot)
     canvas_w = box_w + 2 * over
     h = int(box_h)
@@ -970,6 +972,13 @@ def render_stop_saying_banner_png(
     tx = over + int(pad_x) - left
     ty = (h - bh) // 2 - top
     d.text((tx, ty), label, font=font, fill=(255, 255, 255, 255))
+    if cross_icon:
+        ix, iy = tx + left + bw + 22, (h - icon) // 2
+        for p0, p1 in (((ix, iy), (ix + icon, iy + icon)), ((ix, iy + icon), (ix + icon, iy))):
+            d.line([p0, p1], fill=(255, 255, 255, 255), width=max(5, icon // 6))
+        for cx_, cy_ in ((ix, iy), (ix + icon, iy), (ix, iy + icon), (ix + icon, iy + icon)):
+            r_ = max(5, icon // 6) // 2
+            d.ellipse((cx_ - r_, cy_ - r_, cx_ + r_, cy_ + r_), fill=(255, 255, 255, 255))
 
     if with_strike:
         cy = h // 2

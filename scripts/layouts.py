@@ -1253,7 +1253,7 @@ def build_segment_ffmpeg_args(
         banners = [banners]
     if banners:
         # Resolve shared group fade-out end time so stacked phrases hold together on screen
-        parsed_banners: List[Tuple[str, float, float]] = []
+        parsed_banners: List[Tuple[str, float, float, bool]] = []
         for b_idx, b_item in enumerate(banners):
             if isinstance(b_item, str):
                 b_text, b_at, b_dur = b_item, round(0.15 + b_idx * 0.65, 3), exact
@@ -1263,10 +1263,26 @@ def build_segment_ffmpeg_args(
                 b_dur = float(b_item.get("duration", max(0.4, exact - b_at)))
             else:
                 continue
-            parsed_banners.append((b_text, b_at, b_dur))
+            is_header = b_text.lower().startswith("header:")      # `banner:"header:Stop saying"@0.3`: a title above the stack, never struck
+            parsed_banners.append((b_text[7:].strip() if is_header else b_text, b_at, b_dur, is_header))
 
-        for b_idx, (b_text, b_at, b_dur) in enumerate(parsed_banners):
+        phrase_idx = 0
+        for b_idx, (b_text, b_at, b_dur, is_header) in enumerate(parsed_banners):
             b_end = min(exact, b_at + b_dur)
+            bx_expr = f"trunc(({W}-overlay_w)/2)"
+            if is_header:
+                # Static "STOP SAYING X" title one row above the stacked phrases; fades out with them
+                in_h = next_idx
+                next_idx += 1
+                inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", render_stop_saying_banner_png(b_text, with_strike=False, cross_icon=True)])
+                hy = int(round(H * 0.445))
+                fc.append(
+                    f"[{in_h}:v]scale=w='trunc(iw*{W}/1080/2)*2':h=-1,format=rgba,"
+                    f"fade=t=in:st={b_at:.3f}:d=0.10:alpha=1,fade=t=out:st={max(b_at + 0.1, b_end - 0.18):.3f}:d=0.18:alpha=1[bn_h{b_idx}]"
+                )
+                fc.append(f"{v_curr}[bn_h{b_idx}]overlay=x={bx_expr}:y={hy}:enable='between(t,{b_at:.3f},{b_end:.3f})':eof_action=pass,format=yuv420p[vb{b_idx}h]")
+                v_curr = f"[vb{b_idx}h]"
+                continue
             strike_at = min(b_end - 0.05, b_at + 0.16)
             # Phase 1: Un-struck red pill pops in when phrase begins (b_at -> strike_at)
             # Phase 2: Struck-through red pill holds from strike_at -> b_end (with fade-out)
@@ -1279,8 +1295,8 @@ def build_segment_ffmpeg_args(
             inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", png_struck])
 
             # Centered horizontally (x=0.50*W), stacked at lower-chest level (y=0.52*H + idx*0.068*H)
-            bx_expr = f"trunc(({W}-overlay_w)/2)"
-            by_expr = int(round(H * (0.52 + b_idx * 0.068)))
+            by_expr = int(round(H * (0.52 + phrase_idx * 0.068)))
+            phrase_idx += 1
             fade_out_st = max(strike_at + 0.05, b_end - 0.18)
 
             v_mid = f"[vb{b_idx}a]"
