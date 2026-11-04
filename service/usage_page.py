@@ -1,8 +1,8 @@
 """The admin Usage page: one simple screen of who used what.
 
 Every editor and every run: coding agent, model, tokens in / cached / out, Gemini transcription tokens, video length and an estimated cost.
-It reads `/admin/api/usage` (no plan files, only the numbers) and does the grouping in the browser, so it needs no extra server code.
-The page and its data are behind the same admin sign-in as `/admin`.
+It reads `/api/usage` (no plan files, only the numbers) and does the grouping in the browser, so it needs no extra server code.
+The page holds no data; it asks for a company Google sign-in (any account of the allowed domain, no admin list) and then reads the read-only `/api/usage`.
 
 The cost is an estimate from list prices (USD per million tokens) kept in PRICES below; models not listed, such as Gemini or Antigravity
 models, are shown without a cost instead of with a guess.
@@ -26,13 +26,18 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 td.muted{color:#9fb0cc}
 tr.total td{font-weight:700;border-top:2px solid rgba(148,163,184,.3)}
 .foot{color:#9fb0cc;font-size:12.5px;margin:14px 4px}
+.topbtn{position:fixed;top:16px;right:20px;z-index:5;border:1px solid rgba(148,163,184,.35);background:rgba(20,28,52,.85);color:#cfe0ff;border-radius:10px;padding:7px 16px;font:inherit;font-size:13px;font-weight:600;text-decoration:none;cursor:pointer}
+.signin{text-align:center;padding:36px 10px}
 .tag{display:inline-block;background:rgba(148,163,184,.14);border-radius:6px;padding:1px 7px;margin:1px 3px 1px 0;font-size:12px}
 """
 
 USAGE_PAGE = """<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Zeno · Usage</title><style>__STYLE__ __EXTRA__</style></head><body><main class="wide">
-  <div class="brand"><span class="dot"></span> Zeno Video AI · Usage &nbsp;<a href="/admin" style="color:#9fb0cc;font-weight:400;font-size:13px">← Admin</a></div>
+  <a class="topbtn" id="signout" href="/" title="Back to the Zeno sign-in page">Zeno home</a>
+  <div class="brand"><span class="dot"></span> Zeno Video AI · Admin · Usage log</div>
+  <div class="card signin" id="signin" style="display:none"><h1>Sign in to see the usage log</h1><p class="sub" id="signmsg">Use your company Google account.</p><div id="gbtn" style="display:inline-block"></div></div>
+  <div id="content" style="display:none">
   <div class="card">
     <h1>Who is using what</h1>
     <p class="sub">Every editor and every video: the coding agent and model, tokens in and out, Gemini transcription, and an estimated cost.</p>
@@ -52,13 +57,14 @@ USAGE_PAGE = """<!doctype html><html lang="en"><head>
       <th class="n">Gemini in</th><th class="n">Gemini out</th><th class="n">Gemini total</th><th class="n">Est. cost</th><th>Last run</th>
     </tr></thead><tbody id="users"><tr><td colspan="13">Loading…</td></tr></tbody></table></div>
   </div>
-  <div class="card"><h1>Every run</h1>
+  <div class="card"><h1>Every run <button class="chip" id="all" style="margin-left:12px">Show all</button></h1>
     <div class="scroll"><table><thead><tr>
       <th>When</th><th>Editor</th><th>Project</th><th>Coding agent · model</th><th class="n">Clips</th><th class="n">Seconds</th>
       <th class="n">Agent in</th><th class="n">Cached</th><th class="n">Agent out</th><th class="n">Agent total</th><th class="n">Gemini</th><th class="n">Est. cost</th>
     </tr></thead><tbody id="runs"><tr><td colspan="12">Loading…</td></tr></tbody></table></div>
   </div>
   <p class="foot" id="foot"></p>
+  </div>
 <script>
 const PRICES = [  // [text found in the model name, USD per million tokens: input, cached input, output] from Anthropic list prices
   ['opus-5-5', 4, 0.2, 20], ['opus-5', 5, 0.5, 25], ['opus-4', 5, 0.5, 25],
@@ -107,7 +113,8 @@ function aggregate(runs) {
 const fmtNum = x => Number(x || 0).toLocaleString();
 const fmtDate = t => t ? new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ') : '';
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
-let DATA = {runs: [], keys: [], now: Date.now() / 1000}, DAYS = 30;
+let DATA = {runs: [], keys: [], now: Date.now() / 1000}, DAYS = 30, SHOW_ALL = false, CFG = null;
+const TOKEN_KEY = 'zeno_usage_jwt';
 const rate = () => Number(document.getElementById('rate').value) || 0;
 const inr = usd => '₹' + Math.round(usd * rate()).toLocaleString();
 function view() {
@@ -134,7 +141,9 @@ function render() {
       <td class="n">${fmtNum(t.ain)}</td><td class="n">${fmtNum(t.cached)}</td><td class="n">${fmtNum(t.aout)}</td><td class="n">${fmtNum(t.atotal)}</td>
       <td class="n">${fmtNum(t.gin)}</td><td class="n">${fmtNum(t.gout)}</td><td class="n">${fmtNum(t.gtotal)}</td><td class="n">${inr(t.usd)}${t.unpriced ? ' *' : ''}</td><td></td></tr>`
       : '<tr><td colspan="13">No runs in this period</td></tr>');
-  document.getElementById('runs').innerHTML = runs.slice(0, 500).map(r => { const c = costUsd(r); return `<tr>
+  document.getElementById('all').style.display = runs.length > 100 ? '' : 'none';
+  document.getElementById('all').textContent = SHOW_ALL ? 'Show latest 100' : 'Show all ' + runs.length;
+  document.getElementById('runs').innerHTML = (SHOW_ALL ? runs : runs.slice(0, 100)).map(r => { const c = costUsd(r); return `<tr>
     <td class="muted">${fmtDate(r.created_at)}</td><td>${esc(r.editor_name || r.user_email)}</td><td>${esc(r.project)}</td>
     <td>${esc(r.agent_name)} · ${esc(r.agent_model)}</td><td class="n">${fmtNum(r.clips_count)}</td><td class="n">${Math.round(n(r.video_seconds))}</td>
     <td class="n">${fmtNum(r.agent_in_tokens)}</td><td class="n muted">${fmtNum(r.agent_cached_tokens)}</td><td class="n">${fmtNum(r.agent_out_tokens)}</td>
@@ -156,15 +165,44 @@ function csv() {
   a.href = URL.createObjectURL(new Blob([lines.join('\\n')], {type: 'text/csv'}));
   a.download = 'zeno-usage.csv'; a.click();
 }
-async function load() {
+function loadGoogle() {
+  return new Promise(res => {
+    if (window.google && google.accounts && google.accounts.id) return res();
+    const sc = document.createElement('script'); sc.src = 'https://accounts.google.com/gsi/client'; sc.onload = () => res(); document.head.appendChild(sc);
+  });
+}
+async function showSignIn(msg) {
+  document.getElementById('content').style.display = 'none';
+  document.getElementById('signin').style.display = '';
+  document.getElementById('signmsg').textContent = msg || 'Use your company Google account.';
   try {
-    const r = await fetch('/admin/api/usage');
-    if (!r.ok) throw new Error(r.status === 403 ? 'This account is not an admin.' : 'Could not load (' + r.status + ').');
+    CFG = CFG || await (await fetch('/api/auth/config')).json();
+    if (!CFG.google_client_id) { document.getElementById('signmsg').textContent = 'Google sign-in is not set up on this server.'; return; }
+    await loadGoogle();
+    google.accounts.id.initialize({client_id: CFG.google_client_id, callback: resp => { try { sessionStorage.setItem(TOKEN_KEY, resp.credential); } catch (e) {} load(); }});
+    const box = document.getElementById('gbtn'); box.innerHTML = '';
+    google.accounts.id.renderButton(box, {theme: 'filled_blue', size: 'large', text: 'signin_with'});
+  } catch (e) { document.getElementById('signmsg').textContent = 'Could not start Google sign-in: ' + e.message; }
+}
+async function load() {
+  let token = '';
+  try { token = sessionStorage.getItem(TOKEN_KEY) || ''; } catch (e) {}
+  if (!token) return showSignIn();
+  try {
+    const r = await fetch('/api/usage', {headers: {Authorization: 'Bearer ' + token}});
+    if (r.status === 401 || r.status === 403) {
+      try { sessionStorage.removeItem(TOKEN_KEY); } catch (e) {}
+      return showSignIn(r.status === 403 ? 'That account is not allowed. Use your company Google account.' : 'Please sign in again.');
+    }
+    if (!r.ok) throw new Error('Could not load (' + r.status + ').');
     DATA = await r.json();
+    document.getElementById('signin').style.display = 'none';
+    document.getElementById('content').style.display = '';
     try { const saved = Number(localStorage.getItem('zeno_rate')); if (saved) document.getElementById('rate').value = saved; } catch (e) {}
     render();
   } catch (e) {
-    document.getElementById('cards').innerHTML = '<div class="stat"><b>' + esc(e.message) + '</b></div>';
+    document.getElementById('signin').style.display = '';
+    document.getElementById('signmsg').textContent = e.message;
   }
 }
 document.querySelectorAll('.chip[data-days]').forEach(b => b.onclick = () => {
@@ -175,6 +213,7 @@ document.querySelectorAll('.chip[data-days]').forEach(b => b.onclick = () => {
 document.getElementById('q').oninput = render;
 document.getElementById('rate').oninput = () => { try { localStorage.setItem('zeno_rate', document.getElementById('rate').value); } catch (e) {} render(); };
 document.getElementById('csv').onclick = csv;
+document.getElementById('all').onclick = () => { SHOW_ALL = !SHOW_ALL; render(); };
 load();
 </script></main></body></html>
 """.replace("__STYLE__", STYLE).replace("__EXTRA__", EXTRA_STYLE)

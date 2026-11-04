@@ -935,16 +935,40 @@ def admin_keys(authorization: Optional[str] = Header(None), x_admin_password: Op
     )
 
 
-@app.get("/admin/usage", response_class=HTMLResponse)
-def admin_usage_page(authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None)) -> HTMLResponse:
-    require_admin(authorization, x_admin_password)
+@app.get("/usage", response_class=HTMLResponse)
+def usage_page() -> HTMLResponse:
+    """The page itself holds no data: it asks for a company Google sign-in and then reads /api/usage."""
     return HTMLResponse(USAGE_PAGE, headers=NO_STORE)
 
 
-@app.get("/admin/api/usage")
-def admin_usage(authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None)) -> JSONResponse:
+def _check_viewer(authorization: Optional[str], x_admin_password: Optional[str] = None) -> Dict[str, str]:
+    """Anyone with a company account may READ the usage log: no admin list, no password. Admins (password or listed) pass as before.
+    Revoking keys and approving recipes still need `_check_admin`."""
+    try:
+        return _check_admin(authorization, x_admin_password)
+    except HTTPException as exc:
+        if exc.status_code not in (401, 403):
+            raise
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        if token.startswith("zeno_"):
+            found = store().lookup(token)
+            email = store().get_key_email(found[0]) if found else ""
+            if email and _is_allowed_email(email):
+                return {"name": found[1], "email": email, "via": "zeno_key"}
+            raise HTTPException(403, "Only company accounts can see the usage log")
+        if token.count(".") == 2:
+            profile = _verify_google_identity(GoogleAuthBody(credential=token))
+            if _is_allowed_email(profile["email"]):
+                return {"name": profile["name"], "email": profile["email"], "via": "google_jwt"}
+            raise HTTPException(403, "Only company accounts can see the usage log")
+    raise HTTPException(401, "Sign in with your company Google account")
+
+
+@app.get("/api/usage")
+def usage_log(authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None)) -> JSONResponse:
     """Every editor's runs as plain numbers, plus each key's server-counted totals. No plan files and no secrets."""
-    require_admin(authorization, x_admin_password)
+    _check_viewer(authorization, x_admin_password)
     ks = store()
     keep = ("name", "email", "created_at", "last_used_at", "revoked_at", "requests", "audio_seconds", "input_tokens", "output_tokens", "total_tokens")
     return JSONResponse(

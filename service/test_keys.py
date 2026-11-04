@@ -105,15 +105,20 @@ tel = client.post("/v1/telemetry", headers={"Authorization": "Bearer " + r3.json
 check("telemetry endpoint stores run in DB", tel.status_code == 200 and tel.json().get("ok") is True, str(tel.json()))
 admin_data = client.get("/admin/api/keys", headers=basic("admin-pw")).json()
 check("admin API returns stored runs", len(admin_data.get("runs") or []) == 1 and admin_data["runs"][0]["grand_total_tokens"] == 6160)
-usage = client.get("/admin/api/usage", headers=basic("admin-pw"))
-check("usage API needs admin", client.get("/admin/api/usage").status_code == 401)
+usage = client.get("/api/usage", headers=basic("admin-pw"))
+check("usage log needs a sign-in", client.get("/api/usage").status_code == 401)
 ur = (usage.json().get("runs") or [{}])[0] if usage.status_code == 200 else {}
-check("usage API returns the run's numbers", usage.status_code == 200 and ur.get("agent_in_tokens") == 4200 and ur.get("agent_out_tokens") == 950
+check("usage log returns the run's numbers", usage.status_code == 200 and ur.get("agent_in_tokens") == 4200 and ur.get("agent_out_tokens") == 950
       and ur.get("agent_model") == "Gemini 4 Argon" and ur.get("transcribe_total_tokens") == 1010, str(ur)[:160])
-check("usage API carries no plan files or key hashes", usage.status_code == 200 and "final_edl" not in ur and "initial_edl" not in ur
+check("usage log carries no plan files or key hashes", usage.status_code == 200 and "final_edl" not in ur and "initial_edl" not in ur
       and all("key_hash" not in k for k in usage.json().get("keys", [])))
-page = client.get("/admin/usage", headers=basic("admin-pw"))
-check("usage page needs admin and serves the page", client.get("/admin/usage").status_code == 401 and page.status_code == 200 and "Who is using what" in page.text)
+company_key = r3.json()["key"]
+check("any company key can read the usage log (no admin list)", client.get("/api/usage", headers={"Authorization": "Bearer " + company_key}).status_code == 200)
+check("...but that key is still not an admin", client.get("/admin/api/keys", headers={"Authorization": "Bearer " + company_key}).status_code == 403)
+check("a made-up key cannot read the usage log", client.get("/api/usage", headers={"Authorization": "Bearer zeno_notakey"}).status_code in (401, 403))
+page = client.get("/usage")
+check("the usage page itself holds no data and needs no sign-in to open", page.status_code == 200 and "Who is using what" in page.text and "test_ad" not in page.text and "@gosupernova.live" not in page.text.replace("@gosupernova.live\"", ""))
+check("the sign-in page has the Admin button top right", 'href="/usage"' in client.get("/").text)
 h = client.get("/health").json()
 check("health reports store and admin switch", h["key_store_ok"] and h["admin_enabled"], str(h))
 
@@ -151,6 +156,11 @@ with patch.dict(os.environ, {"ZENO_GOOGLE_CLIENT_ID": ""}):
 check("a company key is not admin by default -> 403", client.get("/admin/api/keys", headers={"Authorization": "Bearer " + g_ok.json()["key"]}).status_code == 403)
 with patch.dict(os.environ, {"ZENO_ADMIN_EMAILS": "editor@gosupernova.live"}):
     check("an email listed in ZENO_ADMIN_EMAILS is admin", client.get("/admin/api/keys", headers={"Authorization": "Bearer " + g_ok.json()["key"]}).status_code == 200)
+
+with google_reply():
+    check("a company Google account can read the usage log", client.get("/api/usage", headers={"Authorization": "Bearer fake.jwt.token"}).status_code == 200)
+with google_reply(email="x@gmail.com"):
+    check("a Google account outside the company cannot -> 403", client.get("/api/usage", headers={"Authorization": "Bearer fake.jwt.token"}).status_code == 403)
 
 g_key = g_ok.json().get("key", "")
 r_rule = client.post("/v1/learnings/rule", headers={"Authorization": f"Bearer {g_key}"}, json={
