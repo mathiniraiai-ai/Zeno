@@ -487,8 +487,7 @@ def tight_report(plan: Dict[str, Any]) -> List[str]:
         sid = str(s.get("id"))
         lead = max(0.0, float(ws[0]["start"]) - st)
         tail = max(0.0, en - float(ws[-1]["end"]))
-        tail_needed = max(0.0, mark_end.get(sid, 0.0) - (float(ws[-1]["end"]) - st))     # the flash after a sentence needs this much
-        tail_free = max(0.0, tail - tail_needed)
+        tail_free = tail          # a flash is an overlay on the finished video and plays on over the next cut: it needs no tail
         nxt = rows[k + 1] if k + 1 < len(rows) else None
         if nxt and nxt[3]:
             nxt_lead = max(0.0, float(nxt[3][0]["start"]) - nxt[1])
@@ -520,7 +519,7 @@ def style_report(plan: Dict[str, Any], work_dir: Optional[Path] = None) -> List[
         lay = str(s.get("layout") or "single").lower()
         style = str(s.get("zoom_style") or "")
         z0, z1 = float(s.get("zoom") or 1.0), float(s.get("zoom_to") or s.get("zoom") or 1.0)
-        moves = style in RAPID_ZOOM_STYLES or style == "sudden_out" or abs(z1 - z0) > 1e-6 or z0 > 1.0 + 1e-6
+        moves = style in RAPID_ZOOM_STYLES or style == "sudden_out" or abs(z1 - z0) > 1e-6          # animated zoom; a fixed crop stands still
         dur = float(s["end"]) - float(s["start"])
         if lay in ("split_h", "split_v", "top_pip") and moves:
             out.append(f"{s.get('id')}: zoom on a {lay} cut is ignored (splits stay still)")

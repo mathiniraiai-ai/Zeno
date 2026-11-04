@@ -1287,7 +1287,7 @@ class TestScriptIsTheTimeline(unittest.TestCase):
         with mock.patch.object(vision_tracker, "analyze_clip_vision", side_effect=RuntimeError("no face")):
             self.assertEqual(layouts.banner_stack_top({"src": "a.mp4"}), 0.445)
 
-    def test_tight_report_names_loose_joins_and_pauses_but_allows_the_mark_tail(self):
+    def test_tight_report_names_loose_joins_and_pauses(self):
         from unittest import mock
         import script_order
 
@@ -1295,12 +1295,9 @@ class TestScriptIsTheTimeline(unittest.TestCase):
         plan = {"segments": [{"id": "L1", "src": "a.mp4", "start": 0.0, "end": 2.2}, {"id": "L2", "src": "a.mp4", "start": 0.0, "end": 2.2}],
                 "marks": [{"type": "wrong", "segment": "L1", "at": 1.5, "duration": 0.56}]}
         with mock.patch.object(script_order, "_words_of", side_effect=lambda seg: words[seg["src"]]):
-            report = script_order.tight_report(plan)
-        text = " ".join(report)
-        self.assertIn("pause between 'x' and 'y'", text)                        # a 0.7 s pause inside a cut
-        plan["marks"] = []
-        with mock.patch.object(script_order, "_words_of", side_effect=lambda seg: words[seg["src"]]):
-            self.assertTrue(any("L1 -> L2" in r for r in script_order.tight_report(plan)))   # without a mark the long tail is a loose join
+            report = " ".join(script_order.tight_report(plan))
+        self.assertIn("pause between 'x' and 'y'", report)                      # a 0.7 s pause inside a cut
+        self.assertIn("L1 -> L2", report)                                       # a mark does not excuse a long tail: its flash plays over the next cut
 
     def test_job_window_starts_once_and_resets_when_the_render_is_done(self):
         import tempfile
@@ -1440,7 +1437,7 @@ class TestScriptIsTheTimeline(unittest.TestCase):
         self.assertIn("zoom on a split_h cut is ignored", text)
         self.assertIn("'no_such_sound.wav'", text)
         self.assertIn("above 0 dB", text)
-        calm = {"canvas": {"fps": 30}, "segments": [seg(1, "sudden_in", dur=3), seg(2), seg(3), seg(4, "smooth", dur=3), seg(5)], "sfx": [{"file": "pop.wav", "segment": "L1", "at": 0.1, "gain_db": -6}]}
+        calm = {"canvas": {"fps": 30}, "segments": [seg(1, "sudden_in", dur=3), seg(2), seg(3, zoom=1.08), seg(4, "smooth", dur=3), seg(5)], "sfx": [{"file": "pop.wav", "segment": "L1", "at": 0.1, "gain_db": -6}]}
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "script_analysis.md").write_text("L1 ...", encoding="utf-8")
             self.assertEqual(script_order.style_report(calm, Path(tmp)), [])
