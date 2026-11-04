@@ -43,6 +43,7 @@ from pydantic import BaseModel
 from keystore import KeyStore
 from prompt import build_transcribe_prompt
 from ui import ADMIN_PAGE, SIGNUP_PAGE
+from usage_page import USAGE_PAGE
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("zeno.service")
@@ -930,6 +931,24 @@ def admin_keys(authorization: Optional[str] = Header(None), x_admin_password: Op
     ks = store()
     return JSONResponse(
         {"keys": ks.list(), "runs": ks.list_runs(), "learnings": ks.get_learnings(limit=100)},
+        headers=NO_STORE,
+    )
+
+
+@app.get("/admin/usage", response_class=HTMLResponse)
+def admin_usage_page(authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None)) -> HTMLResponse:
+    require_admin(authorization, x_admin_password)
+    return HTMLResponse(USAGE_PAGE, headers=NO_STORE)
+
+
+@app.get("/admin/api/usage")
+def admin_usage(authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None)) -> JSONResponse:
+    """Every editor's runs as plain numbers, plus each key's server-counted totals. No plan files and no secrets."""
+    require_admin(authorization, x_admin_password)
+    ks = store()
+    keep = ("name", "email", "created_at", "last_used_at", "revoked_at", "requests", "audio_seconds", "input_tokens", "output_tokens", "total_tokens")
+    return JSONResponse(
+        {"keys": [{k: row.get(k) for k in keep} for row in ks.list()], "runs": ks.usage_runs(), "now": time.time()},
         headers=NO_STORE,
     )
 

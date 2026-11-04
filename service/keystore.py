@@ -511,6 +511,21 @@ class KeyStore:
         cols = ("id", "name", "email", "created_at", "last_used_at", "revoked_at", "requests", "audio_seconds", "input_tokens", "output_tokens", "total_tokens")
         return [dict(zip(cols, r)) for r in rows]
 
+    def usage_runs(self, since: float = 0.0, limit: int = 5000) -> List[Dict[str, Any]]:
+        """Only the numbers of each run (no plan files, no per-clip detail): what the Usage page needs, kept small."""
+        rows = self._run(
+            """SELECT id, editor_name, user_email, project, language, agent_name, agent_model, clips_count, video_seconds,
+                      transcribe_in_tokens, transcribe_out_tokens, transcribe_total_tokens,
+                      agent_in_tokens, agent_cached_tokens, agent_out_tokens, agent_total_tokens, grand_total_tokens, created_at
+               FROM zeno_runs WHERE created_at >= %s ORDER BY id DESC LIMIT %s""",
+            (float(since), int(limit)),
+            "all",
+        )
+        cols = ("id", "editor_name", "user_email", "project", "language", "agent_name", "agent_model", "clips_count", "video_seconds",
+                "transcribe_in_tokens", "transcribe_out_tokens", "transcribe_total_tokens",
+                "agent_in_tokens", "agent_cached_tokens", "agent_out_tokens", "agent_total_tokens", "grand_total_tokens", "created_at")
+        return [dict(zip(cols, r)) for r in rows]
+
     def list_runs(self, limit: int = 100) -> List[Dict[str, Any]]:
         rows = self._run(
             """SELECT id, key_id, editor_name, user_email, project, language, agent_name, agent_model,

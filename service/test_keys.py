@@ -105,6 +105,15 @@ tel = client.post("/v1/telemetry", headers={"Authorization": "Bearer " + r3.json
 check("telemetry endpoint stores run in DB", tel.status_code == 200 and tel.json().get("ok") is True, str(tel.json()))
 admin_data = client.get("/admin/api/keys", headers=basic("admin-pw")).json()
 check("admin API returns stored runs", len(admin_data.get("runs") or []) == 1 and admin_data["runs"][0]["grand_total_tokens"] == 6160)
+usage = client.get("/admin/api/usage", headers=basic("admin-pw"))
+check("usage API needs admin", client.get("/admin/api/usage").status_code == 401)
+ur = (usage.json().get("runs") or [{}])[0] if usage.status_code == 200 else {}
+check("usage API returns the run's numbers", usage.status_code == 200 and ur.get("agent_in_tokens") == 4200 and ur.get("agent_out_tokens") == 950
+      and ur.get("agent_model") == "Gemini 4 Argon" and ur.get("transcribe_total_tokens") == 1010, str(ur)[:160])
+check("usage API carries no plan files or key hashes", usage.status_code == 200 and "final_edl" not in ur and "initial_edl" not in ur
+      and all("key_hash" not in k for k in usage.json().get("keys", [])))
+page = client.get("/admin/usage", headers=basic("admin-pw"))
+check("usage page needs admin and serves the page", client.get("/admin/usage").status_code == 401 and page.status_code == 200 and "Who is using what" in page.text)
 h = client.get("/health").json()
 check("health reports store and admin switch", h["key_store_ok"] and h["admin_enabled"], str(h))
 

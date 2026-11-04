@@ -315,7 +315,7 @@ fetch('/api/auth/config').then(r=>r.json()).then(cfg=>{{
 ADMIN_PAGE = f"""<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Zeno — Admin, Editorial Brain &amp; Token Telemetry</title><style>{STYLE}</style></head><body><main class="wide">
-  <div class="brand"><span class="dot"></span> Zeno Video AI · Admin, Editorial Brain &amp; Token Telemetry</div>
+  <div class="brand"><span class="dot"></span> Zeno Video AI · Admin, Editorial Brain &amp; Token Telemetry &nbsp;<a href="/admin/usage" style="color:#7fb0ff;font-weight:600;font-size:13px">Usage →</a></div>
   <div class="card">
     <h1>Team Keys &amp; Gemini Transcription Totals</h1>
     <p class="sub">Active personal keys, total clips transcribed, audio minutes, and cumulative Gemini API tokens.</p>
