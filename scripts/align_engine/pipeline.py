@@ -574,3 +574,9 @@ def get_shared_pipeline(device: Optional[str] = None) -> KaviooAcousticPipeline:
     if _shared_pipeline is None:
         _shared_pipeline = KaviooAcousticPipeline(device=device)
     return _shared_pipeline
+
+
+def reset_shared_pipeline() -> None:
+    """Drop the shared pipeline so the next `get_shared_pipeline(device=...)` builds a new one (GPU failed: retry on the CPU)."""
+    global _shared_pipeline
+    _shared_pipeline = None

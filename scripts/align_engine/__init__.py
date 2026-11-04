@@ -18,6 +18,7 @@ from .pipeline import (
     EditFlowAcousticPipeline,
     ScriptCutAcousticPipeline,
     get_shared_pipeline,
+    reset_shared_pipeline,
 )
 from .acoustic import AcousticModel, AudioCaptionAlignmentAgent
 from .viterbi import ViterbiAligner
@@ -289,13 +290,18 @@ def transcribe_and_align_clip(
         }
 
     # 2. Forced alignment via Meta Wav2Vec2 95M + uroman + IndicPhoneticMapper + Viterbi + OnsetVerifier
-    pipe = get_shared_pipeline(device="cpu")
-    align_res = pipe.align(
-        audio_path=str(wav_p),
-        word_list=raw_words,
-        language_code=detected_lang,
-        verify_onsets=True,
-    )
+    # The device is chosen by `common.compute_device` (NVIDIA CUDA, else Apple Silicon MPS, else CPU). It used to be
+    # forced to the CPU here, which ran the model flat out on the processor and heated the computer.
+    align_kwargs = dict(audio_path=str(wav_p), word_list=raw_words, language_code=detected_lang, verify_onsets=True)
+    pipe = get_shared_pipeline()
+    try:
+        align_res = pipe.align(**align_kwargs)
+    except Exception as gpu_err:
+        if "cpu" in str(getattr(getattr(pipe, "acoustic_model", None), "device", "cpu")):
+            raise
+        print(f"[Zeno Aligner] the GPU failed ({gpu_err}); running this clip on the CPU instead.")
+        reset_shared_pipeline()
+        align_res = get_shared_pipeline(device="cpu").align(**align_kwargs)
 
     aligned_raw = align_res.get("words") or []
     words_out: List[Dict[str, Any]] = []

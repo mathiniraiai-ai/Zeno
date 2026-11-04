@@ -43,6 +43,10 @@ if (
     os.environ["_ZENO_REEXEC"] = "1"
     os.execv(str(_VENV_PY), [str(_VENV_PY), *sys.argv])
 
+# Keep the computer cool: low priority for the whole job (GPU does the heavy work), see common.run_cool
+if __name__ == "__main__":
+    common.run_cool()
+
 ROOT = common.ROOT
 WORK = common.WORK
 OUTPUT = common.OUTPUT

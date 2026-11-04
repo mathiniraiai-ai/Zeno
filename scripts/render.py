@@ -428,9 +428,12 @@ def main() -> None:
         offline_matched = _match_cached_segments_when_offline(segs, cache, fps)
 
     # 1) each segment -> normalized intermediate (cached by its settings)
+    from common import thermal_pause  # a Mac slowed by heat gets time to cool between segments
+
     files: List[Path] = []
     durs: List[float] = []
     for i, s in enumerate(segs):
+        thermal_pause()
         s.setdefault("id", f"S{i + 1}")
         lay = s.get("layout", "single")
         if layouts is not None and hasattr(layouts, "build_segment_cache_key"):

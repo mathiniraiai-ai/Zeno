@@ -641,6 +641,52 @@ def ffmpeg(*args, timeout=180):
     return run([*base, *args], low_priority=True, timeout=timeout)
 
 
+# ---------------------------------------------------------------------------------------------------- keep the computer cool
+def run_cool() -> None:
+    """Run the whole job at low priority so the computer stays cool and quiet. `ZENO_COOL=0` turns it off.
+
+    Mac: the process (and every FFmpeg and PyTorch worker it starts) moves to the Utility/Efficiency QoS tier.
+    Windows: BELOW_NORMAL priority class. Linux: nice 10. The GPU does the heavy work; the CPU never runs flat out.
+    """
+    if os.environ.get("ZENO_COOL", "1").strip().lower() in ("0", "off", "false", "no") or os.environ.get("_ZENO_COOL"):
+        return
+    if not sys.argv or not Path(sys.argv[0]).is_file():
+        return  # imported by a test or another tool: nothing to relaunch
+    os.environ["_ZENO_COOL"] = "1"
+    try:
+        if IS_MAC and Path("/usr/sbin/taskpolicy").is_file():
+            os.execv("/usr/sbin/taskpolicy", ["taskpolicy", "-c", "utility", sys.executable, *sys.argv])
+        elif IS_WIN:
+            import ctypes
+
+            ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x00004000)
+        elif hasattr(os, "nice"):
+            os.nice(10)
+    except Exception:
+        pass
+
+
+def thermal_pause(max_wait: float = 90.0, step: float = 10.0) -> None:
+    """On a Mac that reports it is being slowed by heat (`pmset -g therm`), wait for it to cool before the next piece of work."""
+    if not IS_MAC:
+        return
+    import time
+
+    waited = 0.0
+    while waited < max_wait:
+        try:
+            out = subprocess.run(["pmset", "-g", "therm"], capture_output=True, text=True, timeout=3).stdout
+        except Exception:
+            return
+        m = re.search(r"CPU_Speed_Limit\s*=\s*(\d+)", out)
+        if not m or int(m.group(1)) >= 90:
+            return
+        if waited == 0.0:
+            print(f"[cool] the CPU is slowed by heat (speed limit {m.group(1)}%); waiting for it to cool down...", flush=True)
+        time.sleep(step)
+        waited += step
+
+
 # ---------------------------------------------------------------------------------------------------- GPU use
 def job_folder_name(name: str) -> str:
     """A safe folder name from the script or video name: no path characters, no leading dots, not empty."""
