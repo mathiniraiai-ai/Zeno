@@ -1,13 +1,13 @@
 # 06 · Token budget & automated telemetry
 
-**Budget:** 50k to 70k tokens per video. The Director makes every editing decision, so spend tokens on looking properly.
+**Budget:** aim for 50k tokens per video; 70k is the hard border. The Director makes every editing decision, so spend tokens on looking properly.
 
 ## How to spend them
 - Read `line_map.md`, `facts.md` and every clip sheet in full, then write `plan.edl` yourself.
 - One script tab, never the whole document.
 - A fresh session for each video. Unused connectors off.
 - Sonnet 5.5 or Opus 5.5. Opus for messy footage, or when a plan fails its check twice.
-- Warn the user mid-job if the job risks passing 70k.
+- Warn the user as soon as the job looks like passing 50k; stop and report before it passes 70k.
 
 ## Automated per-clip & per-agent token tracking (`scripts/token_tracker.py`)
 `prepare.py` and `render.py` call `scripts/token_tracker.py` automatically:

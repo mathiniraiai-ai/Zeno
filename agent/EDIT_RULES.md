@@ -1,6 +1,6 @@
 # Edit rules: how the Director makes every decision
 
-Zeno transcribes, measures and renders. **You, the Director, make every editing decision and write `plan.edl`.** Nothing is drafted for you. Budget: **50k to 70k tokens per video**. Spend them on looking properly, not on shortcuts.
+Zeno transcribes, measures and renders. **You, the Director, make every editing decision and write `plan.edl`.** Nothing is drafted for you. Budget: aim for **50k tokens per video**; **70k is the hard border**. Spend them on looking properly, not on shortcuts.
 
 ## Read these, in this order
 1. `work/<project>/line_map.md`: the full script with its cues; under each line, every clip stretch that says it (`CAND`, `heard`).
@@ -87,6 +87,9 @@ Zeno transcribes, measures and renders. **You, the Director, make every editing 
 
 - `id` is the script line: `L5`, `L5a`/`L5b` for parts, `L6_L7` for one cut holding two lines. Keep these ids: the check reads them and also compares the real words in the cut.
 - Times inside `mark`, `banner`, `sfx` and `z=sudden_in:..@` are relative to the cut's start.
+
+## The frame-by-frame check (after rendering)
+`verify` looks at the finished video every quarter second with the local face detector (no model tokens): `[FRAMES]` fails on black or flat frames and on a banner covering a face, and warns when a panel has no face for more than a third of its frames. Fix a failure in `plan.edl` (move the banner's cut, change the zoom) and render again; treat a warning as a prompt to look at that moment on `review_sheet.jpg`.
 
 ## The check
 `--check-plan` measures, it does not choose. It prints `[TIGHT]` advice (never blocks) and blocks on: lines out of script order, missing or said twice, words in a cut that fit no line, cuts inside a word, and a voice that does not match `sp=`. Fix the plan. If something is deliberate, write it in `work/<project>/decisions.txt`:

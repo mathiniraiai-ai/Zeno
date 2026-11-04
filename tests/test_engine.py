@@ -1379,6 +1379,33 @@ class TestScriptIsTheTimeline(unittest.TestCase):
             self.assertTrue((job / "My Reel.script.txt").is_file())
             self.assertTrue((job / "My Reel.plan.edl").is_file())
 
+    def test_frame_check_helpers_black_frames_and_banner_overlap(self):
+        import numpy as np
+        import verify
+
+        self.assertTrue(verify.is_black_frame(np.zeros((40, 24), np.uint8)))                    # black
+        self.assertTrue(verify.is_black_frame(np.full((40, 24), 128, np.uint8)))                # one flat grey: a render fault
+        noisy = (np.random.RandomState(1).rand(40, 24) * 255).astype(np.uint8)
+        self.assertFalse(verify.is_black_frame(noisy))
+        face = [0.35, 0.20, 0.70, 0.50]                                                         # normalised on a 1000 x 2000 frame
+        self.assertGreater(verify.box_overlap_share(face, (300, 800, 800, 880), 1000, 2000), 0.04)   # a banner across the chin
+        self.assertEqual(verify.box_overlap_share(face, (300, 1100, 800, 1180), 1000, 2000), 0.0)    # a banner below the face
+
+    def test_banner_boxes_follow_the_face_and_split_header_from_phrases(self):
+        from unittest import mock
+        import vision_tracker
+
+        seg = {"src": "a.mp4", "banners": [{"text": "header:Stop saying", "at": 0.3}, {"text": "What do you mean?", "at": 1.0}, {"text": "Repeat", "at": 2.0}]}
+        vis = {"bbox_norm": [0.36, 0.23, 0.71, 0.50], "focus": [0.55, 0.27]}
+        with mock.patch.object(vision_tracker, "analyze_clip_vision", return_value=vis):
+            boxes = layouts.banner_boxes(seg, 1080, 1920, 9.0)
+        self.assertEqual([b["header"] for b in boxes], [True, False, False])
+        self.assertGreater(boxes[0]["y0"], 0.50 * 1920)                                       # the header starts below the face box
+        self.assertLess(boxes[0]["y1"], boxes[1]["y0"])                                       # the phrases stack under it, never over it
+        self.assertLess(boxes[1]["y1"], boxes[2]["y0"] + 1)
+        self.assertTrue(all(b["x0"] < 540 < b["x1"] for b in boxes))                          # centred
+        self.assertEqual(layouts.banner_boxes({"src": "a.mp4"}, 1080, 1920, 9.0), [])
+
     def test_empty_plan_cannot_render(self):
         from unittest import mock
         import tempfile

@@ -715,6 +715,65 @@ def banner_stack_top(seg: Dict[str, Any]) -> float:
     return 0.445
 
 
+def parse_banners(seg: Dict[str, Any], exact: float) -> List[Tuple[str, float, float, bool]]:
+    """The segment's banners as (text, start, duration, is_header), times relative to the cut. A banner `header:<text>` is a title above the
+    stack that is never struck through."""
+    banners = seg.get("banners") or seg.get("stop_saying") or []
+    if isinstance(banners, (str, dict)):
+        banners = [banners]
+    out: List[Tuple[str, float, float, bool]] = []
+    for b_idx, b_item in enumerate(banners):
+        if isinstance(b_item, str):
+            b_text, b_at, b_dur = b_item, round(0.15 + b_idx * 0.65, 3), exact
+        elif isinstance(b_item, dict):
+            b_text = str(b_item.get("text") or b_item.get("phrase") or "STOP SAYING")
+            b_at = float(b_item.get("at", round(0.15 + b_idx * 0.65, 3)))
+            b_dur = float(b_item.get("duration", max(0.4, exact - b_at)))
+        else:
+            continue
+        is_header = b_text.lower().startswith("header:")
+        out.append((b_text[7:].strip() if is_header else b_text, b_at, b_dur, is_header))
+    return out
+
+
+def banner_stack_rows(seg: Dict[str, Any], parsed: List[Tuple[str, float, float, bool]]) -> Tuple[float, float]:
+    """(header row, first phrase row) as fractions of the frame height: the stack starts below the face; phrases follow the header."""
+    stack_top = banner_stack_top(seg)
+    has_header = any(pb[3] for pb in parsed)
+    return stack_top, stack_top + (0.075 if has_header else max(0.0, 0.52 - 0.445))
+
+
+def banner_boxes(seg: Dict[str, Any], W: int, H: int, exact: float) -> List[Dict[str, Any]]:
+    """Where each banner pill sits on the finished frame, in pixels, and when (seconds relative to the cut). Same geometry as the renderer."""
+    parsed = parse_banners(seg, exact)
+    if not parsed:
+        return []
+    stack_top, phrase_base = banner_stack_rows(seg, parsed)
+    scale = W / 1080.0
+    boxes: List[Dict[str, Any]] = []
+    phrase_idx = 0
+    for text, b_at, b_dur, is_header in parsed:
+        try:
+            from PIL import Image
+
+            png = render_stop_saying_banner_png(text, with_strike=False, cross_icon=is_header)
+            with Image.open(png) as im:
+                cw, ch = im.size
+        except Exception:
+            cw, ch = 560, 76
+        over = 36 * scale                                        # transparent margin on each side of the pill
+        pill_w, pill_h = max(10.0, cw * scale - 2 * over), ch * scale
+        x0 = (W - cw * scale) / 2.0 + over
+        if is_header:
+            y0 = int(round(H * stack_top))
+        else:
+            y0 = int(round(H * (phrase_base + phrase_idx * 0.068)))
+            phrase_idx += 1
+        boxes.append({"text": text, "header": is_header, "x0": x0, "y0": float(y0), "x1": x0 + pill_w, "y1": y0 + pill_h,
+                      "t0": b_at, "t1": min(exact, b_at + b_dur)})
+    return boxes
+
+
 def build_segment_cache_key(
     seg: Dict[str, Any],
     plan: Optional[Dict[str, Any]],
@@ -1266,27 +1325,9 @@ def build_segment_ffmpeg_args(
     # ------------------------------------------------------------------
     # Optional "Stop Saying" Hook Banners on any segment (21132 3-stack chest-centered style)
     # ------------------------------------------------------------------
-    banners = seg.get("banners") or seg.get("stop_saying") or []
-    if isinstance(banners, (str, dict)):
-        banners = [banners]
-    if banners:
-        # Resolve shared group fade-out end time so stacked phrases hold together on screen
-        parsed_banners: List[Tuple[str, float, float, bool]] = []
-        for b_idx, b_item in enumerate(banners):
-            if isinstance(b_item, str):
-                b_text, b_at, b_dur = b_item, round(0.15 + b_idx * 0.65, 3), exact
-            elif isinstance(b_item, dict):
-                b_text = str(b_item.get("text") or b_item.get("phrase") or "STOP SAYING")
-                b_at = float(b_item.get("at", round(0.15 + b_idx * 0.65, 3)))
-                b_dur = float(b_item.get("duration", max(0.4, exact - b_at)))
-            else:
-                continue
-            is_header = b_text.lower().startswith("header:")      # `banner:"header:Stop saying"@0.3`: a title above the stack, never struck
-            parsed_banners.append((b_text[7:].strip() if is_header else b_text, b_at, b_dur, is_header))
-
-        has_header = any(pb[3] for pb in parsed_banners)
-        stack_top = banner_stack_top(seg)                       # the stack sits below the face, header first
-        phrase_base = stack_top + (0.075 if has_header else max(0.0, 0.52 - 0.445))
+    parsed_banners = parse_banners(seg, exact)
+    if parsed_banners:
+        stack_top, phrase_base = banner_stack_rows(seg, parsed_banners)
         phrase_idx = 0
         for b_idx, (b_text, b_at, b_dur, is_header) in enumerate(parsed_banners):
             b_end = min(exact, b_at + b_dur)

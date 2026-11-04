@@ -23,7 +23,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Sequence, Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (  # noqa: E402
@@ -648,6 +648,87 @@ def check_picture_timeline(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, 
     return (not bad), bad, compared
 
 
+FRAME_STEP_SEC = 0.25          # one frame every quarter second, skipping the moments around joins and mark flashes
+BLACK_MEAN, BLACK_STD = 10.0, 4.0
+BANNER_FACE_OVERLAP = 0.04     # a banner covering more than 4% of a face's area counts as on the face
+MISSING_FACE_SHARE = 0.35      # a panel without a face in more than this share of its frames is reported
+
+
+def is_black_frame(gray: Any) -> bool:
+    """A frame that is dark or one flat colour (a render fault), not a dark scene: both the average and the spread are tiny."""
+    return float(gray.mean()) < BLACK_MEAN or float(gray.std()) < BLACK_STD
+
+
+def box_overlap_share(face_norm: Sequence[float], box_px: Sequence[float], W: int, H: int) -> float:
+    """The share of a face's area (normalised box) that a pixel box covers."""
+    fx0, fy0, fx1, fy1 = face_norm[0] * W, face_norm[1] * H, face_norm[2] * W, face_norm[3] * H
+    ix = max(0.0, min(fx1, box_px[2]) - max(fx0, box_px[0]))
+    iy = max(0.0, min(fy1, box_px[3]) - max(fy0, box_px[1]))
+    area = max(1e-6, (fx1 - fx0) * (fy1 - fy0))
+    return (ix * iy) / area
+
+
+def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
+    """Frame-by-frame QC of the finished video with the local YuNet face detector (no download, no model tokens):
+    black or flat frames, a banner covering a face, and a face missing from a panel. Black frames and banners on faces fail the check;
+    a missing face only warns, because a detector can miss a turned head or a hand over the face."""
+    result: Dict[str, Any] = {"ok": True, "frames": 0, "black": [], "banner_on_face": [], "no_face": [], "note": ""}
+    try:
+        import cv2
+        import layouts
+        import vision_tracker
+    except Exception as exc:   # noqa: BLE001
+        result["note"] = f"not checked ({exc})"
+        return result
+    cap = cv2.VideoCapture(str(mp4_path))
+    if not cap.isOpened():
+        result["note"] = "video could not be opened"
+        return result
+    fps = float((plan.get("canvas") or {}).get("fps") or 30)
+    W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    marks_by_seg: Dict[str, List[Tuple[float, float]]] = {}
+    for m in plan.get("marks", []):
+        marks_by_seg.setdefault(str(m.get("segment")), []).append((float(m.get("at", 0)), float(m.get("at", 0)) + float(m.get("duration", 0.56)) + 0.1))
+    t0 = 0.0
+    for seg in plan.get("segments", []):
+        dur = round((float(seg["end"]) - float(seg["start"])) * fps) / fps
+        sid, lay = str(seg.get("id")), str(seg.get("layout") or "single").lower()
+        boxes = layouts.banner_boxes(seg, W, H, dur)
+        panels = {"split_h": [("left", (0, 0, W // 2, H)), ("right", (W // 2, 0, W, H))],
+                  "split_v": [("top", (0, 0, W, H // 2)), ("bottom", (0, H // 2, W, H))]}.get(lay, [("frame", (0, 0, W, H))])
+        seen = {name: 0 for name, _ in panels}
+        missing: Dict[str, List[float]] = {name: [] for name, _ in panels}
+        t = 0.2
+        while t < dur - 0.2:
+            if not any(a - 0.05 <= t <= b for a, b in marks_by_seg.get(sid, [])):
+                cap.set(cv2.CAP_PROP_POS_MSEC, (t0 + t) * 1000.0)
+                ok, frame = cap.read()
+                if ok:
+                    result["frames"] += 1
+                    if is_black_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)):
+                        result["black"].append(f"{sid} at {t0 + t:.1f}s")
+                    for name, (x0, y0, x1, y1) in panels:
+                        seen[name] += 1
+                        faces = vision_tracker.prominent_faces(vision_tracker.detect_faces_in_frame(frame[y0:y1, x0:x1]))
+                        if not faces:
+                            missing[name].append(round(t0 + t, 1))
+                        elif name == "frame":
+                            for b in boxes:
+                                if b["t0"] <= t <= b["t1"]:
+                                    for f in faces:
+                                        if box_overlap_share(f["bbox_norm"], (b["x0"], b["y0"], b["x1"], b["y1"]), W, H) > BANNER_FACE_OVERLAP:
+                                            result["banner_on_face"].append(f"{sid} at {t0 + t:.1f}s: '{b['text']}' covers a face")
+            t += FRAME_STEP_SEC
+        for name, times in missing.items():
+            if seen[name] >= 3 and len(times) / seen[name] > MISSING_FACE_SHARE:
+                label = f"{sid} {name} panel" if name != "frame" else sid
+                result["no_face"].append(f"{label}: no face in {len(times)} of {seen[name]} frames (for example at {times[0]}s)")
+        t0 += dur
+    cap.release()
+    result["ok"] = not result["black"] and len(result["banner_on_face"]) < 2
+    return result
+
+
 def build_review_sheet(plan: Dict[str, Any], mp4_path: Path, out_path: Path, tile_w: int = 104) -> Optional[Path]:
     """One small picture of the whole finished video for the Director: 3 frames per cut (just after it starts, middle, just before it
     ends), shrunk and labelled with the cut id and time. About 1k tokens to read, so nothing needs to be extracted by hand."""
@@ -743,6 +824,7 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
     split_hook_ok, split_hook_summary = check_split_and_hook_rules(plan)
     pic_ok, pic_bad, pic_n = check_picture_timeline(plan, out_mp4)
     review = build_review_sheet(plan, out_mp4, p_file.parent / "review_sheet.jpg")
+    frames = check_frames(plan, out_mp4)
     alt_proj_dir = WORK / out_mp4.stem
     if alt_proj_dir.is_dir() and alt_proj_dir.resolve() != p_file.parent.resolve() and sheet_path.is_file():
         (alt_proj_dir / "marks_contact_sheet.jpg").write_bytes(sheet_path.read_bytes())
@@ -780,9 +862,14 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
         except ValueError:
             rel_review = review
         print(f"[REVIEW] one picture of the whole video (3 frames per cut, about 1k tokens to read): {rel_review}")
+    detail = f"{frames['frames']} frames: {len(frames['black'])} black, {len(frames['banner_on_face'])} banner-on-face, {len(frames['no_face'])} panel(s) with missing faces"
+    print(f"[FRAMES {'PASS' if frames['ok'] else 'FAIL'}] {frames['note'] or detail}")
+    for kind, lines in (("BLACK", frames["black"]), ("BANNER ON FACE", frames["banner_on_face"]), ("NO FACE (warning)", frames["no_face"])):
+        for ln in lines[:4]:
+            print(f"          {kind}: {ln}")
     print(f"[PICTURE {'PASS' if pic_ok else 'FAIL'}] {pic_n} cuts: the picture at the middle of each cut matches the plan" + ("" if pic_ok else ": " + "; ".join(pic_bad)))
 
-    return bool(video_ok and audio_ok and cuts_ok and script_ok and marks_ok and split_hook_ok and pic_ok)
+    return bool(video_ok and audio_ok and cuts_ok and script_ok and marks_ok and split_hook_ok and pic_ok and frames['ok'])
 
 
 def main() -> None:
