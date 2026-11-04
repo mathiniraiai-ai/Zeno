@@ -852,6 +852,30 @@ def words_in_silence(words: List[Dict[str, Any]], rms_env: List[Tuple[float, flo
     return out
 
 
+def _silent_clip_owner(c: Dict[str, Any], clips_data: List[Dict[str, Any]]) -> str:
+    """For a silent clip: which speaking clip shows the same person and place, by colour layout (a measurement, not a decision)."""
+    if vision_tracker is None:
+        return ""
+    try:
+        sig = vision_tracker.clip_visual_signature(resolve(c["src"]))
+        if sig is None:
+            return ""
+        ranked = []
+        for o in clips_data:
+            if o is c or clip_is_silent(o):
+                continue
+            osig = vision_tracker.clip_visual_signature(resolve(o["src"]))
+            if osig is not None:
+                ranked.append((float(vision_tracker.signature_distance(sig, osig)), Path(str(o["src"])).name))
+        ranked.sort()
+        if not ranked:
+            return ""
+        near = f"looks like {ranked[0][1]} (distance {ranked[0][0]:.2f}"
+        return near + (f"; next {ranked[1][1]} {ranked[1][0]:.2f})" if len(ranked) > 1 else ")")
+    except Exception:
+        return ""
+
+
 def format_facts(clips_data: List[Dict[str, Any]]) -> str:
     """Everything measured about each clip, as text for the Director: `start word` for every word, a line break at each gap."""
     out = ["# FACTS: measured by Zeno. Times are seconds in the clip. `1.20 word` = the word starts at 1.20; `|2.31` = speech stops at 2.31.", ""]
@@ -868,8 +892,14 @@ def format_facts(clips_data: List[Dict[str, Any]]) -> str:
         for key in ("shot_type", "face_count", "focus"):
             if vis.get(key) not in (None, ""):
                 tags.append(f"{key}={vis[key]}")
+        bb = vis.get("bbox_norm")
+        if bb and len(bb) >= 4:
+            tags.append(f"face_top-bottom={float(bb[1]):.2f}-{float(bb[3]):.2f}")     # keep text and graphics below this line
         if clip_is_silent(c):
             tags.append("SILENT")
+            owner = _silent_clip_owner(c, clips_data)
+            if owner:
+                tags.append(owner)
         out.append(f"## {name} ({' '.join(tags)})")
         phrase: List[str] = []
         ws = c.get("hq_words") or []
@@ -939,6 +969,12 @@ def discover_clips(raw_args: List[str]) -> List[Tuple[str, str, Path]]:
     return unique
 
 
+def common_job_start() -> float:
+    from common import job_start_epoch
+
+    return job_start_epoch()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Deterministic token-saving pre-processor for Claude Editor.")
     ap.add_argument("clips", nargs="*", help="Input footage clips or work/<clip> directories")
@@ -967,7 +1003,7 @@ def main() -> None:
     args = ap.parse_args()
     if args.fresh:
         os.environ["ZENO_FRESH"] = "1"
-    job_start_epoch = time.time()
+    job_start_epoch = common_job_start()
 
     # Auto git pull once per new job (throttled to 15 min so if zeno.py --inspect just pulled, it doesn't repeat)
     try:

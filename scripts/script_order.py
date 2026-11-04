@@ -28,6 +28,8 @@ FIT_MIN = 0.40        # below this a segment is not proven to say a line
 TIE = 0.08            # lines this close to the best fit are treated as equally likely (repeated wording in a script)
 HEARD_MIN = 0.50      # share of a line's words that must be heard for the line to count as present
 STRONG = 0.55         # evidence needed to call a segment out of order from its words alone
+TIGHT_JOIN_SEC = 0.25     # silence across a join (end of one cut + start of the next) above this is reported
+TIGHT_PAUSE_SEC = 0.30    # a pause between two words inside one cut above this is reported
 SNAP_REACH_SEC = 0.12   # a cut may move at most this far to reach a quiet point
 REPEAT_RECALL = 0.8   # two separate segments that each hold this much of a line say it twice
 
@@ -259,6 +261,10 @@ def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path) -> Dict[st
     if voices:
         g["problems"]["WRONG VOICE"] = voices
     g["voice_note"] = note
+    try:
+        g["tighten"] = tight_report(plan)
+    except Exception:       # advice only
+        g["tighten"] = []
     g["blocked"] = bool(g["problems"])
     return g
 
@@ -418,6 +424,41 @@ def cut_problems(plan: Dict[str, Any]) -> List[str]:
                     if env and loud < -50.0:
                         continue      # the cut lands in silence: no sound is cut
                     out.append(f"{s.get('id')} {name} {t:.2f} is inside the word '{w.get('w')}' ({a:.2f}-{b:.2f})")
+    return out
+
+
+def tight_report(plan: Dict[str, Any]) -> List[str]:
+    """Where the edit drags: silence at joins and pauses inside cuts, from the aligned words. Advice only; it never blocks a render."""
+    out: List[str] = []
+    segs = plan.get("segments", [])
+    mark_end: Dict[str, float] = {}
+    for m in plan.get("marks", []):
+        mark_end[str(m.get("segment"))] = max(mark_end.get(str(m.get("segment")), 0.0), float(m.get("at", 0)) + float(m.get("duration", 0.56)))
+    rows = []
+    for s in segs:
+        st, en = float(s["start"]), float(s["end"])
+        ws = [w for w in _words_of(s) if float(w["end"]) > st + 0.05 and float(w["start"]) < en - 0.05]
+        rows.append((s, st, en, ws))
+    for k, (s, st, en, ws) in enumerate(rows):
+        if not ws:
+            continue
+        sid = str(s.get("id"))
+        lead = max(0.0, float(ws[0]["start"]) - st)
+        tail = max(0.0, en - float(ws[-1]["end"]))
+        tail_needed = max(0.0, mark_end.get(sid, 0.0) - (float(ws[-1]["end"]) - st))     # the flash after a sentence needs this much
+        tail_free = max(0.0, tail - tail_needed)
+        nxt = rows[k + 1] if k + 1 < len(rows) else None
+        if nxt and nxt[3]:
+            nxt_lead = max(0.0, float(nxt[3][0]["start"]) - nxt[1])
+            if tail_free + nxt_lead > TIGHT_JOIN_SEC:
+                out.append(f"{sid} -> {nxt[0].get('id')}: {tail_free + nxt_lead:.2f}s of silence at the join (tail {tail_free:.2f}s + lead {nxt_lead:.2f}s): "
+                           f"end {sid} at {en - max(0.0, tail_free - 0.08):.2f} or start {nxt[0].get('id')} later")
+        for w0, w1 in zip(ws, ws[1:]):
+            gap = float(w1["start"]) - float(w0["end"])
+            if gap > TIGHT_PAUSE_SEC:
+                out.append(f"{sid}: {gap:.2f}s pause between '{w0.get('w')}' and '{w1.get('w')}' at {float(w0['end']):.2f}-{float(w1['start']):.2f}: cut it (split the cut) or accept it as a breath")
+        if k == 0 and lead > 0.25:
+            out.append(f"{sid}: starts {lead:.2f}s before the first word")
     return out
 
 

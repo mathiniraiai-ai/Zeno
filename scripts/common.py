@@ -642,6 +642,38 @@ def ffmpeg(*args, timeout=180):
 
 
 # ---------------------------------------------------------------------------------------------------- GPU use
+JOB_MARKER = WORK / "_job_marker.json"
+
+
+def job_start_epoch(create: bool = True) -> float:
+    """When this edit began. Written by the pre-job checks and kept until the render finishes, so the token report counts exactly one
+    edit: from the checks to the finished video. (Looking at a whole session's logs mixed several edits and any code work together.)"""
+    import time as _t
+
+    try:
+        m = json.loads(JOB_MARKER.read_text(encoding="utf-8"))
+        if m.get("start") and _t.time() - float(m["start"]) < 6 * 3600:
+            return float(m["start"])
+    except (OSError, ValueError):
+        pass
+    now = _t.time()
+    if create:
+        try:
+            JOB_MARKER.parent.mkdir(parents=True, exist_ok=True)
+            JOB_MARKER.write_text(json.dumps({"start": now}), encoding="utf-8")
+        except OSError:
+            pass
+    return now
+
+
+def job_done() -> None:
+    """The edit is finished: the next one starts a new window."""
+    try:
+        JOB_MARKER.unlink()
+    except OSError:
+        pass
+
+
 def compute_device() -> str:
     """Where the aligner runs: NVIDIA CUDA, else Apple Silicon MPS, else CPU. `ZENO_DEVICE` (cpu | cuda | mps | auto) forces a choice."""
     want = os.environ.get("ZENO_DEVICE", "auto").strip().lower()

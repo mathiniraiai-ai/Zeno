@@ -580,6 +580,8 @@ def order_gate(plan: dict, plan_path: pathlib.Path) -> str:
     g = script_order.full_gate(plan, common.resolve(script), plan_path.parent)
     if g.get("voice_note"):
         print(f"[VOICE] {g['voice_note']}. Say so in the report.")
+    for t in g.get("tighten") or []:
+        print(f"[TIGHT] {t}")
     return script_order.format_gate(g) if g["blocked"] else ""
 
 
@@ -905,6 +907,8 @@ def main() -> None:
         if not args.inspect and not args.inputs:
             sys.exit(0)
 
+    if args.preflight or args.inspect or (args.inputs and args.script):
+        common.job_start_epoch()          # the token window of this edit starts here
     if args.preflight:
         import preflight
 
@@ -951,6 +955,8 @@ def main() -> None:
             gain_db=args.gain_db,
             draft=args.draft,
         )
+        if rc == 0:
+            common.job_done()
         sys.exit(rc)
 
     if args.inspect:

@@ -17,15 +17,18 @@ Zeno transcribes, measures and renders. **You, the Director, make every editing 
 6. **Motion, transitions, marks, SFX.** See below.
 7. **Self-review.** Read your plan against the script once as an editor would: does each cut land, does anyone speak twice, does the eye have somewhere to go? Then run `python3 scripts/zeno.py --check-plan work/<project>/plan.edl` until it passes.
 
-## Cuts (times from `facts.md`, seconds in the clip)
-- Start 0.10 to 0.18 s before the first kept word; end 0.12 to 0.18 s after the last. Stay inside the clip and never cut inside a word: the check blocks it. A cut in a gap is moved to the gap's quietest 10 ms at render, so no click.
-- Trim dead air and any "actor getting ready" stare before the first word or after the last.
+## Cuts: tight, never laggy (times from `facts.md`, seconds in the clip)
+- **Use the real sound, not only the word times.** `facts.md` lists `voiced` spans (measured from the audio) and flags `TIMING WRONG` words: believe the voiced spans over a flagged word. In a clip with constant background noise (selfie on a road) the whole clip counts as voiced: use word times there.
+- Start **0.06 to 0.10 s** before the first kept word and end **0.08 to 0.12 s** after the last. Never inside a word (the check blocks it). A cut in a gap is nudged by at most 0.12 s to its quietest point.
+- **Silence across a join** (end of one cut + start of the next) must be **0.20 s or less**. A split-screen conversation is back to back: hand over on the breath, not after a gap.
+- **Pauses inside a cut:** cut any pause over **0.30 s** inside one speaker's turn (split into `L5a`/`L5b`, `z=1.08` on the second half to hide the jump). Keep a breath of 0.30 s or less. Pauses of 1.35 s or more are always dead air.
+- `--check-plan` prints `[TIGHT]` lines for every join and pause over these limits. Clear each one by moving a time, or leave it only when it is a deliberate beat (and say why in the note).
+- **Marks must not make a gap.** A ✗/✓ flash needs 0.56 s, but start it **0.15 s before the sentence ends** (`at = last word end - 0.15`) so the cut can end about 0.4 s after the last word, not 0.6 s.
 - **Retakes inside a clip:** when words repeat (`Almost, almost`, a phrase said twice, a false start at the head) keep the last clean saying. Cut in the gap before it. A repeat the script itself contains stays, and so do natural reduplications (Kannada ಮತ್ತೆ ಮತ್ತೆ, ಪದೇ ಪದೇ).
 - **Babble after the line:** if speech continues past the script's last word, end before it.
 - **Overlap between clips:** if a clip opens with the word the previous cut ended on, start after that word.
-- **Internal pauses:** cut pauses over about 0.85 s inside one speaker's turn: split into `L5a` and `L5b`, and put `z=1.08` on the second part to hide the jump. Pauses of 1.35 s or more are always dead air. Natural turns between two characters can stay up to about 1.3 s.
 - A note like `(laughs mockingly)` on a line: keep up to 1.2 s of the reaction after the last word.
-- **Silent beat** (`(Man takes out his phone)`): use a `SILENT` clip that shows it, chosen by looking at the sheet; hold it for what the action needs.
+- **Silent beat** (`(Man takes out his phone)`): use a `SILENT` clip that shows it, chosen by looking at the sheet; hold it only as long as the action needs.
 
 ## Layout
 | Situation | Layout |
@@ -39,11 +42,16 @@ Zeno transcribes, measures and renders. **You, the Director, make every editing 
 
 "Horizontal split" means top and bottom. "Vertical split" means left and right.
 
-**Split screens and the listener rule.** While one character speaks, the other panel shows the other character, silent and listening. A character keeps one panel for the whole split: read `Top: A | Bottom: B`, or `Woman - Right screen`. Give every split segment `slot=` for the speaker and a `peer=` for the listener:
+**Split screens: four clips (the normal case).** The user gives four clips: the left talker, the right talker, and one silent clip for each of them (the character listening). Rules:
+- Each talker is shown **only while they speak**. When the left character speaks, the right panel shows the **right character's silent clip**, and the other way round. A character keeps one panel for the whole split (`Left: A | Right: B` in the script, or `Top`/`Bottom`).
+- `facts.md` marks silent clips `SILENT` and says `looks like <clip>` (the speaking clip with the same person and place). Check it on the clip sheet before you trust it. A silent clip named after the character wins over the guess.
+- **Stitch the silent clips in the gaps.** Give each split segment a `peer=` window of the other character's silent clip, and **walk forward through it** turn after turn (the second turn starts where the first ended). Never restart it at the same moment. If a silent clip is shorter than all the turns, loop it only after it has played once, and tell the user.
+- A talking clip that is itself a long recording of the whole conversation (this character is silent outside their turns, as in a real two-camera shoot) can serve as its own listener: use the other character's quiet stretches. Prefer the dedicated silent clip when there is one.
+- Never show speech in the listener panel. If a character has nothing to show, tell the user.
 
-    L8 S07_Lady1.mp4 0.00-3.73 layout=split_v z=1 sp="Lady 1" slot=bottom peer="Robot:S18_Robot.mp4"@4.15-4.95@top
+    L8 S07_Lady.mp4 0.00-3.73 layout=split_h z=1 sp="Lady" slot=right peer="Miss Nova:Nova_silent.mp4"@4.15-7.88@left
 
-`peer="<character>:<clip>"@<from>-<to>@<panel>`. Use that character's `SILENT` clip. Walk through it turn after turn: never restart at the same moment. With no silent clip use a pause from a stretch of their own clip where they are not speaking, and report it to the user. Never show speech in the listener panel. If a character has nothing to show, tell the user.
+`peer="<character>:<silent clip>"@<from>-<to>@<panel>`.
 
 ## Zoom
 - **Never** zoom split screens, two-shots, holograms, pre-stitched splits or clips with camera movement: `z=1`.
@@ -63,9 +71,14 @@ Zeno transcribes, measures and renders. **You, the Director, make every editing 
 - Add `sfx:whoosh.wav@0.0` on whips.
 
 ## Marks and text
-- `✗`/`✓` only where the script marks a line (`mark=wrong` / `mark=right` in `line_map.md`). Place at the **end of the sentence**: `mark:wrong@<last word end, relative to the cut>/0.56@pos=top-right@style=flash`, and keep at least 0.6 s of cut after that moment.
-- Strike-through lines: `banner:"<text>"@<time>`, on the spoken word. "Stop saying" hook: stack one banner per phrase, each on its word.
+- `✗`/`✓` only where the script marks a line (`mark=wrong` / `mark=right` in `line_map.md`). Flash at the end of the sentence, started 0.15 s before the last word ends: `mark:wrong@<last word end - 0.15, relative to the cut>/0.56@pos=top-right@style=flash`.
+- **"Stop saying" hook:** a `banner:"header:Stop saying"@0.3` title, then one banner per phrase, each on its spoken word (`banner:"What do you mean?"@<word start>`). The stack is placed **below the face** automatically, from the measured face box (`face_top-bottom` in `facts.md`, adjusted for the zoom). Never on the face. Look at the frame to confirm.
+- Strike-through lines (`(X Sign and Text Strikethrough)`): `banner:"<text>"@<time>`, on the spoken word.
 - No captions, CTAs, B-roll or text the script or the style does not ask for.
+
+## Looking at pictures (cheap, and only when it adds something)
+- Read the clip sheets **once**, before editing (`clip_sheet_<n>.jpg`: 3 frames per clip, about 0.5 to 2k tokens a sheet). Use them to see who is in a clip, silent clips, baked splits, bad frames.
+- After rendering, read `marks_contact_sheet.jpg` once. Pull more frames only when a check fails or the user reports a visual problem: then look at the few moments in question, not the whole video.
 
 ## plan.edl
 `zeno.py --inspect` writes the header. Add one line per segment, in script order:
@@ -76,7 +89,7 @@ Zeno transcribes, measures and renders. **You, the Director, make every editing 
 - Times inside `mark`, `banner`, `sfx` and `z=sudden_in:..@` are relative to the cut's start.
 
 ## The check
-`--check-plan` measures, it does not choose. It blocks on: lines out of script order, missing or said twice, words in a cut that fit no line, cuts inside a word, and a voice that does not match `sp=`. Fix the plan. If something is deliberate, write it in `work/<project>/decisions.txt`:
+`--check-plan` measures, it does not choose. It prints `[TIGHT]` advice (never blocks) and blocks on: lines out of script order, missing or said twice, words in a cut that fit no line, cuts inside a word, and a voice that does not match `sp=`. Fix the plan. If something is deliberate, write it in `work/<project>/decisions.txt`:
 
     accept L2 no clip for this beat; user agreed
 

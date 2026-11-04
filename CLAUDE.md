@@ -22,6 +22,7 @@ Script-led AI video editing harness (`1080x1920` MP4). Zeno only transcribes, me
 ## 2. Token Budget & Mandatory Reporting
 - **Budget**: **`50k–70k tokens` per video**, spent on real editorial decisions.
 - **Mid-Job Warning**: Warn the user immediately if a job risks going over `70k tokens`.
+- **Per-edit count**: the token window starts at the pre-job checks and ends when the render finishes (`work/_job_marker.json`), so the report counts exactly one edit. Start every video in a fresh session so it does not include other work.
 - **Mandatory End-of-Job Output**: Print the Token Usage table at the end of every job **and** append a row to `README.md`:
 
 ```markdown

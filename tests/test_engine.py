@@ -1274,6 +1274,47 @@ class TestScriptIsTheTimeline(unittest.TestCase):
             script_order.snap_cuts(plan)
         self.assertGreaterEqual(plan["segments"][0]["start"], 4.9 - script_order.SNAP_REACH_SEC - 1e-6)
 
+    def test_banner_stack_sits_below_the_face_and_moves_with_the_zoom(self):
+        from unittest import mock
+        import vision_tracker
+
+        vis = {"bbox_norm": [0.36, 0.23, 0.71, 0.50], "focus": [0.55, 0.27]}
+        with mock.patch.object(vision_tracker, "analyze_clip_vision", return_value=vis):
+            plain = layouts.banner_stack_top({"src": "a.mp4"})
+            zoomed = layouts.banner_stack_top({"src": "a.mp4", "zoom": 1.0, "zoom_to": 1.08})
+        self.assertGreater(plain, 0.50)               # below the bottom of the face box
+        self.assertGreaterEqual(zoomed, plain)         # a zoom pushes the chin down, so the stack moves down too
+        with mock.patch.object(vision_tracker, "analyze_clip_vision", side_effect=RuntimeError("no face")):
+            self.assertEqual(layouts.banner_stack_top({"src": "a.mp4"}), 0.445)
+
+    def test_tight_report_names_loose_joins_and_pauses_but_allows_the_mark_tail(self):
+        from unittest import mock
+        import script_order
+
+        words = {"a.mp4": [{"w": "x", "start": 0.1, "end": 0.5}, {"w": "y", "start": 1.2, "end": 1.6}]}
+        plan = {"segments": [{"id": "L1", "src": "a.mp4", "start": 0.0, "end": 2.2}, {"id": "L2", "src": "a.mp4", "start": 0.0, "end": 2.2}],
+                "marks": [{"type": "wrong", "segment": "L1", "at": 1.5, "duration": 0.56}]}
+        with mock.patch.object(script_order, "_words_of", side_effect=lambda seg: words[seg["src"]]):
+            report = script_order.tight_report(plan)
+        text = " ".join(report)
+        self.assertIn("pause between 'x' and 'y'", text)                        # a 0.7 s pause inside a cut
+        plan["marks"] = []
+        with mock.patch.object(script_order, "_words_of", side_effect=lambda seg: words[seg["src"]]):
+            self.assertTrue(any("L1 -> L2" in r for r in script_order.tight_report(plan)))   # without a mark the long tail is a loose join
+
+    def test_job_window_starts_once_and_resets_when_the_render_is_done(self):
+        import tempfile
+        from unittest import mock
+        import common
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(common, "JOB_MARKER", Path(tmp) / "m.json"):
+            t1 = common.job_start_epoch()
+            t2 = common.job_start_epoch()
+            self.assertEqual(t1, t2)
+            common.job_done()
+            self.assertFalse((Path(tmp) / "m.json").exists())
+            self.assertGreaterEqual(common.job_start_epoch(), t1)
+
     def test_empty_plan_cannot_render(self):
         from unittest import mock
         import tempfile

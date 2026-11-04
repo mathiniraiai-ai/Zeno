@@ -450,15 +450,6 @@ def save_prepare_snapshot(
     proj_dir = WORK / project_name
     proj_dir.mkdir(parents=True, exist_ok=True)
     snap_path = proj_dir / "token_telemetry.json"
-    if snap_path.is_file():
-        try:
-            prev = read_json(snap_path)
-            prev_start = float(prev.get("job_start_epoch") or 0.0)
-            if prev_start > 0 and (job_start_epoch - prev_start) < 2700.0:
-                job_start_epoch = prev_start
-        except Exception:
-            pass
-
     clip_rows = collect_clip_telemetry(clips_data, segments)
     t_in = sum(r["input_tokens"] for r in clip_rows)
     t_out = sum(r["output_tokens"] for r in clip_rows)

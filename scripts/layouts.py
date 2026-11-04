@@ -697,6 +697,24 @@ def _build_subpixel_zoom_filter(
     return filters
 
 
+def banner_stack_top(seg: Dict[str, Any]) -> float:
+    """Where the "Stop saying" stack starts, as a fraction of the frame height: just below the measured face (with the segment's own zoom),
+    never on it. Falls back to the standard chest-level position when the face cannot be measured."""
+    try:
+        import vision_tracker
+
+        vis = vision_tracker.analyze_clip_vision(resolve(seg["src"]))
+        bb = vis.get("bbox_norm")
+        if bb and len(bb) >= 4:
+            fy = float(seg["focus"][1]) if isinstance(seg.get("focus"), (list, tuple)) and len(seg["focus"]) >= 2 else float((vis.get("focus") or [0.5, 0.4])[1])
+            zmax = max(float(seg.get("zoom") or 1.0), float(seg.get("zoom_to") or 1.0))
+            chin = fy + (float(bb[3]) - fy) * zmax          # the chin moves down when the picture is zoomed in around the focus point
+            return round(min(0.66, max(0.445, chin + 0.03)), 3)
+    except Exception:
+        pass
+    return 0.445
+
+
 def build_segment_cache_key(
     seg: Dict[str, Any],
     plan: Optional[Dict[str, Any]],
@@ -721,7 +739,7 @@ def build_segment_cache_key(
 
     plan_loudness = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
     payload = {
-        "v": 11,
+        "v": 12,
         "src": _file_mtime_sig(seg["src"]),
         "start": round(float(seg["start"]), 4),
         "end": round(float(seg["end"]), 4),
@@ -1266,6 +1284,9 @@ def build_segment_ffmpeg_args(
             is_header = b_text.lower().startswith("header:")      # `banner:"header:Stop saying"@0.3`: a title above the stack, never struck
             parsed_banners.append((b_text[7:].strip() if is_header else b_text, b_at, b_dur, is_header))
 
+        has_header = any(pb[3] for pb in parsed_banners)
+        stack_top = banner_stack_top(seg)                       # the stack sits below the face, header first
+        phrase_base = stack_top + (0.075 if has_header else max(0.0, 0.52 - 0.445))
         phrase_idx = 0
         for b_idx, (b_text, b_at, b_dur, is_header) in enumerate(parsed_banners):
             b_end = min(exact, b_at + b_dur)
@@ -1275,7 +1296,7 @@ def build_segment_ffmpeg_args(
                 in_h = next_idx
                 next_idx += 1
                 inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", render_stop_saying_banner_png(b_text, with_strike=False, cross_icon=True)])
-                hy = int(round(H * 0.445))
+                hy = int(round(H * stack_top))
                 fc.append(
                     f"[{in_h}:v]scale=w='trunc(iw*{W}/1080/2)*2':h=-1,format=rgba,"
                     f"fade=t=in:st={b_at:.3f}:d=0.10:alpha=1,fade=t=out:st={max(b_at + 0.1, b_end - 0.18):.3f}:d=0.18:alpha=1[bn_h{b_idx}]"
@@ -1295,7 +1316,7 @@ def build_segment_ffmpeg_args(
             inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", png_struck])
 
             # Centered horizontally (x=0.50*W), stacked at lower-chest level (y=0.52*H + idx*0.068*H)
-            by_expr = int(round(H * (0.52 + phrase_idx * 0.068)))
+            by_expr = int(round(H * (phrase_base + phrase_idx * 0.068)))
             phrase_idx += 1
             fade_out_st = max(strike_at + 0.05, b_end - 0.18)
 
