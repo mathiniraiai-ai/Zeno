@@ -1183,6 +1183,85 @@ class TestScriptIsTheTimeline(unittest.TestCase):
         self.assertEqual([(s.get("zoom"), s.get("zoom_to"), s.get("zoom_style"), s.get("zoom_at")) for s in back],
                          [(1.0, 1.08, "sudden_in", 0.25), (1.08, 1.0, "sudden_out", 0.1), (1.0, 1.06, None, None)])
 
+    def test_silent_stretches_are_found_and_short_dips_are_not(self):
+        import numpy as np
+        from align_engine.onset_verifier import AcousticOnsetVerifier
+
+        v = AcousticOnsetVerifier()
+        y = np.zeros(16000 * 8, dtype="float32")
+        y[:16000 * 2] = 0.2 * np.sin(np.arange(16000 * 2) * 0.1)
+        y[16000 * 5:16000 * 7] = 0.2 * np.sin(np.arange(16000 * 2) * 0.1)
+        y[int(16000 * 1.0):int(16000 * 1.05)] = 0.0      # a 50 ms closure inside a word
+        runs = v.silent_runs(y)
+        self.assertEqual(len(runs), 2)
+        self.assertAlmostEqual(runs[0][0], 2.0, places=1)
+        self.assertAlmostEqual(runs[1][1], 8.0, places=1)
+
+    def test_word_edges_are_pulled_out_of_silence(self):
+        import numpy as np
+        from align_engine.onset_verifier import AcousticOnsetVerifier
+
+        v = AcousticOnsetVerifier()
+        y = np.zeros(16000 * 10, dtype="float32")
+        y[:16000 * 3] = 0.2 * np.sin(np.arange(16000 * 3) * 0.1)
+        y[16000 * 6:16000 * 7] = 0.2 * np.sin(np.arange(16000) * 0.1)
+        run_on = v.clamp_words_to_sound([{"word": "a", "start": 2.5, "end": 4.5}], y)[0]
+        overshoot = v.clamp_words_to_sound([{"word": "b", "start": 2.5, "end": 6.02}], y)[0]
+        ghost = v.clamp_words_to_sound([{"word": "c", "start": 4.0, "end": 4.4}], y)[0]
+        late = v.clamp_words_to_sound([{"word": "d", "start": 4.5, "end": 6.5}], y)[0]
+        self.assertLess(run_on["end"], 3.2)
+        self.assertLess(overshoot["end"], 3.2)
+        self.assertTrue(ghost.get("no_sound"))
+        self.assertGreater(late["start"], 5.9)
+
+    def test_aligner_cannot_place_a_word_in_silence(self):
+        import numpy as np
+        from align_engine.viterbi import ViterbiAligner
+
+        T, C = 200, 5      # 0.02 s per frame: sound at 0-1 s and 3-4 s, silence between
+        lp = np.full((T, C), -8.0, dtype="float32")
+        lp[:, 0] = -0.01
+        lp[130:140, 1] = -0.01       # the model hears token 1 at 2.6 s (inside the silence): the wrong place
+        lp[130:140, 0] = -6.0
+        lp[170:180, 2] = -0.01
+        lp[170:180, 0] = -6.0
+        meta = [{"word": "w1", "num_chars": 1, "orig_idx": 0}, {"word": "w2", "num_chars": 1, "orig_idx": 1}]
+        plain = ViterbiAligner().align(lp, [1, 2], meta, 0.02)
+        guarded = ViterbiAligner().align(lp, [1, 2], meta, 0.02, silent_spans=[(1.0, 3.0)])
+        self.assertTrue(1.0 < plain[0]["start"] < 3.0)
+        self.assertFalse(1.0 < guarded[0]["start"] < 3.0)
+
+    def test_cut_and_voice_checks_read_the_cache_word_file(self):
+        import tempfile
+        import json
+        from unittest import mock
+        import script_order
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "words.json").write_text(json.dumps([{"w": "hi", "start": 1.0, "end": 1.5}]), encoding="utf-8")
+            with mock.patch("common.clip_work_dir", return_value=Path(tmp)):
+                self.assertEqual(script_order._word_file("x.mp4"), Path(tmp) / "words.json")
+                self.assertEqual(script_order._words_of({"src": "x.mp4"})[0]["w"], "hi")
+
+    def test_a_short_voice_miss_is_a_doubt_when_the_files_other_turns_agree(self):
+        from unittest import mock
+        import script_order, speaker_check
+
+        words = lambda a: [{"w": "w", "start": a + i * 0.2, "end": a + i * 0.2 + 0.15} for i in range(6)]
+        plan = {"segments": [{"id": "L1", "src": "a.mp4", "start": 0, "end": 2, "speaker": "A"},
+                             {"id": "L2", "src": "b.mp4", "start": 0, "end": 2, "speaker": "B"},
+                             {"id": "L3", "src": "a.mp4", "start": 0, "end": 2, "speaker": "A"}]}
+        res = {"ok": True, "clips": {0: {"spans": [{"first": 0, "last": 5, "expected": "A", "heard": "B"}]}, 1: {"spans": []}, 2: {"spans": []}}}
+        with mock.patch.object(speaker_check, "analyze", return_value=res), \
+             mock.patch("common.clip_work_dir", return_value=Path("/nonexistent")), \
+             mock.patch.object(script_order, "_word_file", return_value=Path("/x.json")), \
+             mock.patch("common.read_json", side_effect=lambda f: words(0)), \
+             mock.patch.object(Path, "is_file", return_value=True), \
+             mock.patch("prepare.compute_10ms_rms_envelope", return_value=[]):
+            problems, note = script_order.voice_problems(plan)
+        self.assertEqual(problems, [])
+        self.assertIn("check by ear", note)
+
     def test_empty_plan_cannot_render(self):
         from unittest import mock
         import tempfile

@@ -343,9 +343,9 @@ def voice_problems(plan: Dict[str, Any]) -> Tuple[List[str], str]:
     for n, s in enumerate(plan.get("segments", [])):
         who = str(s.get("speaker") or "")
         wdir = clip_work_dir(s.get("src", ""))
-        f = wdir / "hq_words.json"
+        f = _word_file(s.get("src", ""))
         wav = wdir / "audio16k.wav"
-        if not who or " / " in who or not f.is_file() or not wav.is_file():
+        if not who or " / " in who or f is None or not wav.is_file():
             continue
         st, en = float(s["start"]), float(s["end"])
         ws = [w for w in read_json(f) if float(w.get("end", 0)) > st + 0.08 and float(w.get("start", 0)) < en - 0.08]
@@ -357,18 +357,41 @@ def voice_problems(plan: Dict[str, Any]) -> Tuple[List[str], str]:
     res = speaker_check.analyze(items)
     if not res.get("ok"):
         return [], f"voices not checked: {res.get('reason')}"
-    out = []
+    by_id = {i["id"]: i for i in items}
+    src_of = {n: str(plan["segments"][n].get("src")) for n in ids}
+    disagree = {n for n, info in res.get("clips", {}).items() if info.get("spans")}
+    out, doubts = [], []
     for n, info in res.get("clips", {}).items():
         for sp in info.get("spans", []):
-            out.append(f"{ids.get(n, n)} is labelled {sp.get('expected')}, but the voice is {sp.get('heard', 'someone else')}")
-    return out, ""
+            ws = by_id[n]["words"][sp["first"]: sp["last"] + 1]
+            span_sec = (float(ws[-1]["end"]) - float(ws[0]["start"])) if ws else 0.0
+            same_file = [m for m in ids if m != n and src_of[m] == src_of[n]]
+            msg = f"{ids.get(n, n)} is labelled {sp.get('expected')}, but the voice is {sp.get('heard', 'someone else')}"
+            # A very short span is too little to tell voices apart. If every other turn from the same file agrees with its label,
+            # it is far more likely a miss of the measurement than a wrong person: say so, but do not block.
+            if span_sec < 2.5 and same_file and not any(m in disagree for m in same_file):
+                doubts.append(f"{msg} (only {span_sec:.1f}s of speech; the file's other {len(same_file)} turn(s) match: check by ear)")
+            else:
+                out.append(msg)
+    return out, ("voice doubt: " + "; ".join(doubts)) if doubts else ""
+
+
+def _word_file(src: Any) -> Optional[Path]:
+    """The cached aligned words of a clip. The cache stores them as words.json (hq_words.json in older caches)."""
+    from common import clip_work_dir
+
+    wdir = clip_work_dir(src)
+    for name in ("hq_words.json", "words.json"):
+        if (wdir / name).is_file():
+            return wdir / name
+    return None
 
 
 def _words_of(seg: Dict[str, Any]) -> List[Dict[str, Any]]:
-    from common import clip_work_dir, read_json
+    from common import read_json
 
-    f = clip_work_dir(seg.get("src", "")) / "hq_words.json"
-    return read_json(f) if f.is_file() else []
+    f = _word_file(seg.get("src", ""))
+    return read_json(f) if f else []
 
 
 def _env_of(seg: Dict[str, Any]) -> List[Tuple[float, float]]:

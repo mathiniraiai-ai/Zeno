@@ -4,7 +4,7 @@ Performs accelerated trellis search across frame-level CTC emissions with confid
 """
 
 import numpy as np
-from typing import List, Dict, Any
+from typing import Optional, Tuple, List, Dict, Any
 
 try:
     import torch
@@ -106,14 +106,43 @@ class ViterbiAligner:
         log_probs: np.ndarray,
         token_ids: List[int],
         word_spans_meta: List[Dict[str, Any]],
-        time_per_frame: float
+        time_per_frame: float,
+        silent_spans: Optional[List[Tuple[float, float]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Executes forced alignment on frame log-probabilities.
+
+        `silent_spans` are stretches that hold no sound (measured from the audio). No word may be placed there: in those frames
+        every token is made impossible and only blank stays. Without this the path puts words the model is unsure about
+        (short interjections, line-final Kannada words) anywhere in the silence, because silence costs the same everywhere.
         """
         U = len(token_ids)
         if U == 0 or len(word_spans_meta) == 0:
             return []
+        if silent_spans:
+            n = log_probs.shape[0]
+            dead = np.zeros(n, dtype=bool)
+            for a, b in silent_spans:
+                dead[max(0, int(a / time_per_frame)):min(n, int(b / time_per_frame) + 1)] = True
+            repeats = sum(1 for k in range(1, U) if token_ids[k] == token_ids[k - 1])
+            if dead.any() and int((~dead).sum()) >= U + repeats + 2:      # enough sound left to hold every token
+                masked = log_probs.copy()
+                masked[dead, :] = -1.0e4
+                masked[dead, self.blank_id] = 0.0
+                try:
+                    return self._align_core(masked, token_ids, word_spans_meta, time_per_frame)
+                except Exception:
+                    pass          # fall back to the plain alignment
+        return self._align_core(log_probs, token_ids, word_spans_meta, time_per_frame)
+
+    def _align_core(
+        self,
+        log_probs: np.ndarray,
+        token_ids: List[int],
+        word_spans_meta: List[Dict[str, Any]],
+        time_per_frame: float,
+    ) -> List[Dict[str, Any]]:
+        U = len(token_ids)
 
         # 1. Try PyTorch C++ kernel if available, else fast NumPy Viterbi
         token_spans = None

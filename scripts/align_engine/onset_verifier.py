@@ -247,6 +247,60 @@ class AcousticOnsetVerifier:
             out.append({**w, "end": round(max(float(w["start"]) + 0.05, end), 3)})
         return out
 
+    def silent_runs(self, waveform: np.ndarray, floor_db: float = -58.0, min_run_sec: float = 0.12) -> List[Tuple[float, float]]:
+        """Stretches with no sound at all: at least `min_run_sec` long and `floor_db` below the loudest sound in the audio.
+        Short dips inside words (stop-consonant closures) are shorter than that and are never counted. In a noisy
+        recording nothing counts as silent, which is the safe direction: the aligner then works as before."""
+        rms, times = self.compute_energy_envelope(waveform)
+        if len(rms) < 5:
+            return []
+        db = 20.0 * np.log10(np.maximum(rms, 1e-7))
+        hop = float(self.hop_length) / float(self.sample_rate)
+        quiet = db < floor_db
+        runs: List[Tuple[float, float]] = []
+        i, n = 0, len(quiet)
+        while i < n:
+            if quiet[i]:
+                j = i
+                while j + 1 < n and quiet[j + 1]:
+                    j += 1
+                if (j - i + 1) * hop >= min_run_sec:
+                    runs.append((round(i * hop, 3), round((j + 1) * hop, 3)))
+                i = j + 1
+            else:
+                i += 1
+        return runs
+
+    def clamp_words_to_sound(self, words: List[Dict[str, Any]], waveform: np.ndarray) -> List[Dict[str, Any]]:
+        """Last check on every word: a word's start and end must lie where there is sound. An end that runs into silence is
+        pulled back to the last sound inside the word; a start in silence moves to the first sound. A word with no sound
+        anywhere inside it is flagged `no_sound` (its time cannot be trusted). Never lengthens a word."""
+        runs = self.silent_runs(waveform)
+        if not runs or not words:
+            return words
+        out = []
+        for w in words:
+            s, e = float(w["start"]), float(w["end"])
+            ns, ne = s, e
+            for a, b in runs:
+                if b <= s or a >= e:
+                    continue                                   # this silence does not touch the word
+                if a <= s + 0.10 and b < e - 0.05:
+                    ns = max(ns, b - 0.02)                     # word starts in silence: move to the first sound
+                elif a > s and b >= e - 0.10:
+                    ne = min(ne, a + 0.04)                     # word runs on into silence (also when it overshoots the silence): end at the last sound
+                elif a <= s + 0.10 and b >= e - 0.10:
+                    ns, ne = s, s                              # the whole word lies in silence
+            nw = dict(w)
+            if ne - ns < 0.03 and any(a <= s and e <= b for a, b in runs):
+                nw["no_sound"] = True
+            else:
+                nw["start"], nw["end"] = round(ns, 3), round(max(ne, ns + 0.03), 3)
+                if abs(ns - s) > 0.02 or abs(ne - e) > 0.02:
+                    nw["sound_clamp"] = [round(ns - s, 3), round(ne - e, 3)]
+            out.append(nw)
+        return out
+
     def refine_segment_boundaries(
         self,
         start_sec: float,
