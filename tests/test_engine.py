@@ -896,6 +896,148 @@ Robot: Perfect!
         self.assertEqual(client.__enter__.return_value.post.call_count, 3, "it asked again after each 'too many requests'")
         self.assertEqual(slept.call_count, 2)
 
+    # ------------------------------------------------------------------ the listener rule
+    def _split_job(self, script_text, speaking, silent, preset="auto"):
+        """Plan a split-screen job. speaking: [(stem, speaker_line_index)]; silent: [(stem, extra)]; returns (segments, clips)."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = Path(tmp) / "s.txt"
+            sp.write_text(script_text, encoding="utf-8")
+            _, lines = prepare.parse_script_file(sp)
+        spoken = [l for l in lines if not l["beat"]]
+        clips = []
+        for stem, li, src in speaking:
+            clips.append({"stem": stem, "src": src or f"input/footage/{stem}.mp4", "info": {"duration": 4.0, "face_count": 1, "shot_type": "single"},
+                          "matched_lines": [spoken[li]], "anomalies": [], "hq_words": [{"w": "x", "start": 1.0, "end": 1.5}]})
+        for stem, src, is_flag in silent:
+            clips.append({"stem": stem, "src": src or f"input/footage/{stem}.mp4", "info": {"duration": 6.0, "face_count": 1, "shot_type": "single"},
+                          "matched_lines": [], "is_listening": is_flag, "anomalies": []})
+        speakers = [c for c in clips if c["matched_lines"]]
+        raw = [{"stem": c["stem"], "src": c["src"], "clip": c, "start": 0.0, "end": 3.0, "lines": c["matched_lines"], "lines_override": c["matched_lines"],
+                "words": [{"w": "x", "start": 0.1, "end": 0.5}]} for c in speakers]
+        segs, _, _ = prepare.assign_segment_ids_marks_and_layouts(raw, lines, clips, preset=preset, all_clips=clips)
+        return [s for s in segs if s.get("layout") in ("split_h", "split_v")], clips
+
+    LEFT_RIGHT = """-- Miss Nova -- AI teacher, left screen in Scene 3
+-- Woman -- learner, right screen in Scene 3
+[Visual: SCENE 3 \u2014 SPLIT SCREEN | Woman - Right screen | Miss Nova - Left screen]
+Miss Nova: Hello there, how are you today
+Woman: I am fine thank you very much
+Miss Nova: Great, let us start the lesson now
+Woman: Yes please, I am ready to begin
+"""
+
+    def test_listener_is_the_other_character_left_and_right(self):
+        """Left speaks -> the right panel is the listener, and the other way round; the listener comes from the silent clip."""
+        segs, _ = self._split_job(self.LEFT_RIGHT, [("C0", 0, None), ("C1", 1, None), ("C2", 2, None), ("C3", 3, None)],
+                                  [("MissNova_idle", None, True), ("Woman_listening", None, True)])
+        self.assertEqual(len(segs), 4)
+        for s in segs:
+            self.assertEqual(s["layout"], "split_h")
+            if s["speaker"] == "Miss Nova":
+                self.assertEqual((s["slot"], s["peer"]["slot"], s["peer"]["speaker"]), ("left", "right", "Woman"))
+                self.assertIn("Woman_listening", s["peer"]["src"])
+            else:
+                self.assertEqual((s["slot"], s["peer"]["slot"], s["peer"]["speaker"]), ("right", "left", "Miss Nova"))
+                self.assertIn("MissNova_idle", s["peer"]["src"])
+
+    def test_listener_is_the_other_character_top_and_bottom(self):
+        script = self.W43_SAMPLE.split("Lady 1: Yes, I'm really")[0] + """Horizontal Split screen Top: Robot | Bottom: Lady 1
+Female Humanoid Robot: What are you doing right now
+Lady 1: I am doing work in farm and talking with you
+Female Humanoid Robot: You can say I'm working on the farm
+Lady 1: I'm working on the farm while talking to you
+"""
+        segs, _ = self._split_job(script, [("C0", 0, None), ("C1", 1, None), ("C2", 2, None), ("C3", 3, None)],
+                                  [("Robot_listening", None, True), ("Lady1_listening", None, True)])
+        self.assertEqual(len(segs), 4)
+        for s in segs:
+            if s["speaker"] == "Female Humanoid Robot":
+                self.assertEqual((s["slot"], s["peer"]["slot"], s["peer"]["speaker"]), ("top", "bottom", "Lady 1"))
+                self.assertIn("Lady1_listening", s["peer"]["src"])
+            else:
+                self.assertEqual((s["slot"], s["peer"]["slot"], s["peer"]["speaker"]), ("bottom", "top", "Female Humanoid Robot"))
+                self.assertIn("Robot_listening", s["peer"]["src"])
+
+    def test_silent_clips_are_walked_through_not_restarted(self):
+        segs, _ = self._split_job(self.LEFT_RIGHT, [("C0", 0, None), ("C1", 1, None), ("C2", 2, None), ("C3", 3, None)],
+                                  [("MissNova_idle", None, True), ("Woman_listening", None, True)])
+        nova = [s["peer"]["idle_span"] for s in segs if s["speaker"] == "Woman"]   # the listener beside Woman is Miss Nova's silent clip
+        self.assertEqual(len(nova), 2)
+        self.assertNotEqual(nova[0], nova[1], "the second turn continues where the first one stopped")
+        self.assertEqual(nova[1][0], nova[0][1])
+
+    def test_unnamed_silent_clips_are_told_apart_by_how_they_look(self):
+        import subprocess
+        import tempfile
+
+        import common
+
+        with tempfile.TemporaryDirectory() as tmp:
+            def make(name, colour):
+                out = str(Path(tmp) / name)
+                subprocess.run([str(common.resolve_ffmpeg()), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", f"color=c={colour}:s=96x160:d=1:r=10",
+                                "-pix_fmt", "yuv420p", out], check=True)
+                return out
+
+            nova_clip, woman_clip = make("c_nova.mp4", "0x2255ff"), make("c_woman.mp4", "0xff8822")
+            quiet_a, quiet_b = make("quiet_one.mp4", "0x2a5cf0"), make("quiet_two.mp4", "0xf08a2a")   # no names, only looks
+            segs, clips = self._split_job(self.LEFT_RIGHT, [("C0", 0, nova_clip), ("C1", 1, woman_clip), ("C2", 2, nova_clip), ("C3", 3, woman_clip)],
+                                          [("quiet_one", quiet_a, True), ("quiet_two", quiet_b, True)])
+        owner = {c["stem"]: c.get("listener_of") for c in clips if c.get("is_listening")}
+        self.assertEqual(owner, {"quiet_one": "Miss Nova", "quiet_two": "Woman"})
+        for s in segs:
+            want = "quiet_two" if s["speaker"] == "Miss Nova" else "quiet_one"   # beside Miss Nova sits Woman, and the other way round
+            self.assertIn(want, s["peer"]["src"])
+
+    def test_without_a_silent_clip_the_listener_is_never_speech(self):
+        from unittest.mock import patch
+
+        import vision_tracker
+
+        with patch.object(vision_tracker, "find_listening_idle_window", return_value={"idle_span": [3.1, 4.0], "still_at": 3.5}) as finder:
+            segs, clips = self._split_job(self.LEFT_RIGHT, [("C0", 0, None), ("C1", 1, None), ("C2", 2, None), ("C3", 3, None)], [])
+        for s in segs:
+            self.assertEqual((s["peer"]["mode"], s["peer"]["still_at"]), ("still", 3.5), "0.9 s is too short to loop: hold one mouth-closed frame")
+            self.assertNotEqual(s["peer"]["src"], s["src"])
+        self.assertTrue(any("speech_spans" in c.kwargs and c.kwargs["speech_spans"] for c in finder.call_args_list), "the finder is told where they speak")
+        self.assertTrue(any("LISTENER_FALLBACK" in a for c in clips for a in c["anomalies"]), "the brief asks for a silent clip")
+
+    def test_a_long_quiet_moment_is_looped_inside_its_bounds(self):
+        from unittest.mock import patch
+
+        import vision_tracker
+
+        with patch.object(vision_tracker, "find_listening_idle_window", return_value={"idle_span": [1.0, 6.0], "still_at": 3.0}):
+            segs, _ = self._split_job(self.LEFT_RIGHT, [("C0", 0, None), ("C1", 1, None), ("C2", 2, None), ("C3", 3, None)], [])
+        for s in segs:
+            a, b = s["peer"]["idle_span"]
+            self.assertEqual(s["peer"]["mode"], "loop")
+            self.assertTrue(1.0 <= a < b <= 6.0, (a, b))
+
+    def test_plan_file_keeps_a_held_listener(self):
+        plan = {"segments": [{"id": "L1", "src": "S1.mp4", "start": 0.0, "end": 3.0, "layout": "split_v", "slot": "top",
+                              "peer": {"speaker": "Lady 1", "src": "S2.mp4", "mode": "still", "still_at": 1.25, "slot": "bottom"}}], "marks": []}
+        back = edl_parser.parse_edl(edl_parser.format_edl(plan)) if hasattr(edl_parser, "parse_edl") else None
+        peer = (back or {}).get("segments", [{}])[0].get("peer", {})
+        self.assertEqual((peer.get("mode"), peer.get("still_at"), peer.get("slot")), ("still", 1.25, "bottom"))
+
+    def test_nothing_to_show_is_reported_not_invented(self):
+        segs, clips = self._split_job(self.LEFT_RIGHT, [("C0", 0, None), ("C1", 0, None)], [])   # both clips are Miss Nova: Woman has none
+        self.assertTrue(all(s.get("peer") is None for s in segs if s["speaker"] == "Miss Nova"))
+        self.assertTrue(any("LISTENER_MISSING" in a for c in clips for a in c["anomalies"]))
+
+    def test_script_panel_wordings(self):
+        self.assertEqual(prepare.panels_from_text("Top: Robot | Bottom: Lady 1"), {"top": "Robot", "bottom": "Lady 1"})
+        self.assertEqual(prepare.panels_from_text("SPLIT SCREEN | Woman - Right screen | Miss Nova - Left screen"), {"right": "Woman", "left": "Miss Nova"})
+        self.assertEqual(prepare.split_layout_from_panels({"left": "A", "right": "B"}), "split_h")
+        self.assertEqual(prepare.split_layout_from_panels({"top": "A", "bottom": "B"}), "split_v")
+        self.assertTrue(prepare._stem_is_character("S06_FemaleHumanoidRobot", "Female Humanoid Robot"))
+        self.assertTrue(prepare._stem_is_character("robot_listening", "Female Humanoid Robot"))
+        self.assertTrue(prepare._stem_is_character("Lady1_idle", "Lady 1"))
+        self.assertFalse(prepare._stem_is_character("Lady1_idle", "Lady 2"))
+
     def test_layout_hint_wording(self):
         self.assertEqual(prepare.layout_hint_from_direction("a horizontal split screen"), "split_v")
         self.assertEqual(prepare.layout_hint_from_direction("a vertical split screen"), "split_h")

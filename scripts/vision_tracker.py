@@ -292,6 +292,46 @@ def detect_faces_in_frame(
     return faces
 
 
+_SIGNATURES: Dict[str, Any] = {}
+
+
+def clip_visual_signature(src: Union[str, Path], n: int = 5) -> Optional["np.ndarray"]:
+    """A colour fingerprint of a clip: the average LAB colour of a 3 x 3 grid over the central part of `n` frames, averaged. It has no
+    hard bin edges, so a slightly different shade of the same wardrobe or set stays close, while the robot in a beige room and a woman
+    in a green field land far apart. Used to tell which character a silent listening clip shows when its file name does not say."""
+    key = str(src)
+    if key in _SIGNATURES:
+        return _SIGNATURES[key]
+    if np is None or cv2 is None:
+        return None
+    cap = cv2.VideoCapture(key)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    grids = []
+    for i in range(n):
+        if total:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, min(total - 1, int((i + 0.5) / n * total)))
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            continue
+        h, w = frame.shape[:2]
+        core = frame[int(h * 0.05): int(h * 0.75), int(w * 0.15): int(w * 0.85)]
+        lab = cv2.cvtColor(cv2.resize(core, (90, 120), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2LAB).astype("float32")
+        cells = [lab[r * 40:(r + 1) * 40, c * 30:(c + 1) * 30].reshape(-1, 3).mean(axis=0) for r in range(3) for c in range(3)]
+        grids.append(np.concatenate(cells))
+    cap.release()
+    sig = np.mean(grids, axis=0).astype("float32") if grids else None
+    _SIGNATURES[key] = sig
+    return sig
+
+
+def signature_distance(a: Optional["np.ndarray"], b: Optional["np.ndarray"]) -> float:
+    """0 = the same look; about 0.1-0.25 for the same character in another pose; 1 = clearly different (mean LAB difference per
+    value divided by 50, capped at 1). 1.0 when either is missing."""
+    if a is None or b is None:
+        return 1.0
+    return float(min(1.0, np.mean(np.abs(a - b)) / 50.0))
+
+
 def prominent_faces(faces: List[Dict[str, Any]], min_area_ratio: float = 0.4) -> List[Dict[str, Any]]:
     """Faces that count as people in the shot: a detection with under 40% of the largest face's area is a false positive
     (a wall picture, a sign, a corner) or a distant bystander. A real two-shot has two faces of comparable size. Measured on

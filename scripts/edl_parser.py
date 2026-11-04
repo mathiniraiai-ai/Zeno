@@ -457,6 +457,8 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                             peer_dict["focus"] = [round(float(fx_s), 4), round(float(fy_s), 4)]
                         elif ex.lower() in ("top", "bottom", "left", "right"):
                             peer_dict["slot"] = ex.lower()
+                        elif ex.lower() == "still":   # hold one mouth-closed frame instead of looping a very short clip
+                            peer_dict["mode"] = "still"
                         else:
                             try:
                                 peer_dict["still_at"] = round(float(ex), 4)
@@ -727,6 +729,8 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
                 p_parts.append(f"{_fmt_num(peer['focus'][0])},{_fmt_num(peer['focus'][1])}")
             if peer.get("slot"):
                 p_parts.append(str(peer["slot"]))
+            if peer.get("mode") == "still":
+                p_parts.append("still")
             toks.append(f"peer={'@'.join(p_parts)}")
 
         # Chat messages on segment

@@ -355,6 +355,8 @@ _LAYOUT_CUE_RE = re.compile(r"^(?:rectangle\s+overlay|floating\s+window|(?:(?:ho
 _LABELLED_URL_RE = re.compile(r"^[^:]{1,40}:\s*https?://\S+\s*$", re.I)
 # "Top: Robot | Bottom: Lady 1" or "Left: A | Right: B" after a split-screen note
 _PANELS_RE = re.compile(r"(top|left)\s*:\s*(.+?)\s*\|\s*(bottom|right)\s*:\s*(.+)$", re.I)
+_SIDE_NAME_RE = re.compile(r"([A-Za-z][A-Za-z0-9 .'-]{0,30}?)\s*[-–—:]\s*(left|right|top|bottom)\s+(?:screen|side|panel)\b", re.I)
+_CHAR_SIDE_RE = re.compile(r"\b(left|right|top|bottom)\s+(?:screen|side|panel)\b", re.I)
 _WRONG_MARKS = "❌✗✘❎"
 _RIGHT_MARKS = "✅✓✔☑"
 # a parenthetical that only describes what is happening while people talk, so it is not a silent beat
@@ -365,6 +367,27 @@ _STRIKE_CUE_RE = re.compile(r"\s*[\(\[][^\)\]]*strike[^\)\]]*[\)\]]\s*$", re.I)
 _TEXT_CUE_RE = re.compile(r"\s*\[\s*TEXT\s*:\s*(?P<body>[^\]]*)\]\s*$", re.I)
 # "horizontal split screen" means the divider line runs horizontally (top / bottom panels); "vertical split" is left / right
 SCRIPT_SPLIT_LAYOUT = {"horizontal": "split_v", "vertical": "split_h", "default": "split_v"}
+
+
+def panels_from_text(text: str) -> Dict[str, str]:
+    """Who sits where, from any wording a script uses: "Top: Robot | Bottom: Lady 1" or "Woman - Right screen | Miss Nova - Left screen"."""
+    panels: Dict[str, str] = {}
+    m = _PANELS_RE.search(text or "")
+    if m:
+        panels[m.group(1).lower()] = m.group(2).strip()
+        panels[m.group(3).lower()] = m.group(4).strip()
+    for m in _SIDE_NAME_RE.finditer(text or ""):
+        panels.setdefault(m.group(2).lower(), m.group(1).strip())
+    return panels
+
+
+def split_layout_from_panels(panels: Dict[str, str]) -> str:
+    """Panels named left/right make a `split_h`; named top/bottom make a `split_v`; '' when nothing is named."""
+    if "left" in panels or "right" in panels:
+        return "split_h"
+    if "top" in panels or "bottom" in panels:
+        return "split_v"
+    return ""
 
 
 def layout_hint_from_direction(text: str) -> str:
@@ -487,7 +510,8 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             current_scene = m_scene.group(1).strip()
             scene_no = int(re.search(r"\d+", current_scene).group())
             current_visual = (m_scene.group(2) or "").strip()
-            current_hint = layout_hint_from_direction(current_visual)
+            current_panels = panels_from_text(current_visual)
+            current_hint = split_layout_from_panels(current_panels) or layout_hint_from_direction(current_visual)
             meta["scenes"].append({"scene": current_scene, "visual": current_visual})
             continue
 
@@ -508,9 +532,8 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
         if _LAYOUT_CUE_RE.match(s) and not re.match(r"^[A-Za-z][A-Za-z0-9_ ]{0,22}:\s", s):
             hint_l = layout_hint_from_direction(s)
             if hint_l:
-                current_hint = hint_l
-                m_pan = _PANELS_RE.search(s)
-                current_panels = {m_pan.group(1).lower(): m_pan.group(2).strip(), m_pan.group(3).lower(): m_pan.group(4).strip()} if m_pan else {}
+                current_panels = panels_from_text(s)
+                current_hint = split_layout_from_panels(current_panels) or hint_l
                 continue
 
         # 4. Scene visual / camera direction block: "[Visual: ...]"
@@ -518,6 +541,10 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
         if m_vis_dir:
             in_characters_block = False
             current_visual = m_vis_dir.group(1).strip()
+            vis_panels = panels_from_text(current_visual)
+            vis_hint = split_layout_from_panels(vis_panels) or layout_hint_from_direction(current_visual)
+            if vis_hint:   # "[Visual: SCENE 3 - SPLIT SCREEN | Woman - Right screen | Miss Nova - Left screen]"
+                current_hint, current_panels = vis_hint, vis_panels
             if meta["scenes"]:
                 meta["scenes"][-1]["visual"] = current_visual
             else:
@@ -631,7 +658,18 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             "strike_text": (strike_override or text) if (strike_cue and not beat) else "",
         })
 
-    names = sorted({l["speaker"] for l in lines if l.get("speaker")} | set(meta["characters"]), key=lambda n: -len(n.split()))
+    char_side = {}
+    for cname, cdesc in meta["characters"].items():
+        m_side = _CHAR_SIDE_RE.search(cdesc or "")
+        if m_side:
+            char_side[cname] = m_side.group(1).lower()
+    for l in lines:
+        if l.get("layout_hint") and char_side:
+            for cname, side in char_side.items():
+                if side not in l["panels"] and cname not in l["panels"].values() and split_layout_from_panels({side: cname}) == l["layout_hint"]:
+                    l["panels"][side] = cname
+    panel_names = {v for l in lines for v in (l.get("panels") or {}).values()}   # "Top: Robot" names a character too
+    names = sorted({l["speaker"] for l in lines if l.get("speaker")} | set(meta["characters"]) | panel_names, key=lambda n: -len(n.split()))
     canon = {}
     for n in names:
         words = set(n.lower().split())
@@ -1792,6 +1830,118 @@ def detect_clip_anomalies_and_cuts(
     return raw_segments
 
 
+def _norm_name(text: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+
+def _stem_is_character(stem: str, speaker: str) -> bool:
+    """`S06_FemaleHumanoidRobot` and `robot_listening` belong to "Female Humanoid Robot"; `Lady1_idle` to "Lady 1" (not "Lady 2")."""
+    st, sp = _norm_name(stem), _norm_name(speaker)
+    if not sp:
+        return False
+    if sp in st:
+        return True
+    words = str(speaker).strip().lower().split()
+    tail = _norm_name(words[-1]) if words else ""
+    digits = re.findall(r"\d+", sp)
+    return len(tail) >= 4 and tail in st and (not digits or digits[-1] in st)
+
+
+LISTENER_LOOK_MAX_DISTANCE = 0.40   # colour-signature distance (0 same look, about 0.1-0.25 same character, 1 clearly different)
+LISTENER_LOOK_MARGIN = 0.15         # the best match must beat the next character by this much
+
+
+def assign_listening_owners(listening_pool: List[Dict[str, Any]], pool_clips: List[Dict[str, Any]], speakers: List[str]) -> None:
+    """Decide which character each silent listening clip shows: by its file name, else by how it looks compared with each
+    character's speaking clips. Sets clip["listener_of"] (and "listener_by"); leaves it unset when neither is sure."""
+    spoken_by: Dict[str, List[str]] = {}
+    for c in pool_clips:
+        if c.get("is_listening") or c.get("is_beat"):
+            continue
+        for l in c.get("matched_lines") or []:
+            sp = l.get("speaker")
+            if sp and c["src"] not in spoken_by.setdefault(sp, []):
+                spoken_by[sp].append(c["src"])
+    ref: Optional[Dict[str, Any]] = None
+    for lc in listening_pool:
+        if lc.get("listener_of"):
+            continue
+        named = [sp for sp in speakers if _stem_is_character(lc.get("stem", ""), sp)]
+        if len(named) == 1:
+            lc["listener_of"], lc["listener_by"] = named[0], "name"
+            continue
+        if vision_tracker is None or not hasattr(vision_tracker, "clip_visual_signature"):
+            continue
+        try:
+            if ref is None:
+                ref = {}
+                for sp, srcs in spoken_by.items():
+                    sigs = [x for x in (vision_tracker.clip_visual_signature(resolve(src)) for src in srcs[:3]) if x is not None]
+                    if sigs:
+                        ref[sp] = sum(sigs) / len(sigs)
+            if len(ref) < 2:
+                continue
+            sig = vision_tracker.clip_visual_signature(resolve(lc["src"]))
+            ranked = sorted((vision_tracker.signature_distance(sig, r), sp) for sp, r in ref.items())
+        except Exception:
+            continue
+        if ranked and ranked[0][0] <= LISTENER_LOOK_MAX_DISTANCE and (len(ranked) < 2 or ranked[1][0] - ranked[0][0] >= LISTENER_LOOK_MARGIN):
+            lc["listener_of"], lc["listener_by"] = ranked[0][1], "looks"
+
+
+def choose_listener(other_spk: str, seg: Dict[str, Any], dur: float, listening_pool: List[Dict[str, Any]], pool_clips: List[Dict[str, Any]],
+                    used: Dict[str, int], cursor: Dict[str, float]) -> Tuple[Optional[Dict[str, Any]], str]:
+    """The picture for the panel of the character who is NOT speaking: that character, silent and listening.
+    Returns (peer dict or None, how): "listening_clip" (their silent clip), "guess" (a silent clip nobody could be tied to),
+    "own_clip" (a quiet moment of their own speaking clip) or "none". The silent clip is walked through in order, turn after turn, and
+    the least-used clip goes first, so the listener does not restart from the same frame every time."""
+    cands = [lc for lc in listening_pool if lc.get("listener_of") == other_spk and lc["src"] != seg["src"]]
+    how = "listening_clip"
+    if not cands:
+        cands = [lc for lc in listening_pool if not lc.get("listener_of") and lc["src"] != seg["src"]]
+        how = "guess"
+    if cands:
+        lc = min(cands, key=lambda c: (used.get(c["src"], 0), str(c.get("stem", ""))))
+        used[lc["src"]] = used.get(lc["src"], 0) + 1
+        l_dur = float((lc.get("info") or {}).get("duration") or dur)
+        span = round(min(max(2.0, dur), l_dur), 2)
+        start = cursor.get(lc["src"], 0.0)
+        if start + span > l_dur + 1e-6:
+            start = 0.0
+        cursor[lc["src"]] = round(start + span, 3)
+        return {"speaker": other_spk, "src": lc["src"], "idle_span": [round(start, 2), round(start + span, 2)], "mode": "loop"}, how
+    # No silent clip for this character: a quiet, mouth-closed moment of their own clip, never their speech
+    own = [c for c in pool_clips if c["src"] != seg["src"] and not c.get("is_listening")
+           and any(l.get("speaker") == other_spk for l in c.get("matched_lines", []))]
+    own.sort(key=lambda c: -float((c.get("info") or {}).get("duration") or 0))
+    quiet = []
+    for c in own[:4]:
+        if vision_tracker is None or not hasattr(vision_tracker, "find_listening_idle_window"):
+            break
+        spans = [(float(w["start"]), float(w["end"])) for w in (c.get("hq_words") or [])]
+        try:
+            win = vision_tracker.find_listening_idle_window(resolve(c["src"]), speech_spans=spans)
+        except Exception:
+            win = None
+        if win and win.get("idle_span"):
+            a0, b0 = float(win["idle_span"][0]), float(win["idle_span"][1])
+            quiet.append((b0 - a0, c, a0, b0, win.get("still_at")))
+    if quiet:
+        # the clip used least so far first, then the longest quiet moment
+        length, c, a0, b0, still = min(quiet, key=lambda q: (used.get(q[1]["src"], 0), -q[0]))
+        used[c["src"]] = used.get(c["src"], 0) + 1
+        if length < 1.0:   # too short to loop without twitching: hold one mouth-closed frame
+            return {"speaker": other_spk, "src": c["src"], "mode": "still", "still_at": round(float(still) if still is not None else (a0 + b0) / 2, 3)}, "own_clip"
+        span = round(min(max(2.0, dur), length), 2)
+        key = f"{c['src']}#quiet"
+        start = cursor.get(key, a0)
+        if start + span > b0 + 1e-6:
+            start = a0
+        cursor[key] = round(start + span, 3)
+        return {"speaker": other_spk, "src": c["src"], "idle_span": [round(start, 2), round(start + span, 2)], "mode": "loop"}, "own_clip"
+    return None, "none"
+
+
 def assign_segment_ids_marks_and_layouts(
     raw_segments: List[Dict[str, Any]],
     script_lines: List[Dict[str, Any]],
@@ -1813,6 +1963,10 @@ def assign_segment_ids_marks_and_layouts(
         sp = l.get("speaker")
         if sp and sp not in all_speakers:
             all_speakers.append(sp)
+    assign_listening_owners(listening_pool, pool_clips, all_speakers)
+    listen_used: Dict[str, int] = {}
+    listen_cursor: Dict[str, float] = {}
+    listener_alerts: set = set()
     # Map each raw segment to the script line(s) it covers
     for seg in raw_segments:
         clip = seg["clip"]
@@ -1945,7 +2099,8 @@ def assign_segment_ids_marks_and_layouts(
                 other_spk = next((s for s in (section or all_speakers) if s != cur_spk), cur_spk or "Peer")
             if layout_mode in ("split_h", "split_v") and not seg_dict.get("slot"):
                 slot_a, slot_b = ("left", "right") if layout_mode == "split_h" else ("top", "bottom")
-                spk_idx = all_speakers.index(cur_spk) if (cur_spk and cur_spk in all_speakers) else (idx % 2)
+                parity_pool = section if (cur_spk and cur_spk in section) else all_speakers
+                spk_idx = parity_pool.index(cur_spk) if (cur_spk and cur_spk in parity_pool) else (idx % 2)
                 active_slot = slot_a if (spk_idx % 2 == 0) else slot_b
                 # the script said who sits where ("Top: Robot | Bottom: Lady 1"): that wins over the alternating default
                 panels = next((l.get("panels") for l in lines if l.get("panels")), {}) or {}
@@ -1956,42 +2111,19 @@ def assign_segment_ids_marks_and_layouts(
                 seg_dict["slot"] = active_slot
             else:
                 peer_slot = None
-            peer_clip = None
-            for lc in listening_pool:
-                if lc["src"] != seg["src"] and (not other_spk or other_spk.lower() in str(lc["stem"]).lower()):
-                    peer_clip = lc
-                    break
-            if peer_clip is None and listening_pool:
-                peer_clip = next((lc for lc in listening_pool if lc["src"] != seg["src"]), listening_pool[0])
-            if peer_clip is not None:
-                l_dur = float((peer_clip.get("info") or {}).get("duration") or dur)
-                seg_dict["peer"] = {
-                    "speaker": other_spk,
-                    "src": peer_clip["src"],
-                    "idle_span": [0.0, round(min(max(2.0, dur), l_dur), 2)],
-                    "mode": "loop",
-                }
+            peer, how = choose_listener(other_spk, seg, dur, listening_pool, pool_clips, listen_used, listen_cursor)
+            if peer is not None:
                 if peer_slot:
-                    seg_dict["peer"]["slot"] = peer_slot
-            else:
-                # Fallback: find a silent span in any clip spoken by other_spk
-                other_clip = next(
-                    (c for c in pool_clips if c["src"] != seg["src"] and any(l.get("speaker") == other_spk for l in c.get("matched_lines", []))),
-                    None,
-                )
-                if other_clip is not None:
-                    sils = other_clip.get("macro_silences") or []
-                    best_sil = max(sils, key=lambda s: float(s["end"]) - float(s["start"]), default=None)
-                    c_dur = float((other_clip.get("info") or {}).get("duration") or 3.0)
-                    span = [round(float(best_sil["start"]), 2), round(float(best_sil["end"]), 2)] if best_sil and (best_sil["end"] - best_sil["start"]) >= 0.8 else [0.0, round(min(2.5, c_dur), 2)]
-                    seg_dict["peer"] = {
-                        "speaker": other_spk,
-                        "src": other_clip["src"],
-                        "idle_span": span,
-                        "mode": "loop",
-                    }
-                    if peer_slot:
-                        seg_dict["peer"]["slot"] = peer_slot
+                    peer["slot"] = peer_slot
+                seg_dict["peer"] = peer
+            alert = {
+                "guess": f"[LISTENER_GUESS] a silent clip was used for {other_spk} without being able to tie it to them (name and looks gave no answer); name silent clips after the character, for example Robot_listening.mp4",
+                "own_clip": f"[LISTENER_FALLBACK] {other_spk} has no silent listening clip; a quiet moment of their own clip is used while the other character speaks. Add a silent clip of them",
+                "none": f"[LISTENER_MISSING] {other_spk} has no clip to show while the other character speaks",
+            }.get(how)
+            if alert and clips_data and (other_spk, how) not in listener_alerts:
+                listener_alerts.add((other_spk, how))
+                clips_data[0].setdefault("anomalies", []).append(alert)
 
         # Auto-extract stacked "Stop Saying" banner on Scene 1 / Hook when script opens with "Stop saying ..."
         if idx == 0 and lines:
@@ -2180,7 +2312,7 @@ def assign_segment_ids_marks_and_layouts(
             panel_of.setdefault(sd["speaker"], set()).add(sd["slot"])
     for who, slots in sorted(panel_of.items()):
         if len(slots) > 1 and clips_data:
-            clips_data[0]["anomalies"].append(f"[PANEL_FLIP] {who} is placed in more than one panel ({', '.join(sorted(slots))}); a character must keep one panel. Check the script's 'Top: ... | Bottom: ...' note")
+            clips_data[0].setdefault("anomalies", []).append(f"[PANEL_FLIP] {who} is placed in more than one panel ({', '.join(sorted(slots))}); a character must keep one panel. Check the script's 'Top: ... | Bottom: ...' note")
     return segments_out, marks_out, resolved_preset
 
 
