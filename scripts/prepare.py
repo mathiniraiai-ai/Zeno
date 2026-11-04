@@ -828,6 +828,30 @@ def clip_is_silent(c: Dict[str, Any]) -> bool:
     return sum(float(w["end"]) - float(w["start"]) for w in ws) / max(0.1, dur) < 0.08
 
 
+def voiced_spans(rms_env: List[Tuple[float, float]], floor_db: float = -48.0, merge_gap: float = 0.25) -> List[Tuple[float, float]]:
+    """Where there is real sound: stretches louder than `floor_db`, merged across gaps shorter than `merge_gap`. Measured from the audio,
+    so it stays right when a word time from the aligner is off."""
+    spans: List[List[float]] = []
+    for t, db in rms_env:
+        if db > floor_db:
+            if spans and t - spans[-1][1] <= merge_gap:
+                spans[-1][1] = t
+            else:
+                spans.append([t, t])
+    return [(round(a, 2), round(b + 0.01, 2)) for a, b in spans if b - a >= 0.08]
+
+
+def words_in_silence(words: List[Dict[str, Any]], rms_env: List[Tuple[float, float]], floor_db: float = -55.0) -> List[Dict[str, Any]]:
+    """Words whose aligned time holds no sound at all: the aligner put them in the wrong place."""
+    out = []
+    for w in words:
+        a, b = float(w["start"]), float(w["end"])
+        loud = max((db for t, db in rms_env if a <= t <= b), default=-140.0)
+        if loud < floor_db:
+            out.append(w)
+    return out
+
+
 def format_facts(clips_data: List[Dict[str, Any]]) -> str:
     """Everything measured about each clip, as text for the Director: `start word` for every word, a line break at each gap."""
     out = ["# FACTS: measured by Zeno. Times are seconds in the clip. `1.20 word` = the word starts at 1.20; `|2.31` = speech stops at 2.31.", ""]
@@ -857,6 +881,11 @@ def format_facts(clips_data: List[Dict[str, Any]]) -> str:
         pauses = [f"{float(s['start']):.2f}-{float(s['end']):.2f}" for s in c.get("macro_silences") or []]
         if pauses:
             out.append("  pauses: " + " ".join(pauses))
+        env = c.get("rms_env") or []
+        if env:
+            out.append("  voiced (real sound, measured from the audio): " + " ".join(f"{a:.2f}-{b:.2f}" for a, b in voiced_spans(env)))
+            for w in words_in_silence(ws, env):
+                out.append(f"  ! TIMING WRONG: '{w['w']}' is placed at {float(w['start']):.2f}-{float(w['end']):.2f} but that stretch is silent; its real place is in a nearby voiced span")
         for a in c.get("anomalies") or []:
             out.append(f"  ! {a}")
         out.append("")

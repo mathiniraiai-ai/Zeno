@@ -680,7 +680,16 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
 
         has_z = "zoom" in s and s["zoom"] is not None
         has_zt = "zoom_to" in s and s["zoom_to"] is not None
-        if has_z and has_zt:
+        z_style = str(s.get("zoom_style") or "")
+        z0f, z1f = float(s.get("zoom") or 1.0), float(s.get("zoom_to") or s.get("zoom") or 1.0)
+        z_tail = ""
+        if s.get("zoom_at") is not None:
+            z_tail = f"@{_fmt_num(s['zoom_at'])}" + (f"/{_fmt_num(s['zoom_dur'])}" if s.get("zoom_dur") is not None else "")
+        if z_style in ("sudden_in", "flash_zoom") and has_zt and abs(z0f - 1.0) < 1e-6:
+            toks.append(f"z={z_style}:{_fmt_num(z1f)}{z_tail}")      # style, target and moment survive a save and reload
+        elif z_style == "sudden_out" and has_z and abs(z1f - 1.0) < 1e-6:
+            toks.append(f"z=sudden_out:{_fmt_num(z0f)}{z_tail}")
+        elif has_z and has_zt:
             toks.append(f"z={_fmt_num(s['zoom'])}->{_fmt_num(s['zoom_to'])}")
         elif has_zt:
             toks.append(f"z=->{_fmt_num(s['zoom_to'])}")

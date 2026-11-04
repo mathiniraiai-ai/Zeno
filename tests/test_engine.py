@@ -1079,6 +1079,15 @@ class TestScriptIsTheTimeline(unittest.TestCase):
         rep = script_order.check_order(rows, self._lines())
         self.assertEqual((rep["out_of_order"], rep["missing"], rep["repeated"]), ([], [], []))
 
+    def test_a_long_line_split_over_four_cuts_is_still_heard(self):
+        import script_order
+
+        long = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen".split()
+        lines = [{"id": "L1", "index": 1, "text": " ".join(long), "tokens": long}]
+        rows = [("L1a", long[:4]), ("L1b", long[4:8]), ("L1c", long[8:12]), ("L1d", long[12:])]
+        rep = script_order.check_order(rows, lines)
+        self.assertEqual((rep["unproven"], rep["missing"], rep["repeated"], rep["out_of_order"]), ([], [], [], []))
+
     def test_order_check_catches_missing_and_repeated(self):
         import script_order
 
@@ -1143,6 +1152,36 @@ class TestScriptIsTheTimeline(unittest.TestCase):
         with self._with_words(ws):
             self.assertEqual(len(script_order.cut_problems({"segments": [{"id": "L1", "src": "a", "start": 1.3, "end": 2.5}]})), 1)
             self.assertEqual(script_order.cut_problems({"segments": [{"id": "L1", "src": "a", "start": 0.9, "end": 2.45}]}), [])
+
+    def test_voiced_spans_follow_the_sound_not_the_aligner(self):
+        env = [(round(i * 0.01, 2), -20.0 if (0.40 <= i * 0.01 <= 1.20 or 3.0 <= i * 0.01 <= 3.5) else -140.0) for i in range(500)]
+        spans = prepare.voiced_spans(env)
+        self.assertEqual(len(spans), 2)
+        self.assertAlmostEqual(spans[0][0], 0.40, places=1)
+        self.assertAlmostEqual(spans[1][1], 3.5, places=1)
+        ghost = prepare.words_in_silence([{"w": "Oh", "start": 1.8, "end": 2.4}, {"w": "ok", "start": 0.5, "end": 0.9}], env)
+        self.assertEqual([w["w"] for w in ghost], ["Oh"])
+
+    def test_cut_in_a_misaligned_word_over_silence_is_not_a_problem(self):
+        from unittest import mock
+        import script_order
+
+        ws = [{"w": "end", "start": 43.2, "end": 44.5}]
+        env = [(round(43.0 + i * 0.01, 2), -20.0 if i < 70 else -140.0) for i in range(300)]
+        plan = {"segments": [{"id": "L13", "src": "a", "start": 43.0, "end": 43.9}]}
+        with self._with_words(ws), mock.patch.object(script_order, "_env_of", return_value=env):
+            self.assertEqual(script_order.cut_problems(plan), [])
+            plan["segments"][0]["end"] = 43.5      # still sounding here: a real cut inside the word
+            self.assertEqual(len(script_order.cut_problems(plan)), 1)
+
+    def test_zoom_style_and_moment_survive_save_and_reload(self):
+        plan = {"canvas": {"width": 1080, "height": 1920, "fps": 30}, "preset": "single", "segments": [
+            {"id": "L1", "src": "a.mp4", "start": 0.0, "end": 2.0, "zoom": 1.0, "zoom_to": 1.08, "zoom_style": "sudden_in", "zoom_at": 0.25},
+            {"id": "L2", "src": "a.mp4", "start": 2.0, "end": 4.0, "zoom": 1.08, "zoom_to": 1.0, "zoom_style": "sudden_out", "zoom_at": 0.1},
+            {"id": "L3", "src": "a.mp4", "start": 4.0, "end": 6.0, "zoom": 1.0, "zoom_to": 1.06}]}
+        back = edl_parser.parse_edl(edl_parser.format_edl(plan))["segments"]
+        self.assertEqual([(s.get("zoom"), s.get("zoom_to"), s.get("zoom_style"), s.get("zoom_at")) for s in back],
+                         [(1.0, 1.08, "sudden_in", 0.25), (1.08, 1.0, "sudden_out", 0.1), (1.0, 1.06, None, None)])
 
     def test_empty_plan_cannot_render(self):
         from unittest import mock

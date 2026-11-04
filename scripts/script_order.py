@@ -176,6 +176,8 @@ def check_order(seg_rows: List[Tuple[str, List[str]]], lines: List[Dict[str, Any
         for n in range(len(seg_rows)):
             near = seg_rows[n][1] + (seg_rows[n + 1][1] if n + 1 < len(seg_rows) else [])
             heard = max(heard, recall(near, lt))
+        carried = [t for sid, toks in seg_rows if l["id"] in _line_ids_of(sid) for t in toks]   # a long line split over several cuts (L6a, L6b, ...)
+        heard = max(heard, recall(carried, lt))
         if heard >= HEARD_MIN:
             continue
         if l["id"] in ids_present:
@@ -369,14 +371,28 @@ def _words_of(seg: Dict[str, Any]) -> List[Dict[str, Any]]:
     return read_json(f) if f.is_file() else []
 
 
+def _env_of(seg: Dict[str, Any]) -> List[Tuple[float, float]]:
+    from common import clip_work_dir
+    from prepare import compute_10ms_rms_envelope
+
+    wav = clip_work_dir(seg.get("src", "")) / "audio16k.wav"
+    return compute_10ms_rms_envelope(wav) if wav.is_file() else []
+
+
 def cut_problems(plan: Dict[str, Any]) -> List[str]:
-    """Cuts that land inside a spoken word."""
+    """Cuts that land inside a spoken word. A word counts only where there is real sound: an aligner time that sits in silence is wrong."""
     out = []
     for s in plan.get("segments", []):
+        env = None
         for w in _words_of(s):
             a, b = float(w["start"]), float(w["end"])
             for name, t in (("start", float(s["start"])), ("end", float(s["end"]))):
                 if a + 0.05 < t < b - 0.05:
+                    if env is None:
+                        env = _env_of(s)
+                    loud = max((db for tt, db in env if t - 0.03 <= tt <= t + 0.03), default=-140.0)
+                    if env and loud < -50.0:
+                        continue      # the cut lands in silence: no sound is cut
                     out.append(f"{s.get('id')} {name} {t:.2f} is inside the word '{w.get('w')}' ({a:.2f}-{b:.2f})")
     return out
 
