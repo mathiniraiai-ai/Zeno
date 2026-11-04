@@ -774,6 +774,28 @@ def banner_boxes(seg: Dict[str, Any], W: int, H: int, exact: float) -> List[Dict
     return boxes
 
 
+def _split_canon_srcs(plan: Optional[Dict[str, Any]]) -> List[Path]:
+    """Every clip used in any split of the job (the talker and the listener clips of both panels).
+
+    The split framing takes one shared head position and head size from all of them, so the heads do
+    not jump when the talker/listener pair changes from one cut to the next.
+    """
+    out: List[Path] = []
+    seen = set()
+    for s in (plan or {}).get("segments") or []:
+        if normalize_layout_name(s.get("layout")) not in ("split_h", "split_v"):
+            continue
+        peer = s.get("peer") if isinstance(s.get("peer"), dict) else {}
+        for p in (s.get("src"), peer.get("src")):
+            if not p:
+                continue
+            r = resolve(p)
+            if r.is_file() and str(r) not in seen:
+                seen.add(str(r))
+                out.append(r)
+    return out
+
+
 def build_segment_cache_key(
     seg: Dict[str, Any],
     plan: Optional[Dict[str, Any]],
@@ -797,8 +819,12 @@ def build_segment_cache_key(
         }
 
     plan_loudness = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
+    split_canon = None
+    if lay in ("split_h", "split_v"):
+        split_canon = sorted(str(_file_mtime_sig(p)) for p in _split_canon_srcs(plan))
     payload = {
-        "v": 12,
+        "v": 13,
+        "split_canon": split_canon,
         "src": _file_mtime_sig(seg["src"]),
         "start": round(float(seg["start"]), 4),
         "end": round(float(seg["end"]), 4),
@@ -1089,6 +1115,7 @@ def build_segment_ffmpeg_args(
                 peer_slot_h=peer_h_slot,
                 live_focus=[fx, fy],
                 peer_focus=peer_focus,
+                canon_srcs=_split_canon_srcs(plan),
             )
             fc.append(_build_slot_video_chain("[0:v]", "[live_slot]", src_w, src_h, slot_w, live_h, fps, exact, [fx, fy], 1.0, 1.0, color_filter=color_filter, prebuilt_crop_filter=live_crop["filter"]))
             fc.append(_build_slot_video_chain(peer_in_label, "[peer_slot]", peer_w, peer_h, slot_w, peer_h_slot, fps, exact, peer_focus, 1.0, 1.0, prebuilt_crop_filter=peer_crop["filter"]))
@@ -1121,6 +1148,7 @@ def build_segment_ffmpeg_args(
                 peer_slot_h=slot_h,
                 live_focus=[fx, fy],
                 peer_focus=peer_focus,
+                canon_srcs=_split_canon_srcs(plan),
             )
             fc.append(_build_slot_video_chain("[0:v]", "[live_slot]", src_w, src_h, live_w, slot_h, fps, exact, [fx, fy], 1.0, 1.0, exact=exact_fit, color_filter=color_filter, prebuilt_crop_filter=live_crop["filter"]))
             fc.append(_build_slot_video_chain(peer_in_label, "[peer_slot]", peer_w, peer_h, peer_w_slot, slot_h, fps, exact, peer_focus, 1.0, 1.0, exact=exact_fit, prebuilt_crop_filter=peer_crop["filter"]))

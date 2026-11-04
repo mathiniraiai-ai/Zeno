@@ -545,6 +545,17 @@ def check_split_and_hook_rules(plan: Dict[str, Any]) -> Tuple[bool, str]:
     hook_transitions = 0
     in_initial_hook = True
     common_hr_val: Optional[float] = None
+    framing_sigs = set()
+    canon_srcs: List[Any] = []
+    _seen_canon = set()
+    for _s in segs:
+        if str(_s.get("layout") or "single").strip().lower() not in ("split_h", "split_v", "left_right", "top_bottom"):
+            continue
+        _peer = _s.get("peer") if isinstance(_s.get("peer"), dict) else {}
+        for _p in (_s.get("src"), _peer.get("src")):
+            if _p and str(_p) not in _seen_canon:
+                _seen_canon.add(str(_p))
+                canon_srcs.append(resolve(_p))
 
     try:
         from vision_tracker import compute_paired_split_crop_filters
@@ -575,17 +586,22 @@ def check_split_and_hook_rules(plan: Dict[str, Any]) -> Tuple[bool, str]:
                     split_violations.append(f"{sid}:intra_split_transition({tr})")
                 if sid in whoosh_segs:
                     split_violations.append(f"{sid}:intra_split_whoosh")
-            if common_hr_val is None and compute_paired_split_crop_filters is not None:
+            if compute_paired_split_crop_filters is not None:
                 peer = s.get("peer") if isinstance(s.get("peer"), dict) else {}
                 if peer and peer.get("src"):
                     c_live, c_peer = compute_paired_split_crop_filters(
                         resolve(s["src"]), resolve(peer["src"]),
                         720, 1280, 720, 1280, 540, 1920, 540, 1920,
+                        canon_srcs=canon_srcs,
                     )
                     if c_live["common_headroom_pct"] != c_peer["common_headroom_pct"]:
                         split_violations.append(f"{sid}:headroom_mismatch")
                     else:
                         common_hr_val = float(c_live["common_headroom_pct"])
+                        framing_sigs.add((c_live["common_headroom_pct"], c_live.get("common_face_pct")))
+
+    if len(framing_sigs) > 1:
+        split_violations.append(f"framing_varies(head position/size differs between cuts: {sorted(framing_sigs, key=str)})")
 
     if hook_transitions > 2:
         split_violations.append(f"hook_transitions={hook_transitions}(>2)")

@@ -41,6 +41,9 @@ TARGET_HEADROOM_PCT: float = 14.0
 TARGET_EYELINE_PCT: float = 38.0
 MIN_SLOT_FILL: float = 0.55
 MAX_EXTRA_ZOOM: float = 1.35
+# A split that matches head size across four clips (a small cartoon face next to a close selfie) needs more room.
+SPLIT_MAX_EXTRA_ZOOM: float = 1.85
+SPLIT_MIN_FACE: float = 0.38
 
 _YUNET_LOCK = threading.Lock()
 _YUNET_DETECTOR: Any = None
@@ -440,6 +443,108 @@ def compute_slot_crop_filter(
     }
 
 
+_PRIMARY_FACE_CACHE: Dict[str, Tuple[float, float, float]] = {}
+
+
+def _primary_face_geometry(clip_path: Union[str, Path]) -> Tuple[float, float, float]:
+    """`(eye_x, eye_y, face_height)` of the largest face, as fractions of the frame, averaged over a few frames.
+
+    `analyze_clip_vision` merges two detections (a face and a raised hand) into one box on some clips; a
+    split needs the real face, so this keeps only the biggest one.
+    """
+    p = Path(clip_path)
+    key = f"{p}:{p.stat().st_mtime_ns if p.is_file() else 0}"
+    if key in _PRIMARY_FACE_CACHE:
+        return _PRIMARY_FACE_CACHE[key]
+    boxes: List[Sequence[float]] = []
+    eyes: List[Sequence[float]] = []
+    if cv2 is not None and np is not None and p.is_file():
+        cap = cv2.VideoCapture(str(p))
+        if cap.isOpened():
+            total = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
+            for i in range(7):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, min(total - 1, int((i + 0.5) / 7 * total)))
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                faces = prominent_faces(detect_faces_in_frame(frame, is_bgr=True))
+                if faces:
+                    best = max(faces, key=lambda f: (f["bbox_norm"][2] - f["bbox_norm"][0]) * (f["bbox_norm"][3] - f["bbox_norm"][1]))
+                    boxes.append(best["bbox_norm"])
+                    eyes.append(best["eye_center_norm"])
+            cap.release()
+    if boxes:
+        n = len(boxes)
+        geom = (
+            sum(float(e[0]) for e in eyes) / n,
+            sum(float(e[1]) for e in eyes) / n,
+            sum(float(b[3]) - float(b[1]) for b in boxes) / n,
+        )
+    else:
+        vis = analyze_clip_vision(p) or {}
+        bbox = vis.get("bbox_norm") or [0.3, 0.2, 0.7, 0.5]
+        eye = vis.get("eye_center_norm") or [0.5 * (bbox[0] + bbox[2]), bbox[1] + 0.4 * (bbox[3] - bbox[1])]
+        geom = (float(eye[0]), float(eye[1]), max(0.10, float(bbox[3]) - float(bbox[1])))
+    _PRIMARY_FACE_CACHE[key] = geom
+    return geom
+
+
+def _compute_canon_split_crop_filters(
+    live_src, peer_src, src_w, src_h, peer_w, peer_h,
+    live_slot_w, live_slot_h, peer_slot_w, peer_slot_h, canon_srcs,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """One framing for every clip of the job: the same eye line and the same face size in every panel.
+
+    The target comes from ALL clips used in a split (`canon_srcs`), not from the two on screen, so the heads
+    do not move when the talker/listener pair changes from one cut to the next.
+    """
+    eye_t = TARGET_EYELINE_PCT / 100.0
+    clips: List[Tuple[Union[str, Path], int, int]] = [(live_src, src_w, src_h), (peer_src, peer_w, peer_h)]
+    seen = {str(live_src), str(peer_src)}
+    for cp in canon_srcs or []:
+        if str(cp) in seen:
+            continue
+        seen.add(str(cp))
+        try:
+            info = probe(cp) or {}
+        except Exception:
+            info = {}
+        clips.append((cp, max(16, int(info.get("width") or peer_w)), max(16, int(info.get("height") or peer_h))))
+
+    def _spec(path, w, h, slot_w, slot_h):
+        ex, ey, fh = _primary_face_geometry(path)
+        ey = max(0.05, min(0.90, ey))
+        s0 = max(slot_w / float(w), slot_h / float(h))
+        ratio = (h * s0) / float(slot_h)
+        k_min = max(1.0, eye_t / (ey * ratio), (1.0 - eye_t) / max(0.10, (1.0 - ey) * ratio))
+        return {"w": w, "h": h, "sw_slot": slot_w, "sh_slot": slot_h, "s0": s0, "ratio": ratio,
+                "ex": ex, "ey": ey, "fh": max(0.08, fh), "k_min": k_min}
+
+    specs = [_spec(p, w, h, live_slot_w, live_slot_h) for p, w, h in clips]
+    specs[0] = _spec(live_src, src_w, src_h, live_slot_w, live_slot_h)
+    specs[1] = _spec(peer_src, peer_w, peer_h, peer_slot_w, peer_slot_h)
+    common_fh = max([SPLIT_MIN_FACE] + [sp["fh"] * sp["ratio"] * sp["k_min"] for sp in specs])
+
+    def _build(sp: Dict[str, Any]) -> Dict[str, Any]:
+        k = min(SPLIT_MAX_EXTRA_ZOOM, max(sp["k_min"], common_fh / (sp["fh"] * sp["ratio"])))
+        s = sp["s0"] * k
+        sw = max(sp["sw_slot"], _even(sp["w"] * s))
+        sh = max(sp["sh_slot"], _even(sp["h"] * s))
+        crop_x = int(round(min(max(sp["ex"] * sw - sp["sw_slot"] / 2.0, 0), sw - sp["sw_slot"])))
+        crop_y = int(round(min(max(sp["ey"] * sh - eye_t * sp["sh_slot"], 0), sh - sp["sh_slot"])))
+        return {
+            "filter": f"scale={sw}:{sh}:flags=lanczos,crop={sp['sw_slot']}:{sp['sh_slot']}:{crop_x}:{crop_y}",
+            "scale": (sw, sh),
+            "crop": (crop_x, crop_y),
+            "slot_size": (sp["sw_slot"], sp["sh_slot"]),
+            "common_headroom_pct": round(eye_t * 100.0, 2),   # the shared eye line
+            "extra_zoom": round(k, 3),
+            "common_face_pct": round(common_fh * 100.0, 2),
+        }
+
+    return _build(specs[0]), _build(specs[1])
+
+
 def compute_paired_split_crop_filters(
     live_src: Union[str, Path],
     peer_src: Union[str, Path],
@@ -453,6 +558,7 @@ def compute_paired_split_crop_filters(
     peer_slot_h: int,
     live_focus: Optional[Sequence[float]] = None,
     peer_focus: Optional[Sequence[float]] = None,
+    canon_srcs: Optional[Sequence[Union[str, Path]]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Compute matched FFmpeg `scale=sw:sh:flags=lanczos,crop=slot_w:slot_h:cx:cy` filters
     for a two-character split screen (`split_h` or `split_v`) so that BOTH characters share:
@@ -466,6 +572,12 @@ def compute_paired_split_crop_filters(
     peer_slot_w, peer_slot_h = _even(max(16, peer_slot_w)), _even(max(16, peer_slot_h))
     src_w, src_h = max(16, int(src_w or live_slot_w)), max(16, int(src_h or live_slot_h))
     peer_w, peer_h = max(16, int(peer_w or peer_slot_w)), max(16, int(peer_h or peer_slot_h))
+
+    if canon_srcs:
+        return _compute_canon_split_crop_filters(
+            live_src, peer_src, src_w, src_h, peer_w, peer_h,
+            live_slot_w, live_slot_h, peer_slot_w, peer_slot_h, canon_srcs,
+        )
 
     def _extract_geom(
         clip_path: Union[str, Path],
