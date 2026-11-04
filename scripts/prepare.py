@@ -2550,6 +2550,7 @@ def main() -> None:
         help="Layout preset mode",
     )
     ap.add_argument("--mark-pack", default="flash", help="Swappable ✓/✗ mark overlay pack (flash, vignette, default, glossy)")
+    ap.add_argument("--style", default="", help="Style this job follows (a folder under styles/, for example micronarrative). Written into the plan as '#style <name>' so the job counts toward that style's readiness and the team's learning")
     ap.add_argument(
         "--fresh",
         action="store_true",
@@ -2675,6 +2676,7 @@ def main() -> None:
         "canvas": canvas,
         "preset": resolved_preset,
         "mark_pack": args.mark_pack,
+        **({"style": re.sub(r"[^a-z0-9_-]", "", args.style.lower())} if getattr(args, "style", "") else {}),
         "segments": segments,
         "marks": marks,
         "audio": {"loudness": -11.5},

@@ -4,9 +4,12 @@
 set -e
 cd "$(dirname "$0")"
 if [ ! -d .git ]; then
-  echo "This copy was not installed with git, so it can't update itself."
-  echo "Ask the Zeno owner for the download key and the one-line setup in ONBOARDING.md."
-  exit 1
+  echo "This copy is not connected to GitHub yet. Connecting it now..."
+  if [ ! -x .venv/bin/python ]; then
+    echo "Run install.command first."
+    exit 1
+  fi
+  .venv/bin/python scripts/auto_updater.py --connect-git
 fi
 echo "Getting the latest Zeno..."
 git pull --ff-only

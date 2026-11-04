@@ -12,7 +12,7 @@ Levels (each needs everything below it):
     2 PILOT          at least 3 real jobs tagged to this style and at most 2 open unknowns
     3 PRODUCTION     at least 10 tagged real jobs, no open unknowns, a hand-marked gold set of at least 5 clips
 
-A real job is tagged to a style when its `work/<project>/plan.edl` has a line `#style <name>` or `# style: <name>`.
+A real job is tagged to a style when it ran with `--style <name>`, which writes `#style <name>` into its `work/<project>/plan.edl`.
 A gold set is Audacity label files (`*.txt`) in `styles/<name>/gold/`, scored with `scripts/eval_alignment.py`.
 """
 from __future__ import annotations
@@ -105,7 +105,7 @@ def assess(style: str, root: Path = ROOT, run_tests: bool = True) -> Dict[str, A
 
     reals, tagged = real_projects(root), tagged_projects(root, style)
     checks.append(_check("real jobs recorded (all styles)", len(reals) >= 1, f"{len(reals)}: {', '.join(reals[:5])}" if reals else "none"))
-    checks.append(_check("real jobs tagged to this style", len(tagged) >= 3, f"{len(tagged)} (pilot needs 3, production 10); add '#style {style}' to plan.edl"))
+    checks.append(_check("real jobs tagged to this style", len(tagged) >= 3, f"{len(tagged)} (pilot needs 3, production 10); run the job with --style {style}"))
 
     gold = sorted((sdir / "gold").glob("*.txt")) if (sdir / "gold").is_dir() else []
     checks.append(_check("hand-marked gold set", len(gold) >= 5, f"{len(gold)} label files in styles/{style}/gold/ (needs 5); alignment accuracy on real footage stays unmeasured without it"))
@@ -130,7 +130,7 @@ def assess(style: str, root: Path = ROOT, run_tests: bool = True) -> Dict[str, A
 
     nxt: List[str] = []
     if level < 2:
-        nxt.append("run real raw footage for this style and add '#style %s' to each plan.edl (needs 3 jobs)" % style)
+        nxt.append("run real raw footage for this style and run each job with --style %s (needs 3 jobs)" % style)
     if unknowns:
         nxt.append(f"answer the {len(unknowns)} open unknowns in spec.json")
     if len(gold) < 5:

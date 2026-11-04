@@ -68,6 +68,9 @@ else
 fi
 uv pip install --python .venv/bin/python -r requirements.txt
 
+# 3b. Connect this folder to GitHub if it came from a ZIP, so it can update itself (the repository is public: no GitHub account is needed)
+.venv/bin/python scripts/auto_updater.py --connect-git || echo "      (updates need Git and an internet connection; see ONBOARDING.md)"
+
 # 4. .env from the template (never overwrites an existing one)
 if [ -f .env ]; then
   echo "[4/5] .env already exists (kept as is)"

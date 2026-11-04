@@ -43,8 +43,9 @@ Script-led AI video editing harness (`1080x1920` MP4). Given raw clips in `input
    `python3 scripts/zeno.py --check` (prints `[✓] Installed` vs `[✗] Remaining` across all 8 dependencies without reading `.env` secrets).
 1. **Stages 1–3 — Ingest, Transcribe, Match & Pitch (`1 command` + 50s Live Heartbeat)**:
    ```bash
-   python3 scripts/zeno.py --inspect <raw_dir_or_clips> --script <script_path_or_google_doc_url> [--lang <lang>] [--preset auto|single|split_v|split_h|chat_bar|video_call|hybrid] [--mark-pack default|glossy|flash|vignette]
+   python3 scripts/zeno.py --inspect <raw_dir_or_clips> --script <script_path_or_google_doc_url> [--lang <lang>] [--style <name>] [--preset auto|single|split_v|split_h|chat_bar|video_call|hybrid] [--mark-pack default|glossy|flash|vignette]
    ```
+   - `--style <name>`: the style folder this job follows (for example `micronarrative`). Always pass it when the style is known: it writes `# style: <name>` into the plan so the job counts toward the style's readiness level (`scripts/style_readiness.py`) and the team's learning.
    - `<lang>`: `en`, `kn`/`kannada`, `ta`/`tamil`, `hi`/`hindi`, `te`/`telugu`, `ml`/`malayalam`, or `auto`.
    - Emits live stage progress every ~48s (`work/<project>/progress.json` / `python3 scripts/progress.py`). Schedule a 50s timer while running in the background so the user gets live stage updates in chat.
 2. **Stage 3 Gate — Refine Plan & Ask Yes/No Before Rendering (`Mandatory Stop`)**:

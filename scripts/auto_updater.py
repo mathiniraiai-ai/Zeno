@@ -30,6 +30,62 @@ LOG_FILE = WORK / "auto_update.log"
 LAUNCHD_LABEL = "live.gosupernova.zeno.autoupdate"
 
 
+GITHUB_REMOTE = os.environ.get("ZENO_REPO_URL", "https://github.com/mathiniraiai-ai/Zeno.git")
+
+
+def find_git() -> str:
+    """The git executable, or '' when Git is not installed. On Windows, Git is often installed but not yet on PATH."""
+    exe = shutil.which("git")
+    if exe:
+        return exe
+    if sys.platform.startswith("win") or os.name == "nt":
+        for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"), os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")):
+            if base:
+                cand = Path(base) / "Git" / "cmd" / "git.exe"
+                if cand.is_file():
+                    return str(cand)
+    return ""
+
+
+def _git() -> str:
+    return find_git() or "git"
+
+
+def connect_to_git(root: Path = None, remote: str = "", branch: str = "main") -> Dict[str, Any]:
+    """Turn a folder that was installed from a ZIP (no .git) into a normal clone of the Zeno repository so it can update itself.
+    The files are left exactly as they are (only Git's bookkeeping is added), so .env, .venv, models, work/ and input/ are never touched.
+    The repository is public, so no GitHub account or sign-in is needed."""
+    root = Path(root or ROOT)
+    remote = remote or GITHUB_REMOTE
+    git = find_git()
+    if not git:
+        return {"ok": False, "status": "git_missing",
+                "message": "Git is not installed. Install it (Windows: winget install --id Git.Git -e, or https://git-scm.com/download/win) and run this again."}
+    if (root / ".git").exists():
+        return {"ok": True, "status": "already_connected", "message": "This folder is already connected to GitHub."}
+
+    def run(*args: str, timeout: float = 300.0) -> "subprocess.CompletedProcess":
+        return subprocess.run([git, *args], cwd=str(root), capture_output=True, text=True, timeout=timeout, check=False)
+
+    try:
+        run("init", "-q")
+        run("remote", "add", "origin", remote)
+        fetched = run("fetch", "--depth", "1", "origin", branch)
+        if fetched.returncode != 0:
+            shutil.rmtree(root / ".git", ignore_errors=True)   # leave nothing half-made, so a retry starts clean
+            why = (fetched.stderr.strip() or fetched.stdout.strip() or "fetch failed").splitlines()[-1]
+            return {"ok": False, "status": "fetch_failed",
+                    "message": f"Could not reach the repository ({why}). Check your internet connection and try again (no GitHub account is needed)."}
+        run("reset", "-q", f"origin/{branch}")   # mixed reset: the working files stay as they are
+        run("branch", "-M", branch)
+        run("branch", f"--set-upstream-to=origin/{branch}", branch)
+        head = run("rev-parse", "--short", "HEAD").stdout.strip()
+    except Exception as exc:   # noqa: BLE001
+        shutil.rmtree(root / ".git", ignore_errors=True)
+        return {"ok": False, "status": "error", "message": f"Could not connect this folder to GitHub ({type(exc).__name__})."}
+    return {"ok": True, "status": "connected", "head": head, "message": f"Connected to GitHub at {head}. This folder can now update itself."}
+
+
 def _find_python() -> str:
     if sys.platform.startswith("win") or os.name == "nt":
         cand = ROOT / ".venv" / "Scripts" / "python.exe"
@@ -59,7 +115,7 @@ def _write_state(payload: Dict[str, Any]) -> None:
 def _git_head_sha() -> str:
     try:
         r = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
+            [_git(), "rev-parse", "--short", "HEAD"],
             cwd=str(ROOT),
             capture_output=True,
             text=True,
@@ -77,7 +133,7 @@ def _has_uncommitted_code_edits() -> bool:
         return False
     try:
         r = subprocess.run(
-            ["git", "status", "--porcelain", "--", "scripts", "service", "styles"],
+            [_git(), "status", "--porcelain", "--", "scripts", "service", "styles"],
             cwd=str(ROOT),
             capture_output=True,
             text=True,
@@ -110,8 +166,16 @@ def ensure_latest_update(
     ):
         return {"ok": True, "status": "skipped_offline", "updated": False}
 
-    if not (ROOT / ".git").exists():
-        return {"ok": False, "status": "no_git_repo", "updated": False}
+    problem = ""
+    if not find_git():
+        problem, status = "Git is not installed, so Zeno cannot update itself. Windows: winget install --id Git.Git -e, then run install.bat again.", "git_missing"
+    elif not (ROOT / ".git").exists():
+        problem, status = ("This folder is not connected to GitHub (installed from a ZIP?), so it cannot update itself. Run install.bat (Windows) or "
+                           "install.command (Mac) again, or: python scripts/auto_updater.py --connect-git"), "no_git_repo"
+    if problem:
+        if not quiet:
+            print(f"  [Auto-Update] {problem}")
+        return {"ok": False, "status": status, "updated": False, "message": problem}
 
     now = time.time()
     state = _read_state()
@@ -141,7 +205,7 @@ def ensure_latest_update(
     try:
         # Detect active branch (e.g., MacBook or main) so team PCs pull their tracked branch
         br_proc = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            [_git(), "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=str(ROOT),
             capture_output=True,
             text=True,
@@ -153,12 +217,13 @@ def ensure_latest_update(
             branch_name = "main"
 
         r = subprocess.run(
-            ["git", "pull", "--rebase", "--autostash", "origin", branch_name],
+            [_git(), "pull", "--rebase", "--autostash", "origin", branch_name],
             cwd=str(ROOT),
             capture_output=True,
             text=True,
             timeout=timeout_sec,
             check=False,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
         )
         if r.returncode == 0:
             pull_ok = True
@@ -166,7 +231,7 @@ def ensure_latest_update(
         else:
             # Abort any failed rebase cleanly so the working tree stays untouched
             subprocess.run(
-                ["git", "rebase", "--abort"],
+                [_git(), "rebase", "--abort"],
                 cwd=str(ROOT),
                 capture_output=True,
                 timeout=3.0,
@@ -183,7 +248,7 @@ def ensure_latest_update(
     if updated:
         try:
             diff_r = subprocess.run(
-                ["git", "diff", "--name-only", before_sha, after_sha, "--", "requirements.txt"],
+                [_git(), "diff", "--name-only", before_sha, after_sha, "--", "requirements.txt"],
                 cwd=str(ROOT),
                 capture_output=True,
                 text=True,
@@ -309,10 +374,16 @@ def install_daily_scheduler(hour: int = 11, minute: int = 0) -> Dict[str, Any]:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Zeno Automatic Git Updater & Daily 11:00 AM Scheduler")
     ap.add_argument("--scheduled", action="store_true", help="Run as background scheduled job (logs to work/auto_update.log)")
+    ap.add_argument("--connect-git", action="store_true", help="Connect this folder to the GitHub repository (for a copy installed from a ZIP) so it can update itself")
     ap.add_argument("--install-schedule", action="store_true", help="Install daily 11:00 AM background auto-update schedule")
     ap.add_argument("--hour", type=int, default=11, help="Daily schedule hour in 24h format (default: 11 for 11:00 AM)")
     ap.add_argument("--status", action="store_true", help="Print last auto-update status")
     args = ap.parse_args()
+
+    if args.connect_git:
+        res = connect_to_git()
+        print(f"  [Auto-Update] {res['message']}")
+        sys.exit(0 if res.get("ok") else 1)
 
     if args.install_schedule:
         res = install_daily_scheduler(hour=args.hour, minute=0)

@@ -229,7 +229,17 @@ def resolve_script_input(script_arg: str) -> pathlib.Path:
     return dest
 
 
-def job_gate(raw_inputs: List[str], script_arg: str, skip: bool = False) -> None:
+def style_hint(style: str) -> str:
+    """One line about the job's style: confirm it exists, or say how to set it."""
+    known = sorted(p.parent.name for p in (ROOT / "styles").glob("*/spec.json"))
+    if not style:
+        return f"[style] none set, so this job is not counted toward a style. Add --style <name> (known: {', '.join(known) or 'none'})"
+    if style.lower() not in known:
+        return f"[style] '{style}' is not a learned style (known: {', '.join(known) or 'none'}); the job will still run"
+    return f"[style] {style.lower()}"
+
+
+def job_gate(raw_inputs: List[str], script_arg: str, skip: bool = False, style: str = "") -> None:
     """Nothing starts until the live checks pass and the script and footage the user gave have been checked."""
     import preflight
 
@@ -261,6 +271,7 @@ def job_gate(raw_inputs: List[str], script_arg: str, skip: bool = False) -> None
         print(f"  [knowledge] {knowledge_sync.pull()['message']}; team formats: {format_library.sync_team()['message']}")
     except Exception:
         pass
+    print("  " + style_hint(style))
     print("\n[GATE PASSED] Live checks and inputs are good. Starting the edit.")
 
 
@@ -436,6 +447,7 @@ def run_inspect(
     lang: str = "auto",
     preset: str = "auto",
     mark_pack: str = "flash",
+    style: str = "",
 ) -> pathlib.Path:
     try:
         import auto_updater
@@ -476,6 +488,7 @@ def run_inspect(
             preset,
             "--mark-pack",
             mark_pack,
+            *(["--style", style] if style else []),
         ]
 
         env = os.environ.copy()
@@ -787,6 +800,7 @@ def main() -> None:
     ap.add_argument("--update", action="store_true", help="Run git pull + Zeno Cloud brain memory sync immediately")
     ap.add_argument("--install-schedule", action="store_true", help="Install daily 11:00 AM background auto-update schedule")
     ap.add_argument("--preflight", action="store_true", help="Run the live pre-job checks (FFmpeg, OpenCV, wav2vec2, Zeno server) and, with --script and inputs, check them too")
+    ap.add_argument("--style", default="", help="Style this job follows (a folder under styles/, for example micronarrative); written into the plan so the job counts toward that style")
     ap.add_argument("--fresh", action="store_true", help="Rebuild every cached transcript and alignment for these clips (rarely needed: caches refresh themselves when the code changes)")
     ap.add_argument("--skip-preflight", action="store_true", help="Development only: skip the pre-job gate. Agents must never use this.")
     ap.add_argument("--yes", "-y", action="store_true", help="Auto-confirm the Stage 3 Yes/No gate in standalone mode")
@@ -904,13 +918,14 @@ def main() -> None:
     if args.inspect:
         if not args.inputs or not args.script:
             ap.error("--inspect requires <raw_dir_or_clips> and --script <path_or_gdoc_url>")
-        job_gate(args.inputs, args.script, skip=args.skip_preflight)
+        job_gate(args.inputs, args.script, skip=args.skip_preflight, style=args.style)
         plan_path = run_inspect(
             raw_inputs=args.inputs,
             script_arg=args.script,
             lang=args.lang,
             preset=args.preset,
             mark_pack=args.mark_pack,
+            style=args.style,
         )
         print(f"\n[NEXT STEP] Review the pitch above. Once approved, run:")
         print(f"  python3 scripts/zeno.py --execute {plan_path.relative_to(ROOT)} --square")
@@ -918,13 +933,14 @@ def main() -> None:
 
     # Interactive Standalone Mode (Stage 0 -> Stage 1–3 -> [Y/n] -> Stage 4–5)
     if args.inputs and args.script:
-        job_gate(args.inputs, args.script, skip=args.skip_preflight)
+        job_gate(args.inputs, args.script, skip=args.skip_preflight, style=args.style)
         plan_path = run_inspect(
             raw_inputs=args.inputs,
             script_arg=args.script,
             lang=args.lang,
             preset=args.preset,
             mark_pack=args.mark_pack,
+            style=args.style,
         )
         if not args.yes:
             if not sys.stdin.isatty():

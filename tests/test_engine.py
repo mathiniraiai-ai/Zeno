@@ -1038,6 +1038,109 @@ Lady 1: I'm working on the farm while talking to you
         self.assertTrue(prepare._stem_is_character("Lady1_idle", "Lady 1"))
         self.assertFalse(prepare._stem_is_character("Lady1_idle", "Lady 2"))
 
+    def test_a_job_carries_its_style_and_is_counted(self):
+        import tempfile
+
+        import style_readiness
+
+        os = __import__("os")
+        os.environ["_ZENO_REEXEC"] = "1"
+        import zeno
+
+        plan = {"output": "out.mp4", "style": "micronarrative", "segments": [{"id": "L1", "src": "S1.mp4", "start": 0.0, "end": 2.0}], "marks": []}
+        text = edl_parser.format_edl(plan)
+        self.assertIn("#style micronarrative", text)
+        with tempfile.TemporaryDirectory() as tmp:
+            pp = Path(tmp) / "plan.edl"
+            pp.write_text(text, encoding="utf-8")
+            self.assertEqual(edl_parser.load_edl(pp)["style"], "micronarrative", "the style survives a Stage 3 quick tweak (which rewrites the plan)")
+            work = Path(tmp) / "root"
+            (work / "work" / "job1").mkdir(parents=True)
+            (work / "work" / "job1" / "plan.edl").write_text(text, encoding="utf-8")
+            (work / "work" / "job2").mkdir()
+            (work / "work" / "job2" / "plan.edl").write_text(edl_parser.format_edl({**plan, "style": "other"}), encoding="utf-8")
+            self.assertEqual(style_readiness.tagged_projects(work, "micronarrative"), ["job1"], "only jobs of that style are counted")
+        self.assertIn("none set", zeno.style_hint(""))
+        self.assertEqual(zeno.style_hint("micronarrative"), "[style] micronarrative")
+        self.assertIn("not a learned style", zeno.style_hint("nonsense"))
+
+    def test_a_zip_installed_folder_can_be_connected_to_github_and_then_updates(self):
+        """Windows PC with no Git and a ZIP download: connect the folder to the repository without touching its files, then update."""
+        import shutil
+        import subprocess
+        import tempfile
+        from unittest.mock import patch
+
+        import auto_updater
+
+        git = shutil.which("git")
+        if not git:
+            self.skipTest("git is not installed here")
+
+        def g(cwd, *args):
+            return subprocess.run([git, "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=str(cwd), capture_output=True, text=True, check=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_p = Path(tmp)
+            remote, seed, zipdir = tmp_p / "remote.git", tmp_p / "seed", tmp_p / "Zeno"
+            subprocess.run([git, "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+            seed.mkdir()
+            g(seed, "init", "-q", "-b", "main")
+            (seed / "scripts").mkdir()
+            (seed / "scripts" / "tool.py").write_text("v1\n", encoding="utf-8")
+            (seed / ".gitignore").write_text(".env\nwork/\n.venv/\n", encoding="utf-8")
+            g(seed, "add", "-A")
+            g(seed, "commit", "-q", "-m", "one")
+            g(seed, "remote", "add", "origin", str(remote))
+            g(seed, "push", "-q", "origin", "main")
+            # the folder as a ZIP download plus what the installer made: no .git, a secret, a venv and work files
+            shutil.copytree(seed, zipdir, ignore=shutil.ignore_patterns(".git"))
+            (zipdir / ".env").write_text("SECRET=1\n", encoding="utf-8")
+            (zipdir / "work").mkdir()
+            (zipdir / "work" / "keep.txt").write_text("mine\n", encoding="utf-8")
+
+            with patch.object(auto_updater, "ROOT", zipdir), patch.object(auto_updater, "WORK", zipdir / "work"), \
+                    patch.object(auto_updater, "STATE_FILE", zipdir / "work" / ".state.json"), patch.object(auto_updater, "LOG_FILE", zipdir / "work" / "u.log"), \
+                    patch.dict("os.environ", {k: "" for k in ("ZENO_NO_AUTO_UPDATE", "CLAUDE_EDITOR_OFFLINE", "SCRIPTCUT_OFFLINE", "ZENO_NO_LIVE")}):
+                blocked = auto_updater.ensure_latest_update(force=True, quiet=True, sync_brain=False)
+                self.assertEqual(blocked["status"], "no_git_repo")
+                self.assertIn("install.bat", blocked["message"], "it says what to do instead of failing silently")
+
+                res = auto_updater.connect_to_git(zipdir, remote=str(remote), branch="main")
+                self.assertEqual(res["status"], "connected", res)
+                self.assertEqual((zipdir / ".env").read_text(), "SECRET=1\n", "the secret is untouched")
+                self.assertEqual((zipdir / "work" / "keep.txt").read_text(), "mine\n")
+                self.assertEqual(g(zipdir, "status", "--porcelain").stdout.strip(), "", "the files already match the repository")
+                self.assertEqual(auto_updater.connect_to_git(zipdir, remote=str(remote))["status"], "already_connected")
+
+                (seed / "scripts" / "tool.py").write_text("v2\n", encoding="utf-8")
+                g(seed, "commit", "-aq", "-m", "two")
+                g(seed, "push", "-q", "origin", "main")
+                upd = auto_updater.ensure_latest_update(force=True, quiet=True, sync_brain=False)
+                self.assertEqual(upd["status"], "updated", upd)
+                self.assertEqual((zipdir / "scripts" / "tool.py").read_text(), "v2\n")
+                self.assertEqual((zipdir / ".env").read_text(), "SECRET=1\n")
+
+            # a repository that cannot be reached leaves no half-made .git behind, so a retry starts clean
+            other = tmp_p / "Other"
+            other.mkdir()
+            bad = auto_updater.connect_to_git(other, remote=str(tmp_p / "does_not_exist.git"), branch="main")
+            self.assertEqual(bad["status"], "fetch_failed")
+            self.assertFalse((other / ".git").exists())
+            self.assertIn("internet connection", bad["message"])
+
+    def test_missing_git_is_explained(self):
+        from unittest.mock import patch
+
+        import auto_updater
+
+        with patch.object(auto_updater, "find_git", return_value=""):
+            self.assertEqual(auto_updater.connect_to_git(Path("."))["status"], "git_missing")
+            self.assertIn("winget install --id Git.Git", auto_updater.connect_to_git(Path("."))["message"])
+            with patch.dict("os.environ", {k: "" for k in ("ZENO_NO_AUTO_UPDATE", "CLAUDE_EDITOR_OFFLINE", "SCRIPTCUT_OFFLINE", "ZENO_NO_LIVE")}):
+                res = auto_updater.ensure_latest_update(force=True, quiet=True, sync_brain=False)
+            self.assertEqual(res["status"], "git_missing")
+
     def test_layout_hint_wording(self):
         self.assertEqual(prepare.layout_hint_from_direction("a horizontal split screen"), "split_v")
         self.assertEqual(prepare.layout_hint_from_direction("a vertical split screen"), "split_h")

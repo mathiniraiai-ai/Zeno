@@ -54,9 +54,10 @@ Zeno operates like a **Senior Human Video Editor** in 5 transparent stages with 
    ```bash
    python3 scripts/zeno.py --inspect <raw_dir_or_clips> \
      --script <script_path_or_google_doc_url> \
-     [--lang auto] [--preset auto|single|split_v|split_h|chat_bar|video_call|hybrid] \
+     [--lang auto] [--style <name>] [--preset auto|single|split_v|split_h|chat_bar|video_call|hybrid] \
      [--mark-pack flash|vignette|glossy|default]
    ```
+   - `--style <name>`: the style folder this job follows (for example `micronarrative`). Always pass it when the style is known: it writes `# style: <name>` into the plan so the job counts toward the style's readiness level (`scripts/style_readiness.py`) and the team's learning.
    - **Stage 1 (Mapping)**: Scans raw clips, probes resolution/FPS/duration, and extracts 16kHz audio.
    - **Stage 2 (Transcribing)**: Transcribes word-level timestamps, scores `[BEST_TAKE]` vs `[ALT_TAKE]`, and checks speaker voices.
    - **Stage 3 (Matching & Editorial Pitch)**: Builds `work/<project>/brief.txt`, `work/<project>/plan.edl`, and `work/<project>/pitch_card.md`.
@@ -173,12 +174,13 @@ Checked and passing: all Python files compile; `tests.test_engine` (28), `servic
 - `group_takes` uses the script: two clips that each fit a different script line are never takes of one line (a learner repeating the teacher's corrected sentence used to be pruned, which dropped the ✓).
 - Service: name-only signup needs `ZENO_SIGNUP_CODE`; company keys are not admin unless listed in `ZENO_ADMIN_EMAILS` (or `ZENO_ADMIN_ALLOW_DOMAIN=1`); only `gosupernova.live` unless `ZENO_ALLOWED_EMAIL_DOMAINS` says otherwise; Google ID token for our client id only; a revoked key stays revoked after a restart. These need a Railway redeploy of `service/`.
 - Listener rule in every split: the other panel shows the other character from their silent clip (matched by file name, else by looks), walked through turn after turn; panels are read from `Top: A | Bottom: B`, `Name - Left screen` and the character list; no silent clip means a quiet moment (or a held frame) with a `[LISTENER_FALLBACK]` alert; names that appear only in the panel note are merged with the speaker (`Robot` = `Female Humanoid Robot`).
+- Windows with no Git / a ZIP-installed folder: the installers install Git if missing (winget) and run `auto_updater.py --connect-git`, which turns the folder into a normal clone of the private repository without touching any file (the repository is public, so no GitHub account or sign-in is needed); `update.bat`/`update.command` connect instead of stopping; the updater says why it cannot update (`git_missing`, `no_git_repo`) instead of failing silently, and its pull fails fast instead of hanging on a sign-in prompt. Untested on a real Windows PC until the tester reports.
+- `--style <name>` writes `# style: <name>` into the plan (and survives quick tweaks), so jobs count toward a style's readiness level and the team's learning; the gate prints which style the job follows.
 - Pre-job gate (`zeno.py --preflight`, enforced by `--inspect`), `style_readiness.py`, the format library (`styles/formats/`), per-clip engine versions in caches, `--fresh`, automatic low-disk cleanup, the server transcript cache and team format learning (observations, admin approval, `--sync-learnings`).
 - micronarrative now has two references (`variants` in its spec.json): W42 (left/right split, warm flash) and W43 Hindi (top/bottom split with the seam at 0.472 of the height, fast blur whips and a glitch frame, one 91 s split-screen lesson).
 
 **Open**
 - micronarrative is level 1 (RENDER-ONLY) in `style_readiness.py`: nothing is proven on real raw footage, there is no hand-marked gold set, 6 unknowns are open (including whether the transition style is chosen per reel, per scene type or by the script).
-- Plans do not carry `# style: <name>` yet, so jobs are not counted per style; add a `--style` option.
 - "Horizontal split screen" is read as a horizontal divider (top and bottom, `split_v`); change `SCRIPT_SPLIT_LAYOUT` in `prepare.py` if the team means the opposite (the W43 reference confirms top and bottom).
 - Only the strike-through on-screen text cue is rendered; the general text format is undefined.
 - The Railway service must be redeployed for `/v1/selftest`, the transcript cache, `/v1/observations` and the security fixes to take effect; no admin page yet for approving formats.

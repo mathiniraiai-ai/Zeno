@@ -9,18 +9,22 @@ Zeno turns raw clips and a script into a finished vertical video. An AI agent (C
 
 ## 1. Install (once, about 5 minutes, nothing to type)
 
-1. Clone Zeno into **`Documents/Zeno`**:
-   ```bash
-   cd ~/Documents
-   git clone https://github.com/mathiniraiai-ai/Zeno.git
-   ```
+1. Get Zeno into **`Documents/Zeno`**. The repository is public: you do **not** need a GitHub account.
+   - **Windows only, once:** install Git (`winget install --id Git.Git -e`; Windows asks for permission). The installer in step 2 also does this for you if it is missing.
+   - Clone:
+     ```bash
+     cd ~/Documents
+     git clone https://github.com/mathiniraiai-ai/Zeno.git
+     ```
+   - **No Git yet?** Download https://github.com/mathiniraiai-ai/Zeno/archive/refs/heads/main.zip (no sign-in), unzip it, and go to step 2. The installer installs Git if needed and connects the folder to GitHub, so it can update itself like a normal clone. Your files, `.env` and videos are not touched.
 2. Double-click the installer:
    - **Mac:** `install.command` (first time: right-click it, choose **Open**, then **Open** again).
    - **Windows:** `install.bat`.
-3. The installer asks you nothing and needs no admin password. It:
+3. The installer asks you nothing and needs no admin password for Zeno itself (installing Git, only if it is missing, makes Windows ask for permission). It:
    - installs `uv`, which brings Python 3.12,
    - uses FFmpeg if the PC already has it, otherwise downloads it into `tools/ffmpeg/`,
    - creates `.venv` and installs the packages,
+   - installs Git if it is missing (Windows) and connects the folder to GitHub, so it can update itself,
    - creates `.env` from the template,
    - downloads the alignment model (Meta wav2vec2, about 360 MB, into `models/torch`),
    - sets up a daily background update (11:00 AM) that also frees disk space when it is nearly full,
@@ -46,7 +50,7 @@ Start a **new agent session for each video** (it keeps token use low), open the 
 2. **One question.** If everything passes, the agent asks for exactly two things:
    - the **script link**: the Google Doc **tab** for this video (the link ends in `?tab=…`; a link without a tab is refused so the other languages are never loaded), and
    - the **footage folder**: a folder on your computer (Drive or web links are not downloaded; download them first).
-3. **Nothing starts before you answer.** Then `python scripts/zeno.py --inspect <footage folder> --script "<script link>" [--lang auto]` repeats the live checks and measures what you gave it: the script (spoken lines, scenes, speakers, silent beats, split-screen notes, strike-through lines) and every clip (readable? has audio? how long?). It stops with `[BLOCKED]` and says why if something is wrong.
+3. **Nothing starts before you answer.** Then `python scripts/zeno.py --inspect <footage folder> --script "<script link>" [--lang auto] [--style micronarrative]` repeats the live checks and measures what you gave it: the script (spoken lines, scenes, speakers, silent beats, split-screen notes, strike-through lines) and every clip (readable? has audio? how long?). It stops with `[BLOCKED]` and says why if something is wrong. It also prints which style the job follows; `--style <name>` makes the job count toward that style and the team's learning.
 
 ## 3. What Zeno measures, and what it decides from it
 
@@ -115,9 +119,10 @@ The agent prints a token table and adds a row to `README.md`. After a verified j
 - `[BLOCKED]` after you gave the script and footage: read the line below it (a link with no `?tab=`, an unreadable clip, a script with no spoken lines).
 - Google Doc says private: ask for "anyone with the link can view".
 - A transcript or a cut looks wrong: tell the agent the video, the line and what you hear.
+- "Cannot update itself" or `[Auto-Update] … not connected to GitHub`: run the installer again (or `python scripts/auto_updater.py --connect-git`). It needs Git and an internet connection, not a GitHub account.
 - Out of disk: `python scripts/clean.py --apply`.
 
 ## Known limits (be aware on your first jobs)
 - The micronarrative style has been learned from two reference videos; full jobs on real raw footage are just starting, so tell the owner what looks off.
-- The Windows installer has not been tested on a real Windows PC yet.
+- The Windows installer is being tested on a real PC now: the Git step and the ZIP-to-clone connection were added after the first test found a PC with no Git.
 - Footage must be a local folder; links are not downloaded.

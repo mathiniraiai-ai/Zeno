@@ -1,5 +1,5 @@
 # Zeno one-click installer for Windows 10/11 (called by install.bat).
-# Safe to run again: it skips anything already installed. No admin rights needed.
+# Safe to run again: it skips anything already installed. Zeno itself needs no admin rights; installing Git (only if missing) may ask Windows for permission.
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 Set-Location (Split-Path -Parent $PSScriptRoot)
@@ -73,6 +73,21 @@ if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
     Write-Host "      NVIDIA GPU found. Zeno runs fine on CPU; for GPU speed see the README (optional)."
 }
 
+# 3b. Git, so this folder can update itself (also for a copy that came from a ZIP download).
+#     The repository is public: no GitHub account or sign-in is needed.
+$ErrorActionPreference = "Continue"
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Host "[3b] Git is not installed. Installing it with winget (Windows may ask for your permission)..."
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        winget install --id Git.Git -e --source winget --silent --accept-package-agreements --accept-source-agreements
+        $env:Path = "$env:ProgramFiles\Git\cmd;$env:LOCALAPPDATA\Programs\Git\cmd;$env:Path"
+    } else {
+        Write-Host "      winget is not available on this PC. Install Git from https://git-scm.com/download/win, then run this installer again."
+    }
+}
+& .venv\Scripts\python.exe scripts\auto_updater.py --connect-git
+$ErrorActionPreference = "Stop"
+
 # 4. .env from the template (never overwrites an existing one)
 if (Test-Path ".env") {
     Write-Host "[4/5] .env already exists (kept as is)"
@@ -81,7 +96,7 @@ if (Test-Path ".env") {
     Write-Host "[4/5] Created .env from .env.example"
 }
 
-# 5. Alignment model (Meta wav2vec2, about 360 MB, into models\torch) + automatic Google login + daily 8 AM auto-updater
+# 5. Alignment model (Meta wav2vec2, about 360 MB, into models\torch) + automatic Google login + daily 11 AM auto-updater
 Write-Host "[5/5] Downloading the alignment model (first time only) and checking everything..."
 $ErrorActionPreference = "Continue"
 & .venv\Scripts\python.exe scripts\setup.py --prewarm | Out-Null
