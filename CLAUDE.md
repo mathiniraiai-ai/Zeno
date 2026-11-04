@@ -77,9 +77,14 @@ Script-led AI video editing harness (`1080x1920` MP4). Zeno only transcribes, me
 - Custom: Place `right.png` & `wrong.png` in `assets/marks/<pack>/`.
 - **Skill Links**: [`.agent/skills/video-edit/SKILL.md`](.agent/skills/video-edit/SKILL.md) | [`styles/micronarrative/SKILL.md`](styles/micronarrative/SKILL.md) | [`agent/DIRECTOR.md`](agent/DIRECTOR.md) | [`agent/concepts/word_boundary_training.md`](agent/concepts/word_boundary_training.md)
 
-## 5. One Director, Full Review
+## 5. Five Agents: Four Edit, One Final Check
 
-The agent makes all decisions in one pass, in the order given by `agent/EDIT_RULES.md`: timeline, takes, speakers, cuts, layouts, motion, transitions, marks, then a self-review as an editor. After rendering, `verify.py` checks the result locally (order, clipped words, pauses, loudness, marks, split rules). Read its output, look at `marks_contact_sheet.jpg`, fix `plan.edl` and render again if anything fails.
+Zeno's code transcribes (Gemini), aligns (wav2vec2), measures and renders, once, in `--inspect`; no agent repeats that. The Director merges **four specialist agents** into `plan.edl`, in the order of `agent/EDIT_RULES.md`, then a **fifth agent** checks the finished video. Roles, inputs and budgets: [`agent/concepts/10_five_agents.md`](agent/concepts/10_five_agents.md).
+1. **Agent 1 (`Script & Take Auditor`)**: which clip and take says each script line, who speaks it, script order; names lines the footage cannot deliver and wording that differs from the script.
+2. **Agent 2 (`Cut & Pause Editor`)**: in/out of every segment: pauses, repeats, false starts, no cut inside a word, tight joins.
+3. **Agent 3 (`Layout & Motion Director`)**: the layout the script asks for (a split stays a split), peer windows, same head height and size in every panel and cut, zooms by emotion, at most three peaks.
+4. **Agent 4 (`Transitions, Marks & Sound`)**: transitions, ✗/✓ marks only where the script marks them, banners, effect sounds.
+5. **Agent 5 (`Final Check`)**: after `--execute`, re-verifies the whole video against the script **with zero Gemini or server calls and at most 10k tokens**: `verify.py` output, script coverage (names a missing line), cut timestamps, a tiled frame batch (layout, head alignment, faces, black frames), audio (dead air, loudness). It fixes `plan.edl` and re-renders at most once, and reports what is still wrong.
 
 ## 6. `plan.edl` Quick Syntax
 

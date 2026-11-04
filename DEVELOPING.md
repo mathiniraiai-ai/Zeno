@@ -24,7 +24,7 @@ There is no linter or build step. `tests/test_engine.py` also scores a gold-set 
 
 ## 8. Architecture (big picture)
 
-**Director / Engine split.** The LLM Director (`agent/DIRECTOR.md`, `agent/EDIT_RULES.md`) makes every editing decision and writes `plan.edl`. Python in `scripts/` only transcribes, measures, checks and renders. Do not add editing decisions back into Python: a measurement or a safety check belongs in the Engine, a choice belongs in `EDIT_RULES.md`. `CLAUDE.md` and `AGENTS.md` (Antigravity/OpenAI) are parallel manuals and must be kept in sync.
+**Director / Engine split.** The LLM Director (`agent/DIRECTOR.md`, `agent/EDIT_RULES.md`) makes every editing decision and writes `plan.edl`, with four specialist agents for the edit and a fifth that checks the render locally (`agent/concepts/10_five_agents.md`). Python in `scripts/` only transcribes, measures, checks and renders. Do not add editing decisions back into Python: a measurement or a safety check belongs in the Engine, a choice belongs in `EDIT_RULES.md`. `CLAUDE.md` and `AGENTS.md` (Antigravity/OpenAI) are parallel manuals and must be kept in sync.
 
 **Pipeline** (`scripts/zeno.py` orchestrates): ingest/extract audio → transcribe → align → measure → write `line_map.md` + `facts.md` + clip sheets → the Director writes `plan.edl` → `--check-plan` → Yes/No gate → `render.py` (+ `premiere_export.py`, `verify.py`, token telemetry).
 - `prepare.py` measures: transcripts, 10 ms energy, pauses, silent clips, faces. `script_order.py` holds the candidates per line and the plan checks (order, coverage, cuts, voices via `speaker_check.py`) and moves cuts to the quietest point of their gap. Per-clip caches live in `work/_clips/<stem>-<fingerprint>`.
