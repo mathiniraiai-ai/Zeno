@@ -1,6 +1,6 @@
 # micronarrative (Macro / Micro-Narrative Style Skill)
 
-A short story skit (`60–130s`): a live conversation problem scene, a friend's tip or dialogue continuation, and an AI-teacher split-screen or in-frame 3D hologram demo with Miss Nova. Learned from reference metrics in [`spec.json`](spec.json) and production-hardened across Zeno's multi-agent harness.
+A short story skit (`60–130s`): a live-action problem scene, a friend's tip or dialogue continuation, and an AI-teacher split-screen or in-frame 3D hologram demo with Miss Nova. Learned from reference metrics in [`spec.json`](spec.json) and production-hardened across Zeno's multi-agent harness.
 
 ---
 
@@ -17,8 +17,8 @@ A short story skit (`60–130s`): a live conversation problem scene, a friend's 
 
 ## 2. When to Use This Skill
 
-- The script has `Scene N` / `SCENE N` headings, named speakers (`Speaker: line`), a live conversation first half, and either a vertical split-screen section or an in-frame 3D hologram / two-shot section with Miss Nova (or two speakers).
-- The user refers to the edit as a **macro narrative**, **micronarrative**, **skit based micro narrative (`1.1`)**, or **hologram (`2.1`)**.
+- The script has `Scene N` / `SCENE N` headings, named speakers (`Speaker: line`), a live-action first half, and either a split-screen section or an in-frame 3D hologram / two-shot section with Miss Nova (or two speakers).
+- The user refers to the edit as a **macro narrative**, **micronarrative**, **skit based micro narrative (`1.1`)**, or **hologram (`2.1`)**. (The team's sheet uses "Live conversation" for a separate format family; see 2c.)
 
 ---
 
@@ -30,6 +30,31 @@ The reference videos this style was learned from used **no digital zoom and no e
 - **Values for this style (starting points, tune from the owner's feedback):** rapid zoom `1.08` (one `flash_zoom 1.12` at most), slow push `1.04` to `1.06`, closing call to action `1.05`; at most 8 rapid zooms a minute and never two in a row; at least a quarter of the single-speaker cuts stand still.
 - **Splits, two-shots and holograms stay still** (`z=1`). Their energy comes from the cut and the effect.
 - The library has no laugh, gasp, heartbeat or sad sting. Use the footage's own sound or a short silence, or ask the owner for licensed files.
+
+---
+
+## 2c. The formats (the team's "Editing Automation sheet")
+
+Identify the format from the script **before** the emotion plan, and write it on the first line of `script_analysis.md`. Marks show where each statement comes from: **[sheet]** the team's sheet (names, priority, example links), **[scripts]** read from the example scripts (one or two per format, in Telugu, Hindi, Malayalam or Kannada; the cards show lengths of 79 to 121 s), **[none]** no example script was available. Correct anything that is wrong.
+
+**The backbone most micro-narratives share [scripts]:** a human hook or problem, a bridge ("I used to speak like this too", "let me show you"), a drill with the AI teacher (Miss Nova or the Female Robot) in which a wrong sentence is corrected and praised, then the install call to action. The emotional peaks are the humiliation or surprise early, and the correction or the "Wow" at the payoff.
+
+| Format and priority [sheet] | What its script looks like and how it plays [scripts] |
+|---|---|
+| **1. Skit based micro narrative** (URGENT; a vertical and a horizontal version) | A `Visual:` paragraph and a reference link at the top, a character list, bold speaker labels, tone notes in parentheses (`(making fun)`), cut notes in brackets. About 30 to 40 spoken lines. Human actors in several locations (an airplane seat, a crew cabin, a construction site), the Female Robot only in the split. Opens on a humiliating incident or a hook, a kind stranger or flashback coaches one line, then the robot drills it. One example strikes three stock phrases with a red X; the other has no marks. |
+| **2. Direct hook micro narrative** (URGENT) | `Concept reference`, `Visual:`, `Characters:`, then `Scene 1/2/3`; about 20 to 25 lines; the same script is often repeated in variants (character or visual changes). A selfie talking head hooks straight to camera (an offer, or a whispered secret), then a split with the AI teacher (teacher left, human right), then the call to action. The first example puts a red X and a green tick after the wrong and right answers; the second has none. |
+| **3. Street interview micro narrative** (URGENT) | A reference link, `Characters`, `Scene 1/2`; about 20 to 30 lines. A handheld street and microphone look with an unusual interviewee (a couple abroad, an old woman asking for a job). They answer fluently, the reveal is that they studied with an AI teacher, a "let me show you" bridge, then a split with Miss Nova, then the call to action. No X or tick marks in the examples. Peaks: the husband's smile drops; "Are old people not supposed to speak English?" |
+| **4. Stop saying / Never say micro narrative** (URGENT) | A reference link, `Characters`, `Scene 1` to `5`; 16 to 24 lines; the shortest format (79 to 101 s). Opens "Stop saying / Never say X"; the three stock phrases appear on screen, each struck through with a red X and a wrong-answer sound as it is said; a bridge ("I used to speak like this too"); a split drill with the robot (left/right in one example, top/bottom in another) with a green tick on the corrected sentence; a return to scene 1; the call to action. A human presenter in a location or a 3D-animated one (the sea, a talk show, a scooter selfie). Peak: the phrases being struck out. |
+| **5. Live conversation** (URGENT) is its own family: **hologram**, **AI teacher on a tablet with the human doing an activity**, **interactive (driving a cycle, riding a bull, a road accident)** | Only the tablet type has examples: a `Visual:` line in brackets and no scene numbers; 12 to 20 lines. The robot is a device in the same shot (on a giant phone beside the bed, or on the phone screen throughout), so the layout is a **single full frame, not a split**. A comic misunderstanding or small mistake the robot corrects, objections about judgment, time and cost answered, the call to action, sometimes a cut to the app screen. No X or tick marks. Hologram and interactive: **[none]**. |
+| **6. Skit based / story based, direct pitch** (MEDIUM) | One example: five scenes, a `Visual:` line on each, about 11 long narration blocks and some flashback lines; one continuous kitchen shot plus slightly faded flashbacks, a hologram of Miss Nova pops up above the phone, the call to action straight to camera. Single full frame, no split, no marks. |
+| **Split screen: horizontal, vertical, video call (HIGH); with flash card (MEDIUM)**, **Scrolling text: one person, two people in a vertical split (HIGH)**, **How would you translate (MEDIUM)** | **[none]** no example scripts. The engine has `split_h`, `split_v`, `video_call` and `chat_bar` layouts; there is no scrolling-text or flash-card layout yet. |
+
+**Things the examples show that affect the edit**
+- **The writers use "vertical" and "horizontal" split loosely** (one script calls a floating window "more like a horizontal split"; another says "vertical split" and means top and bottom). Do not trust those words: use the explicit `Left:`, `Right:`, `Top:`, `Bottom:` in the script.
+- **A script often holds competitor transcripts and several variant tabs.** The Supernova script of the tab you were given is the one to edit.
+- **Marks differ by script, not by format.** Put a red X or a green tick only where that script marks a line.
+- **Footage is mostly AI-generated** (3D or live-action looks); a character may be silent in one clip and speaking in another, so check the clip sheet for who is who.
+- The cards show lengths of 79 to 121 s, in Telugu, Hindi, Malayalam and Kannada.
 
 ---
 
@@ -69,7 +94,7 @@ Always check how the raw footage was generated before assigning layouts in `plan
 
 ## 4. Scene Structure & Editorial Rules
 
-1. **First Half — Live Conversation (`Scene 1` Problem + `Scene 2` Tip/Continuation)**:
+1. **First Half — Live-Action Scenes (`Scene 1` Problem + `Scene 2` Tip/Continuation)**:
    - `layout=single`, speaker-follow cuts across wide establishing shots, speaker close-ups, two-shots, and reaction beats.
    - Preserve natural reaction/laughter beats where indicated in the script.
 2. **Second Half — AI Teacher Demo (`Scene 3` Split Screen or Hologram)**:

@@ -86,7 +86,7 @@ One effect per beat at most, under the voice (gain -12 to -4 dB, never above 0),
 | A language drill "How to say X?" | `chat_bar` with `chat:` |
 | A remote call | `video_call` |
 
-"Horizontal split" in a script means top and bottom; "vertical split" means left and right.
+Writers use "vertical" and "horizontal" split loosely, so the explicit words win: `Left:`/`Right:` means `split_h`, `Top:`/`Bottom:` means `split_v`. Only when a script gives no side words, "horizontal split" means top and bottom and "vertical split" means left and right.
 
 **Split screens with four clips (the normal case):** the left talker, the right talker, and a silent clip for each character. A character is shown talking only while they speak; the other panel shows the other character's silent clip, so a talker never appears in the listener panel. Each character keeps one panel for the whole split (`Left: A | Right: B` in the script). Give each split segment a `peer=` window: a stretch of the other character's clip in which they are not speaking. It does not have to sit at the same time as the cut; use the quiet stretches (`speech gaps` in `facts.md`). Walk forward through it turn after turn, never restarting at the same moment. When a window is shorter than the cut the renderer loops it, and a loop under a second is invisible; choose the longest quiet stretch you can, and tell the user when a loop is long. A long two-camera recording where each person is silent outside their turn can be its own listener: use the other character's quiet stretches. When a character has nothing to show, tell the user.
 
