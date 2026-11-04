@@ -579,7 +579,7 @@ def order_gate(plan: dict, plan_path: pathlib.Path) -> str:
         script = common.read_json(side).get("script")
     if not script:
         return "[BLOCKED] This plan names no script, so it cannot be checked. Add #script <path> to plan.edl."
-    g = script_order.full_gate(plan, common.resolve(script), plan_path.parent)
+    g = script_order.full_gate(plan, common.resolve(script), plan_path.parent, plan_path)
     if g.get("voice_note"):
         print(f"[VOICE] {g['voice_note']}. Say so in the report.")
     for t in g.get("tighten") or []:

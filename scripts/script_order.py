@@ -243,7 +243,26 @@ def gate(plan: Dict[str, Any], script_path: Any, work_dir: Path) -> Dict[str, An
     return {"blocked": bool(problems), "problems": problems, "accepted": ok, "report": rep}
 
 
-def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path) -> Dict[str, Any]:
+def unread_plan_lines(plan: Dict[str, Any], plan_path: Path) -> List[str]:
+    """Lines of plan.edl that look like segments but were not read. The usual cause is a clip name with spaces that is not in quotes:
+    the parser then drops the whole line without a word, and the order check would blame the wrong lines."""
+    ids = {str(s.get("id")) for s in plan.get("segments", [])}
+    out: List[str] = []
+    try:
+        text = Path(plan_path).read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for n, line in enumerate(text.splitlines(), 1):
+        raw = line.strip()
+        if not raw or raw.startswith("#"):
+            continue
+        first = raw.split()[0].strip('"')
+        if first not in ids:
+            out.append(f"line {n} ('{raw[:46]}...') was not read: put clip names that contain spaces in quotes, e.g. \"MISS NOVA FV.mp4\"")
+    return out
+
+
+def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path, plan_path: Optional[Path] = None) -> Dict[str, Any]:
     """Order, coverage, cuts and voices. Used by `--check-plan` and before every render."""
     g = gate(plan, script_path, work_dir)
     ok = g["accepted"]
@@ -253,6 +272,9 @@ def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path) -> Dict[st
 
     if not plan.get("segments"):
         g["problems"] = {"EMPTY PLAN": ["no segments yet"]}
+    unread = unread_plan_lines(plan, plan_path) if plan_path else []
+    if unread:
+        g["problems"] = {"PLAN LINES NOT READ (fix these first; the other messages may be a result of them)": unread, **g["problems"]}
     cuts = still_open(cut_problems(plan))
     if cuts:
         g["problems"]["CUT INSIDE A WORD"] = cuts
@@ -416,15 +438,28 @@ def _env_of(seg: Dict[str, Any]) -> List[Tuple[float, float]]:
     return compute_10ms_rms_envelope(wav) if wav.is_file() else []
 
 
+def _speech_spans_for(seg: Dict[str, Any]) -> List[Tuple[float, float]]:
+    from common import clip_work_dir, read_json
+
+    f = clip_work_dir(seg.get("src", "")) / "speech_spans.json"
+    try:
+        return [tuple(x) for x in read_json(f).get("spans", [])] if f.is_file() else []
+    except Exception:
+        return []
+
+
 def cut_problems(plan: Dict[str, Any]) -> List[str]:
     """Cuts that land inside a spoken word. A word counts only where there is real sound: an aligner time that sits in silence is wrong."""
     out = []
     for s in plan.get("segments", []):
         env = None
+        spoken = _speech_spans_for(s)
         for w in _words_of(s):
             a, b = float(w["start"]), float(w["end"])
             for name, t in (("start", float(s["start"])), ("end", float(s["end"]))):
                 if a + 0.05 < t < b - 0.05:
+                    if spoken and not any(x0 - 0.03 <= t <= x1 + 0.03 for x0, x1 in spoken):
+                        continue      # the voice detector hears no speech at this moment: a word the transcript put here is a ghost
                     if env is None:
                         env = _env_of(s)
                     loud = max((db for tt, db in env if t - 0.03 <= tt <= t + 0.03), default=-140.0)
@@ -564,7 +599,7 @@ def main() -> None:
     if not sp:
         print("[ORDER] This plan names no script, so order cannot be measured.")
         sys.exit(2)
-    g = full_gate(plan, resolve(sp), p.parent)
+    g = full_gate(plan, resolve(sp), p.parent, p)
     for a in g["report"]["assigned"]:
         print(f"  {a['id']:<8} says {a['line'] or '?':<6} fit={a['fit']}")
     print(format_gate(g))

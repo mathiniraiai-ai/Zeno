@@ -962,6 +962,9 @@ def format_facts(clips_data: List[Dict[str, Any]]) -> str:
         spoken = _speech_spans_of(c)
         if spoken:
             out.append("  speech (voice detector, works over noise): " + " ".join(f"{a:.2f}-{b:.2f}" for a, b in spoken))
+            gaps = [(spoken[i][1], spoken[i + 1][0]) for i in range(len(spoken) - 1) if spoken[i + 1][0] - spoken[i][1] >= 0.25]
+            if gaps:
+                out.append("  speech gaps (pauses a cut can remove, also in noisy clips): " + " ".join(f"{a:.2f}-{b:.2f}({b - a:.2f}s)" for a, b in gaps))
             for w in ws:
                 mid = (float(w["start"]) + float(w["end"])) / 2
                 if not any(a - 0.08 <= mid <= b + 0.08 for a, b in spoken):

@@ -1445,6 +1445,32 @@ class TestScriptIsTheTimeline(unittest.TestCase):
             (Path(tmp) / "script_analysis.md").write_text("L1 ...", encoding="utf-8")
             self.assertEqual(script_order.style_report(calm, Path(tmp)), [])
 
+    def test_unquoted_clip_name_is_reported_as_an_unread_line(self):
+        import tempfile
+        import script_order
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_file = Path(tmp) / "plan.edl"
+            plan_file.write_text('#output "x.mp4"\nL1 "My Clip.mp4" 0.0-2.0 z=1 sp=Lady\nL2 My Other Clip.mp4 0.0-2.0 z=1 sp=Lady\n', encoding="utf-8")
+            plan = {"segments": [{"id": "L1", "src": "My Clip.mp4", "start": 0.0, "end": 2.0}]}
+            lines = script_order.unread_plan_lines(plan, plan_file)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("line 3", lines[0])
+        self.assertIn("quotes", lines[0])
+
+    def test_a_cut_across_a_ghost_word_is_allowed_where_the_voice_detector_hears_no_speech(self):
+        from unittest import mock
+        import script_order
+
+        ws = [{"w": "ghost", "start": 6.91, "end": 7.58}]
+        noisy_env = [(round(6.0 + i * 0.01, 2), -20.0) for i in range(300)]           # constant road noise: loud everywhere
+        plan = {"segments": [{"id": "L6", "src": "a.mp4", "start": 5.0, "end": 7.30}]}
+        with self._with_words(ws), mock.patch.object(script_order, "_env_of", return_value=noisy_env):
+            with mock.patch.object(script_order, "_speech_spans_for", return_value=[(5.0, 7.0)]):
+                self.assertEqual(script_order.cut_problems(plan), [])                  # 7.30 is after the speech ended: no sound is cut
+            with mock.patch.object(script_order, "_speech_spans_for", return_value=[(5.0, 7.5)]):
+                self.assertEqual(len(script_order.cut_problems(plan)), 1)              # speech is really there: a cut inside the word
+
     def test_empty_plan_cannot_render(self):
         from unittest import mock
         import tempfile
