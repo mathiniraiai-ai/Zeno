@@ -584,6 +584,8 @@ def order_gate(plan: dict, plan_path: pathlib.Path) -> str:
         print(f"[VOICE] {g['voice_note']}. Say so in the report.")
     for t in g.get("tighten") or []:
         print(f"[TIGHT] {t}")
+    for t in g.get("style") or []:
+        print(f"[STYLE] {t}")
     return script_order.format_gate(g) if g["blocked"] else ""
 
 

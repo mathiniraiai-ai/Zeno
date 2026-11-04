@@ -9,13 +9,14 @@ Zeno transcribes, measures and renders. **You, the Director, make every editing 
 4. `styles/<style>/SKILL.md` and `styles/<style>/brain_memory.json` (the full learned rules; `line_map.md` only shows their start).
 
 ## Decide in this order
+0. **Analyse the script (emotion plan). Do this before choosing a single clip.** See "Emotion plan" below. It decides where the video speeds up, where it breathes, which zooms are rapid or slow, and where an effect sound goes.
 1. **Timeline.** The script is the timeline. Go line by line, top to bottom. File names and file order mean nothing.
 2. **Take.** For each line compare every `CAND` in `facts.md`. Prefer the take that says the script's words completely, with no stumble or repeat, then the clean clip end, then the later take. Never assume first or last is right. Two clips with different script lines are not takes of each other: a learner repeating the teacher's corrected sentence is a line of its own.
 3. **Speaker.** Use the clip of the character the script names. A clip's file name or the sheet tells you who it is. Set `sp="<name>"` on every segment: the check measures the voice against it. `WRONG VOICE` means pick another take; if no clip has the right voice, tell the user to reshoot.
 4. **Cuts.** See below.
 5. **Layout.** See below.
-6. **Motion, transitions, marks, SFX.** See below.
-7. **Self-review.** Read your plan against the script once as an editor would: does each cut land, does anyone speak twice, does the eye have somewhere to go? Then run `python3 scripts/zeno.py --check-plan work/<project>/plan.edl` until it passes.
+6. **Apply the emotion plan:** zooms, effect sounds, transitions, marks. Take the exact word times from `facts.md` (`emphasis` words are where the speaker leaned in).
+7. **Self-review.** Read your plan against the script once as an editor would: does each cut land, does anyone speak twice, does the eye have somewhere to go, do the biggest moments get the biggest treatment? Then run `python3 scripts/zeno.py --check-plan work/<project>/plan.edl` until it passes (`[STYLE]` and `[TIGHT]` lines are advice: clear them or keep them on purpose).
 
 ## Cuts: tight, never laggy (times from `facts.md`, seconds in the clip)
 - **Use the real sound, not only the word times.** `facts.md` lists `speech` spans (a voice detector that works over background noise) and `voiced` spans (loudness). It flags `NO SPEECH under '<word>'` and `TIMING WRONG` words: believe the spans over a flagged word and never build a cut on it. In a noisy clip (selfie on a road) `voiced` covers the whole clip and is useless: use `speech`.
@@ -53,22 +54,66 @@ Zeno transcribes, measures and renders. **You, the Director, make every editing 
 
 `peer="<character>:<silent clip>"@<from>-<to>@<panel>`.
 
-## Zoom
-- **Never** zoom split screens, two-shots, holograms, pre-stitched splits or clips with camera movement: `z=1`.
-- Single static speaker only:
-  - First single segment: `z=sudden_in:1.08@<word time>`, on the first strong word, about 0.25 s in.
-  - Sudden zoom-in on a Supernova mention, a key teaching point or the punch word; not twice in a row.
-  - After a sudden-in, `sudden_out` or a slow push on the next shot of 1.5 s or more.
-  - Any single shot over 6 s moves: `z=1->1.06`, or `z=1.08->1` as a pull-out. A closing call to action: `z=1->1.05`.
-  - `z=1.08` on the second half of a same-clip jump cut.
-- Focus: `focus=x,y` from `facts.md`, to keep the eyes where they are.
+## Emotion plan (write `work/<project>/script_analysis.md` first; about 1.5 to 2.5k tokens)
+Read the whole script once (it is in `line_map.md`) and write one line per spoken line:
+
+    L8 [Lady] emotion=embarrassed 2/3 | beat=mistake | zoom=slow push 1->1.05 | sfx=none | why: says the wrong sentence confidently, then the red X
+    L9 [Miss Nova] emotion=warm 1/3 | beat=correction | zoom=none | sfx=none | why: calm teacher, let the face breathe
+    L10 [Lady] emotion=impressed 3/3 PEAK | beat=reaction | zoom=rapid in 1.08 on "Wow" | sfx=pop at the zoom | why: the payoff of the scene
+
+- **emotion** (pick one) and **intensity 1 to 3:** neutral, curious, joy/excited, confident, surprised/shock, tense/worried, frustrated/angry, embarrassed, sad/lonely, relieved, proud/success.
+- **beat:** hook, problem, mistake, correction, reveal, tip, demo, proof, reaction, CTA.
+- Read emotion from the script itself: stage directions in (parentheses) and `[ ]` notes, punctuation (`!`, `?`, `...`), capitals, quoted words, the scene's visual notes; then from the speaker's voice (`emphasis` words in `facts.md`) and the face (clip sheet).
+- **Mark at most 3 PEAK moments in the whole video** (about 1 per 30 s). The peaks get the strongest treatment, a rapid zoom plus an effect sound. Everything else gets less, or nothing. Contrast between calm and peak is what makes a peak land; a video where everything is emphasised has no emphasis.
+- Keep it honest: a line with no real emotion is `neutral`, zoom `none`, sfx `none`. Do not decorate it.
+
+## Zoom: emotion decides the kind (single static speaker only)
+**Two kinds.** A *rapid* zoom is a snap on a word. A *slow* zoom is a push or a pull over the whole cut. Start from these values and tune them from the owner's feedback (they are a style choice, not measured from the reference videos):
+
+| Emotion or beat | Zoom | Plan syntax | Why |
+|---|---|---|---|
+| Surprise, shock, a big reveal (PEAK) | **Rapid in** on the reaction or reveal word | `z=sudden_in:1.08@<t>`; the one biggest PEAK of the video may use `z=flash_zoom:1.12@<t>` (adds a brightness pulse) | the snap is the jolt |
+| Anger, frustration, a strong claim | **Rapid in**, then hold | `z=sudden_in:1.08@<t>` | pressure |
+| Joy, pride, success, a punchline | **Rapid in** on the key word | `z=sudden_in:1.08@<t>` | the beat lands |
+| Release right after a rapid zoom | **Rapid out** | `z=sudden_out:1.08@0.10` on the next cut (1.5 s or longer) | lets go of the tension |
+| Tension, worry, fear, suspense | **Slow push** | `z=1->1.06` | the room closes in |
+| Embarrassment, an awkward beat, confession | **Slow push**, small | `z=1->1.04` | uncomfortable closeness; no sound |
+| Sadness, loneliness, doubt | **Slow pull** | `z=1.08->1` | distance |
+| Relief, calm, resolution | **Slow pull** | `z=1.06->1` | the breath out |
+| Confidence, authority, the closing call to action | **Slow push** | `z=1->1.05` | steady and warm |
+| Neutral information | none; a shot over 6 s still drifts `z=1->1.03` | | never leave a long shot dead |
+
+**Where exactly**
+- A rapid zoom starts **0.05 s before the stressed word** so the snap lands on it: `@<word start - cut start - 0.05>`. Take the word from `emphasis` in `facts.md`, or from the script's key word. It takes about 0.18 s, then the picture holds.
+- A slow zoom runs over the whole cut, so give the beat a cut of **2 s or more**. A slow push into a rapid zoom on the same cut is the strongest build: use it only for a PEAK.
+- **Limits (starting values):** no more than 8 rapid zooms a minute and never two in a row; at least a quarter of the single-speaker cuts stand still, so the zooms mean something; one `flash_zoom` in the whole video at most; the first cut of the hook usually opens with a rapid zoom on its first strong word.
+- **Never** zoom a split screen, a two-shot, a hologram, a pre-stitched split or a clip with camera movement: `z=1`. (They keep their own energy from the cut and the effect.)
+- `z=1.08` (a fixed punch-in) on the second half of a same-clip jump cut hides the jump.
+- Keep the eyes in place: `focus=x,y` from `facts.md`.
+
+## Sound effects for emotion (library: `assets/sfx`, `sfx:<file>@<t>/<gain dB>`, `t` relative to the cut)
+Effects are seasoning. One per beat at most, always under the voice (gain -12 to -4 dB, never above 0), never on a listener-only moment.
+
+| Need | File | Where | Gain |
+|---|---|---|---|
+| Light reveal or a rapid zoom | `pop.wav` | its loudest point is at 0.01 s: `at` = the zoom time | -6 |
+| Impact on a shock or a PEAK | `sn_punch_1.wav` (hit 0.15 s in); `sn_punch_2.wav` (0.16 s) | `at` = word start **- 0.15**, so the hit lands on the word | -4 |
+| Tension building to a reveal | `riser.wav` (0.75 s, peak at its end) or `sn_riser_1.wav` (1.35 s, peak at 1.08 s) | `at` = reveal word start **- 0.73** (riser) or **- 1.08** (sn_riser); only when the reveal is at least that far into the cut | -10 |
+| Success, praise, "right" | `correct_ding.wav` (also what a ✓ mark plays), `ding.wav` | on the word | -6 |
+| Wrong, a mistake | `buzzer.wav` (also what a ✗ mark plays) | at the end of the sentence | marks set it |
+| Transition | `whoosh.wav`, `sn_swish_1.wav`, `w42_transition.wav` | the join | -2 |
+| UI or selection feel | `click.wav` | on the word | -8 |
+
+- **Not in the library:** laughter, a gasp, a heartbeat, a sad sting, applause. For those moments use the footage's own sound, a 0.2 s dip in silence before the beat, or tell the user the effect is missing. Do not pretend another file is one. New files (licensed, or the owner's own) go in `assets/sfx/` and into this table.
+- A transition, a mark and an emotion effect on the same join are too much: choose the strongest.
+- The reference videos used no effects at all. The user asked for emotion effects on purpose: keep them sparse and let the peaks carry them.
 
 ## Transitions
 - Scene change in the script: `tr=whip_left@0.28` or `whip_right@0.28`.
 - Single to split: `tr=warm_flash@0.35`. Split back to single: `tr=smoothright@0.28`.
 - One or two crisp whips across clip changes in a single-speaker hook.
 - **Never** a transition between turns inside a split.
-- Add `sfx:whoosh.wav@0.0` on whips.
+- Add `sfx:whoosh.wav@0.0/-2` on whips.
 
 ## Marks and text
 - `✗`/`✓` only where the script marks a line (`mark=wrong` / `mark=right` in `line_map.md`). Flash at the end of the sentence, started 0.15 s before the last word ends: `mark:wrong@<last word end - 0.15, relative to the cut>/0.56@pos=top-right@style=flash`.

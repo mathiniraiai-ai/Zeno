@@ -1406,6 +1406,45 @@ class TestScriptIsTheTimeline(unittest.TestCase):
         self.assertTrue(all(b["x0"] < 540 < b["x1"] for b in boxes))                          # centred
         self.assertEqual(layouts.banner_boxes({"src": "a.mp4"}, 1080, 1920, 9.0), [])
 
+    def test_emphasis_words_are_the_loudest_against_the_speakers_usual(self):
+        env = [(round(i * 0.01, 2), -24.0) for i in range(400)]
+        for i in range(150, 190):
+            env[i] = (round(i * 0.01, 2), -14.0)                 # 10 dB louder during one word
+        words = [{"w": "calm", "start": 0.2, "end": 0.7}, {"w": "WOW", "start": 1.5, "end": 1.9}, {"w": "again", "start": 2.5, "end": 3.0}]
+        got = prepare.emphasis_words(env, words)
+        self.assertEqual([g["w"] for g in got], ["WOW"])
+        self.assertGreaterEqual(got[0]["delta_db"], 9.0)
+        self.assertEqual(prepare.emphasis_words([], words), [])
+
+    def test_style_advice_flags_rapid_zoom_rules_and_unknown_sounds(self):
+        import tempfile
+        import script_order
+
+        def seg(i, style=None, layout="single", dur=3.0, **kw):
+            d = {"id": f"L{i}", "src": "a.mp4", "start": 0.0, "end": dur, "layout": layout, "zoom": 1.0}
+            if style:
+                d.update(zoom_style=style, zoom_to=1.08)
+            d.update(kw)
+            return d
+
+        plan = {"canvas": {"fps": 30},
+                "segments": [seg(1, "sudden_in"), seg(2, "sudden_in"), seg(3, "sudden_in"), seg(4, "sudden_in"), seg(5, "flash_zoom"),
+                             seg(6, layout="split_h", zoom_to=1.06)],
+                "sfx": [{"file": "no_such_sound.wav", "segment": "L1", "at": 0.2, "gain_db": -6}, {"file": "pop.wav", "segment": "L1", "at": 0.1, "gain_db": 3}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            text = " | ".join(script_order.style_report(plan, Path(tmp)))
+        self.assertIn("no script_analysis.md", text)
+        self.assertIn("rapid zoom straight after another", text)
+        self.assertIn("rapid zooms in", text)                       # too many a minute
+        self.assertIn("stand still", text)                          # no stillness at all
+        self.assertIn("zoom on a split_h cut is ignored", text)
+        self.assertIn("'no_such_sound.wav'", text)
+        self.assertIn("above 0 dB", text)
+        calm = {"canvas": {"fps": 30}, "segments": [seg(1, "sudden_in", dur=3), seg(2), seg(3), seg(4, "smooth", dur=3), seg(5)], "sfx": [{"file": "pop.wav", "segment": "L1", "at": 0.1, "gain_db": -6}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "script_analysis.md").write_text("L1 ...", encoding="utf-8")
+            self.assertEqual(script_order.style_report(calm, Path(tmp)), [])
+
     def test_empty_plan_cannot_render(self):
         from unittest import mock
         import tempfile

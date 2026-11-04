@@ -30,6 +30,9 @@ HEARD_MIN = 0.50      # share of a line's words that must be heard for the line 
 STRONG = 0.55         # evidence needed to call a segment out of order from its words alone
 TIGHT_JOIN_SEC = 0.25     # silence across a join (end of one cut + start of the next) above this is reported
 TIGHT_PAUSE_SEC = 0.30    # a pause between two words inside one cut above this is reported
+RAPID_ZOOM_STYLES = ('sudden_in', 'flash_zoom')
+MAX_RAPID_PER_MIN = 8        # starting value for the emotion plan; tune from the owner's feedback
+MIN_STILL_SHARE = 0.25       # at least this share of single-speaker cuts should not move, so a zoom means something
 SNAP_REACH_SEC = 0.12   # a cut may move at most this far to reach a quiet point
 REPEAT_RECALL = 0.8   # two separate segments that each hold this much of a line say it twice
 
@@ -265,6 +268,10 @@ def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path) -> Dict[st
         g["tighten"] = tight_report(plan)
     except Exception:       # advice only
         g["tighten"] = []
+    try:
+        g["style"] = style_report(plan, work_dir)
+    except Exception:
+        g["style"] = []
     g["blocked"] = bool(g["problems"])
     return g
 
@@ -459,6 +466,63 @@ def tight_report(plan: Dict[str, Any]) -> List[str]:
                 out.append(f"{sid}: {gap:.2f}s pause between '{w0.get('w')}' and '{w1.get('w')}' at {float(w0['end']):.2f}-{float(w1['start']):.2f}: cut it (split the cut) or accept it as a breath")
         if k == 0 and lead > 0.25:
             out.append(f"{sid}: starts {lead:.2f}s before the first word")
+    return out
+
+
+def style_report(plan: Dict[str, Any], work_dir: Optional[Path] = None) -> List[str]:
+    """Advice on the emotion plan: whether the script was analysed, whether zooms and effects follow the rules. Never blocks a render."""
+    out: List[str] = []
+    segs = plan.get("segments", [])
+    if work_dir is not None and not (Path(work_dir) / "script_analysis.md").is_file():
+        out.append("no script_analysis.md: analyse the script first (emotion, beat, zoom and effect per line) and save it in the work folder; it is how the zooms and effects are planned")
+    from common import resolve_sfx_asset
+
+    fps = float((plan.get("canvas") or {}).get("fps") or 30)
+    total = sum(float(s["end"]) - float(s["start"]) for s in segs) or 1.0
+    rapid, flash, singles, still = [], 0, 0, 0
+    prev_rapid = False
+    for s in segs:
+        lay = str(s.get("layout") or "single").lower()
+        style = str(s.get("zoom_style") or "")
+        z0, z1 = float(s.get("zoom") or 1.0), float(s.get("zoom_to") or s.get("zoom") or 1.0)
+        moves = style in RAPID_ZOOM_STYLES or style == "sudden_out" or abs(z1 - z0) > 1e-6 or z0 > 1.0 + 1e-6
+        dur = float(s["end"]) - float(s["start"])
+        if lay in ("split_h", "split_v", "top_pip") and moves:
+            out.append(f"{s.get('id')}: zoom on a {lay} cut is ignored (splits stay still)")
+        if lay == "single":
+            if dur >= 1.5:
+                singles += 1
+                still += 0 if moves else 1
+            is_rapid = style in RAPID_ZOOM_STYLES
+            if is_rapid and prev_rapid:
+                out.append(f"{s.get('id')}: a rapid zoom straight after another rapid zoom; make one of them slow or none")
+            prev_rapid = is_rapid
+            if is_rapid:
+                rapid.append(s)
+            if style == "flash_zoom":
+                flash += 1
+        else:
+            prev_rapid = False
+    if flash > 1:
+        out.append(f"{flash} flash zooms: keep it to the single biggest beat of the video")
+    per_min = len(rapid) / (total / 60.0)
+    if per_min > MAX_RAPID_PER_MIN:
+        out.append(f"{len(rapid)} rapid zooms in {total:.0f}s ({per_min:.1f} a minute; starting limit {MAX_RAPID_PER_MIN}): keep the rapid ones for the peak beats")
+    if singles >= 4 and still / singles < MIN_STILL_SHARE:
+        out.append(f"only {still} of {singles} single-speaker cuts stand still (aim for at least {int(MIN_STILL_SHARE * 100)}%): stillness is what gives a zoom its weight")
+    ids = {str(s.get("id")): s for s in segs}
+    for e in plan.get("sfx", []):
+        name, seg = str(e.get("file")), ids.get(str(e.get("segment")))
+        try:
+            known = resolve_sfx_asset(name).is_file()
+        except Exception:
+            known = False
+        if not known:
+            out.append(f"sound '{name}' on {e.get('segment')} is not in assets/sfx: it will not play")
+        if float(e.get("gain_db", -8)) > 0:
+            out.append(f"sound '{name}' on {e.get('segment')} is boosted above 0 dB: keep effects under the voice")
+        if seg is not None and float(e.get("at", 0)) > float(seg["end"]) - float(seg["start"]):
+            out.append(f"sound '{name}' on {e.get('segment')} starts after the cut ends")
     return out
 
 

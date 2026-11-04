@@ -904,6 +904,26 @@ def _silent_clip_owner(c: Dict[str, Any], clips_data: List[Dict[str, Any]]) -> s
         return ""
 
 
+def emphasis_words(rms_env: List[Tuple[float, float]], words: List[Dict[str, Any]], max_n: int = 6, min_delta_db: float = 4.0) -> List[Dict[str, Any]]:
+    """The words the speaker stressed: each word's peak loudness against the median loudness of the clip's speech. A measurement the
+    Director uses to place a rapid zoom or an effect on the exact word. In a noisy clip the median is high, so weak peaks do not show."""
+    voiced = sorted(db for _, db in rms_env if db > -34.0)
+    if not voiced or not words:
+        return []
+    median = voiced[len(voiced) // 2]
+    scored = []
+    for w in words:
+        a, b = float(w["start"]), float(w["end"])
+        text = str(w.get("w") or "").strip()
+        if b - a < 0.12 or len(_clean_token(text)) < 2:
+            continue
+        dbs = [db for t, db in rms_env if a <= t <= b and db > -36.0]
+        if dbs and max(dbs) - median >= min_delta_db:
+            scored.append((round(max(dbs) - median, 1), round(a, 2), text))
+    scored.sort(reverse=True)
+    return [{"w": t, "start": a, "delta_db": d} for d, a, t in scored[:max_n]]
+
+
 def format_facts(clips_data: List[Dict[str, Any]]) -> str:
     """Everything measured about each clip, as text for the Director: `start word` for every word, a line break at each gap."""
     out = ["# FACTS: measured by Zeno. Times are seconds in the clip. `1.20 word` = the word starts at 1.20; `|2.31` = speech stops at 2.31.", ""]
@@ -947,6 +967,9 @@ def format_facts(clips_data: List[Dict[str, Any]]) -> str:
                 if not any(a - 0.08 <= mid <= b + 0.08 for a, b in spoken):
                     out.append(f"  ! NO SPEECH under '{w['w']}' ({float(w['start']):.2f}-{float(w['end']):.2f}): likely a transcription ghost or a mistimed word; do not build a cut on it")
         env = c.get("rms_env") or []
+        stress = emphasis_words(env, ws) if env else []
+        if stress:
+            out.append("  emphasis (louder than this speaker's usual; put a rapid zoom or an effect on these words): " + " ".join(f"'{x['w']}'@{x['start']:.2f}(+{x['delta_db']}dB)" for x in stress))
         if env:
             out.append("  voiced (real sound, measured from the audio): " + " ".join(f"{a:.2f}-{b:.2f}" for a, b in voiced_spans(env)))
             for w in words_in_silence(ws, env):
