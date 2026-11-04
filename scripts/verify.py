@@ -648,6 +648,53 @@ def check_picture_timeline(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, 
     return (not bad), bad, compared
 
 
+def build_review_sheet(plan: Dict[str, Any], mp4_path: Path, out_path: Path, tile_w: int = 104) -> Optional[Path]:
+    """One small picture of the whole finished video for the Director: 3 frames per cut (just after it starts, middle, just before it
+    ends), shrunk and labelled with the cut id and time. About 1k tokens to read, so nothing needs to be extracted by hand."""
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return None
+    cap = cv2.VideoCapture(str(mp4_path))
+    if not cap.isOpened():
+        return None
+    fps = float((plan.get("canvas") or {}).get("fps") or 30)
+    tile_h = int(tile_w * 16 / 9)
+    cols_per_cut, label_h = 3, 14
+    cuts, t0 = [], 0.0
+    for seg in plan.get("segments", []):
+        dur = round((float(seg["end"]) - float(seg["start"])) * fps) / fps
+        row = []
+        for k, frac_t in enumerate((min(0.25, dur * 0.3), dur / 2, max(dur - 0.25, dur * 0.7))):
+            cap.set(cv2.CAP_PROP_POS_MSEC, (t0 + frac_t) * 1000.0)
+            ok, fr = cap.read()
+            tile = cv2.resize(fr, (tile_w, tile_h), interpolation=cv2.INTER_AREA) if ok else np.zeros((tile_h, tile_w, 3), np.uint8)
+            row.append(cv2.copyMakeBorder(tile, 0, 0, 1, 1, cv2.BORDER_CONSTANT, value=(255, 255, 255)))
+        strip = np.hstack(row)
+        bar = np.full((label_h, strip.shape[1], 3), 245, np.uint8)
+        cv2.putText(bar, f"{seg.get('id')} {t0:.1f}s", (3, 11), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (0, 0, 0), 1, cv2.LINE_AA)
+        cuts.append(np.vstack([bar, strip]))
+        t0 += dur
+    cap.release()
+    if not cuts:
+        return None
+    per_row = max(1, min(len(cuts), 6))
+    rows = []
+    for r in range(0, len(cuts), per_row):
+        group = cuts[r:r + per_row]
+        while len(group) < per_row:
+            group.append(np.full_like(cuts[0], 255))
+        rows.append(np.hstack(group))
+    sheet = np.vstack(rows)
+    k = 1560.0 / max(sheet.shape[:2])
+    if k < 1.0:
+        sheet = cv2.resize(sheet, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_path), sheet, [cv2.IMWRITE_JPEG_QUALITY, 70])
+    return out_path
+
+
 def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = None) -> bool:
     """Run all 5 deterministic verification checks and print the 5-line QA report."""
     p_file, plan = load_plan(plan_path)
@@ -695,6 +742,7 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
     )
     split_hook_ok, split_hook_summary = check_split_and_hook_rules(plan)
     pic_ok, pic_bad, pic_n = check_picture_timeline(plan, out_mp4)
+    review = build_review_sheet(plan, out_mp4, p_file.parent / "review_sheet.jpg")
     alt_proj_dir = WORK / out_mp4.stem
     if alt_proj_dir.is_dir() and alt_proj_dir.resolve() != p_file.parent.resolve() and sheet_path.is_file():
         (alt_proj_dir / "marks_contact_sheet.jpg").write_bytes(sheet_path.read_bytes())
@@ -726,6 +774,12 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
         f"({', '.join(m_details)}) -> {rel_sheet} ({sheet_kb} KB)"
     )
     print(f"[SPLIT  {'PASS' if split_hook_ok else 'FAIL'}] {split_hook_summary}")
+    if review:
+        try:
+            rel_review = review.relative_to(ROOT)
+        except ValueError:
+            rel_review = review
+        print(f"[REVIEW] one picture of the whole video (3 frames per cut, about 1k tokens to read): {rel_review}")
     print(f"[PICTURE {'PASS' if pic_ok else 'FAIL'}] {pic_n} cuts: the picture at the middle of each cut matches the plan" + ("" if pic_ok else ": " + "; ".join(pic_bad)))
 
     return bool(video_ok and audio_ok and cuts_ok and script_ok and marks_ok and split_hook_ok and pic_ok)

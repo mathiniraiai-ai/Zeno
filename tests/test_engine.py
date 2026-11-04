@@ -1327,6 +1327,20 @@ class TestScriptIsTheTimeline(unittest.TestCase):
             self.assertEqual(vad.speech_spans(__import__("numpy").zeros(32000, dtype="float32")), [])    # not installed: nothing changes
         self.assertEqual(vad.nonspeech_runs([], 10.0), [])
 
+    def test_review_sheet_is_one_small_picture_of_every_cut(self):
+        import subprocess
+        import tempfile
+        import common
+        import verify
+
+        with tempfile.TemporaryDirectory() as tmp:
+            mp4 = Path(tmp) / "v.mp4"
+            subprocess.run([str(common.FFMPEG), "-v", "error", "-f", "lavfi", "-i", "testsrc=s=180x320:r=30:d=4", "-pix_fmt", "yuv420p", str(mp4)], check=True)
+            plan = {"canvas": {"fps": 30}, "segments": [{"id": "L1", "start": 0.0, "end": 2.0}, {"id": "L2", "start": 0.0, "end": 2.0}]}
+            sheet = verify.build_review_sheet(plan, mp4, Path(tmp) / "r.jpg")
+            self.assertTrue(sheet and sheet.is_file())
+            self.assertLess(sheet.stat().st_size, 200 * 1024)
+
     def test_empty_plan_cannot_render(self):
         from unittest import mock
         import tempfile

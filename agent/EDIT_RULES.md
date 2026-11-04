@@ -78,7 +78,7 @@ Zeno transcribes, measures and renders. **You, the Director, make every editing 
 
 ## Looking at pictures (cheap, and only when it adds something)
 - Read the clip sheets **once**, before editing (`clip_sheet_<n>.jpg`: 3 frames per clip, about 0.5 to 2k tokens a sheet). Use them to see who is in a clip, silent clips, baked splits, bad frames.
-- After rendering, read `marks_contact_sheet.jpg` once. Pull more frames only when a check fails or the user reports a visual problem: then look at the few moments in question, not the whole video.
+- After rendering, read `review_sheet.jpg` once (3 small frames per cut, labelled with the cut id and time, about 1k tokens): check banners are off the face, the split panels show the right character, the listener is not speaking, and marks and transitions look right. Pull more frames only when a check fails or the user reports a visual problem, and then only the few moments in question.
 
 ## plan.edl
 `zeno.py --inspect` writes the header. Add one line per segment, in script order:
