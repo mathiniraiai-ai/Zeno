@@ -1261,5 +1261,141 @@ class TestGpu(unittest.TestCase):
         self.assertTrue(lines)
 
 
+class TestScriptIsTheTimeline(unittest.TestCase):
+    """The script decides order, never file names. Zeno never guesses a line. A plan that breaks script order cannot render."""
+
+    LINES = ["my grandmother wants to go to america next month", "but she never finished tenth standard at school",
+             "she learned english on her phone with a teacher", "now she speaks to the officer with confidence",
+             "everyone in the village is proud of her today", "you can also start learning from home right now"]
+
+    def _lines(self):
+        return [{"id": f"L{i + 1}", "index": i + 1, "text": t, "tokens": t.split(), "speaker": ""} for i, t in enumerate(self.LINES)]
+
+    def _clip(self, name, text):
+        ws = [{"w": w, "start": i * 0.4, "end": i * 0.4 + 0.35} for i, w in enumerate(text.split())]
+        return {"stem": name, "src": name + ".mp4", "hq_words": ws, "base_words": list(ws), "info": {"duration": len(ws) * 0.4 + 0.3}, "anomalies": [], "rms_env": []}
+
+    def _final_order(self, texts):
+        clips = [self._clip(f"C{i}", t) for i, t in enumerate(texts)]
+        prepare.match_clips_to_script_lines(clips, self._lines())
+        kept = prepare.order_kept_clips([c for c in clips if not c.get("needs_decision")])
+        return [l["id"] for c in kept for l in c["matched_lines"]], clips
+
+    def test_middle_clip_first_in_the_folder_still_lands_in_the_middle(self):
+        order, _ = self._final_order([self.LINES[2], self.LINES[0], self.LINES[1], self.LINES[3], self.LINES[4], self.LINES[5]])
+        self.assertEqual(order, ["L1", "L2", "L3", "L4", "L5", "L6"])
+
+    def test_any_file_order_gives_script_order(self):
+        import random
+
+        rnd = random.Random(7)
+        for _ in range(25):
+            idx = list(range(6))
+            rnd.shuffle(idx)
+            order, _ = self._final_order([self.LINES[i] for i in idx])
+            self.assertEqual(order, ["L1", "L2", "L3", "L4", "L5", "L6"], idx)
+
+    def test_long_speech_sharing_common_words_is_not_pulled_to_a_short_earlier_line(self):
+        import script_order
+
+        lines = [{"id": "L1", "index": 1, "tokens": "you are so very good".split()}, {"id": "L2", "index": 2, "tokens": "the sun rose above the river".split()},
+                 {"id": "L3", "index": 3, "tokens": "this game gets easier when you are so very good at practice every day and you are very good with so much care".split()}]
+        tokens = lines[2]["tokens"]
+        self.assertEqual(script_order.place_in_script(tokens, lines)[0], 3)
+
+    def test_clip_that_opens_with_the_earlier_line_sorts_there(self):
+        import script_order
+
+        lines = self._lines()
+        self.assertEqual(script_order.place_in_script((self.LINES[1] + " " + self.LINES[2]).split(), lines)[0], 2)
+
+    def test_clip_with_no_evidence_is_not_given_a_line(self):
+        order, clips = self._final_order(["hello okay camera rolling action", self.LINES[0], self.LINES[1]])
+        self.assertEqual(order, ["L1", "L2"])
+        self.assertTrue(clips[0].get("needs_decision"))
+        self.assertEqual(clips[0]["matched_lines"], [])
+
+    def test_order_check_catches_a_wrong_order(self):
+        import script_order
+
+        rows = [(f"L{i + 1}", self.LINES[i].split()) for i in (2, 0, 1, 3, 4, 5)]
+        rep = script_order.check_order(rows, self._lines())
+        self.assertTrue(rep["out_of_order"])
+
+    def test_order_check_catches_words_that_contradict_the_label(self):
+        import script_order
+
+        rows = [("L1", self.LINES[2].split()), ("L2", self.LINES[0].split()), ("L3", self.LINES[1].split())]
+        self.assertTrue(script_order.check_order(rows, self._lines())["out_of_order"])
+
+    def test_order_check_passes_a_correct_plan(self):
+        import script_order
+
+        rep = script_order.check_order([(f"L{i + 1}", t.split()) for i, t in enumerate(self.LINES)], self._lines())
+        self.assertEqual((rep["out_of_order"], rep["missing"], rep["repeated"], rep["unknown"]), ([], [], [], []))
+
+    def test_split_line_and_combined_ids_are_not_false_alarms(self):
+        import script_order
+
+        w = self.LINES[0].split()
+        rows = [("L1a", w[:4]), ("L1b", w[4:]), ("L2_L3", (self.LINES[1] + " " + self.LINES[2]).split()), ("L4", self.LINES[3].split()),
+                ("L5", self.LINES[4].split()), ("L6", self.LINES[5].split())]
+        rep = script_order.check_order(rows, self._lines())
+        self.assertEqual((rep["out_of_order"], rep["missing"], rep["repeated"]), ([], [], []))
+
+    def test_order_check_catches_missing_and_repeated(self):
+        import script_order
+
+        rows = [("L1", self.LINES[0].split()), ("L1b", self.LINES[0].split()), ("L3", self.LINES[2].split())]
+        rep = script_order.check_order(rows, self._lines())
+        self.assertIn("L2", rep["missing"])
+        self.assertTrue(rep["repeated"])
+
+    def test_silent_beat_with_no_clip_is_an_open_decision(self):
+        import script_order
+
+        lines = self._lines()[:2] + [{"id": "L3", "index": 3, "text": "(she looks shocked)", "tokens": [], "beat": True}]
+        rep = script_order.check_order([("L1", self.LINES[0].split()), ("L2", self.LINES[1].split())], lines)
+        self.assertEqual(rep["missing"], ["L3"])
+
+    def test_director_can_record_a_deliberate_exception(self):
+        import tempfile
+        import script_order
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "decisions.txt").write_text("accept L2 cut for time, client asked\n", encoding="utf-8")
+            self.assertEqual(script_order.read_accepted(Path(tmp)), {"L2": "cut for time, client asked"})
+
+    def test_line_map_lists_every_line_alternatives_and_unmatched_clips(self):
+        import script_order
+
+        a, b, junk = self._clip("A", self.LINES[0]), self._clip("B", self.LINES[0]), self._clip("J", "hello okay camera rolling")
+        a["matched_lines"] = b["matched_lines"] = [self._lines()[0]]
+        junk["matched_lines"] = []
+        plan = {"segments": [{"id": "L1", "src": "A.mp4", "start": 0.0, "end": 3.0}]}
+        text = script_order.build_line_map(plan, self._lines()[:2], [a, b, junk])
+        self.assertIn("USE A", text)
+        self.assertIn("ALT B", text)
+        self.assertIn("L2", text)
+        self.assertIn("DECIDE", text)
+        self.assertIn("J (", text)
+
+    def test_clip_sheet_builds_one_image_for_all_clips(self):
+        import subprocess
+        import tempfile
+        import clip_sheet
+        import common
+
+        with tempfile.TemporaryDirectory() as tmp:
+            clips = []
+            for i in range(3):
+                f = Path(tmp) / f"c{i}.mp4"
+                subprocess.run([str(common.FFMPEG), "-v", "error", "-f", "lavfi", "-i", "testsrc=s=180x320:r=10:d=1", str(f)], check=True)
+                clips.append(str(f))
+            sheets = clip_sheet.build(Path(tmp) / "out", clips)
+            self.assertEqual(len(sheets), 1)
+            self.assertTrue(sheets[0].is_file())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

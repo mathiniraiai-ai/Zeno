@@ -978,11 +978,44 @@ def match_clips_to_script_lines(
         members = groups[gid]
         best = max(members, key=lambda m: len(_clip_tokens(m)))
         stand_ins.append(best)
+    stand_ins = _in_script_order(stand_ins, script_lines)
     _match_sequence(stand_ins, script_lines)
     for gid, members in groups.items():
         rep = next(m for m in members if m in stand_ins)
         for m in members:
             m["matched_lines"] = list(rep.get("matched_lines", []))
+            m["script_pos"] = rep.get("script_pos")
+            if rep.get("needs_decision"):
+                m["needs_decision"] = True
+
+
+def _in_script_order(clips: List[Dict[str, Any]], script_lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The script is the timeline: clips are walked by where their words sit in the script, whatever their file names.
+    A clip whose words fit nowhere stays beside its neighbour in the list and is left for the Director."""
+    import script_order
+
+    keyed = []
+    last = (0, 0)
+    for n, c in enumerate(clips):
+        line_no, offset, _ = script_order.place_in_script(_clip_tokens(c), script_lines)
+        key = (line_no, offset) if line_no is not None else last
+        if line_no is not None:
+            c["script_pos"] = key
+        last = key
+        keyed.append((key, n, c))
+    keyed.sort(key=lambda x: (x[0], x[1]))
+    return [c for _, _, c in keyed]
+
+
+def order_kept_clips(clips: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Final order of the draft. This line is why the plan follows the script and not the file names."""
+    def key(c: Dict[str, Any]) -> Tuple[int, int]:
+        lines = c.get("matched_lines") or []
+        first = min((int(l.get("index", 0)) for l in lines), default=10 ** 6)
+        pos = c.get("script_pos")
+        return (first, int(pos[1]) if pos else 0)
+
+    return sorted(clips, key=key)
 
 
 def _match_sequence(
@@ -1096,12 +1129,10 @@ def _match_sequence(
                 remaining_tokens[best_i] = []
                 if best_i >= line_ptr:
                     line_ptr = best_i + 1
-        if not matched_lines and line_ptr < n_lines:
-            matched_lines = [script_lines[line_ptr]]
-            remaining_tokens[line_ptr] = []
-            line_ptr += 1
-        elif not matched_lines and n_lines > 0:
-            matched_lines = [script_lines[-1]]
+        if not matched_lines:
+            # No evidence for any line: never hand it "the next line". The Director looks at it in line_map.md.
+            clip["needs_decision"] = True
+            clip["anomalies"].append(f"[NO_LINE_MATCH] {clip['stem']}: its words fit no script line; left out of the draft for the Director to decide")
 
         clip["matched_lines"] = matched_lines
 
@@ -2641,7 +2672,7 @@ def main() -> None:
     match_clips_to_script_lines(clips_data, script_lines)
     apply_speaker_check(clips_data, script_lines)   # before choosing takes: a take with the wrong voice scores lower
     select_best_takes(clips_data)
-    kept_clips = [c for c in clips_data if not c.get("dropped_take")]
+    kept_clips = order_kept_clips([c for c in clips_data if not c.get("dropped_take") and not c.get("needs_decision")])
     raw_segments = cut_clips(kept_clips)
     fill_clips = fill_lines_lost_to_wrong_speaker(raw_segments, clips_data, script_lines)
     kept_clips = kept_clips + [c for c in fill_clips if c not in kept_clips]
@@ -2704,9 +2735,24 @@ def main() -> None:
     write_json(proj_dir / "plan.json", plan)
     write_json(proj_dir / "plan.auto.json", plan)
 
+    # What the Director decides from: the line map (words) and the clip sheet (pictures)
+    import script_order
+
+    line_map = script_order.build_line_map(plan, script_lines, clips_data)
+    (proj_dir / "line_map.md").write_text(line_map, encoding="utf-8")
+    try:
+        import clip_sheet
+
+        sheets = clip_sheet.build(proj_dir, [str(resolve(c["src"])) for c in clips_data])
+    except Exception as exc:   # noqa: BLE001  (a picture is a help, not a requirement)
+        sheets = []
+        print(f"  ! clip sheet not made: {exc}")
+
     est_tokens = len(brief_text) // 4
     print(f"Prepared {len(clips_data)} clips -> {len(segments)} segments, {len(marks)} marks")
     print(f"  Brief : {proj_dir / 'brief.txt'} (~{est_tokens} tokens, {len(brief_text.splitlines())} lines)")
+    print(f"  Line map: {proj_dir / 'line_map.md'} ({line_map.splitlines()[2].lstrip('# ')})")
+    print(f"  Clip sheets: {len(sheets)}")
     print(f"  EDL   : {proj_dir / 'plan.edl'}")
     print(f"  JSON  : {proj_dir / 'plan.json'}")
     try:

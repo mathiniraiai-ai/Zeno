@@ -362,6 +362,13 @@ def build_editorial_pitch_card(work_dir: pathlib.Path, plan_path: pathlib.Path) 
     if "[SPEAKER_CHECK] not applied" in brief_txt:
         warnings.append("NOTE: Speaker voices were similar; verify speaker assignment on split-screen turns.")
 
+    try:
+        order_msg = order_gate(plan, plan_path)
+    except Exception as exc:   # noqa: BLE001
+        order_msg = f"[ORDER] could not be measured: {exc}"
+    if order_msg:
+        warnings.insert(0, "CRITICAL: " + order_msg)
+
     # Summarize Sections
     hook_segs = [s for s in segs if str(s.get("layout", "single")) == "single"]
     split_segs = [s for s in segs if str(s.get("layout", "")) in ("split_h", "split_v", "video_call", "chat_bar")]
@@ -575,6 +582,20 @@ def run_inspect(
 # ============================================================================
 # STAGES 4–5: Execute Render, Premiere .prproj Export & Post-Render QC
 # ============================================================================
+def order_gate(plan: dict, plan_path: pathlib.Path) -> str:
+    """Empty when the plan follows the script; otherwise the message that stops the render."""
+    import script_order
+
+    script = plan.get("script")
+    side = plan_path.parent / "plan.json"
+    if not script and side.is_file():
+        script = common.read_json(side).get("script")
+    if not script:
+        return ""
+    g = script_order.gate(plan, common.resolve(script), plan_path.parent)
+    return script_order.format_gate(g) if g["blocked"] else ""
+
+
 def run_execute(
     plan_arg: str,
     square: bool = True,
@@ -590,6 +611,12 @@ def run_execute(
     plan = load_edl(plan_path)
     segs = plan.get("segments", [])
     total_segs = max(1, len(segs))
+
+    blocked = order_gate(plan, plan_path)
+    if blocked:
+        print(blocked)
+        print("\n[BLOCKED] Nothing was rendered. The Director fixes plan.edl (see line_map.md), then runs --execute again.")
+        return 2
 
     tracker = ProgressTracker(work_dir=work_dir, project_name=work_dir.name, heartbeat_sec=48.0)
     tracker.start_heartbeat()

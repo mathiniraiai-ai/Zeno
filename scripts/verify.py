@@ -357,6 +357,18 @@ def check_script_coverage(
 
     total_lines = len(script_lines)
     passed = (covered == total_lines and boundary_dups == 0)
+    try:
+        import script_order
+
+        rep = script_order.check_order([(str(s.get("id", "")), seg_word_slices[i]) for i, s in enumerate(segs)], script_lines)
+        accepted = script_order.read_accepted(Path(plan["_plan_dir"])) if plan.get("_plan_dir") else {}
+        wrong = [m for m in rep["out_of_order"] + rep["repeated"] if not any(re.search(rf"\b{re.escape(k)}[a-z]?\b", m) for k in accepted)]
+        if wrong:
+            passed = False
+            print("[ORDER FAIL] " + "; ".join(wrong))
+    except Exception as exc:   # noqa: BLE001
+        print(f"[ORDER FAIL] could not measure order: {exc}")
+        passed = False
     return passed, covered, total_lines, boundary_dups
 
 
@@ -625,6 +637,7 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
         except Exception:
             script_path = None
     resolved_script = resolve(script_path) if script_path else None
+    plan["_plan_dir"] = str(p_file.parent)
     script_ok, cov_lines, tot_lines, b_dups = check_script_coverage(plan, script_path=resolved_script)
 
     # Write contact sheet to plan directory AND work/<output_stem>/ if it exists
