@@ -39,8 +39,8 @@ DEFAULT_TUNING: Dict[str, Any] = {
     # Marks & SFX (prepare.py / render.py)
     "mark_duration_sec": 0.56,
     "mark_alpha": 0.50,
-    "wrong_sfx_primary": "buzzer.wav",
-    "wrong_sfx_layer": "kn20228_wrong_core.mp3",
+    "wrong_sfx_primary": "sn_wrong.wav",
+    "wrong_sfx_layer": "none",
     "right_sfx_primary": "correct_ding.wav",
     "right_sfx_layer": "sn_correct.wav",
     "whoosh_sfx": "whoosh.wav",

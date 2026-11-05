@@ -1292,12 +1292,19 @@ class TestScriptIsTheTimeline(unittest.TestCase):
         import script_order
 
         words = {"a.mp4": [{"w": "x", "start": 0.1, "end": 0.5}, {"w": "y", "start": 1.2, "end": 1.6}]}
-        plan = {"segments": [{"id": "L1", "src": "a.mp4", "start": 0.0, "end": 2.2}, {"id": "L2", "src": "a.mp4", "start": 0.0, "end": 2.2}],
-                "marks": [{"type": "wrong", "segment": "L1", "at": 1.5, "duration": 0.56}]}
+        plan = {
+            "segments": [
+                {"id": "L1", "src": "a.mp4", "start": 0.0, "end": 2.2},
+                {"id": "L2", "src": "a.mp4", "start": 0.0, "end": 2.2},
+                {"id": "L3", "src": "a.mp4", "start": 0.0, "end": 2.2},
+            ],
+            "marks": [{"type": "wrong", "segment": "L1", "at": 1.6, "duration": 0.56}],
+        }
         with mock.patch.object(script_order, "_words_of", side_effect=lambda seg: words[seg["src"]]):
             report = " ".join(script_order.tight_report(plan))
         self.assertIn("pause between 'x' and 'y'", report)                      # a 0.7 s pause inside a cut
-        self.assertIn("L1 -> L2", report)                                       # a mark does not excuse a long tail: its flash plays over the next cut
+        self.assertNotIn("L1 -> L2", report)                                    # L1's extra post-word tail holds the wrong mark + SFX before L2 starts
+        self.assertIn("L2 -> L3", report)                                       # L2 has no mark, so its 0.6 s tail is flagged
 
     def test_job_window_starts_once_and_resets_when_the_render_is_done(self):
         import tempfile
@@ -1346,12 +1353,16 @@ class TestScriptIsTheTimeline(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(common, "OUTPUT", Path(tmp)):
             first = common.unique_job_output("W44 Reel: Hindi / Grandma?")
             self.assertEqual(first.parent.name, "W44 Reel Hindi Grandma")           # no path characters
-            self.assertEqual(first.name, "W44 Reel Hindi Grandma.mp4")
-            self.assertEqual(common.unique_job_output("W44 Reel Hindi Grandma"), first)      # before any render: same job, same folder
+            self.assertEqual(first.name, "reel_W44 Reel Hindi Grandma.mp4")
+            self.assertEqual(common.square_job_output(first).name, "SQ_W44 Reel Hindi Grandma.mp4")
+            self.assertEqual(common.unique_job_output("Reel - W44 Reel Hindi Grandma"), first)  # strips leading Reel - prefix
+            self.assertEqual(common.unique_job_output("W44 Reel Hindi Grandma"), first)         # before any render: same job, same folder
             first.parent.mkdir(parents=True)
             first.write_bytes(b"x")                                                  # a finished video: the next edit is a new job
             second = common.unique_job_output("W44 Reel Hindi Grandma")
             self.assertEqual(second.parent.name, "W44 Reel Hindi Grandma (2)")
+            self.assertEqual(second.name, "reel_W44 Reel Hindi Grandma (2).mp4")
+            self.assertEqual(common.square_job_output(second).name, "SQ_W44 Reel Hindi Grandma (2).mp4")
             self.assertEqual(common.job_folder_name("   ...  "), "Zeno edit")
 
     def test_script_and_plan_are_gathered_into_the_job_folder(self):
@@ -1369,7 +1380,7 @@ class TestScriptIsTheTimeline(unittest.TestCase):
             script = Path(tmp) / "s.txt"
             script.write_text("Lady: hello there\n", encoding="utf-8")
             plan = Path(tmp) / "plan.edl"
-            plan.write_text(f'#output "{job / "My Reel.mp4"}"\n#script {script}\n#canvas 1080x1920@30\n', encoding="utf-8")
+            plan.write_text(f'#output "{job / "reel_My Reel.mp4"}"\n#script {script}\n#canvas 1080x1920@30\n', encoding="utf-8")
             with mock.patch.object(zeno, "OUTPUT", out_root):
                 folder = zeno.finish_job_folder(plan)
             self.assertEqual(folder, job)

@@ -71,11 +71,11 @@ The agent writes the plan and Zeno checks it: every line present, once, in scrip
 
 ## 5. Render, check, hand over
 
-After Yes: `python scripts/zeno.py --execute work/<project>/plan.edl`. Every edit is its own job with its own folder, `~/Downloads/Zeno Outputs/<video name>/`, named after the script (or after `--name "<name>"` when you give one). Everything for that edit is in it:
-- `<name>.mp4` (9:16 reel) and `<name>_1x1.mp4` (square Meta ad),
-- `<name>.timeline.txt` (every cut and effect),
-- `<name>.prproj` and `<name>.premiere.xml` (open in Adobe Premiere Pro to polish),
-- `<name>.script.txt` (the script it was made from) and `<name>.plan.edl` (the plan).
+After Yes: `python scripts/zeno.py --execute work/<project>/plan.edl`. Every edit is its own job with its own Notion-named folder, `~/Downloads/Zeno Outputs/<Notion name>/` (passed via `--name "<Notion name>"`). Everything for that edit is in it:
+- `reel_<Notion name>.mp4` (9:16 reel ratio — `"reel"` before the name) and `SQ_<Notion name>.mp4` (1:1 square Meta ad — `"SQ"` before the name),
+- `reel_<Notion name>.timeline.txt` (every cut and effect),
+- `<Notion name>.prproj` and `<Notion name>.premiere.xml` (open in Adobe Premiere Pro to polish),
+- `<Notion name>.script.txt` (the script it was made from) and `<Notion name>.plan.edl` (the plan).
 
 A second edit with the same name goes to `<name> (2)`, so nothing is overwritten.
 

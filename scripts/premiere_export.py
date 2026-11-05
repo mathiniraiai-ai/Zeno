@@ -768,8 +768,7 @@ def _collect_timeline_model(
                 })
 
             if kind == "wrong":
-                place_sfx(REPO / "assets" / "sfx" / "buzzer.wav", mk_start, gain_db=4.0, max_dur=0.65)
-                place_sfx(REPO / "assets" / "sfx" / "kn20228_wrong_core.mp3", mk_start, gain_db=3.0, max_dur=0.65)
+                place_sfx(REPO / "assets" / "sfx" / "sn_wrong.wav", mk_start, gain_db=4.0, max_dur=0.65)
             else:
                 place_sfx(REPO / "assets" / "sfx" / "correct_ding.wav", mk_start, gain_db=2.5, max_dur=0.65)
                 place_sfx(REPO / "assets" / "sfx" / "sn_correct.wav", mk_start, gain_db=2.0, max_dur=0.65)
@@ -1945,7 +1944,8 @@ def export_premiere_project(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     output_name = plan.get("output") or plan.get("output_name") or plan.get("project") or plan_path.parent.name
-    stem = pathlib.Path(str(output_name)).stem
+    raw_stem = pathlib.Path(str(output_name)).stem
+    stem = _common.strip_ratio_prefix(raw_stem) if hasattr(_common, "strip_ratio_prefix") else raw_stem
     canvas = plan.get("canvas") or {}
     eff_fps = int(plan.get("fps") or canvas.get("fps") or fps)
     eff_w = int(plan.get("premiere_width") or 720)

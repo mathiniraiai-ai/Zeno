@@ -1382,8 +1382,8 @@ def build_segment_ffmpeg_args(
             v_curr = v_next
 
     # Final video label -> [vout]
-    # scale->fps can lose the last frame of a clip; hold it for up to 3 frames so -frames:v always reaches the exact count
-    fc.append(f"{v_curr}tpad=stop_mode=clone:stop=3[vout]")
+    # Clone trailing frame up to 1.25s if the cut holds an extra ~1s tail after speech for a wrong/right flash mark + SFX
+    fc.append(f"{v_curr}tpad=stop_mode=clone:stop={max(3, int(round(fps * 1.25)))}[vout]")
 
     # Audio input & chain (always from active segment, or anullsrc if clip has no audio)
     if not has_audio:

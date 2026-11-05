@@ -259,7 +259,7 @@ WORK = ROOT / "work"
 # Finished videos go to Downloads/Zeno Outputs on every PC (team rule); ZENO_OUTPUT_DIR in .env overrides it.
 OUTPUT = Path(os.environ.get("ZENO_OUTPUT_DIR", "").strip() or (Path.home() / "Downloads" / "Zeno Outputs")).expanduser()
 
-DEFAULT_SFX = {"right": "correct_ding.wav", "wrong": "buzzer.wav"}
+DEFAULT_SFX = {"right": "correct_ding.wav", "wrong": "sn_wrong.wav"}
 # Meta Ads & Social Media Reels/Shorts Loudness Standard (-11.5 LUFS, -1.0 dBTP peak cap)
 DEFAULT_LOUDNESS_LUFS = -11.5
 DEFAULT_PEAK_CAP_DB = -1.0
@@ -301,7 +301,7 @@ MARK_PACKS = {
 SFX_PACKS = {
     "default": {
         "right": "correct_ding.wav",
-        "wrong": "buzzer.wav",
+        "wrong": "sn_wrong.wav",
         "transition": "whoosh.wav",
         "swoosh": "whoosh.wav",
         "pop": "pop.wav",
@@ -321,7 +321,7 @@ SFX_PACKS = {
     },
     "kn20228": {
         "right": "kn20228_correct.mp3",
-        "wrong": "kn20228_wrong_core.mp3",
+        "wrong": "sn_wrong.wav",
         "transition": "kn20228_swoosh.wav",
         "swoosh": "kn20228_swoosh.wav",
         "click": "kn20228_click.wav",
@@ -329,7 +329,7 @@ SFX_PACKS = {
     },
     "w42": {
         "right": "w42_right.wav",
-        "wrong": "w42_wrong.wav",
+        "wrong": "sn_wrong.wav",
         "transition": "w42_transition.wav",
         "swoosh": "w42_swoosh.wav",
         "click": "click.wav",
@@ -642,22 +642,35 @@ def ffmpeg(*args, timeout=180):
 
 
 # ---------------------------------------------------------------------------------------------------- GPU use
+def strip_ratio_prefix(name: str) -> str:
+    """Strip a leading 'reel' or 'SQ' ratio prefix from a Notion or video name so prefixes never double up."""
+    s = str(name or "").strip()
+    stripped = re.sub(r"^(?:reel|sq)[\s_-]+", "", s, flags=re.IGNORECASE).strip()
+    return stripped or s
+
+
 def job_folder_name(name: str) -> str:
-    """A safe folder name from the script or video name: no path characters, no leading dots, not empty."""
-    cleaned = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", " ", str(name or "")).strip().strip(".")
-    cleaned = re.sub(r"\s+", " ", cleaned)[:120].strip()
+    """A safe folder name from the Notion or video name: no path characters, no leading dots, not empty."""
+    cleaned = re.sub(r"[\\/:*?\"<>|\x00-\x1f]+", " ", strip_ratio_prefix(name)).strip().strip(".")
+    cleaned = re.sub(r"\s+", " ", cleaned)[:180].strip()
     return cleaned or "Zeno edit"
 
 
 def unique_job_output(name: str) -> Path:
-    """`Zeno Outputs/<name>/<name>.mp4`. Every edit is its own job with its own folder: when a folder of that name already holds a finished
-    video, this edit gets `<name> (2)`, `<name> (3)`, and so on. Nothing is created here; the render makes the folder."""
+    """`Zeno Outputs/<name>/reel_<name>.mp4`. Every edit is its own job with its own Notion-named folder: when a folder of that name already
+    holds a finished video, this edit gets `<name> (2)`, `<name> (3)`, and so on. Nothing is created here; the render makes the folder."""
     base = job_folder_name(name)
     folder, n = OUTPUT / base, 2
     while folder.is_dir() and any(f.suffix.lower() in (".mp4", ".prproj") for f in folder.iterdir()):
         folder = OUTPUT / f"{base} ({n})"
         n += 1
-    return folder / f"{folder.name}.mp4"
+    return folder / f"reel_{folder.name}.mp4"
+
+
+def square_job_output(src_mp4: Path) -> Path:
+    """`SQ_<name>.mp4` next to the 9:16 reel video (`reel_<name>.mp4` -> `SQ_<name>.mp4`)."""
+    p = Path(src_mp4)
+    return p.with_name(f"SQ_{strip_ratio_prefix(p.stem)}.mp4")
 
 
 JOB_MARKER = WORK / "_job_marker.json"

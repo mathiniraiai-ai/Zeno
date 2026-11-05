@@ -19,7 +19,7 @@ You are the editor and `plan.edl` is yours to write. This file holds what only t
 ## Emotion plan (write `work/<project>/script_analysis.md` before choosing clips; 1.5 to 2.5k tokens)
 One line per spoken line:
 
-    L8 [Lady] emotion=embarrassed 2/3 | beat=mistake | zoom=none (split) | sfx=buzzer via the red X | why: says the wrong sentence confidently
+    L8 [Lady] emotion=embarrassed 2/3 | beat=mistake | zoom=none (split) | sfx=sn_wrong.wav via the red X | why: says the wrong sentence confidently
     L10 [Lady] emotion=impressed 3/3 PEAK | beat=reaction | zoom=none (split) | sfx=pop.wav on "Wow" | why: the payoff of the scene
 
 - **emotion:** neutral, curious, joy/excited, confident, surprised/shock, tense/worried, frustrated/angry, embarrassed, sad/lonely, relieved, proud/success, with an **intensity 1 to 3**. **beat:** hook, problem, mistake, correction, reveal, tip, demo, proof, reaction, CTA.
@@ -58,7 +58,7 @@ One effect per beat at most, under the voice (gain -12 to -4 dB, never above 0),
 | Impact on a shock or a peak | `sn_punch_1.wav` (hit at 0.15 s) or `sn_punch_2.wav` (0.16 s) | `at` = word start - 0.15 | -4 |
 | Tension building to a reveal | `riser.wav` (0.75 s, peak at its end) or `sn_riser_1.wav` (1.35 s, peak at 1.08 s) | `at` = reveal word start - 0.73 or - 1.08; only when the reveal is that far into the cut | -10 |
 | Success, praise | `correct_ding.wav`, `ding.wav` (a ✓ mark already plays `correct_ding`) | on the word | -6 |
-| A mistake | `buzzer.wav` (a ✗ mark already plays it) | end of the sentence | set by the mark |
+| A mistake | `sn_wrong.wav` (a ✗ mark already plays it) | end of the sentence | set by the mark |
 | Transition | `whoosh.wav`, `sn_swish_1.wav`, `w42_transition.wav` | the join | -2 |
 | Selection or UI feel | `click.wav` | on the word | -8 |
 
@@ -69,7 +69,7 @@ One effect per beat at most, under the voice (gain -12 to -4 dB, never above 0),
 ## Cuts (times from `facts.md`, seconds in the clip)
 - Start 0.06 to 0.10 s before the first kept word (at the start of the clip when the word comes earlier than that) and end 0.08 to 0.12 s after the last. A cut inside a word clips it, and the plan check blocks that. A cut that falls in a gap is moved at most 0.12 s to the quietest point at render.
 - Silence across a join (end of one cut plus start of the next) of 0.20 s or less. Pauses inside one speaker's turn: cut anything over 0.30 s (split into `L5a`/`L5b`, `z=1.08` on the second half hides the jump); a breath of 0.30 s or less stays. A pause of 1.35 s or more is dead air. `--check-plan` lists the joins and pauses over these as `[TIGHT]`; Pauses of a noisy clip are in its `speech gaps` line, because the loudness method sees none there. A word flagged `NO SPEECH` is a ghost: cut across it freely and end the cut where the speech spans end.
-- A ✗/✓ flash is an overlay on the finished video, so it is not clipped to its cut and can play on over the first frames of the next one. End the cut on the sentence (0.08 to 0.12 s after the last word) and start the flash 0.15 s before the sentence ends; do not leave extra tail for it.
+- When a line carries a `✗` (`wrong`) or `✓` (`right`) mark, place the flashy red/green gradient (`style=flash`: `red_flash.png` / `green_flash.png`) and SFX (`sn_wrong.wav` or `correct_ding.wav`) right where the wrong or right dialogue completes, **just before the next dialogue starts**. Add `~0.70 to 1.00 s` of extra tail on that cut (`end = <last word end + 0.70..1.00 s>`) and set `mark:wrong@<last word end - cut start>/0.56@style=flash` (or `mark:right@...`) so the flash gradient and SFX complete inside that post-dialogue hold before cutting to the next speaker.
 - Words repeated inside a clip (a stumble, a phrase said twice, a false start at the head): keep the last clean saying and cut in the gap before it. Repeats the script itself contains stay, as do natural reduplications (Kannada ಮತ್ತೆ ಮತ್ತೆ).
 - Speech running past the script's last word is a babble to cut. A clip that opens with the word the previous cut ended on starts after that word. A note such as `(laughs mockingly)` keeps up to 1.2 s of the reaction after the last word.
 - A silent beat (`(Man takes out his phone)`) uses a `SILENT` clip that shows it, chosen from the sheet, held only as long as the action needs.
@@ -96,7 +96,7 @@ Leaving the split for a full-frame close (the closing call to action, which can 
 
 ## Transitions, marks, text
 - A scene change in the script: `tr=whip_left@0.28` or `whip_right@0.28`. One or two crisp whips across clip changes in a single-speaker hook. Single into a split: `tr=warm_flash@0.35`; back out: `tr=smoothright@0.28`. No transition between turns inside a split. A whoosh goes with each whip: `sfx:whoosh.wav@0/-2`.
-- `✗`/`✓` only where the script marks a line (`mark=wrong`/`mark=right` in `line_map.md`), at the end of the sentence: `mark:wrong@<last word end - 0.15, relative to the cut>/0.56@pos=top-right@style=flash`.
+- `✗`/`✓` only where the script marks a line (`mark=wrong`/`mark=right` in `line_map.md`), placed right when the wrong or right sentence finishes, just before the next dialogue starts: extend the cut tail by `~0.70 to 1.00 s` after the last word, and place `mark:wrong@<last word end - cut start, relative to the cut>/0.56@pos=top-right@style=flash` (`red_flash.png` + `sn_wrong.wav`) or `mark:right@<last word end - cut start, relative to the cut>/0.56@pos=top-right@style=flash` (`green_flash.png` + `correct_ding.wav`).
 - A "Stop saying" hook: `banner:"header:Stop saying"@0.3`, then one banner per phrase on its spoken word (`banner:"What do you mean?"@<word start>`). The stack is placed below the measured face automatically.
 - Strike-through lines (`(X Sign and Text Strikethrough)`): `banner:"<text>"@<time>` on the spoken word. No captions, call-to-action text, B-roll or graphics that the script or the style did not ask for.
 

@@ -39,9 +39,9 @@
   },
   "sfx_packs": {
     "default": {
-      "description": "Standard crisp ding & buzzer",
+      "description": "Standard crisp ding & Supernova warning SFX",
       "right": "assets/sfx/correct_ding.wav",
-      "wrong": "assets/sfx/buzzer.wav",
+      "wrong": "assets/sfx/sn_wrong.wav",
       "transition": "assets/sfx/whoosh.wav",
       "pop": "assets/sfx/pop.wav",
       "click": "assets/sfx/click.wav",
@@ -59,14 +59,14 @@
     "kn20228": {
       "description": "Kannada 20228 'Stop Saying This' SFX pack",
       "right": "assets/sfx/kn20228_correct.mp3",
-      "wrong": "assets/sfx/kn20228_wrong_core.mp3",
+      "wrong": "assets/sfx/sn_wrong.wav",
       "transition": "assets/sfx/kn20228_swoosh.wav",
       "click": "assets/sfx/kn20228_click.wav"
     },
     "w42": {
       "description": "W42 Kannada SFX pack",
       "right": "assets/sfx/w42_right.wav",
-      "wrong": "assets/sfx/w42_wrong.wav",
+      "wrong": "assets/sfx/sn_wrong.wav",
       "transition": "assets/sfx/w42_transition.wav",
       "swoosh": "assets/sfx/w42_swoosh.wav"
     }
