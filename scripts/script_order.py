@@ -487,7 +487,8 @@ def tight_report(plan: Dict[str, Any]) -> List[str]:
         sid = str(s.get("id"))
         lead = max(0.0, float(ws[0]["start"]) - st)
         tail = max(0.0, en - float(ws[-1]["end"]))
-        tail_free = tail          # a flash is an overlay on the finished video and plays on over the next cut: it needs no tail
+        # When a segment has a wrong/right mark at the end of the sentence, allow up to ~1.0s post-word tail for the flashy red/green gradient + SFX before the next cut
+        tail_free = max(0.0, en - max(float(ws[-1]["end"]), st + mark_end.get(sid, 0.0))) if sid in mark_end else tail
         nxt = rows[k + 1] if k + 1 < len(rows) else None
         if nxt and nxt[3]:
             nxt_lead = max(0.0, float(nxt[3][0]["start"]) - nxt[1])

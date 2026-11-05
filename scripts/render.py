@@ -34,6 +34,8 @@ from common import (  # noqa: E402
     resolve_mark_asset,
     resolve_mark_sfx,
     resolve_sfx_asset,
+    square_job_output,
+    strip_ratio_prefix,
     tc,
     write_json,
 )
@@ -153,7 +155,7 @@ def render_square_1x1(
     """
     src_mp4 = resolve(src_mp4)
     if out_mp4 is None:
-        out_mp4 = src_mp4.with_name(f"{src_mp4.stem}_1x1.mp4")
+        out_mp4 = square_job_output(src_mp4)
     out_mp4 = Path(out_mp4)
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
 
@@ -387,7 +389,7 @@ def main() -> None:
     # Direct MP4 -> 1:1 Square conversion if a .mp4 path is passed with --square
     if str(a.plan).lower().endswith(".mp4"):
         src_vid = resolve(a.plan)
-        sq_out = OUTPUT / f"{src_vid.stem}_1x1.mp4"
+        sq_out = OUTPUT / f"SQ_{strip_ratio_prefix(src_vid.stem)}.mp4"
         print(f"Rendering 1:1 Square version from {src_vid} -> {sq_out} ...")
         render_square_1x1(src_vid, sq_out, sq_size=1080, blur_sigma=a.blur_sigma, draft=a.draft)
         print(f"Done (1:1 Square): {sq_out}")
@@ -640,7 +642,7 @@ def main() -> None:
             if str(sfx_override).lower() == "default":
                 sfx_override = str(
                     plan.get("error_sfx")
-                    or plan_tuning.get("wrong_sfx_primary", "buzzer.wav")
+                    or plan_tuning.get("wrong_sfx_primary", "sn_wrong.wav")
                     if mtype == "wrong"
                     else plan_tuning.get("right_sfx_primary", "correct_ding.wav")
                 )
@@ -650,9 +652,9 @@ def main() -> None:
             gain_db = float(raw_gain) if (raw_gain is not None and float(raw_gain) > -3.5) else default_gain
             if sfx_path and sfx_path.is_file():
                 sfx_list.append((sfx_path, t, gain_db))
-            # Layer a second punchy SFX for strong error/right feedback when using strobe overlays
+            # Optional second SFX layer (disabled by default for wrong/warning marks via wrong_sfx_layer="none")
             if is_fullframe_strobe:
-                layer_name = str(plan_tuning.get("wrong_sfx_layer", "kn20228_wrong_core.mp3") if mtype == "wrong" else plan_tuning.get("right_sfx_layer", "sn_correct.wav"))
+                layer_name = str(plan_tuning.get("wrong_sfx_layer", "none") if mtype == "wrong" else plan_tuning.get("right_sfx_layer", "sn_correct.wav"))
                 extra_sfx = SFX_DIR / layer_name if layer_name and layer_name.lower() != "none" else None
                 if extra_sfx and extra_sfx.is_file() and (not sfx_path or extra_sfx.resolve() != sfx_path.resolve()):
                     sfx_list.append((extra_sfx, t, default_gain if mtype == "wrong" else max(1.0, default_gain - 1.0)))
@@ -810,7 +812,7 @@ def main() -> None:
             print(f"[WARN] Premiere Pro export skipped: {exc}")
 
     if a.square or plan.get("square") or (plan.get("canvas") or {}).get("square"):
-        sq_out = out_path.with_name(f"{out_path.stem}_1x1.mp4")
+        sq_out = square_job_output(out_path)
         print(f"Rendering 1:1 Square version -> {sq_out} ...")
         render_square_1x1(out_path, sq_out, sq_size=max(W, 1080), blur_sigma=a.blur_sigma, draft=a.draft)
         print(f"Done (1:1 Square): {sq_out}")

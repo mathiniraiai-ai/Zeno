@@ -1055,7 +1055,7 @@ def main() -> None:
         help="Layout preset mode",
     )
     ap.add_argument("--mark-pack", default="flash", help="Swappable ✓/✗ mark overlay pack (flash, vignette, default, glossy)")
-    ap.add_argument("--name", default="", help="Name of this video; its outputs go to Zeno Outputs/<name>/ (default: the script's name)")
+    ap.add_argument("--name", default="", help="Notion name for this video; its outputs go to Zeno Outputs/<name>/ (reel_<name>.mp4 and SQ_<name>.mp4)")
     ap.add_argument("--style", default="", help="Style this job follows (a folder under styles/, for example micronarrative). Written into the plan as '#style <name>' so the job counts toward that style's readiness and the team's learning")
     ap.add_argument(
         "--fresh",

@@ -10,7 +10,7 @@ Script-led AI video editing harness (`1080x1920` MP4). Zeno only transcribes, me
 
 ## 1. Hard Rules
 1. **Workspace Isolation**: Never modify any files outside this Zeno folder (team PCs: `~/Documents/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`). Never touch other projects in `Documents`.
-2. **Folders**: Zeno runs from `~/Documents/Zeno` on team PCs (the installer puts it there). Every edit is its own job with its own folder: `~/Downloads/Zeno Outputs/<video name>/` holds the reel (9:16), the square (1:1), the timeline, the Premiere files (`.prproj`, `.premiere.xml`), the script and the plan, never inside the repo. The folder is named after the script, or after `--name "<name>"`. A second edit of the same name becomes `<name> (2)`. Raw clips can stay in any local folder: pass their path to `prepare.py`.
+2. **Folders & Notion Naming**: Zeno runs from `~/Documents/Zeno` on team PCs (the installer puts it there). Never create folders with random or invented names: always ask the user for the **Notion name** and pass `--name "<Notion name>"`. Every edit gets its own folder `~/Downloads/Zeno Outputs/<Notion name>/` holding the 9:16 reel (`reel_<Notion name>.mp4` — `"reel"` before the name), the 1:1 square (`SQ_<Notion name>.mp4` — `"SQ"` before the name), the timeline, the Premiere files (`<Notion name>.prproj`, `<Notion name>.premiere.xml`), the script and the plan, never inside the repo. A second edit of the same name becomes `<Notion name> (2)`. Raw clips can stay in any local folder: pass their path to `prepare.py`.
 3. **Takes**: The agent chooses the take. `line_map.md` lists every clip stretch that says each line, `facts.md` has each word. Never assume the first, middle or last take is right, and never trust file names or file order: the script is the timeline.
 4. **Speakers**: The agent sets `sp="<name>"` on every segment. `--check-plan` measures the voice in each cut against it and blocks `WRONG VOICE`: pick another take, and if no clip has the right voice, tell the user to reshoot. `voices not checked` means the voices could not be told apart: say so in the report. Reference samples in `input/voices/<Speaker>.wav` make this reliable with few clips.
 5. **Never Read Raw JSONs or Python Source**:
@@ -35,8 +35,8 @@ Script-led AI video editing harness (`1080x1920` MP4). Zeno only transcribes, me
 
 **Pre-job gate (mandatory, every job, every agent).** Do not start from a guess and do not start before the user has handed over the inputs:
 1. Run `python3 scripts/zeno.py --preflight`. It runs live checks (FFmpeg, OpenCV face detection on a real frame, the wav2vec2 aligner, and a small WAV sent to the Zeno server, which checks its key store and Gemini). Show the user the PASS/FAIL table.
-2. If every check passes, ask the user one question: "Share the script link (the Google Doc tab) and the footage folder." The footage must be a local folder or files; a Drive or web link is not downloaded, so ask them to download it first. A Google Doc link must end in `?tab=...`; never load a whole document.
-3. Only after the user answers, run `python3 scripts/zeno.py --inspect <footage> --script <script>`. It repeats the live checks, then checks the script (spoken lines, scenes, strike-through text, layout notes) and every clip (readable, has audio) and prints them. If anything fails it stops with `[BLOCKED]` and exits with code 2; fix the listed problem with the user. Never use `--skip-preflight`.
+2. If every check passes, ask the user: "Share the script link (the Google Doc tab), the footage folder, and the Notion name for this video." The footage must be a local folder or files; a Drive or web link is not downloaded, so ask them to download it first. A Google Doc link must end in `?tab=...`; never load a whole document.
+3. Only after the user answers, run `python3 scripts/zeno.py --inspect <footage> --script <script> --name "<Notion name>"`. It repeats the live checks, then checks the script (spoken lines, scenes, strike-through text, layout notes) and every clip (readable, has audio) and prints them. If anything fails it stops with `[BLOCKED]` and exits with code 2; fix the listed problem with the user. Never use `--skip-preflight`.
 
 
 **The job, step by step**
@@ -54,7 +54,7 @@ Script-led AI video editing harness (`1080x1920` MP4). Zeno only transcribes, me
    ```bash
    python3 scripts/zeno.py --execute work/<project>/plan.edl [--square] [--loudness -11.5] [--gain-db +2.0]
    ```
-   - Renders `~/Downloads/Zeno Outputs/<name>/<name>.mp4` + `<name>_1x1.mp4` (`1080×1080` Square Meta Ad) + `<name>.timeline.txt` + `<name>.script.txt` + `<name>.plan.edl` + **editable Adobe Premiere Pro project files** (`<name>.prproj` and `<name>.premiere.xml`), repeats the plan check, verifies script order from the words in each cut, `-11.5 LUFS` (`-1.0 dBTP` cap) loudness, and generates `work/<project>/marks_contact_sheet.jpg`. Use `vol=+3dB` on any segment in `plan.edl` for exact mid-video dB boosts.
+   - Renders `~/Downloads/Zeno Outputs/<name>/reel_<name>.mp4` (9:16 Reel) + `SQ_<name>.mp4` (`1080×1080` Square Meta Ad) + `reel_<name>.timeline.txt` + `<name>.script.txt` + `<name>.plan.edl` + **editable Adobe Premiere Pro project files** (`<name>.prproj` and `<name>.premiere.xml`), repeats the plan check, verifies script order from the words in each cut, `-11.5 LUFS` (`-1.0 dBTP` cap) loudness, and generates `work/<project>/marks_contact_sheet.jpg`. Use `vol=+3dB` on any segment in `plan.edl` for exact mid-video dB boosts.
 
 ## 4. The 5 Dynamic Layout Modes, Pre-Stitched Split Screens & Swappable Mark Packs
 
@@ -70,7 +70,7 @@ Script-led AI video editing harness (`1080x1920` MP4). Zeno only transcribes, me
 - **Listener rule (every split: left/right or top/bottom).** While one character speaks, the OTHER panel shows the other character, silent and listening: left speaks -> right listens, right speaks -> left listens, and the same for top and bottom. Who sits where comes from the script (`Top: Robot | Bottom: Lady 1`, or `Woman - Right screen | Miss Nova - Left screen`, or "left screen" in the character list). The picture comes from that character's silent clip: put the character's name in the file name (`Robot_listening.mp4`, `Lady1_idle.mp4`); an unnamed silent clip is matched by how it looks (colours) and is left unassigned if unsure. Silent clips are walked through turn after turn, never restarted from the same frame. With no silent clip, a quiet mouth-closed moment of the character's own clip is used (a still frame if it is under 1 s) and the brief says `[LISTENER_FALLBACK]`; `[LISTENER_GUESS]` and `[LISTENER_MISSING]` mean a silent clip could not be tied to the character or does not exist. A character that lands in two panels is reported as `[PANEL_FLIP]`.
 
 **Swappable `✓`/`✗` Mark Packs (`--mark-pack` or `# mark_pack:`)**:
-- `flash` (**default**): Full-frame `1080×1920` subtle `0.50` alpha green/red border overlay (`assets/marks/green_flash.png`, `red_flash.png`) that triggers **only at the end of the wrong/right sentence** and **flashes 2 times (`0.56s`: Pulse 1 → OFF → Pulse 2)** with `+4 dB` error buzzer (`buzzer.wav` + `kn20228_wrong_core.mp3`) and `+2.5 dB` right ding (`correct_ding.wav` + `sn_correct.wav`).
+- `flash` (**default**): Full-frame `1080×1920` subtle `0.50` alpha green/red border overlay (`assets/marks/green_flash.png`, `red_flash.png`) that triggers **only at the end of the wrong/right sentence** and **flashes 2 times (`0.56s`: Pulse 1 → OFF → Pulse 2)** with `+4 dB` single clean error SFX (`sn_wrong.wav`) and `+2.5 dB` right ding (`correct_ding.wav` + `sn_correct.wav`).
 - `vignette`: Full-frame radial glow (`assets/marks/w42_green_vignette.png`, `w42_red_vignette.png`, `0.50` alpha 2-pulse at sentence end).
 - `default`: Flat circle badge (`assets/marks/right.png`, `wrong.png`)
 - `glossy`: 3D glass gradient badge (`assets/marks/glossy_right.png`, `glossy_wrong.png`)
@@ -96,7 +96,7 @@ L2 | S2 | 0.85-4.90 | split_v:top=S1@5.48 | 1.0 | cut | active=bottom | Wrong st
 L3 | S3 | 1.05-6.20 | chat_bar | 1.08 | fade:0.3 | label="ನನಗೆ ಹಸಿವಾಗಿದೆ" | Teacher correction
 
 # MARKS: type | segment | at | duration | pos | size | sfx | gain_db
-wrong | L2 | 1.40 | 1.3 | top-right | 0.22 | buzzer.wav | -4
+wrong | L2 | 1.40 | 1.3 | top-right | 0.22 | sn_wrong.wav | -4
 right | L3 | 2.10 | 1.3 | top-right | 0.22 | correct_ding.wav | -4
 
 # SFX: file | segment | at | gain_db

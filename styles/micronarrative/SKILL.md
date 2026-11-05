@@ -113,12 +113,17 @@ Always check how the raw footage was generated before assigning layouts in `plan
    - **Never** add unrequested decorative text where not specified in the script. Use `subs=ref` when reference-style pill subtitles are requested.
 5. **Where to Show Errors (`✗` / `✓`) vs. Where NOT to**:
    - **Show `✗` (`wrong`) and `✓` (`right`) marks ONLY** when the script contains an explicit spoken-English learner mistake (`[WRONG]`) followed by the teacher's correction (`[RIGHT]`).
-   - Uses Zeno's **Minimal 2-Pulse End-of-Sentence Flash (`mark_pack: flash`)** (`0.56s`, `buzzer.wav` `+4 dB` or `correct_ding.wav` `+2.5 dB`).
+   - **Exact End-of-Dialogue Placement (`~0.70–1.00s` Post-Dialogue Hold Before Next Cut)**: Trigger `mark:wrong` or `mark:right` right where the wrong or right dialogue is completed (`at = <last_word_end - cut_start>`), **just before the next dialogue starts**. Extend that segment's `end` by **`~0.70–1.00s`** after the last spoken word so the flashy green/red gradient (`green_flash.png` / `red_flash.png`, `mark_pack: flash`, `0.56s`) and SFX (`sn_wrong.wav` `+4 dB` or `correct_ding.wav` `+2.5 dB`) play out completely on that speaker before cutting to the next dialogue turn.
 6. **Where Transitions Are Added**:
    - Placed **at scene boundaries** (e.g., `Scene 1 -> Scene 2` and `Scene 2 -> Scene 3`) using `tr=whip_left@0.28` / `whip_right@0.28` + `whoosh.wav` (or `tr=warm_flash@0.38`), while keeping all intra-scene cuts as clean hard cuts (`tr=cut`).
    - All transitions use **Zero-Audio-Loss (`tpad` video tail cloning + `0.00s` audio concat)** so zero words or syllables are ever swallowed at cuts.
 7. **4-Clip Split-Screen Workflow (2 Talking Clips + 2 Dedicated Listening Clips — Never Static Images)**:
    - When the user provides **4 clips** for a `split_h` or `split_v` dialogue scene (Character A Talking, Character B Talking, Character A Listening, Character B Listening), [`scripts/layouts.py`](../../scripts/layouts.py) loops the dedicated listening video clip so the listening character is **100% live moving video** at all times.
+8. **Notion Naming & Ratio Prefix Convention (`~/Downloads/Zeno Outputs/<Notion name>/`)**:
+   - Always ask the user for the **Notion name** (instead of inventing a random folder name) and pass `--name "<Notion name>"` to `zeno.py --inspect` / `prepare.py`.
+   - Output folder: `~/Downloads/Zeno Outputs/<Notion name>/`
+   - 9:16 Reel ratio output: `reel_<Notion name>.mp4` (`"reel"` before the name)
+   - 1:1 Square ratio output: `SQ_<Notion name>.mp4` (`"SQ"` before the name)
 
 ---
 

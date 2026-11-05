@@ -7,9 +7,9 @@
 ## The loop
 
 0. **Pre-production (only if the user has a script but no clips yet)** — write the Veo shots and first-frame prompts. → `concepts/08_preproduction`
-0b. **Pre-job gate** — `zeno.py --preflight`, show the table, then ask the user for the script link (Google Doc tab) and the footage folder. Start nothing before they answer; `--inspect` checks them and blocks on any problem.
+0b. **Pre-job gate** — `zeno.py --preflight`, show the table, then ask the user for the script link (Google Doc tab), the footage folder, and the **Notion name** for the video (never invent a random folder name). Start nothing before they answer; `--inspect` checks them and blocks on any problem.
 1. **Script in** — get one script, one language, one tab. → `concepts/01_script_intake`
-2. **Footage in (`zeno.py --inspect`)** — run `python3 scripts/zeno.py --inspect <raw_dir> --script "<gdoc_or_path>"` (with 50s live heartbeat via `scripts/progress.py`). It only measures. It writes `line_map.md`, `facts.md`, `clip_sheet_<n>.jpg` and a `plan.edl` with a header and no segments. → `concepts/02_footage_intake`
+2. **Footage in (`zeno.py --inspect`)** — run `python3 scripts/zeno.py --inspect <raw_dir> --script "<gdoc_or_path>" --name "<Notion name>"` (with 50s live heartbeat via `scripts/progress.py`). It only measures. It writes `line_map.md`, `facts.md`, `clip_sheet_<n>.jpg` and a `plan.edl` with a header (`#output ".../Zeno Outputs/<Notion name>/reel_<Notion name>.mp4"`) and no segments. → `concepts/02_footage_intake`
 3. **Pick the style** — from the user's words, else from the script's header and format. Load `styles/<name>/SKILL.md`. Pass the chosen style to the engine with `--style <name>` so the job is counted for it. No match: ask the user, or learn it from a reference. → `concepts/03_style_library`, `concepts/04_reference_learning`
 4. **On-screen text** — only what the script document asks for (plus auto-extracted `"Stop Saying"` hook banner when opening with `"Stop saying ..."`). → `concepts/05_onscreen_text`
 5. **Analyse, then edit** — follow [`EDIT_RULES.md`](EDIT_RULES.md). **First analyse the script and write `work/<project>/script_analysis.md`** (emotion, beat, zoom and effect sound per line, at most 3 PEAK moments), then edit: read the line map, the facts and the clip sheets, then write every segment of `plan.edl`. Run `python3 scripts/zeno.py --check-plan work/<project>/plan.edl` until it passes (order, coverage, cuts, voices). Show the user the plan and **ask Yes/No once**. After Yes, `python3 scripts/zeno.py --execute work/<project>/plan.edl` renders, then verifies the video; fix and re-render if it fails.
@@ -56,4 +56,4 @@ To stay portable:
 | Token telemetry skill | [`.agent/skills/token-telemetry/SKILL.md`](../.agent/skills/token-telemetry/SKILL.md) |
 | Learned styles | `styles/<name>/` |
 | 5-Stage Harness & Engine (Python) | `scripts/zeno.py`, `scripts/` |
-| Inputs / work / outputs | `input/`, `work/`, `~/Downloads/Zeno Outputs/` (`.mp4`, `_1x1.mp4`, `.timeline.txt`, `.prproj`, `.premiere.xml`) |
+| Inputs / work / outputs | `input/`, `work/`, `~/Downloads/Zeno Outputs/<Notion name>/` (`reel_<Notion name>.mp4`, `SQ_<Notion name>.mp4`, `.timeline.txt`, `.prproj`, `.premiere.xml`) |

@@ -372,10 +372,11 @@ def build_editorial_pitch_card(work_dir: pathlib.Path, plan_path: pathlib.Path) 
     right_count = sum(1 for m in marks if str(m.get("type") or m.get("kind") or "").lower() in ("right", "check"))
     wrong_count = sum(1 for m in marks if str(m.get("type") or m.get("kind") or "").lower() in ("wrong", "x", "cross", "error"))
 
-    out_mp4 = pathlib.Path(str(plan.get("output") or (OUTPUT / f"{work_dir.name}.mp4")))
-    out_sq = out_mp4.with_name(f"{out_mp4.stem}_1x1.mp4")
-    out_prproj = out_mp4.with_suffix(".prproj")
-    out_xml = out_mp4.with_suffix(".premiere.xml")
+    out_mp4 = pathlib.Path(str(plan.get("output") or common.unique_job_output(work_dir.name)))
+    out_sq = common.square_job_output(out_mp4)
+    base_stem = common.strip_ratio_prefix(out_mp4.stem)
+    out_prproj = out_mp4.with_name(f"{base_stem}.prproj")
+    out_xml = out_mp4.with_name(f"{base_stem}.premiere.xml")
 
     card_lines = [
         "╔══════════════════════════════════════════════════════════════════════╗",
@@ -603,6 +604,7 @@ def finish_job_folder(plan_path: pathlib.Path) -> Optional[pathlib.Path]:
     if not out.name or out.parent == OUTPUT or not out.parent.is_dir():
         return None
     folder = out.parent
+    base_stem = common.strip_ratio_prefix(out.stem)
     script = plan.get("script")
     if not script and plan_path.with_name("plan.json").is_file():
         script = common.read_json(plan_path.with_name("plan.json")).get("script")
@@ -610,10 +612,10 @@ def finish_job_folder(plan_path: pathlib.Path) -> Optional[pathlib.Path]:
         src = common.resolve(script)
         if src.is_file():
             if src.suffix.lower() in (".txt", ".md"):
-                shutil.copy2(src, folder / f"{out.stem}.script.txt")
+                shutil.copy2(src, folder / f"{base_stem}.script.txt")
             else:
-                (folder / f"{out.stem}.script.txt").write_text(common.read_script_text(src), encoding="utf-8")
-    shutil.copy2(plan_path, folder / f"{out.stem}.plan.edl")
+                (folder / f"{base_stem}.script.txt").write_text(common.read_script_text(src), encoding="utf-8")
+    shutil.copy2(plan_path, folder / f"{base_stem}.plan.edl")
     return folder
 
 
@@ -866,7 +868,7 @@ def main() -> None:
     ap.add_argument("--update", action="store_true", help="Run git pull + Zeno Cloud brain memory sync immediately")
     ap.add_argument("--install-schedule", action="store_true", help="Install daily 11:00 AM background auto-update schedule")
     ap.add_argument("--preflight", action="store_true", help="Run the live pre-job checks (FFmpeg, OpenCV, wav2vec2, Zeno server) and, with --script and inputs, check them too")
-    ap.add_argument("--name", default="", help="Name of this video; all its files go to Zeno Outputs/<name>/ (default: the script's name). Each edit is a new job and folder")
+    ap.add_argument("--name", default="", help="Notion name for this video; all its files go to Zeno Outputs/<name>/ (reel_<name>.mp4 and SQ_<name>.mp4)")
     ap.add_argument("--style", default="", help="Style this job follows (a folder under styles/, for example micronarrative); written into the plan so the job counts toward that style")
     ap.add_argument("--fresh", action="store_true", help="Rebuild every cached transcript and alignment for these clips (rarely needed: caches refresh themselves when the code changes)")
     ap.add_argument("--skip-preflight", action="store_true", help="Development only: skip the pre-job gate. Agents must never use this.")
