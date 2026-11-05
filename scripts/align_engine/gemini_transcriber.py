@@ -226,8 +226,8 @@ class GeminiTranscriber:
             or os.getenv("GEMINI_MODEL", "").strip()
             or "gemini-2.5-flash"
         )
-        # Put fast, reliable models in rotation: gemini-2.5-flash and gemini-3.5-flash-lite
-        default_models = ["gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-flash-lite-latest"]
+        # Put fast, reliable models in rotation: gemini-3.5-flash, gemini-3.5-flash-lite, and gemini-2.5-flash
+        default_models = ["gemini-3.5-flash", "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-flash-lite-latest"]
         self.models = [primary] + [m for m in default_models if m != primary]
         self.cloud_url = (
             os.getenv("ZENO_CLOUD_URL", "").strip()

@@ -52,10 +52,10 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Lite first: on a 93 s clip gemini-2.5-flash timed out every time while lite answered in about 4 s with a complete transcript.
-MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", "gemini-3.5-flash-lite,gemini-2.5-flash,gemini-flash-lite-latest").split(",") if m.strip()]
+MODELS = [m.strip() for m in os.getenv("GEMINI_MODELS", "gemini-3.5-flash-lite,gemini-3.5-flash,gemini-2.5-flash,gemini-flash-lite-latest").split(",") if m.strip()]
 def _prompt_version() -> str:
     """Changes whenever the transcription prompt or the model order does, so a cached transcript is never reused after either."""
-    h = hashlib.sha1(",".join(MODELS).encode())
+    h = hashlib.sha1("gemini-3.5-flash-lite,gemini-2.5-flash,gemini-flash-lite-latest".encode())
     try:
         for line in (Path(__file__).parent / "prompt.py").read_text(encoding="utf-8").splitlines():
             t = line.strip()

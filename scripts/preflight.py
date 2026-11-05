@@ -96,6 +96,32 @@ def _small_wav(seconds: float = 1.0, rate: int = 16000) -> bytes:
     return data
 
 
+def _ping_local_gemini_keys() -> Optional[Tuple[bool, str]]:
+    """If local GEMINI_API_KEY(s) are set in .env, run a live ping so owner PCs work when cloud Gemini quota is exhausted."""
+    try:
+        from align_engine.gemini_transcriber import get_gemini_api_keys
+        from google import genai
+        from google.genai import types
+
+        keys = get_gemini_api_keys()
+        if not keys:
+            return None
+        models = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-flash-lite-latest"]
+        for model in models:
+            t0 = time.time()
+            for key in keys:
+                try:
+                    client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=15000))
+                    reply = client.models.generate_content(model=model, contents="Reply with the single word: ok")
+                    if (reply.text or "").strip():
+                        return True, f"{model} answered in {time.time() - t0:.1f}s (local .env GEMINI_API_KEY)"
+                except Exception:
+                    continue
+        return False, "local .env GEMINI_API_KEY failed on every model"
+    except Exception as exc:   # noqa: BLE001
+        return False, f"local .env GEMINI_API_KEY check failed ({type(exc).__name__})"
+
+
 def check_server() -> List[Check]:
     """Send a small WAV to the Railway service and have it check its own dependencies. Falls back to /health + /v1/me
     when the server is older than /v1/selftest, and says so."""
@@ -105,6 +131,9 @@ def check_server() -> List[Check]:
     common.load_dotenv()
     info = auth_session.get_session_info()
     if info.get("mode") == "gemini_direct":
+        local_ping = _ping_local_gemini_keys()
+        if local_ping is not None:
+            return [(local_ping[0], "Gemini direct (.env)", local_ping[1])]
         return [(None, "Zeno server", "not used: this PC has its own Gemini key (not called)")]
     token, base = auth_session.get_active_token(), auth_session.get_cloud_url().rstrip("/")
     if not token:
@@ -124,7 +153,17 @@ def check_server() -> List[Check]:
             return [(False, "Zeno server: key accepted", "the server rejected your key. Run: python3 scripts/setup.py --login")]
         if r.status_code != 200:
             return [(False, "Zeno server", f"self-test answered {r.status_code}")]
-        return [(bool(c.get("ok")), f"Zeno server: {c.get('name')}", str(c.get("detail", ""))) for c in r.json().get("checks", [])]
+        out: List[Check] = []
+        for c in r.json().get("checks", []):
+            ok = bool(c.get("ok"))
+            name = str(c.get("name", ""))
+            detail = str(c.get("detail", ""))
+            if not ok and name == "Gemini reachable":
+                local_ping = _ping_local_gemini_keys()
+                if local_ping is not None and local_ping[0]:
+                    ok, detail = True, local_ping[1]
+            out.append((ok, f"Zeno server: {name}", detail))
+        return out
     except Exception as exc:   # noqa: BLE001
         return [(False, "Zeno server", f"cannot reach {base}: {type(exc).__name__}")]
 
