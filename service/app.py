@@ -176,7 +176,7 @@ class _Gemini:
         best: Optional[Dict[str, Any]] = None
         count = lambda d: len(d.get("words") or str(d.get("full_transcript", "")).split())
         for model in MODELS:
-            for attempt in range(2):
+            for attempt in range(max(2, len(keys))):
                 try:
                     self._wait()
                     client = genai.Client(api_key=keys[self.key_idx % len(keys)], http_options=types.HttpOptions(timeout=60000))
@@ -281,9 +281,9 @@ _ping_cache: Dict[str, Any] = {"at": 0.0, "result": None}
 
 
 def _gemini_ping() -> Dict[str, Any]:
-    """One tiny text request, trying each model in turn, so we know the Gemini key and the network path work (cached for 60 s)."""
+    """One tiny text request, trying each model and configured key in turn, so we know a Gemini key and the network path work (cached for 60 s when ok)."""
     now = time.time()
-    if _ping_cache["result"] is not None and now - _ping_cache["at"] < 60:
+    if _ping_cache["result"] is not None and _ping_cache["result"].get("ok") and now - _ping_cache["at"] < 60:
         return _ping_cache["result"]
     keys = _gemini_keys()
     if not keys:
@@ -295,23 +295,36 @@ def _gemini_ping() -> Dict[str, Any]:
 
             res = {"ok": False, "detail": "no model answered"}
             failed = []
+            answered = False
             for model in MODELS:   # same order as a real transcription: one busy model must not fail the whole check
                 t0 = time.time()
-                try:
-                    client = genai.Client(api_key=keys[0], http_options=types.HttpOptions(timeout=15000))
-                    reply = client.models.generate_content(model=model, contents="Reply with the single word: ok")
-                    if (reply.text or "").strip():
-                        note = f" ({', '.join(failed)} did not answer)" if failed else ""
-                        res = {"ok": True, "detail": f"{model} answered in {time.time() - t0:.1f}s{note}"}
-                        break
+                model_ok = False
+                for offset in range(len(keys)):
+                    k_idx = (_gemini.key_idx + offset) % len(keys)
+                    try:
+                        client = genai.Client(api_key=keys[k_idx], http_options=types.HttpOptions(timeout=15000))
+                        reply = client.models.generate_content(model=model, contents="Reply with the single word: ok")
+                        if (reply.text or "").strip():
+                            _gemini.key_idx = k_idx
+                            note = f" ({', '.join(failed)} did not answer)" if failed else ""
+                            res = {"ok": True, "detail": f"{model} answered in {time.time() - t0:.1f}s{note}"}
+                            model_ok = True
+                            answered = True
+                            break
+                    except Exception:
+                        continue
+                if answered:
+                    break
+                if not model_ok:
                     failed.append(model)
-                except Exception:
-                    failed.append(model)
-            else:
+            if not answered:
                 res = {"ok": False, "detail": f"Gemini call failed on every model ({', '.join(failed)})"}
         except Exception as exc:
             res = {"ok": False, "detail": f"Gemini call failed ({type(exc).__name__})"}
-    _ping_cache.update(at=now, result=res)
+    if res.get("ok"):
+        _ping_cache.update(at=now, result=res)
+    else:
+        _ping_cache.update(at=0.0, result=None)
     return res
 
 
