@@ -467,52 +467,112 @@ def compute_paired_split_crop_filters(
     src_w, src_h = max(16, int(src_w or live_slot_w)), max(16, int(src_h or live_slot_h))
     peer_w, peer_h = max(16, int(peer_w or peer_slot_w)), max(16, int(peer_h or peer_slot_h))
 
+    def _canonical_split_clip(clip_path: Union[str, Path]) -> Path:
+        p = Path(clip_path)
+        if not p.is_file():
+            return p
+        stem = p.stem
+        if re.search(r"\b(dfv|speaking|talk|dialogue)\b", stem, re.I):
+            char_prefix = re.sub(r"[\s_-]*(dfv|sfv|speaking|listening|idle|silent)\b.*$", "", stem, flags=re.I).strip().lower()
+            if char_prefix:
+                for cand in sorted(p.parent.glob(f"*{p.suffix}")):
+                    if cand == p or not cand.is_file():
+                        continue
+                    c_stem = cand.stem
+                    c_prefix = re.sub(r"[\s_-]*(dfv|sfv|speaking|listening|idle|silent)\b.*$", "", c_stem, flags=re.I).strip().lower()
+                    if c_prefix == char_prefix and re.search(r"\b(sfv|listening|idle|silent)\b", c_stem, re.I):
+                        return cand
+        if re.search(r"\bsplit\b", stem, re.I) and not re.search(r"\b(sfv|listening|idle|silent)\b", stem, re.I):
+            p_vis = analyze_clip_vision(p) or {}
+            p_bb = p_vis.get("bbox_norm") or [0.35, 0.14, 0.65, 0.42]
+            best_cand = None
+            best_dist = 0.08
+            for cand in sorted(p.parent.glob(f"*{p.suffix}")):
+                if cand == p or not cand.is_file():
+                    continue
+                if re.search(r"\b(sfv|listening|idle|silent)\b", cand.stem, re.I):
+                    c_vis = analyze_clip_vision(cand) or {}
+                    c_bb = c_vis.get("bbox_norm") or [0.35, 0.14, 0.65, 0.42]
+                    dist = abs(float(p_bb[1]) - float(c_bb[1])) + abs(float(p_bb[3]) - float(c_bb[3])) + abs(float(p_bb[0]) - float(c_bb[0]))
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_cand = cand
+            if best_cand is not None:
+                return best_cand
+        return p
+
     def _extract_geom(
         clip_path: Union[str, Path],
         fallback_focus: Optional[Sequence[float]],
-    ) -> Tuple[float, float, float]:
+    ) -> Tuple[float, float, float, float, float]:
         vis: Dict[str, Any] = {}
         try:
-            p = Path(clip_path)
+            p = _canonical_split_clip(clip_path)
             if p.is_file():
                 vis = analyze_clip_vision(p) or {}
         except Exception:
             vis = {}
         bbox = vis.get("bbox_norm")
         v_foc = vis.get("focus")
+        eye_c = vis.get("eye_center_norm")
         if bbox and len(bbox) >= 4:
             x0, y0, x1, y1 = [min(1.0, max(0.0, float(v))) for v in bbox[:4]]
             if x1 > x0 and y1 > y0:
-                fx = float(v_foc[0]) if (v_foc and len(v_foc) >= 2) else 0.5 * (x0 + x1)
-                return max(0.05, min(0.95, fx)), max(0.04, min(0.65, y0)), max(0.10, min(0.65, y1 - y0))
+                cx = 0.5 * (x0 + x1)
+                fx = 0.65 * cx + 0.35 * float(v_foc[0]) if (v_foc and len(v_foc) >= 2) else cx
+                fh = max(0.10, min(0.65, y1 - y0))
+                fw = max(0.10, min(0.75, x1 - x0))
+                ey = float(eye_c[1]) if (eye_c and len(eye_c) >= 2) else (y0 + 0.42 * fh)
+                return max(0.05, min(0.95, fx)), max(0.04, min(0.65, y0)), fh, ey, fw
         if fallback_focus and len(fallback_focus) >= 2:
             fx = max(0.05, min(0.95, float(fallback_focus[0])))
             fy = max(0.10, min(0.75, float(fallback_focus[1])))
             y0 = max(0.06, fy - 0.14)
-            return fx, y0, 0.26
-        return 0.5, 0.18, 0.26
+            return fx, y0, 0.26, fy, 0.32
+        return 0.5, 0.18, 0.26, 0.30, 0.32
 
-    fx_a, y0_a, fh_a = _extract_geom(live_src, live_focus)
-    fx_b, y0_b, fh_b = _extract_geom(peer_src, peer_focus)
+    fx_a, y0_a, fh_a, ey_a, fw_a = _extract_geom(live_src, live_focus)
+    fx_b, y0_b, fh_b, ey_b, fw_b = _extract_geom(peer_src, peer_focus)
 
-    # Dynamic common headroom (~15%-20%) shared identically by both characters
-    common_hr = round(max(0.14, min(0.20, min(y0_a, y0_b) * 0.85)), 4)
+    # Dynamic common headroom (~12%-18%) shared identically by both characters
+    common_hr = round(max(0.12, min(0.18, min(y0_a, y0_b) * 1.35)), 4)
 
     s0_a = max(live_slot_w / float(src_w), live_slot_h / float(src_h))
     s0_b = max(peer_slot_w / float(peer_w), peer_slot_h / float(peer_h))
     hr_ratio_a = (src_h * s0_a) / float(live_slot_h)
     hr_ratio_b = (peer_h * s0_b) / float(peer_slot_h)
 
-    def _min_scale_for_headroom(y0: float, h_ratio: float) -> float:
-        k_top = common_hr / max(0.05, y0 * h_ratio)
-        k_bot = (1.0 - common_hr) / max(0.10, (1.0 - y0) * h_ratio)
-        return min(MAX_EXTRA_ZOOM, max(1.0, k_top, k_bot))
+    def _scale_for_lower_head(y0: float, h_ratio: float, fw: float) -> float:
+        target_crown = max(common_hr, 0.135)
+        k_bot = (1.0 - target_crown) / max(0.15, (1.0 - y0) * h_ratio)
+        max_z = 1.213 if fw >= 0.35 else MAX_EXTRA_ZOOM
+        return min(max_z, max(1.0, k_bot))
 
-    k_hr_a = _min_scale_for_headroom(y0_a, hr_ratio_a)
-    k_hr_b = _min_scale_for_headroom(y0_b, hr_ratio_b)
+    # Determine if one character is significantly lower in the frame than the other
+    if abs(y0_a - y0_b) >= 0.08:
+        if y0_a > y0_b:
+            k_a = _scale_for_lower_head(y0_a, hr_ratio_a, fw_a)
+            sh_a_tmp = max(live_slot_h, _even(src_h * s0_a * k_a))
+            cy_a_tmp = int(round(min(max(y0_a * sh_a_tmp - common_hr * live_slot_h, 0), sh_a_tmp - live_slot_h)))
+            achieved_eye = (ey_a * sh_a_tmp - cy_a_tmp) / float(live_slot_h)
+            k_b = min(1.30, max(1.0, achieved_eye / max(0.10, ey_b * hr_ratio_b)))
+        else:
+            k_b = _scale_for_lower_head(y0_b, hr_ratio_b, fw_b)
+            sh_b_tmp = max(peer_slot_h, _even(peer_h * s0_b * k_b))
+            cy_b_tmp = int(round(min(max(y0_b * sh_b_tmp - common_hr * peer_slot_h, 0), sh_b_tmp - peer_slot_h)))
+            achieved_eye = (ey_b * sh_b_tmp - cy_b_tmp) / float(peer_slot_h)
+            k_a = min(1.30, max(1.0, achieved_eye / max(0.10, ey_a * hr_ratio_a)))
+    else:
+        def _min_scale_for_headroom(y0: float, h_ratio: float) -> float:
+            k_top = common_hr / max(0.05, y0 * h_ratio) if y0 * h_ratio > common_hr else 1.0
+            k_bot = (1.0 - common_hr) / max(0.10, (1.0 - y0) * h_ratio)
+            return min(MAX_EXTRA_ZOOM, max(1.0, k_top, k_bot))
 
-    # Common face height fraction in slot so both characters have the same face zoom level
-    common_fh = max(fh_a * hr_ratio_a * k_hr_a, fh_b * hr_ratio_b * k_hr_b, MIN_SLOT_FILL * 0.52)
+        k_hr_a = _min_scale_for_headroom(y0_a, hr_ratio_a)
+        k_hr_b = _min_scale_for_headroom(y0_b, hr_ratio_b)
+        common_fh = max(fh_a * hr_ratio_a * k_hr_a, fh_b * hr_ratio_b * k_hr_b, MIN_SLOT_FILL * 0.52)
+        k_a = min(MAX_EXTRA_ZOOM, max(1.0, k_hr_a, common_fh / max(0.08, fh_a * hr_ratio_a)))
+        k_b = min(MAX_EXTRA_ZOOM, max(1.0, k_hr_b, common_fh / max(0.08, fh_b * hr_ratio_b)))
 
     def _build_one(
         w_in: int,
@@ -520,14 +580,10 @@ def compute_paired_split_crop_filters(
         sw_slot: int,
         sh_slot: int,
         s0: float,
-        h_ratio: float,
         fx: float,
         y0: float,
-        fh: float,
-        k_hr: float,
+        k: float,
     ) -> Dict[str, Any]:
-        k_face = common_fh / max(0.08, fh * h_ratio)
-        k = min(MAX_EXTRA_ZOOM, max(1.0, k_hr, k_face))
         s = s0 * k
         sw = max(sw_slot, _even(w_in * s))
         sh = max(sh_slot, _even(h_in * s))
@@ -542,8 +598,8 @@ def compute_paired_split_crop_filters(
             "extra_zoom": round(k, 3),
         }
 
-    live_crop = _build_one(src_w, src_h, live_slot_w, live_slot_h, s0_a, hr_ratio_a, fx_a, y0_a, fh_a, k_hr_a)
-    peer_crop = _build_one(peer_w, peer_h, peer_slot_w, peer_slot_h, s0_b, hr_ratio_b, fx_b, y0_b, fh_b, k_hr_b)
+    live_crop = _build_one(src_w, src_h, live_slot_w, live_slot_h, s0_a, fx_a, y0_a, k_a)
+    peer_crop = _build_one(peer_w, peer_h, peer_slot_w, peer_slot_h, s0_b, fx_b, y0_b, k_b)
     return live_crop, peer_crop
 
 

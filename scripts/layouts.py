@@ -789,6 +789,7 @@ def build_segment_cache_key(
     if peer and peer.get("src"):
         peer_sig = {
             "src": _file_mtime_sig(peer["src"]),
+            "start": peer.get("start"),
             "still_at": peer.get("still_at"),
             "idle_span": peer.get("idle_span"),
             "mode": peer.get("mode", "loop"),
@@ -798,7 +799,7 @@ def build_segment_cache_key(
 
     plan_loudness = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
     payload = {
-        "v": 12,
+        "v": 13,
         "src": _file_mtime_sig(seg["src"]),
         "start": round(float(seg["start"]), 4),
         "end": round(float(seg["end"]), 4),
