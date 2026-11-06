@@ -1566,5 +1566,29 @@ class TestFinalBitrate(unittest.TestCase):
         self.assertIn("-maxrate", common.hw_video_args("h264_nvenc", 18, False, 9800))
 
 
+class TestFactsNoise(unittest.TestCase):
+    def test_silent_word_runs_name_every_wrong_word_in_one_line_per_run(self):
+        ws = [{"w": f"w{i}", "start": i * 1.0, "end": i * 1.0 + 0.5} for i in range(8)]
+        flagged = [ws[0], ws[1], ws[2], ws[5]]
+        lines = prepare.silent_word_runs(ws, flagged)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("3 words from 'w0' (0.00) to 'w2' (2.50)", lines[0])
+        self.assertIn("'w5' at 5.00-5.50", lines[1])
+        self.assertTrue(all("TIMING WRONG" in x for x in lines))
+        self.assertEqual(prepare.silent_word_runs(ws, []), [])
+
+    def test_only_a_truly_soundless_clip_counts_as_no_sound(self):
+        from unittest.mock import patch
+        quiet = [(i / 100, -70.0) for i in range(500)]
+        with_speech = quiet[:100] + [(i / 100, -30.0) for i in range(100, 150)] + quiet[150:]
+        wav = Path("/nonexistent/audio16k.wav")
+        with patch.object(prepare, "_speech_spans_of", return_value=[]):
+            self.assertTrue(prepare.clip_has_no_sound(wav, quiet))
+            self.assertFalse(prepare.clip_has_no_sound(wav, with_speech))
+        with patch.object(prepare, "_speech_spans_of", return_value=[(1.0, 2.0)]):
+            self.assertFalse(prepare.clip_has_no_sound(wav, quiet))   # the voice detector hears someone: keep the clip
+        self.assertFalse(prepare.clip_has_no_sound(wav, []))           # nothing measured: never assume silence
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -690,8 +690,13 @@ def ensure_clip_transcribed(
         except Exception:
             pass
 
+    # A clip with no sound at all has nothing to transcribe: Gemini would only invent words from the script reference.
+    no_sound = not hq_words and not base_words and wav_path.is_file() and clip_has_no_sound(wav_path)
+    if no_sound:
+        print(f"  [{clip_stem}] no sound in this clip: not sent for transcription")
+
     # If neither hq_words nor base_words is cached, invoke align_engine or transcribe scripts
-    if not hq_words and not base_words and wav_path.is_file():
+    if not hq_words and not base_words and wav_path.is_file() and not no_sound:
         if align_engine is not None and hasattr(align_engine, "transcribe_and_align_clip"):
             try:
                 res = align_engine.transcribe_and_align_clip(
@@ -842,6 +847,34 @@ def voiced_spans(rms_env: List[Tuple[float, float]], floor_db: float = -48.0, me
     return [(round(a, 2), round(b + 0.01, 2)) for a, b in spans if b - a >= 0.08]
 
 
+def clip_has_no_sound(wav_path: Path, rms_env: Optional[List[Tuple[float, float]]] = None) -> bool:
+    """True only when the audio holds nothing: no stretch of real sound, and the voice detector (when installed) hears no speech. Quiet speech
+    still counts as sound, so a real take is never treated as empty."""
+    env = rms_env if rms_env is not None else compute_10ms_rms_envelope(wav_path)
+    if not env or voiced_spans(env):
+        return False
+    return not _speech_spans_of({"work_dir": Path(wav_path).parent})
+
+
+def silent_word_runs(words: List[Dict[str, Any]], flagged: List[Dict[str, Any]]) -> List[str]:
+    """One line per unbroken run of words sitting in silence. The words and their times are already listed above, so naming the first
+    and the last word of each run says exactly which ones are wrong."""
+    bad = {id(w) for w in flagged}
+    lines: List[str] = []
+    run: List[Dict[str, Any]] = []
+    for w in list(words) + [None]:
+        if w is not None and id(w) in bad:
+            run.append(w)
+            continue
+        if run:
+            a, b = run[0], run[-1]
+            who = f"'{a['w']}' at {float(a['start']):.2f}-{float(a['end']):.2f}" if len(run) == 1 else (
+                f"{len(run)} words from '{a['w']}' ({float(a['start']):.2f}) to '{b['w']}' ({float(b['end']):.2f})")
+            lines.append(f"  ! TIMING WRONG: {who}: that stretch is silent; the real place is in a nearby voiced span")
+            run = []
+    return lines
+
+
 def words_in_silence(words: List[Dict[str, Any]], rms_env: List[Tuple[float, float]], floor_db: float = -55.0) -> List[Dict[str, Any]]:
     """Words whose aligned time holds no sound at all: the aligner put them in the wrong place."""
     out = []
@@ -975,8 +1008,7 @@ def format_facts(clips_data: List[Dict[str, Any]]) -> str:
             out.append("  emphasis (louder than this speaker's usual; put a rapid zoom or an effect on these words): " + " ".join(f"'{x['w']}'@{x['start']:.2f}(+{x['delta_db']}dB)" for x in stress))
         if env:
             out.append("  voiced (real sound, measured from the audio): " + " ".join(f"{a:.2f}-{b:.2f}" for a, b in voiced_spans(env)))
-            for w in words_in_silence(ws, env):
-                out.append(f"  ! TIMING WRONG: '{w['w']}' is placed at {float(w['start']):.2f}-{float(w['end']):.2f} but that stretch is silent; its real place is in a nearby voiced span")
+            out.extend(silent_word_runs(ws, words_in_silence(ws, env)))
         for a in c.get("anomalies") or []:
             out.append(f"  ! {a}")
         out.append("")
@@ -1114,6 +1146,9 @@ def main() -> None:
         wav_path = wdir / "audio16k.wav"
         rms_env = compute_10ms_rms_envelope(wav_path)
         macro_sil, micro_dips = detect_two_tier_silences(wav_path, rms_env, cached_silences_path=wdir / "silences.json")
+        if hq_words and wav_path.is_file() and clip_has_no_sound(wav_path, rms_env):
+            print(f"  [{stem}] no sound in this clip: ignoring {len(hq_words)} transcribed words")
+            hq_words, base_words = [], []
         clips_data.append({
             "stem": stem,
             "src": src_str,
