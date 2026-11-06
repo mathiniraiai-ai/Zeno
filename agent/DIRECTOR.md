@@ -2,7 +2,7 @@
 
 **Role:** you make every editing decision and write `plan.edl` yourself. The Engine (`scripts/`) only transcribes, measures and renders (FFmpeg, wav2vec2, face and voice measurements, safety checks). It chooses nothing: no takes, cuts, layouts, zooms, transitions or marks. **Your rulebook is [`EDIT_RULES.md`](EDIT_RULES.md). Read it on every job.**
 
-**Model:** any capable agent can be the Director (see "Any agent can be the Director" below). Use Sonnet 5.5 or Opus 5.5. A job may use 50k to 70k tokens. Use Opus for a messy job, or when a plan fails `--check-plan` or `--verify` twice.
+**Model:** any capable agent can be the Director (see "Any agent can be the Director" below). Use Sonnet 5.5 or Opus 5.5. A job usually uses 50k to 70k tokens; quality comes first, so go past that when the edit needs it. Use Opus for a messy job, or when a plan fails `--check-plan` or `--verify` twice.
 
 ## The loop
 
@@ -43,7 +43,7 @@ To stay portable:
 - Look at the clip sheets before editing and the marks contact sheet after rendering. If the agent cannot read images, say so in the report: the clip sheets are how you see who is in each clip.
 - Gemini inside the Engine (transcription) is a tool, not the Director. It authenticates via zero-touch Google OAuth (`python3 scripts/setup.py --login` → `.zeno_session.json`), team cloud token (`ZENO_CLOUD_URL` / `ZENO_CLOUD_TOKEN`, with legacy `SCRIPTCUT_CLOUD_*` fallback), or `GEMINI_API_KEY` whichever agent is in charge.
 - The token budget is the same for every agent. Name the agent and model in the token-table row.
-- Status: both **Antigravity (Gemini 4 Argon)** and **Claude Code (Opus 4.5 / 5.5 & Sonnet 5.5)** are production-verified on multi-language edits. Other agents (OpenAI/Codex, etc.) remain compatible via `AGENTS.md`.
+- Status: both **Antigravity (Gemini 4 Argon)** and **Claude Code (Opus 5.5 & Sonnet 5.5)** are production-verified on multi-language edits. Other agents (OpenAI/Codex, etc.) remain compatible via `AGENTS.md`.
 
 ## Where things live
 

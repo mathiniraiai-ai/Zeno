@@ -1,6 +1,6 @@
 # AGENTS.md — Zeno (Antigravity Gemini 4 Argon & Dual-Agent Instructions)
 
-Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Code (Opus 4.5 / 5.5)** inside this Zeno folder (team PCs: `~/Documents/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`).
+Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Code (Opus 5.5 / Sonnet 5.5)** inside this Zeno folder (team PCs: `~/Documents/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`).
 
 **Agent entry point** (Antigravity, OpenAI and any other agent, not only Claude): read `agent/DIRECTOR.md` first. It sets the decision loop and points to one concept file per topic in `agent/concepts/`. Learned styles live in `styles/<name>/`. A style may allow captions or extra graphics only if its own `SKILL.md` says so; otherwise rule 4 below applies.
 
@@ -22,8 +22,8 @@ Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Co
 
 ## 2. Token Budget & Mandatory Reporting
 
-- **Budget**: **`50k–70k tokens` per video**: aim for **50k**, and 70k is the hard border. Claude is the main brain and spends the tokens on editorial decisions; wav2vec2 (timing), the voice detector, the face/vision model and FFmpeg only measure and render.
-- **Mid-Job Warning**: Warn the user as soon as a job looks like passing 50k, and stop and report before it passes 70k.
+- **Budget**: **`50k–70k tokens` per video** is the usual range; **quality comes first and it is not a hard stop**. Do not trim thinking, reading or checks to hit a number; remove only waste. Claude is the main brain and spends the tokens on editorial decisions; wav2vec2 (timing), the voice detector, the face/vision model and FFmpeg only measure and render.
+- **Mid-Job Note**: If a job passes 70k, say so and why in the report; keep working to the same quality (no stop).
 - **Per-edit count**: the token window starts at the pre-job checks and ends when the render finishes (`work/_job_marker.json`), so the report counts exactly one edit. Start every video in a fresh session so it does not include other work.
 - **Mandatory End-of-Job Table**: Always output the Token Usage table at the end of every job and append a row to `README.md`:
 

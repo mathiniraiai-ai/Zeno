@@ -26,7 +26,7 @@ A short story skit (`60–130s`): a live-action problem scene, a friend's tip or
 
 The reference videos this style was learned from used **no digital zoom and no effect sounds** (`spec.json` -> `zoom`, `audio`). The owner asked for emotion-driven zooms and effects on top of that, so they are a deliberate addition, kept sparse:
 
-- **The Director analyses the script first** and writes `work/<project>/script_analysis.md`: per spoken line the emotion (with intensity 1 to 3), the beat, the zoom kind and the effect sound, with at most 3 PEAK moments in the whole video. The full method, the emotion-to-zoom table (rapid and slow zooms, where on the word) and the effect-sound table with exact timing are in [`agent/EDIT_RULES.md`](../../agent/EDIT_RULES.md) -> "Emotion plan", "Zoom" and "Sound effects for emotion".
+- **The Director analyses the script first** and writes `work/<project>/script_analysis.md`: per spoken line the emotion (with intensity 1 to 3), the beat, the zoom kind and the effect sound, with at most 3 PEAK moments in the whole video. The full method, the emotion-to-zoom table (rapid and slow zooms, where on the word) and the effect-sound table with exact timing are in [`agent/EDIT_RULES.md`](../../agent/EDIT_RULES.md) -> "Emotion plan", "Zoom" and "Sound effects".
 - **Values for this style (starting points, tune from the owner's feedback):** rapid zoom `1.08` (one `flash_zoom 1.12` at most), slow push `1.04` to `1.06`, closing call to action `1.05`; at most 8 rapid zooms a minute and never two in a row; at least a quarter of the single-speaker cuts stand still.
 - **Splits, two-shots and holograms stay still** (`z=1`). Their energy comes from the cut and the effect.
 - The library has no laugh, gasp, heartbeat or sad sting. Use the footage's own sound or a short silence, or ask the owner for licensed files.
@@ -118,7 +118,7 @@ Always check how the raw footage was generated before assigning layouts in `plan
    - Placed **at scene boundaries** (e.g., `Scene 1 -> Scene 2` and `Scene 2 -> Scene 3`) using `tr=whip_left@0.28` / `whip_right@0.28` + `whoosh.wav` (or `tr=warm_flash@0.38`), while keeping all intra-scene cuts as clean hard cuts (`tr=cut`).
    - All transitions use **Zero-Audio-Loss (`tpad` video tail cloning + `0.00s` audio concat)** so zero words or syllables are ever swallowed at cuts.
 7. **4-Clip Split-Screen Workflow (2 Talking Clips + 2 Dedicated Listening Clips — Never Static Images)**:
-   - When the user provides **4 clips** for a `split_h` or `split_v` dialogue scene (Character A Talking, Character B Talking, Character A Listening, Character B Listening), [`scripts/layouts.py`](../../scripts/layouts.py) loops the dedicated listening video clip so the listening character is **100% live moving video** at all times.
+   - When the user provides **4 clips** for a `split_h` or `split_v` dialogue scene (Character A Talking, Character B Talking, Character A Listening, Character B Listening), [`scripts/layouts.py`](../../scripts/layouts.py) uses the dedicated listening clip (a quiet stretch of it, `peer=`) so the listening character is **live moving video**; a still frame is used only when that character has no quiet stretch, and the brief says `[LISTENER_FALLBACK]`.
 8. **Notion Naming & Ratio Prefix Convention (`~/Downloads/Zeno Outputs/<Notion name>/`)**:
    - Always ask the user for the **Notion name** (instead of inventing a random folder name) and pass `--name "<Notion name>"` to `zeno.py --inspect` / `prepare.py`.
    - Output folder: `~/Downloads/Zeno Outputs/<Notion name>/`

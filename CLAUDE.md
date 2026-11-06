@@ -20,8 +20,8 @@ Script-led AI video editing harness (`1080x1920` MP4). Zeno only transcribes, me
 7. **Clean Editorial Style**: No B-roll, no unrequested captions, no CTAs, no extra graphics.
 
 ## 2. Token Budget & Mandatory Reporting
-- **Budget**: **`50k–70k tokens` per video**: aim for **50k**, and 70k is the hard border. Claude is the main brain and spends the tokens on editorial decisions; wav2vec2 (timing), the voice detector, the face/vision model and FFmpeg only measure and render.
-- **Mid-Job Warning**: Warn the user as soon as a job looks like passing 50k, and stop and report before it passes 70k.
+- **Budget**: **`50k–70k tokens` per video** is the usual range; **quality comes first and it is not a hard stop**. Do not trim thinking, reading or checks to hit a number; remove only waste. Claude is the main brain and spends the tokens on editorial decisions; wav2vec2 (timing), the voice detector, the face/vision model and FFmpeg only measure and render.
+- **Mid-Job Note**: If a job passes 70k, say so and why in the report; keep working to the same quality (no stop).
 - **Per-edit count**: the token window starts at the pre-job checks and ends when the render finishes (`work/_job_marker.json`), so the report counts exactly one edit. Start every video in a fresh session so it does not include other work.
 - **Mandatory End-of-Job Output**: Print the Token Usage table at the end of every job **and** append a row to `README.md`:
 
