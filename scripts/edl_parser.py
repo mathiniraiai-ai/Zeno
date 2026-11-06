@@ -213,8 +213,11 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                 subs: Dict[str, Any] = {"style": "", "y": 70.0}
                 for tok in toks:
                     m_y = re.match(r"^y=([0-9.]+)$", tok)
+                    m_a = re.match(r"^adapt=(on|off)$", tok, re.I)
                     if m_y:
                         subs["y"] = float(m_y.group(1))
+                    elif m_a:
+                        subs["adapt"] = m_a.group(1).lower() == "on"
                     elif not subs["style"]:
                         subs["style"] = _unquote(tok)
                 if subs["style"]:
@@ -618,7 +621,8 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
     if plan_dict.get("style"):
         lines.append(f"#style {plan_dict['style']}")
     if isinstance(plan_dict.get("subs"), dict) and plan_dict["subs"].get("style"):
-        lines.append(f"#subs {_quote_if_needed(str(plan_dict['subs']['style']))} y={_fmt_num(float(plan_dict['subs'].get('y', 70.0)))}")
+        lines.append(f"#subs {_quote_if_needed(str(plan_dict['subs']['style']))} y={_fmt_num(float(plan_dict['subs'].get('y', 70.0)))}"
+                     + (" adapt=off" if plan_dict["subs"].get("adapt") is False else ""))
 
     segs = plan_dict.get("segments") or []
     src_dir = str(plan_dict.get("src_dir") or _detect_common_src_dir(segs))

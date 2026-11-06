@@ -738,18 +738,6 @@ def main() -> None:
     loud = float(plan.get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
     master_gain_db = float(plan.get("audio", {}).get("gain_db", 0.0) or 0.0)
     mix = WORK / "_segments" / "mix.mkv"
-    # Subtitles (only when the plan has `#subs <style>`): one image sequence of caption PNGs laid over the finished picture
-    try:
-        import subtitles
-        sub_list = subtitles.build_overlay(plan, segs, starts, total, W, H, WORK, srt_path=out_path.with_suffix(".srt"))
-    except Exception as exc:   # noqa: BLE001  (a subtitle problem never stops the video)
-        print(f"  [SUBS] could not build subtitles: {exc}")
-        sub_list = None
-    if sub_list:
-        inputs += ["-f", "concat", "-safe", "0", "-i", str(sub_list)]
-        fc.append(f"{v}[{n}:v]overlay=0:0:format=auto:eof_action=pass[vsub]")
-        v = "[vsub]"
-        n += 1
     fc.append(f"{v}null[vout]")
     fc.append(f"{au}anull[aout]")
     ffmpeg_encode(
@@ -765,7 +753,8 @@ def main() -> None:
         "-c:a", "pcm_s16le",
         mix,
         draft=bool(a.draft),
-        bitrate_kbps=final_bitrate_kbps(total),
+        # with subtitles this file is an intermediate (the captions are added, and the video encoded once more, in the last step)
+        bitrate_kbps=max(final_bitrate_kbps(total) * 3, 30000) if plan.get("subs") else final_bitrate_kbps(total),
     )
     r = ffmpeg("-i", mix, "-af", f"loudnorm=I={loud}:TP={DEFAULT_PEAK_CAP_DB}:LRA=11:print_format=json", "-f", "null", "-")
     meas = json.loads(re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr).group(0))
@@ -776,7 +765,28 @@ def main() -> None:
         f"offset={meas['target_offset']}:linear=true{vol_extra},alimiter=limit=0.75:level=false,aresample=48000"
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    ffmpeg("-i", mix, "-c:v", "copy", "-af", ln, "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_path)
+    # Subtitles (only when the plan has `#subs ...`): the loop is measure, then draw. The picture is already rendered without captions, so the
+    # colours behind every caption are measured from it, each caption gets colours that contrast with (or match) its picture, and the captions are laid
+    # over it in this last step, which encodes the video once at the final size.
+    sub_list = None
+    if plan.get("subs"):
+        try:
+            import subtitles
+            sub_list = subtitles.build_overlay(plan, segs, starts, total, W, H, WORK, srt_path=out_path.with_suffix(".srt"), video=mix, report_dir=plan_path.parent)
+        except Exception as exc:   # noqa: BLE001  (a subtitle problem never stops the video)
+            print(f"  [SUBS] could not build subtitles: {exc}")
+            sub_list = None
+    if sub_list:
+        ffmpeg_encode(
+            "-i", mix, "-f", "concat", "-safe", "0", "-i", str(sub_list),
+            "-filter_complex", "[0:v][1:v]overlay=0:0:format=auto:eof_action=pass[vsub]",
+            "-map", "[vsub]", "-map", "0:a",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-profile:v", "high", "-pix_fmt", "yuv420p",
+            "-af", ln, "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_path,
+            bitrate_kbps=final_bitrate_kbps(total),
+        )
+    else:
+        ffmpeg("-i", mix, "-c:v", "copy", "-af", ln, "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", out_path)
 
     # 5) human-readable timeline (with mapped Concept Brief, Scene & Character Speakers)
     lines = [f"{out_path.name}  {W}x{H} @ {fps} fps  length {tc(total)}"]

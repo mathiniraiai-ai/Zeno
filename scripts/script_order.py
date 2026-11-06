@@ -560,6 +560,16 @@ def style_report(plan: Dict[str, Any], work_dir: Optional[Path] = None) -> List[
             out.append(f"{live_trans} transition(s) in {live_total:.0f}s of live conversation: for a Meta ad aim for about {want} (whip_left/whip_right across clip changes, slide_up, zoom_burst on a reveal)")
     if singles >= 4 and still / singles < MIN_STILL_SHARE:
         out.append(f"only {still} of {singles} single-speaker cuts stand still (aim for at least {int(MIN_STILL_SHARE * 100)}%): stillness is what gives a zoom its weight")
+    sp = plan.get("subs")
+    if isinstance(sp, dict) and sp.get("style") and str(sp["style"]).strip().lower() != "auto":
+        try:
+            import subtitles
+
+            named, last = subtitles.resolve_style(sp["style"]), subtitles.recent_styles(n=1)
+            if named is not None and last and named["name"] == last[0]:
+                out.append(f"subtitle style '{named['name']}' is the one used on the last edit; use `#subs auto` (or name another) so this edit gets a different look")
+        except Exception:   # noqa: BLE001
+            pass
     ids = {str(s.get("id")): s for s in segs}
     for e in plan.get("sfx", []):
         name, seg = str(e.get("file")), ids.get(str(e.get("segment")))

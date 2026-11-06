@@ -74,6 +74,12 @@ def record_cleanup(proj_dir: Path, result: Dict[str, Any]) -> None:
     _save(proj_dir, data)
 
 
+def record_subs(proj_dir: Path, style: str, captions: int, adapted: int) -> None:
+    data = load(proj_dir)
+    data["subs"] = {"style": style, "captions": captions, "colours_adapted": adapted}
+    _save(proj_dir, data)
+
+
 def video_format(proj_dir: Path, plan: Optional[Dict[str, Any]] = None) -> str:
     """The kind of video, as the Director named it on the first line of script_analysis.md (for example 'Format: micro narrative,
     quiz'). Falls back to the plan's preset, then to 'unknown'."""

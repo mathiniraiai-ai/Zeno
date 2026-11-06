@@ -7,10 +7,12 @@ render.py overlays them in the final mix as one image sequence. Standard library
 """
 from __future__ import annotations
 
+import colorsys
 import json
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -202,19 +204,180 @@ def write_srt(cues: List[Dict[str, Any]], path: Path) -> None:
     path.write_text("\n".join(out), encoding="utf-8")
 
 
+# ---------------------------------------------------------------- which style: rotate from job to job
+HISTORY = "_subs_history.json"      # in work/, one list of the styles this computer used, newest last
+
+
+def _history_file(work_dir: Path) -> Path:
+    return Path(work_dir) / HISTORY
+
+
+def recent_styles(work_dir: Optional[Path] = None, n: int = 3) -> List[str]:
+    """The last `n` subtitle styles used on this computer, newest first."""
+    from common import WORK
+
+    try:
+        d = json.loads(_history_file(work_dir or WORK).read_text(encoding="utf-8"))
+        return [str(x.get("style")) for x in reversed(d.get("used", []))][:n]
+    except Exception:   # noqa: BLE001
+        return []
+
+
+def remember_style(name: str, project: str, work_dir: Optional[Path] = None) -> None:
+    from common import WORK
+
+    f = _history_file(work_dir or WORK)
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:   # noqa: BLE001
+        d = {}
+    used = [x for x in d.get("used", []) if x.get("project") != project]       # a re-render of the same edit does not count twice
+    used.append({"style": name, "project": project, "at": time.strftime("%Y-%m-%d %H:%M")})
+    try:
+        f.write_text(json.dumps({"used": used[-20:]}, ensure_ascii=False), encoding="utf-8")
+    except Exception:   # noqa: BLE001
+        pass
+
+
+def choose_style(project: str, work_dir: Optional[Path] = None, avoid: int = 2) -> Dict[str, Any]:
+    """`#subs auto`: a style that is not one of the last `avoid` used on this computer, picked by a stable hash of the project name so a
+    re-render of the same edit keeps its look while the next edit gets another one."""
+    pool = styles()
+    recent = set(recent_styles(work_dir, avoid))
+    fresh = [s for s in pool if s["name"] not in recent] or pool
+    h = sum(ord(c) * (k + 1) for k, c in enumerate(project or "zeno"))
+    return fresh[h % len(fresh)]
+
+
+# ---------------------------------------------------------------- colours: look at the picture behind each caption
+SAFE_FILLS = {          # accents and box colours that stay readable (white text on them is 4.5:1 or better; bright ones sit on dark bars)
+    "bright": ["#FACC15", "#22D3EE", "#A3E635", "#F472B6", "#FB923C", "#60A5FA", "#C084FC", "#FFFFFF"],
+    "box": ["#2563EB", "#7C3AED", "#15803D", "#DC2626", "#DB2777", "#0F766E", "#C2410C"],
+}
+
+
+def _rgb(hexcol: str) -> Tuple[float, float, float]:
+    h = hexcol.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4))     # type: ignore[return-value]
+
+
+def _lum(rgb: Tuple[float, float, float]) -> float:
+    def ch(c: float) -> float:
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    r, g, b = rgb
+    return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b)
+
+
+def _contrast(a: float, b: float) -> float:
+    hi, lo = max(a, b), min(a, b)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _hue(hexcol: str) -> float:
+    return colorsys.rgb_to_hsv(*_rgb(hexcol))[0] * 360.0
+
+
+def _hue_gap(a: float, b: float) -> float:
+    d = abs(a - b) % 360.0
+    return min(d, 360.0 - d)
+
+
+def band_stats(img: Any, y_percent: float) -> Dict[str, float]:
+    """What the caption will sit on: mean luminance, the dominant hue and how colourful the band is. `img` is a small PIL RGB frame."""
+    import numpy as np
+
+    w, h = img.size
+    y0, y1 = int(h * max(0.0, y_percent - 7.0) / 100.0), int(h * min(100.0, y_percent + 7.0) / 100.0)
+    x0, x1 = int(w * 0.08), int(w * 0.92)
+    a = np.asarray(img.convert("RGB").crop((x0, y0, x1, max(y1, y0 + 1))), dtype="float32") / 255.0
+    px = a.reshape(-1, 3)
+    mx, mn = px.max(axis=1), px.min(axis=1)
+    sat = np.where(mx > 1e-4, (mx - mn) / np.maximum(mx, 1e-4), 0.0)
+    lum = 0.2126 * px[:, 0] + 0.7152 * px[:, 1] + 0.0722 * px[:, 2]
+    colourful = sat > 0.25
+    hue = 0.0
+    if colourful.sum() > 0.04 * len(px):
+        hsv = np.array([colorsys.rgb_to_hsv(*c) for c in px[colourful][:: max(1, int(colourful.sum() // 400))]])
+        ang = hsv[:, 0] * 2 * np.pi
+        weights = hsv[:, 1] * hsv[:, 2]
+        hue = (np.degrees(np.arctan2((np.sin(ang) * weights).sum(), (np.cos(ang) * weights).sum())) % 360.0)
+    return {"lum": float(_lum(tuple(px.mean(axis=0)))), "hue": float(hue), "colour": float(colourful.mean()), "dark": float((lum < 0.25).mean())}
+
+
+def adapt_style(style: Dict[str, Any], st: Dict[str, float]) -> Dict[str, Any]:
+    """Colour overrides for one caption so it reads on the picture behind it. Bars and boxes stay dark and take a tint of the scene's own hue
+    (they match it); the accent on the spoken word is the colour furthest from the scene's hue (it contrasts); outlined text switches colour when
+    it would blend into the picture. Returns {} for styles whose colours need no change."""
+    kind_mode = style.get("highlightMode") or ""
+    sat = st["colour"]
+    bg_hue = st["hue"]
+
+    def best(cands: List[str], vs_dark: bool = True) -> str:
+        weight = max(0.25, min(1.0, sat * 2.0))
+
+        def score(c: str) -> float:
+            gap = _hue_gap(_hue(c), bg_hue) / 180.0 if sat > 0.12 else 0.5
+            ctr = min(_contrast(_lum(_rgb(c)), 0.02 if vs_dark else st["lum"]), 9.0) / 9.0
+            return gap * weight + ctr * 0.6
+
+        return max(cands, key=score)
+
+    out: Dict[str, Any] = {}
+
+    def dark_tint(alpha: float) -> str:
+        r, g, b = colorsys.hsv_to_rgb((bg_hue % 360.0) / 360.0, min(0.55, 0.15 + sat * 0.6), 0.14)
+        return f"rgba({int(r * 255)}, {int(g * 255)}, {int(b * 255)}, {alpha})"
+
+    if kind_mode == "docu-bar":
+        out["bgColor"] = dark_tint(0.90)
+        out["activeColor"] = best(SAFE_FILLS["bright"])
+    elif kind_mode == "frosted-lyric":
+        out["bgColor"] = dark_tint(0.78)
+    elif kind_mode == "word-box":
+        out["wordBoxColor"] = best(SAFE_FILLS["box"], vs_dark=False)
+    elif kind_mode == "gradient-badge":
+        c = best(SAFE_FILLS["box"], vs_dark=False)
+        out["wordBoxColor"] = c
+        out["activeColor"] = c
+    elif kind_mode == "cinema":
+        out["color"] = best(["#FFE600", "#FFFFFF", "#00E5FF", "#A3E635"], vs_dark=False)
+        out["activeColor"] = out["color"]
+    elif kind_mode == "comic-slap":
+        out["activeColor"] = best(["#FACC15", "#22D3EE", "#A3E635", "#F472B6"], vs_dark=False)
+    return out
+
+
+def _frames_for_cues(video: Path, cues: List[Dict[str, Any]], out_dir: Path) -> List[Tuple[float, Any]]:
+    """Small frames of the rendered picture, four a second, for measuring colours."""
+    from PIL import Image
+    from common import ffmpeg
+
+    d = out_dir / "probe"
+    d.mkdir(parents=True, exist_ok=True)
+    ffmpeg("-i", str(video), "-vf", "fps=4,scale=108:192", "-f", "image2", str(d / "f%05d.png"), timeout=600)
+    files = sorted(d.glob("f*.png"))
+    return [(i / 4.0, Image.open(f).convert("RGB")) for i, f in enumerate(files)]
+
+
 def build_overlay(plan: Dict[str, Any], segs: List[Dict[str, Any]], starts: List[float], total: float, width: int, height: int,
-                  work_dir: Path, srt_path: Optional[Path] = None) -> Optional[Path]:
+                  work_dir: Path, srt_path: Optional[Path] = None, video: Optional[Path] = None, report_dir: Optional[Path] = None) -> Optional[Path]:
     """Everything render.py needs: the concat list of caption images for the whole video, or None when subtitles are off or cannot be made
-    (a problem is printed, the video still renders without them)."""
+    (a problem is printed, the video still renders without them). With `video` (the picture rendered without captions) every caption's colours
+    are chosen from the picture behind it; `#subs auto` also picks the style, rotating away from the recent ones."""
     spec = plan.get("subs")
     if not isinstance(spec, dict) or not spec.get("style"):
         return None
-    style = resolve_style(spec["style"])
-    if style is None:
-        print(f"  [SUBS] unknown style '{spec['style']}'. Styles: " + ", ".join(f"{s['id']} {s['name']}" for s in styles()) + ". Rendering without subtitles.")
-        return None
     if not ensure_ready():
         print("  [SUBS] Node.js is not installed (get the LTS version from nodejs.org) or its caption package could not be installed. Rendering without subtitles.")
+        return None
+    project = Path(str(plan.get("output") or "zeno")).stem
+    if str(spec["style"]).strip().lower() == "auto":
+        style = choose_style(project, work_dir)
+    else:
+        style = resolve_style(spec["style"])
+    if style is None:
+        print(f"  [SUBS] unknown style '{spec['style']}'. Styles: auto, " + ", ".join(f"{s['id']} {s['name']}" for s in styles()) + ". Rendering without subtitles.")
         return None
     script_lines: List[Dict[str, Any]] = []
     try:
@@ -232,8 +395,34 @@ def build_overlay(plan: Dict[str, Any], segs: List[Dict[str, Any]], starts: List
     out_dir = work_dir / "_subs"
     if out_dir.is_dir():
         shutil.rmtree(out_dir)
-    frames = render_frames(cues, style, width, height, out_dir, float(spec.get("y", 70.0)))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    y = float(spec.get("y", 70.0))
+    adapted = 0
+    if video is not None and spec.get("adapt", True):
+        try:
+            probes = _frames_for_cues(Path(video), cues, out_dir)
+            for c in cues:
+                near = [im for t, im in probes if c["startTime"] - 0.15 <= t <= c["endTime"] + 0.15] or [min(probes, key=lambda p: abs(p[0] - c["startTime"]))[1]]
+                stats = [band_stats(im, y) for im in near]
+                avg = {k: sum(s[k] for s in stats) / len(stats) for k in stats[0]}
+                avg["hue"] = stats[len(stats) // 2]["hue"]
+                ov = adapt_style(style, avg)
+                if ov:
+                    c["style"] = ov
+                    adapted += 1
+            shutil.rmtree(out_dir / "probe", ignore_errors=True)
+        except Exception as exc:   # noqa: BLE001  (the stored colours are always readable; adapting is a refinement)
+            print(f"  [SUBS] could not read the picture's colours, using the style's own: {exc}")
+    frames = render_frames(cues, style, width, height, out_dir, y)
     if srt_path is not None:
         write_srt(cues, srt_path)
-    print(f"  [SUBS] {len(cues)} captions, {len(frames)} frames, style '{style['name']}'")
+    remember_style(style["name"], project, work_dir)
+    if report_dir is not None:
+        try:
+            import job_report
+
+            job_report.record_subs(report_dir, style["name"], len(cues), adapted)
+        except Exception:   # noqa: BLE001
+            pass
+    print(f"  [SUBS] {len(cues)} captions, {len(frames)} frames, style '{style['name']}', colours adapted on {adapted} captions")
     return write_concat_list(frames, total, width, height, out_dir)

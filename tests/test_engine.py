@@ -1725,5 +1725,69 @@ class TestSubtitles(unittest.TestCase):
         self.assertIn('#subs "Hormozi Punch" y=68', edl_parser.format_edl(plan))
 
 
+class TestSubtitleAdaptation(unittest.TestCase):
+    def setUp(self):
+        global subtitles, script_order
+        import subtitles, script_order
+
+    def _style(self, sid):
+        return subtitles.resolve_style(sid)
+
+    def test_band_stats_see_a_yellow_picture(self):
+        from PIL import Image
+        yellow = Image.new("RGB", (108, 192), (240, 200, 40))
+        st = subtitles.band_stats(yellow, 68)
+        self.assertTrue(35 <= st["hue"] <= 60, st)
+        self.assertGreater(st["colour"], 0.9)
+        grey = subtitles.band_stats(Image.new("RGB", (108, 192), (90, 90, 90)), 68)
+        self.assertLess(grey["colour"], 0.1)
+
+    def test_accents_move_away_from_the_scenes_colour(self):
+        yellow_scene = {"lum": 0.6, "hue": 48.0, "colour": 0.8, "dark": 0.0}
+        bar = subtitles.adapt_style(self._style(28), yellow_scene)
+        self.assertNotEqual(bar["activeColor"], "#FACC15")                       # a yellow accent on a yellow dress would vanish
+        self.assertTrue(bar["bgColor"].startswith("rgba("))                      # the bar stays dark, tinted to the scene
+        r, g, b = [int(x) for x in bar["bgColor"][5:-1].split(",")[:3]]
+        self.assertLess(max(r, g, b), 90)
+        cine = subtitles.adapt_style(self._style(13), yellow_scene)
+        self.assertNotEqual(cine["color"].upper(), "#FFE600")                    # yellow text on a yellow picture switches colour
+        blue_scene = {"lum": 0.2, "hue": 225.0, "colour": 0.8, "dark": 0.5}
+        box = subtitles.adapt_style(self._style(4), blue_scene)
+        self.assertNotEqual(box["wordBoxColor"], "#2563EB")                       # a blue box on a blue picture changes
+        self.assertEqual(subtitles.adapt_style(self._style(12), yellow_scene), {})   # stickers carry their own colours
+
+    def test_a_grey_picture_keeps_the_stored_look(self):
+        grey = {"lum": 0.3, "hue": 0.0, "colour": 0.02, "dark": 0.3}
+        self.assertTrue(subtitles.adapt_style(self._style(28), grey)["activeColor"])
+        box = subtitles.adapt_style(self._style(4), grey)["wordBoxColor"]
+        self.assertIn(box, subtitles.SAFE_FILLS["box"])
+
+    def test_auto_style_rotates_away_from_recent_ones(self):
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        first = subtitles.choose_style("job A", d)
+        subtitles.remember_style(first["name"], "job A", d)
+        second = subtitles.choose_style("job B", d)
+        self.assertNotEqual(first["name"], second["name"])
+        subtitles.remember_style(second["name"], "job B", d)
+        third = subtitles.choose_style("job C", d)
+        self.assertNotIn(third["name"], (first["name"], second["name"]))
+        self.assertEqual(subtitles.recent_styles(d, 2), [second["name"], first["name"]])
+        self.assertEqual(subtitles.choose_style("job C", d)["name"], third["name"])   # stable for the same edit
+        subtitles.remember_style(third["name"], "job B", d)                            # a re-render of an edit replaces its entry
+        self.assertEqual(len(subtitles.recent_styles(d, 10)), 2)
+
+
+    def test_repeating_the_last_subtitle_style_is_flagged_but_auto_is_not(self):
+        from unittest.mock import patch
+        plan = {"segments": [], "canvas": {"fps": 25}, "sfx": [], "subs": {"style": "Docu Split-Bar", "y": 68}}
+        with patch.object(subtitles, "recent_styles", return_value=["Docu Split-Bar"]):
+            self.assertTrue(any("last edit" in x for x in script_order.style_report(plan)))
+            plan["subs"]["style"] = "auto"
+            self.assertFalse(any("last edit" in x for x in script_order.style_report(plan)))
+            plan["subs"]["style"] = "Blue Highlight"
+            self.assertFalse(any("last edit" in x for x in script_order.style_report(plan)))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

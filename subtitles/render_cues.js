@@ -19,8 +19,17 @@ const { CaptionRenderer } = require('./caption-renderer.js');
   const styles = JSON.parse(fs.readFileSync(path.join(here, 'styles.json'), 'utf8'));
   const base = styles.find(s => s.id === job.styleId) || styles[0];
   const style = { ...base, positionY: job.positionY !== undefined ? job.positionY : base.positionY };
-  const res = await CaptionRenderer.renderAllCuesToPngs({
-    cues: job.cues, width: job.width || 1080, height: job.height || 1920, style, outputDir: job.outDir,
-  });
+  // One cue at a time, so every caption can carry its own colours (cue.style overrides the base style) and its own folder.
+  const frames = [];
+  for (let i = 0; i < job.cues.length; i++) {
+    const cue = job.cues[i];
+    const cueStyle = { ...style, ...(cue.style || {}) };
+    const res = await CaptionRenderer.renderAllCuesToPngs({
+      cues: [cue], width: job.width || 1080, height: job.height || 1920, style: cueStyle, outputDir: path.join(job.outDir, 'c' + i),
+    });
+    for (const f of res.frames) { f.captionIndex = i; frames.push(f); }
+  }
+  frames.sort((a, b) => a.startMs - b.startMs || a.captionIndex - b.captionIndex || a.stepIndex - b.stepIndex);
+  const res = { frames };
   process.stdout.write(JSON.stringify({ style: style.name, frames: res.frames }) + '\n');
 })().catch(e => { process.stderr.write(String(e && e.stack || e) + '\n'); process.exit(1); });
