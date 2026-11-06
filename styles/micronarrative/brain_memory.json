@@ -30,37 +30,12 @@
     {
       "id": "ACTOR_READINESS_ANTI_FREEZE",
       "category": "cutting",
-      "rule": "Respect [FACE_READY] bounds to trim pre-speech 'actor getting ready' stares and post-speech 'end-of-take freeze' frames."
-    },
-    {
-      "id": "RAW_COLORS_AND_SYNC_LOCK",
-      "category": "color_audio",
-      "rule": "Keep color_match OFF (false) by default so raw clip colours are never altered, and never apply J/L audio-video offsets unless explicitly requested."
-    },
-    {
-      "id": "STATIONARY_NOISE_VS_ONE_WORD_LINE_BEAT_GUARD",
-      "category": "cutting",
-      "rule": "Treat clips with stationary ambient noise (rms_p90 - rms_p50 <= 4.2 dB and active_frac >= 0.90) as silent beat clips (_is_silent=True, clearing any LLM-echoed words), while never misclassifying 1-2 word spoken script lines (e.g. 'Whatever!') as silent beats."
-    },
-    {
-      "id": "MULTI_SPEAKER_SINGLE_CLIP_TURN_PRESERVATION",
-      "category": "alignment",
-      "rule": "When an 8s-10s AI clip contains the tail of Speaker A's line + Speaker B's short question + the head of Speaker A's next line, _match_sequence must match all covered lines without early continue, and apply_speaker_check must never amputate legitimate second-speaker turns."
-    },
-    {
-      "id": "TWO_SHOT_AND_HOLOGRAM_ZOOM_LOCK",
-      "category": "zoom",
-      "rule": "Lock zoom=1.0 (no sudden_in:1.08, sudden_out, or PACING_PASS 1.0->1.06) on all multi-speaker (len(spk_list) >= 2) and two-shot / galley / hologram scenes (Scene 2 & Scene 3) so characters framed near the left/right edges are never cropped."
+      "rule": "Trim the actor's getting-ready stare before the first word and the freeze after the last: start 0.06-0.10 s before the first kept word and end 0.08-0.12 s after the last; the `speech` spans in facts.md show where speech really starts and stops."
     },
     {
       "id": "TOP_PIP_FLOATING_RECTANGLE_WINDOW",
       "category": "layout",
       "rule": "For top_pip scenes (Subtopic 1.1 / 3.1), render a clean top-center rounded rectangle window (750x420 at x=165, y=20, radius=36px on 1080x1920, no phone status bar chrome) showing the AI Robot (R1..r4 or looping R extra.mp4 when listening) over the full-screen human background (M1, M2 or looping M extra.mp4 when listening)."
-    },
-    {
-      "id": "VOICEOVER_STEM_VO_AUTO_PAIRING",
-      "category": "audio_mux",
-      "rule": "When a folder contains both <stem>.mp4 (listening actor video) and <stem>VO.mp4 (phone-partner voiceover audio), mux <stem>.mp4 video (0:v:0) with <stem>VO.mp4 audio (1:a:0) and transfer <stem>VO's word timestamps so the phone reaction shot plays with clean voiceover audio."
     },
     {
       "id": "INTERLEAVED_MULTITURN_AND_HEAD_REPEAT_CUTS",
