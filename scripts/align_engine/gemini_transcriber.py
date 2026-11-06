@@ -222,12 +222,18 @@ class GeminiTranscriber:
         _load_env_files()
         self.api_keys = api_keys if api_keys is not None else get_gemini_api_keys()
         primary = (
-            os.getenv("GEMINI_PRIMARY_MODEL", "").strip()
-            or os.getenv("GEMINI_MODEL", "").strip()
-            or "gemini-2.5-flash"
+            os.getenv("GEMINI_FORCE_MODEL", "").strip()
+            or "gemini-3.1-flash-lite"
         )
-        # Put fast, reliable models in rotation: gemini-3.5-flash, gemini-3.5-flash-lite, and gemini-2.5-flash
-        default_models = ["gemini-3.5-flash", "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-flash-lite-latest"]
+        # Put fast, reliable models in rotation: gemini-3.1-flash-lite, gemini-3-flash-preview, gemini-3.5-flash, gemini-3.5-flash-lite, gemini-2.5-flash
+        default_models = [
+            "gemini-3.1-flash-lite",
+            "gemini-3-flash-preview",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-2.5-flash",
+            "gemini-flash-lite-latest",
+        ]
         self.models = [primary] + [m for m in default_models if m != primary]
         self.cloud_url = (
             os.getenv("ZENO_CLOUD_URL", "").strip()
@@ -259,8 +265,8 @@ class GeminiTranscriber:
             raise RuntimeError("No GEMINI_API_KEY configured")
         key = self.api_keys[self._key_idx % len(self.api_keys)]
         if self._client is None or self._client_key != key:
-            # Minimum allowed deadline by Google GenAI API is 10s (10000ms); use 25000ms
-            self._client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=25000))
+            # Allow 120s (120000ms) for gemini-3.5-flash audio transcription
+            self._client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=120000))
             self._client_key = key
         return self._client
 
@@ -440,7 +446,7 @@ class GeminiTranscriber:
         audio_bytes = wav_p.read_bytes()
         prompt = build_transcribe_prompt(target_script_lines, language_hint=language_hint)
 
-        max_attempts = min(4, max(2, len(self.api_keys)))
+        max_attempts = max(4, len(self.api_keys) * len(self.models))
         for attempt in range(max_attempts):
             try:
                 from google.genai import types
@@ -455,6 +461,7 @@ class GeminiTranscriber:
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
                         temperature=0.1,
+                        thinking_config=types.ThinkingConfig(thinking_budget=0),
                     ),
                 )
                 data = self._parse_json_lenient(resp.text or "{}")

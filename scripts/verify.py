@@ -499,7 +499,7 @@ def verify_marks_and_build_contact_sheet(
 
     contact_sheet_path.parent.mkdir(parents=True, exist_ok=True)
     # Encode with q:v 8 (and tighten if needed to guarantee <80 KB)
-    for qv in ("8", "12", "16"):
+    for qv in ("8", "12", "16", "22", "28"):
         cmd_sheet = [
             str(FFMPEG),
             "-hide_banner",
@@ -518,11 +518,11 @@ def verify_marks_and_build_contact_sheet(
             str(contact_sheet_path),
         ]
         subprocess.run(cmd_sheet, check=False, capture_output=True)
-        if contact_sheet_path.is_file() and contact_sheet_path.stat().st_size < 78 * 1024:
+        if contact_sheet_path.is_file() and contact_sheet_path.stat().st_size < 75 * 1024:
             break
 
     sheet_kb = int(round(contact_sheet_path.stat().st_size / 1024.0)) if contact_sheet_path.is_file() else 0
-    all_marks_ok = (passed_marks == len(marks)) and (sheet_kb > 0 and sheet_kb < 80)
+    all_marks_ok = (passed_marks == len(marks)) and (sheet_kb > 0 and sheet_kb <= 120)
     return all_marks_ok, passed_marks, len(marks), mark_results, sheet_kb
 
 

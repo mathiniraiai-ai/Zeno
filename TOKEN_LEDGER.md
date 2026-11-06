@@ -17,19 +17,21 @@ Full relational history is also stored in local SQLite (`work/zeno_telemetry.db`
 | `2026-11-05 13:20:00` | **`gdoc_1DXaWMt-2hs-_t_ppr074h4oa37`** (`kn`) | **Antigravity** | `Gemini 4 Argon` | 10 (`134s → 01:41.46`) | `17,683` in / `11,802` out / **`29,485` total** (`~17,436/min`) | `14,860` in / `4,727` out / **`19,587` total** |
 | `2026-11-05 13:50:05` | **`gdoc_15VT5VlpidqX_t_0`** (`kn`) | **Claude Code** | `claude-sonnet-5-5` | 14 (`170s → 02:13.72`) | `246,138` in / `68,916` out / **`315,054` total** (`~141,364/min`) | `22,987` in / `13,174` out / **`36,161` total** |
 | `2026-11-05 14:24:29` | **`gdoc_149jwRt8pzai_t_d8xozxjkesx5`** (`kn`) | **Antigravity** | `Gemini 3.8 Flash` | 11 (`154s → 01:40.54`) | `11,737` in / `6,787` out / **`18,524` total** (`~11,055/min`) | `16,038` in / `27,420` out / **`43,458` total** |
+| `2026-11-05 20:01:21` | **`gdoc_16Xwq5WJhSlr_t_rm6a9obxu5e9`** (`te`) | **Antigravity** | `Gemini 4 Argon` | 12 (`235s → 02:46.60`) | `2,078` in / `3,514` out / **`5,592` total** (`~2,014/min`) | `22,092` in / `13,985` out / **`36,077` total** |
 
-## 2. Latest Job Clip-by-Clip Breakdown — `gdoc_149jwRt8pzai_t_d8xozxjkesx5` (`2026-11-05 14:24:29`)
+## 2. Latest Job Clip-by-Clip Breakdown — `gdoc_16Xwq5WJhSlr_t_rm6a9obxu5e9` (`2026-11-05 20:01:21`)
 
 | Clip | Raw → Kept | Words | Script Lines | Kept Segments | Raw Clip Process (Retakes / Cuts / Anomalies) | Gemini In | Gemini Out | Gemini Total |
 |---|---|---|---|---|---|---:|---:|---:|
-| `LADY DFV` | `19.8s → 0.0s` | 46 | `-` | `dropped` | Clean take (pause-snapped) | `1,752` | `4,777` | **`6,529`** |
-| `LADY SFV` | `20.0s → 0.0s` | 146 | `-` | `dropped` | Clean take (pause-snapped) | `1,759` | `10,482` | **`12,241`** |
-| `MISS NOVA DFV` | `30.6s → 0.0s` | 64 | `-` | `dropped` | Clean take (pause-snapped) | `2,096` | `8,454` | **`10,550`** |
-| `MISS NOVA SFV` | `20.0s → 0.0s` | 146 | `-` | `dropped` | Clean take (pause-snapped) | `951` | `425` | **`1,376`** |
-| `S1` | `10.0s → 0.0s` | 14 | `-` | `dropped` | Clean take (pause-snapped) | `1,368` | `346` | **`1,714`** |
-| `S2` | `10.0s → 0.0s` | 20 | `-` | `dropped` | Clean take (pause-snapped) | `1,368` | `336` | **`1,704`** |
-| `S3` | `3.4s → 0.0s` | 4 | `-` | `dropped` | Clean take (pause-snapped) | `1,202` | `154` | **`1,356`** |
-| `S4` | `10.0s → 0.0s` | 21 | `-` | `dropped` | Clean take (pause-snapped) | `1,368` | `626` | **`1,994`** |
-| `S5` | `10.0s → 0.0s` | 15 | `-` | `dropped` | Clean take (pause-snapped) | `1,368` | `475` | **`1,843`** |
-| `S6` | `10.0s → 0.0s` | 17 | `-` | `dropped` | Clean take (pause-snapped) | `1,438` | `869` | **`2,307`** |
-| `S7` | `10.0s → 0.0s` | 29 | `-` | `dropped` | Clean take (pause-snapped) | `1,368` | `476` | **`1,844`** |
+| `silent v1` | `10.0s → 0.0s` | 365 | `-` | `dropped` | Clean take (pause-snapped) | `1,601` | `2,157` | **`3,758`** |
+| `silent v2` | `10.0s → 0.0s` | 365 | `-` | `dropped` | Clean take (pause-snapped) | `1,601` | `2,157` | **`3,758`** |
+| `split v1` | `33.4s → 0.0s` | 46 | `-` | `dropped` | Clean take (pause-snapped) | `2,186` | `944` | **`3,130`** |
+| `split v2` | `103.8s → 0.0s` | 196 | `-` | `dropped` | Clean take (pause-snapped) | `3,945` | `3,296` | **`7,241`** |
+| `v1` | `10.0s → 0.0s` | 8 | `-` | `dropped` | Clean take (pause-snapped) | `1,601` | `233` | **`1,834`** |
+| `v2` | `10.0s → 0.0s` | 16 | `-` | `dropped` | Clean take (pause-snapped) | `1,601` | `438` | **`2,039`** |
+| `v3` | `10.0s → 0.0s` | 23 | `-` | `dropped` | Clean take (pause-snapped) | `1,601` | `520` | **`2,121`** |
+| `v4` | `8.0s → 0.0s` | 365 | `-` | `dropped` | Clean take (pause-snapped) | `1,552` | `2,145` | **`3,697`** |
+| `v5` | `10.0s → 0.0s` | 14 | `-` | `dropped` | Clean take (pause-snapped) | `1,601` | `418` | **`2,019`** |
+| `v6` | `10.0s → 0.0s` | 17 | `-` | `dropped` | Clean take (pause-snapped) | `1,601` | `493` | **`2,094`** |
+| `v7` | `10.0s → 0.0s` | 20 | `-` | `dropped` | Clean take (pause-snapped) | `1,601` | `599` | **`2,200`** |
+| `v8` | `10.0s → 0.0s` | 30 | `-` | `dropped` | Clean take (pause-snapped) | `1,601` | `585` | **`2,186`** |

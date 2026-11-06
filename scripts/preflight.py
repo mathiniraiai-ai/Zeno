@@ -106,17 +106,32 @@ def _ping_local_gemini_keys() -> Optional[Tuple[bool, str]]:
         keys = get_gemini_api_keys()
         if not keys:
             return None
-        models = ["gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-flash-lite-latest"]
+        models = [
+            "gemini-3.1-flash-lite",
+            "gemini-3-flash-preview",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-2.5-flash",
+            "gemini-flash-lite-latest",
+        ]
         for model in models:
             t0 = time.time()
             for key in keys:
-                try:
-                    client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=15000))
-                    reply = client.models.generate_content(model=model, contents="Reply with the single word: ok")
-                    if (reply.text or "").strip():
-                        return True, f"{model} answered in {time.time() - t0:.1f}s (local .env GEMINI_API_KEY)"
-                except Exception:
-                    continue
+                for _retry in range(2):
+                    try:
+                        client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=60000))
+                        reply = client.models.generate_content(
+                            model=model,
+                            contents="Reply with the single word: ok",
+                            config=types.GenerateContentConfig(
+                                temperature=0.0,
+                                thinking_config=types.ThinkingConfig(thinking_budget=0),
+                            ),
+                        )
+                        if (reply.text or "").strip():
+                            return True, f"{model} answered in {time.time() - t0:.1f}s (local .env GEMINI_API_KEY)"
+                    except Exception:
+                        continue
         return False, "local .env GEMINI_API_KEY failed on every model"
     except Exception as exc:   # noqa: BLE001
         return False, f"local .env GEMINI_API_KEY check failed ({type(exc).__name__})"
