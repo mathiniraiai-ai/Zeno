@@ -163,7 +163,7 @@ class _Gemini:
             res = json.loads(m.group(1))
         return res if isinstance(res, dict) else {"words": res if isinstance(res, list) else []}
 
-    def transcribe(self, audio: bytes, prompt: str, duration: float, trace: Optional[List[str]] = None) -> Dict[str, Any]:
+    def transcribe(self, audio: bytes, prompt: str, duration: float, trace: Optional[List[str]] = None, language: str = "auto") -> Dict[str, Any]:
         """Try each model in order, twice each. A transcript far shorter than the audio is treated as incomplete: keep it
         only if no model does better, and mark it with "warning"."""
         from google import genai
@@ -193,10 +193,18 @@ class _Gemini:
                         out_tok = int(getattr(um, "candidates_token_count", 0) or 0) + int(getattr(um, "thoughts_token_count", 0) or 0)
                         tot_tok = int(getattr(um, "total_token_count", 0) or (in_tok + out_tok))
                         data["usage"] = {"input_tokens": in_tok, "output_tokens": out_tok, "total_tokens": tot_tok}
-                    if count(data) and (best is None or count(data) > count(best)):
+                    foreign = _foreign_script_words(data.get("words") or str(data.get("full_transcript", "")).split(), language)
+                    if foreign:   # e.g. Bengali letters in a Malayalam clip: try the next model before accepting it
+                        data["foreign_script_words"] = len(foreign)
+                        if trace is not None:
+                            trace.append(f"{model}: wrong script ({len(foreign)} word(s) not in the clip's language)")
+                    if count(data) and (best is None or (len(foreign) < int(best.get("foreign_script_words") or 0)) or
+                                        (len(foreign) == int(best.get("foreign_script_words") or 0) and count(data) > count(best))):
                         best = data
-                    if count(data) >= min_words and count(data):
+                    if count(data) >= min_words and count(data) and not foreign:
                         return data
+                    if foreign:
+                        break   # a different model may keep to the right script
                     log.info("incomplete transcript from %s: %d words for %.0fs of audio", model, count(data), duration)
                     break   # a different model may do better
                 except Exception as exc:
@@ -206,12 +214,39 @@ class _Gemini:
                     busy = "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc)
                     time.sleep(min(4.0, 1.0 + attempt + random.uniform(0.1, 0.5)) if busy else 0.3)
         if best is not None:
-            best["warning"] = f"incomplete: {count(best)} words for {duration:.0f}s of audio"
+            if best.get("foreign_script_words"):
+                best["warning"] = f"wrong script: {best['foreign_script_words']} word(s) are not in the clip's language"
+            else:
+                best["warning"] = f"incomplete: {count(best)} words for {duration:.0f}s of audio"
             return best
         raise HTTPException(502, "Transcription failed upstream")
 
 
 _gemini = _Gemini()
+
+
+# Unicode block of each Indic script. A word written in a block other than the clip's own (Latin and digits are always allowed,
+# because English is spoken between native words) means the model drifted into the wrong language.
+_SCRIPT_BLOCKS = {"hi": (0x0900, 0x097F), "mr": (0x0900, 0x097F), "sa": (0x0900, 0x097F), "bn": (0x0980, 0x09FF), "as": (0x0980, 0x09FF),
+                  "pa": (0x0A00, 0x0A7F), "gu": (0x0A80, 0x0AFF), "or": (0x0B00, 0x0B7F), "ta": (0x0B80, 0x0BFF), "te": (0x0C00, 0x0C7F),
+                  "kn": (0x0C80, 0x0CFF), "ml": (0x0D00, 0x0D7F)}
+_LANG_NAMES = {"malayalam": "ml", "kannada": "kn", "tamil": "ta", "telugu": "te", "hindi": "hi", "marathi": "mr", "bengali": "bn",
+               "gujarati": "gu", "punjabi": "pa", "odia": "or", "assamese": "as"}
+
+
+def _foreign_script_words(words: List[Any], language: str) -> List[str]:
+    """Words that contain a letter of an Indic script other than the clip's own. Empty when the language is unknown or auto."""
+    lang = (language or "auto").strip().lower()
+    lang = _LANG_NAMES.get(lang, lang)
+    own = _SCRIPT_BLOCKS.get(lang)
+    if not own:
+        return []
+    out = []
+    for w in words:
+        s = str(w.get("word", "") if isinstance(w, dict) else w)
+        if any(0x0900 <= ord(c) <= 0x0D7F and not (own[0] <= ord(c) <= own[1]) for c in s):
+            out.append(s)
+    return out
 
 
 def _why(exc: BaseException) -> str:
@@ -423,7 +458,7 @@ def transcribe(
         log.exception("transcript cache unavailable")
     if result is None:
         try:
-            result = _gemini.transcribe(audio, build_transcribe_prompt(lines, language_hint=language_hint or "auto"), duration, trace)
+            result = _gemini.transcribe(audio, build_transcribe_prompt(lines, language_hint=language_hint or "auto"), duration, trace, language_hint or "auto")
         except HTTPException as exc:
             log.info("user=%s bytes=%d status=%d seconds=%.1f", name, len(audio), exc.status_code, time.time() - started)
             _log_transcription(key_id, name, status="failed", http_status=exc.status_code, failed_models="; ".join(trace), audio_seconds=duration,
@@ -443,7 +478,7 @@ def transcribe(
             store().record_use(key_id, duration, input_tokens=in_tok, output_tokens=out_tok, total_tokens=tot_tok)
         except Exception:
             log.exception("could not record usage")
-    _log_transcription(key_id, name, status="incomplete" if result.get("warning") else "ok", model=str(result.get("model_used") or ""),
+    _log_transcription(key_id, name, status=("wrong_script" if result.get("foreign_script_words") else "incomplete") if result.get("warning") else "ok", model=str(result.get("model_used") or ""),
                        failed_models="; ".join(trace), words=len(result.get("words") or []), audio_seconds=duration, size=len(audio),
                        seconds=time.time() - started, in_tokens=in_tok, out_tokens=out_tok, cached=bool(result.get("cached")),
                        reason=str(result.get("warning") or ""))

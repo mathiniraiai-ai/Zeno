@@ -192,7 +192,7 @@ with patch.object(service, "_gemini_ping", return_value={"ok": False, "detail": 
 _calls = []
 
 
-def _fake_gemini(audio, prompt, duration, trace=None):
+def _fake_gemini(audio, prompt, duration, trace=None, language="auto"):
     _calls.append(1)
     return {"words": ["hello", "world"], "model_used": "stub", "usage": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60}}
 
@@ -212,7 +212,7 @@ with patch.object(service._gemini, "transcribe", side_effect=_fake_gemini):
 _calls.clear()
 
 
-def _warn_gemini(audio, prompt, duration, trace=None):
+def _warn_gemini(audio, prompt, duration, trace=None, language="auto"):
     _calls.append(1)
     return {"words": ["x"], "warning": "incomplete", "model_used": "stub"}
 
@@ -225,14 +225,14 @@ with patch.object(service._gemini, "transcribe", side_effect=_warn_gemini):
     check("transcript cache: an incomplete transcript is never cached", len(_calls) == 2)
 
 # Transcription monitoring: every call is recorded with its result, model and the reason a model failed
-def _dead_gemini(audio, prompt, duration, trace=None):
+def _dead_gemini(audio, prompt, duration, trace=None, language="auto"):
     if trace is not None:
         trace.append("gemini-3.5-flash-lite: timed out at Google (504)")
         trace.append("gemini-2.5-flash: timed out at Google (504)")
     raise service.HTTPException(502, "Transcription failed upstream")
 
 
-def _fallback_gemini(audio, prompt, duration, trace=None):
+def _fallback_gemini(audio, prompt, duration, trace=None, language="auto"):
     if trace is not None:
         trace.append("gemini-3.5-flash-lite: timed out at Google (504)")
     return {"words": ["hello", "world"], "model_used": "gemini-2.5-flash", "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}}
@@ -255,6 +255,10 @@ check("monitoring: the failed models are listed", "gemini-2.5-flash" in by_statu
 check("monitoring: a call saved by a fallback model is recorded as ok with the model that answered",
       any(e["status"] == "ok" and e["model"] == "gemini-2.5-flash" and "504" in e["failed_models"] for e in events))
 check("monitoring: an incomplete transcript is recorded as incomplete", any(e["status"] == "incomplete" for e in events))
+check("script check: Bengali letters in a Malayalam clip are caught", service._foreign_script_words(["ഹലോ", "নমস্কার", "hello"], "ml") == ["নমস্কার"])
+check("script check: English and the clip's own script pass", service._foreign_script_words(["ഹലോ", "hello", "OK,", "ശരി."], "malayalam") == [])
+check("script check: unknown or auto language is never judged", service._foreign_script_words(["নমস্কার"], "auto") == [] and service._foreign_script_words(["নমস্কার"], "xx") == [])
+check("script check: Hindi in Devanagari passes", service._foreign_script_words(["नमस्ते", "hello"], "hi") == [])
 check("monitoring: events carry no audio or transcript text", all(set(e) <= set(service.store()._TX_COLS) for e in events))
 check("monitoring: the usage API returns the events", client.get("/api/usage", headers=basic("admin-pw")).json().get("transcriptions"))
 

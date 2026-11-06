@@ -154,12 +154,38 @@ def build_transcribe_prompt(target_script_lines: Optional[List[str]] = None, lan
                 f"{joined_script}\n"
             )
 
-    lang_note = (
-        f"Main native language: {language_hint}. The audio is MIXED: it can switch to English for single words, "
-        "phrases, whole sentences or whole scenes. Transcribe EVERY spoken word, in whichever language it is actually spoken. "
-        "Never skip English because a native language was named.\n"
-        if language_hint and language_hint != "auto" else ""
-    )
+    scripts = {
+        "ml": ("Malayalam", "Malayalam script (മലയാളം)"), "kn": ("Kannada", "Kannada script (ಕನ್ನಡ)"),
+        "ta": ("Tamil", "Tamil script (தமிழ்)"), "te": ("Telugu", "Telugu script (తెలుగు)"),
+        "hi": ("Hindi", "Devanagari script (हिन्दी)"), "mr": ("Marathi", "Devanagari script (मराठी)"),
+        "bn": ("Bengali", "Bengali script (বাংলা)"), "gu": ("Gujarati", "Gujarati script (ગુજરાતી)"),
+        "pa": ("Punjabi", "Gurmukhi script (ਪੰਜਾਬੀ)"), "or": ("Odia", "Odia script (ଓଡ଼ିଆ)"),
+    }
+    hint = (language_hint or "auto").strip().lower()
+    for code, (lname, _) in scripts.items():
+        if hint == lname.lower():
+            hint = code
+    if hint in scripts:
+        lname, lscript = scripts[hint]
+        lang_note = (
+            f"Main language: {lname}, written in {lscript}. The audio is MIXED: it can switch to English for single words, "
+            "phrases, whole sentences or whole scenes. Transcribe EVERY spoken word, in whichever language it is actually spoken. "
+            "Never skip English because a native language was named.\n"
+            f"SCRIPT LAW: every non-English word is written in {lscript} and nothing else. Never write a word in Bengali, "
+            "Devanagari, Tamil, Telugu, Kannada, Malayalam or any other script than the one named, even when a word sounds like another language, "
+            f"the audio is unclear or the speaker is quiet. Give your best {lname} spelling instead. Only {lscript} and English (Latin A-Z) may appear.\n"
+        )
+    elif hint != "auto":
+        lang_note = (
+            f"Main native language: {language_hint}. The audio is MIXED: it can switch to English for single words, "
+            "phrases, whole sentences or whole scenes. Transcribe EVERY spoken word, in whichever language it is actually spoken. "
+            "Never skip English because a native language was named.\n"
+        )
+    else:
+        lang_note = (
+            "Decide the clip's main language once, from the whole clip, and write every non-English word in that language's own script. "
+            "Never mix two Indic scripts in one clip.\n"
+        )
     return f"""You are a precision multilingual speech-to-text transcription engine for video editing.
 Transcribe ONLY the intelligible words actually spoken aloud in this audio clip 100% verbatim.
 {lang_note}{script_context}
