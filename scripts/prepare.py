@@ -957,6 +957,17 @@ def emphasis_words(rms_env: List[Tuple[float, float]], words: List[Dict[str, Any
     return [{"w": t, "start": a, "delta_db": d} for d, a, t in scored[:max_n]]
 
 
+def safe_zoom_focus(spans: List[Tuple[float, float]], z: float) -> Optional[Tuple[float, float]]:
+    """For a zoom of `z` the visible window is [(1-1/z)*fx, (1-1/z)*fx + 1/z] of the frame width. The focus x range that keeps every face span
+    (x0, x1) inside it, clamped to the 0.05-0.95 the renderer allows; None when no focus keeps them all (use z=1)."""
+    k = 1.0 - 1.0 / z
+    if k <= 0 or not spans:
+        return None
+    lo = max(0.05, (max(x1 for _, x1 in spans) - 1.0 / z) / k)
+    hi = min(0.95, min(x0 for x0, _ in spans) / k)
+    return (round(lo, 2), round(hi, 2)) if lo <= hi else None
+
+
 def format_facts(clips_data: List[Dict[str, Any]]) -> str:
     """Everything measured about each clip, as text for the Director: `start word` for every word, a line break at each gap."""
     out = ["# FACTS: measured by Zeno. Times are seconds in the clip. `1.20 word` = the word starts at 1.20; `|2.31` = speech stops at 2.31.", ""]
@@ -982,6 +993,13 @@ def format_facts(clips_data: List[Dict[str, Any]]) -> str:
             if owner:
                 tags.append(owner)
         out.append(f"## {name} ({' '.join(tags)})")
+        spans = [(float(f["bbox_norm"][0]), float(f["bbox_norm"][2])) for f in (vis.get("faces") or []) if f.get("bbox_norm") and len(f["bbox_norm"]) >= 4]
+        if len(spans) >= 2:
+            parts = []
+            for z in (1.05, 1.08, 1.10):
+                r = safe_zoom_focus(spans, z)
+                parts.append(f"{z:g}: focus x {r[0]:.2f}-{r[1]:.2f}" if r else f"{z:g}: none (keep z=1)")
+            out.append("  faces x " + ", ".join(f"{a:.2f}-{b:.2f}" for a, b in spans) + " | zoom that keeps every face in frame: " + "; ".join(parts))
         phrase: List[str] = []
         ws = c.get("hq_words") or []
         for i, w in enumerate(ws):

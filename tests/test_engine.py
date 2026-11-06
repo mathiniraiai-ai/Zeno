@@ -1639,5 +1639,18 @@ class TestAdTempoAndCoverage(unittest.TestCase):
         self.assertEqual((covered, total, dups), (3, 3, 0))
 
 
+class TestSafeZoomFocus(unittest.TestCase):
+    def test_focus_range_keeps_both_faces_inside_the_zoom_window(self):
+        r = prepare.safe_zoom_focus([(0.13, 0.45), (0.62, 0.95)], 1.08)
+        self.assertIsNotNone(r)
+        for fx in r:
+            k = 1 - 1 / 1.08
+            lo = k * fx
+            self.assertLessEqual(lo, 0.13 + 1e-6)
+            self.assertGreaterEqual(lo + 1 / 1.08, 0.95 - 0.01)
+        self.assertIsNone(prepare.safe_zoom_focus([(0.00, 0.30), (0.70, 1.00)], 1.08))   # faces at both edges: no safe zoom
+        self.assertIsNone(prepare.safe_zoom_focus([], 1.08))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
