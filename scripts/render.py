@@ -28,6 +28,7 @@ from common import (  # noqa: E402
     _normalize_mark_type,
     ffmpeg,
     ffmpeg_encode,
+    final_bitrate_kbps,
     probe,
     read_json,
     resolve,
@@ -189,6 +190,7 @@ def render_square_1x1(
         "-c:a", "copy",
         "-movflags", "+faststart",
         out_mp4,
+        bitrate_kbps=final_bitrate_kbps(probe(src_mp4).get("duration") or 60.0, scale=0.65),
     )
     return out_mp4
 
@@ -751,6 +753,7 @@ def main() -> None:
         "-c:a", "pcm_s16le",
         mix,
         draft=bool(a.draft),
+        bitrate_kbps=final_bitrate_kbps(total),
     )
     r = ffmpeg("-i", mix, "-af", f"loudnorm=I={loud}:TP={DEFAULT_PEAK_CAP_DB}:LRA=11:print_format=json", "-f", "null", "-")
     meas = json.loads(re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr).group(0))

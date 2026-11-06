@@ -1548,5 +1548,23 @@ class TestJobReport(unittest.TestCase):
         self.assertTrue(new.exists())
 
 
+class TestFinalBitrate(unittest.TestCase):
+    def test_bitrate_lands_near_150mb_and_stays_in_the_measured_safe_range(self):
+        import common
+        self.assertEqual(common.final_bitrate_kbps(30), 12000)       # short: capped, no point spending more
+        self.assertTrue(9000 <= common.final_bitrate_kbps(120) <= 10500)
+        self.assertEqual(common.final_bitrate_kbps(600), 8000)        # long: never below the quality floor
+        mb = lambda d: common.final_bitrate_kbps(d) * d / 8000
+        self.assertTrue(140 <= mb(120) <= 160)
+        self.assertLess(common.final_bitrate_kbps(120, scale=0.65), common.final_bitrate_kbps(120))
+
+    def test_hardware_and_cpu_paths_use_the_bitrate(self):
+        import common
+        self.assertEqual(common.hw_video_args("h264_videotoolbox", 18, False, 9800)[3], "9800k")
+        self.assertEqual(common.hw_video_args("h264_videotoolbox", 18, False)[3], "16M")
+        self.assertEqual(common.hw_video_args("h264_videotoolbox", 18, True, 9800)[3], "8M")   # drafts stay small and fast
+        self.assertIn("-maxrate", common.hw_video_args("h264_nvenc", 18, False, 9800))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

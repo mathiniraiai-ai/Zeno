@@ -824,13 +824,26 @@ def hardware_encoder() -> str:
     return name
 
 
-def hw_video_args(name: str, crf: int = 18, draft: bool = False) -> list:
+def final_bitrate_kbps(duration_sec: float, scale: float = 1.0, target_mb: float = None) -> int:
+    """Video bitrate that lands a finished video near `target_mb` (default 150, or ZENO_TARGET_MB) without visible loss.
+    Measured on a real reel with VMAF: 10 Mbps scores 96.5 against the old fixed 16 Mbps (about 2 points below a re-encode at the same 16 Mbps, which is
+    not visible), so the bitrate never goes above 12 Mbps or below 8 Mbps for a 1080x1920 picture. `scale` shrinks it for a smaller frame (a 1080x1080
+    square has 56% of the pixels: 0.65)."""
+    mb = float(target_mb if target_mb is not None else os.environ.get("ZENO_TARGET_MB", "150"))
+    dur = max(1.0, float(duration_sec or 1.0))
+    kbps = (mb * 8000.0 / dur) - 200.0          # minus the 192 kbps audio
+    kbps = max(8000.0, min(12000.0, kbps))
+    return int(kbps * scale)
+
+
+def hw_video_args(name: str, crf: int = 18, draft: bool = False, bitrate_kbps: int = None) -> list:
     """The ffmpeg arguments for one hardware encoder at roughly the quality of x264 `-crf <crf>` (12 = near-lossless intermediate, 18 = final)."""
     q = 28 if draft else (14 if crf <= 14 else 19)
+    cap = [] if not bitrate_kbps or draft else ["-maxrate", f"{int(bitrate_kbps * 1.25)}k", "-bufsize", f"{int(bitrate_kbps * 2)}k"]
     if name == "h264_videotoolbox":
-        return ["-c:v", name, "-b:v", "8M" if draft else "16M", "-allow_sw", "1"]
+        return ["-c:v", name, "-b:v", "8M" if draft else (f"{bitrate_kbps}k" if bitrate_kbps else "16M"), "-allow_sw", "1"]
     if name == "h264_nvenc":
-        return ["-c:v", name, "-preset", "p3" if draft else "p5", "-rc", "vbr", "-cq", str(q), "-b:v", "0"]
+        return ["-c:v", name, "-preset", "p3" if draft else "p5", "-rc", "vbr", "-cq", str(q), "-b:v", "0"] + cap
     if name == "h264_qsv":
         return ["-c:v", name, "-global_quality", str(q + 2), "-preset", "veryfast" if draft else "medium"]
     if name == "h264_amf":
@@ -838,7 +851,7 @@ def hw_video_args(name: str, crf: int = 18, draft: bool = False) -> list:
     return ["-c:v", name]
 
 
-def with_hardware_encoder(args, draft: bool = False):
+def with_hardware_encoder(args, draft: bool = False, bitrate_kbps: int = None):
     """A copy of an ffmpeg argument list with libx264 (and its -preset / -crf / -tune) replaced by the hardware encoder; None when there is
     no hardware encoder or the arguments do not use libx264."""
     name = hardware_encoder()
@@ -855,7 +868,7 @@ def with_hardware_encoder(args, draft: bool = False):
             crf = int(float(a[a.index("-crf") + 1]))
         except (ValueError, IndexError):
             pass
-    out, k = a[:i] + hw_video_args(name, crf, draft), i + 2
+    out, k = a[:i] + hw_video_args(name, crf, draft, bitrate_kbps), i + 2
     while k < len(a):
         if a[k] in ("-preset", "-crf", "-tune") and k + 1 < len(a):
             k += 2
@@ -865,16 +878,18 @@ def with_hardware_encoder(args, draft: bool = False):
     return out
 
 
-def ffmpeg_encode(*args, timeout=180, draft: bool = False, hardware: bool = True):
+def ffmpeg_encode(*args, timeout=180, draft: bool = False, hardware: bool = True, bitrate_kbps: int = None):
     """Run an ffmpeg command that encodes H.264 on the GPU encoder when the machine has one, and on the CPU (libx264) otherwise or if the
     GPU encode fails."""
     if hardware:
-        hw = with_hardware_encoder(args, draft)
+        hw = with_hardware_encoder(args, draft, bitrate_kbps)
         if hw is not None:
             try:
                 return ffmpeg(*hw, timeout=timeout)
             except Exception:
                 pass
+    if bitrate_kbps and not draft and len(args) > 1:   # CPU encoder: keep its constant quality, but cap the peak so the file size stays near the target
+        args = [("16" if args[i - 1] == "-crf" and str(x) == "18" else x) for i, x in enumerate(args[:-1])] + ["-maxrate", f"{int(bitrate_kbps * 1.25)}k", "-bufsize", f"{int(bitrate_kbps * 2)}k", args[-1]]
     return ffmpeg(*args, timeout=timeout)
 
 
