@@ -50,6 +50,69 @@ def _iso_to_epoch(ts_str: str) -> float:
         return 0.0
 
 
+CODE_PATH_HINTS = ("/scripts/", "/tests/", "/service/", "/agent/", "/styles/", "/subtitles/")
+
+
+def claude_window_usage(lines: List[str], cutoff: float, ceiling: float) -> Optional[Dict[str, Any]]:
+    """Exact token sums of the assistant turns of one Claude Code transcript that fall inside [cutoff, ceiling]: fresh input, cache writes, cache
+    reads and output, each summed over every turn (the old report took the last turn's cache and the growth of the context). It also notes whether the
+    window holds work on Zeno's own code, in which case the number is not the cost of one edit."""
+    turns: List[Tuple[float, Dict[str, Any]]] = []
+    code_edits = 0
+    model_name = "Claude Sonnet 5.5"
+    for line in lines:
+        if not line.strip():
+            continue
+        d = json.loads(line)
+        if d.get("type") != "assistant" or not isinstance(d.get("message"), dict):
+            continue
+        msg = d["message"]
+        u = msg.get("usage") or {}
+        if not u:
+            continue
+        ts = _iso_to_epoch(str(d.get("timestamp") or ""))
+        if not (cutoff <= ts <= ceiling):
+            continue
+        if msg.get("model"):
+            model_name = str(msg["model"])
+        turns.append((ts, u))
+        for blk in msg.get("content") or []:
+            if isinstance(blk, dict) and blk.get("type") == "tool_use" and blk.get("name") in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+                path = str((blk.get("input") or {}).get("file_path") or "").replace("\\", "/")
+                if any(h in path for h in CODE_PATH_HINTS) or path.endswith(".py"):
+                    code_edits += 1
+            elif isinstance(blk, dict) and blk.get("type") == "tool_use" and blk.get("name") == "Bash":
+                cmd = str((blk.get("input") or {}).get("command") or "")      # code changed through the shell: a commit, a push, an in-place edit, a script that writes files
+                if any(w in cmd for w in ("git commit", "git push", "sed -i", ".write_text(", "unittest")) and (any(h in cmd for h in CODE_PATH_HINTS) or ".py" in cmd):
+                    code_edits += 1
+    if not turns:
+        return None
+    g = lambda u, k: int(u.get(k) or 0)   # noqa: E731
+    fresh = sum(g(u, "input_tokens") for _, u in turns)
+    write = sum(g(u, "cache_creation_input_tokens") for _, u in turns)
+    read = sum(g(u, "cache_read_input_tokens") for _, u in turns)
+    out = sum(g(u, "output_tokens") for _, u in turns)
+    first, last = turns[0][1], turns[-1][1]
+    ctx = lambda u: g(u, "input_tokens") + g(u, "cache_creation_input_tokens") + g(u, "cache_read_input_tokens")   # noqa: E731
+    return {
+        "agent_name": "Claude Code",
+        "agent_model": model_name,
+        "steps_count": len(turns),
+        "turns": len(turns),
+        "context_start": ctx(first),
+        "context_end": ctx(last),
+        "input_tokens": fresh + write,
+        "cache_write_tokens": write,
+        "cached_tokens": read,
+        "output_tokens": out,
+        "total_tokens": fresh + write + out,
+        "token_precision": "exact",
+        "code_edits": code_edits,
+        "window_minutes": round((turns[-1][0] - turns[0][0]) / 60.0, 1),
+        "mixed_with_development": code_edits > 0,
+    }
+
+
 def detect_agent_usage(
     since_epoch: Optional[float] = None,
     until_epoch: Optional[float] = None,
@@ -165,50 +228,11 @@ def detect_agent_usage(
         try:
             mtime = os.path.getmtime(path_str)
             lines = Path(path_str).read_text(encoding="utf-8", errors="ignore").splitlines()
-            assistant_turns = []
-            model_name = "Claude Sonnet 5.5"
-            for line in lines:
-                if not line.strip():
-                    continue
-                d = json.loads(line)
-                if d.get("type") == "assistant" and isinstance(d.get("message"), dict):
-                    msg = d["message"]
-                    u = msg.get("usage") or {}
-                    if u:
-                        ts = _iso_to_epoch(str(d.get("timestamp") or ""))
-                        if msg.get("model"):
-                            model_name = str(msg["model"])
-                        assistant_turns.append((ts, u))
-
-            job_turns = [u for ts, u in assistant_turns if cutoff <= ts <= ceiling]
-            if not job_turns:
+            got = claude_window_usage(lines, cutoff, ceiling)
+            if got is None:
                 continue
-
-            first_u = job_turns[0]
-            last_u = job_turns[-1]
-            first_ctx = int(first_u.get("input_tokens") or 0) + int(first_u.get("cache_creation_input_tokens") or 0) + int(first_u.get("cache_read_input_tokens") or 0)
-            last_ctx = int(last_u.get("input_tokens") or 0) + int(last_u.get("cache_creation_input_tokens") or 0) + int(last_u.get("cache_read_input_tokens") or 0)
-            new_in = sum(int(u.get("input_tokens") or 0) + int(u.get("cache_creation_input_tokens") or 0) for u in job_turns)
-            cached_in = int(last_u.get("cache_read_input_tokens") or 0)
-            out_tok = sum(int(u.get("output_tokens") or 0) for u in job_turns)
-            ctx_growth = max(0, last_ctx - first_ctx)
-            eff_in = max(1, ctx_growth - out_tok) if ctx_growth > out_tok else new_in
-            candidates.append((
-                mtime,
-                {
-                    "agent_name": "Claude Code",
-                    "agent_model": model_name,
-                    "steps_count": len(job_turns),
-                    "context_start": first_ctx,
-                    "context_end": last_ctx,
-                    "input_tokens": eff_in,
-                    "cached_tokens": cached_in,
-                    "output_tokens": out_tok,
-                    "total_tokens": eff_in + out_tok,
-                    "token_precision": "exact",
-                    "session_id": Path(path_str).stem,
-                },
-            ))
+            got["session_id"] = Path(path_str).stem
+            candidates.append((mtime, got))
             break
         except Exception:
             continue
@@ -639,6 +663,7 @@ def finalize_job_telemetry(
     try:
         import job_report
         record["job_report"] = job_report.final_report(proj_dir, plan)
+        record["job_report"]["agent"] = {k: agent.get(k) for k in ("turns", "cache_write_tokens", "code_edits", "window_minutes", "mixed_with_development") if k in agent}
     except Exception:
         pass
     write_json(snap_path, record)

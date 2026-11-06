@@ -1789,5 +1789,51 @@ class TestSubtitleAdaptation(unittest.TestCase):
             self.assertFalse(any("last edit" in x for x in script_order.style_report(plan)))
 
 
+class TestExactTokenCount(unittest.TestCase):
+    def setUp(self):
+        global json
+        import json
+    def _turn(self, ts, fresh, write, read, out, tools=()):
+        import json
+        return json.dumps({"type": "assistant", "timestamp": ts, "message": {
+            "model": "claude-sonnet-5-5", "usage": {"input_tokens": fresh, "cache_creation_input_tokens": write, "cache_read_input_tokens": read, "output_tokens": out},
+            "content": [{"type": "tool_use", "name": n, "input": {"file_path": p}} for n, p in tools]}})
+
+    def test_every_turn_is_summed_exactly_inside_the_window(self):
+        import token_tracker
+        t0 = token_tracker._iso_to_epoch("2026-11-06T10:00:00Z")
+        lines = [self._turn("2026-11-06T09:00:00Z", 999, 999, 999, 999),                    # before the window: ignored
+                 self._turn("2026-11-06T10:00:00Z", 10, 1000, 5000, 200),
+                 self._turn("2026-11-06T10:05:00Z", 20, 500, 7000, 300),
+                 self._turn("2026-11-06T11:30:00Z", 888, 888, 888, 888)]                    # after the window: ignored
+        got = token_tracker.claude_window_usage(lines, t0 - 1, t0 + 600)
+        self.assertEqual((got["input_tokens"], got["cache_write_tokens"], got["cached_tokens"], got["output_tokens"]), (1530, 1500, 12000, 500))
+        self.assertEqual(got["total_tokens"], 2030)
+        self.assertEqual((got["turns"], got["window_minutes"], got["mixed_with_development"]), (2, 5.0, False))
+
+    def test_code_work_in_the_window_is_flagged(self):
+        import token_tracker
+        t0 = token_tracker._iso_to_epoch("2026-11-06T10:00:00Z")
+        lines = [self._turn("2026-11-06T10:00:00Z", 1, 1, 1, 1, tools=[("Edit", "/Users/x/Zeno/scripts/render.py"), ("Write", "/Users/x/Zeno/work/p/plan.edl")])]
+        got = token_tracker.claude_window_usage(lines, t0 - 1, t0 + 60)
+        self.assertEqual(got["code_edits"], 1)       # the plan file is the job's own work; the Python file is development
+        self.assertTrue(got["mixed_with_development"])
+        self.assertIsNone(token_tracker.claude_window_usage(lines, t0 + 100, t0 + 200))
+        shell = [json.dumps({"type": "assistant", "timestamp": "2026-11-06T10:00:00Z", "message": {"usage": {"output_tokens": 1}, "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "python3 scripts/zeno.py --check-plan work/p/plan.edl"}},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "git commit -m x && python3 -m unittest tests/test_engine.py"}}]}})]
+        self.assertEqual(token_tracker.claude_window_usage(shell, t0 - 1, t0 + 60)["code_edits"], 1)       # running Zeno is the edit; committing code is development
+
+    def test_a_new_inspect_opens_a_fresh_window_but_a_quick_repeat_keeps_it(self):
+        import tempfile, time, common
+        from unittest.mock import patch
+        marker = Path(tempfile.mkdtemp()) / "_job_marker.json"
+        marker.write_text('{"start": %f}' % (time.time() - 3 * 3600), encoding="utf-8")
+        with patch.object(common, "JOB_MARKER", marker):
+            first = common.job_begin()
+            self.assertLess(time.time() - first, 5)                      # a window from 3 hours ago is replaced
+            self.assertEqual(common.job_begin(), first)                   # inspect again a minute later: the same edit
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

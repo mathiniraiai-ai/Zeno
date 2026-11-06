@@ -947,8 +947,8 @@ def main() -> None:
         if not args.inspect and not args.inputs:
             sys.exit(0)
 
-    if args.preflight or args.inspect or (args.inputs and args.script):
-        common.job_start_epoch()          # the token window of this edit starts here
+    if args.inspect or (args.inputs and args.script):
+        common.job_begin()                # the token window of this edit starts here, when transcription starts (not at the pre-job checks)
     if args.preflight:
         import preflight
 

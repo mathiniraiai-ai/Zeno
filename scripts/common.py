@@ -743,6 +743,26 @@ def job_start_epoch(create: bool = True) -> float:
     return now
 
 
+def job_begin(reuse_minutes: float = 30.0) -> float:
+    """A new edit starts: `--inspect` (the start of transcription) calls this. Unlike the pre-job checks it always opens a fresh window, so work done
+    earlier in the same chat session is never counted. Running inspect again within `reuse_minutes` keeps the window (the same edit, measured twice)."""
+    import time as _t
+
+    try:
+        m = json.loads(JOB_MARKER.read_text(encoding="utf-8"))
+        if m.get("start") and _t.time() - float(m["start"]) < reuse_minutes * 60:
+            return float(m["start"])
+    except (OSError, ValueError):
+        pass
+    now = _t.time()
+    try:
+        JOB_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        JOB_MARKER.write_text(json.dumps({"start": now}), encoding="utf-8")
+    except OSError:
+        pass
+    return now
+
+
 def job_done() -> None:
     """The edit is finished: the next one starts a new window."""
     try:
