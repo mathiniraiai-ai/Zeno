@@ -636,6 +636,11 @@ def finalize_job_telemetry(
         "learned_rules": learned_rules,
         "assets_used": assets_used,
     }
+    try:
+        import job_report
+        record["job_report"] = job_report.final_report(proj_dir, plan)
+    except Exception:
+        pass
     write_json(snap_path, record)
 
     # 1. Write per-project markdown report: work/<project>/token_report.md

@@ -1509,5 +1509,44 @@ class TestScriptIsTheTimeline(unittest.TestCase):
             self.assertTrue(sheets[0].is_file())
 
 
+class TestJobReport(unittest.TestCase):
+    def test_report_records_checks_failures_format_and_cleanup(self):
+        import tempfile, json, job_report
+        d = Path(tempfile.mkdtemp())
+        (d / "script_analysis.md").write_text("Format: micro narrative, quiz\nL1 emotion=calm", encoding="utf-8")
+        blocked = {"blocked": True, "problems": {"WRONG VOICE": ["L3 cut 1.0-2.0 sounds like S2"]}, "tighten": ["x"], "style": [], "accepted": [], "voice_note": ""}
+        passed = {"blocked": False, "problems": {}, "tighten": [], "style": ["y", "z"], "accepted": ["L2"], "voice_note": "voices not checked"}
+        job_report.record_plan_check(d, blocked)
+        job_report.record_plan_check(d, passed)
+        job_report.record_cleanup(d, {"ran": True, "freed_mb": 3.5, "kept_mb": 1.0, "files": 2})
+        r = job_report.final_report(d)
+        self.assertEqual(r["format"], "micro narrative, quiz")
+        self.assertEqual((r["plan_check_runs"], r["plan_check_blocked"]), (2, 1))
+        self.assertEqual(r["failures"][0]["stage"], "plan_check")
+        self.assertIn("WRONG VOICE", r["failures"][0]["detail"])
+        self.assertEqual(r["plan_checks"][1]["style"], 2)
+        self.assertEqual(r["cleanup"]["freed_mb"], 3.5)
+        self.assertNotIn("script", json.dumps(r).lower().replace("script_analysis", ""))
+
+    def test_cleanup_after_job_removes_only_old_render_cache(self):
+        import tempfile, time, os, clean
+        root = Path(tempfile.mkdtemp())
+        seg = root / "work" / "_segments"; seg.mkdir(parents=True)
+        old, new = seg / "old.mp4", seg / "new.mp4"
+        old.write_bytes(b"x" * 2000); new.write_bytes(b"y" * 1000)
+        past = time.time() - 3 * 86400
+        os.utime(old, (past, past))
+        keep = root / "work" / "proj"; keep.mkdir(); (keep / "words.json").write_text("{}")
+        res = clean.cleanup_after_job(root, keep_hours=24)
+        self.assertTrue(res["ran"] and res["files"] == 1)
+        self.assertFalse(old.exists()); self.assertTrue(new.exists()); self.assertTrue((keep / "words.json").exists())
+        os.environ["ZENO_AUTO_CLEAN"] = "0"
+        try:
+            self.assertEqual(clean.cleanup_after_job(root, keep_hours=0), {"ran": False})
+        finally:
+            os.environ.pop("ZENO_AUTO_CLEAN")
+        self.assertTrue(new.exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -824,6 +824,14 @@ def main() -> None:
         if not ok:
             sys.exit(1)
 
+    # 6b) automatic cleanup of old render cache, no question asked (recorded in the job report)
+    try:
+        import clean
+        import job_report
+        job_report.record_cleanup(plan_path.parent, clean.cleanup_after_job())
+    except Exception:
+        pass
+
     # 7) automated per-clip & per-agent token telemetry logging
     try:
         import token_tracker

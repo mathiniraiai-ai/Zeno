@@ -127,6 +127,7 @@ class KeyStore:
             ("edl_diff_json", "TEXT NOT NULL DEFAULT '{}'"),
             ("learned_rules_json", "TEXT NOT NULL DEFAULT '[]'"),
             ("assets_used_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("job_report_json", "TEXT NOT NULL DEFAULT '{}'"),
         )
         for col, col_def in run_migrations:
             try:
@@ -325,14 +326,17 @@ class KeyStore:
         assets_raw = payload.get("assets_used") if "assets_used" in payload else payload.get("assets_used_json")
         assets_used_json = self._to_json_str(assets_raw, "{}")
 
+        jr = payload.get("job_report")
+        job_report_json = json.dumps(jr, ensure_ascii=False)[:20000] if isinstance(jr, dict) else "{}"
+
         now = time.time()
         self._run(
             """INSERT INTO zeno_runs (
                 key_id, editor_name, user_email, project, language, agent_name, agent_model,
                 clips_count, video_seconds, transcribe_in_tokens, transcribe_out_tokens, transcribe_total_tokens,
                 agent_in_tokens, agent_cached_tokens, agent_out_tokens, agent_total_tokens, grand_total_tokens,
-                clips_json, initial_edl, final_edl, edl_diff_json, learned_rules_json, assets_used_json, created_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                clips_json, initial_edl, final_edl, edl_diff_json, learned_rules_json, assets_used_json, job_report_json, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (
                 key_id,
                 str(resolved_name or "unknown")[:60],
@@ -351,6 +355,7 @@ class KeyStore:
                 edl_diff_json,
                 learned_rules_json,
                 assets_used_json,
+                job_report_json,
                 now,
             ),
         )
@@ -535,15 +540,23 @@ class KeyStore:
         rows = self._run(
             """SELECT id, editor_name, user_email, project, language, agent_name, agent_model, clips_count, video_seconds,
                       transcribe_in_tokens, transcribe_out_tokens, transcribe_total_tokens,
-                      agent_in_tokens, agent_cached_tokens, agent_out_tokens, agent_total_tokens, grand_total_tokens, created_at
+                      agent_in_tokens, agent_cached_tokens, agent_out_tokens, agent_total_tokens, grand_total_tokens, created_at, job_report_json
                FROM zeno_runs WHERE created_at >= %s ORDER BY id DESC LIMIT %s""",
             (float(since), int(limit)),
             "all",
         )
         cols = ("id", "editor_name", "user_email", "project", "language", "agent_name", "agent_model", "clips_count", "video_seconds",
                 "transcribe_in_tokens", "transcribe_out_tokens", "transcribe_total_tokens",
-                "agent_in_tokens", "agent_cached_tokens", "agent_out_tokens", "agent_total_tokens", "grand_total_tokens", "created_at")
-        return [dict(zip(cols, r)) for r in rows]
+                "agent_in_tokens", "agent_cached_tokens", "agent_out_tokens", "agent_total_tokens", "grand_total_tokens", "created_at", "job_report")
+        out = []
+        for r in rows:
+            d = dict(zip(cols, r))
+            try:
+                d["job_report"] = json.loads(d.get("job_report") or "{}")
+            except Exception:
+                d["job_report"] = {}
+            out.append(d)
+        return out
 
     _TX_COLS = ("id", "user_name", "created_at", "status", "http_status", "model", "failed_models", "words", "audio_seconds",
                 "bytes", "seconds", "in_tokens", "out_tokens", "cached", "reason")

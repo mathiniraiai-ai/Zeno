@@ -103,6 +103,31 @@ def auto_clean(root: Path = ROOT, min_free_gb: float = None, days: float = 14.0,
     return {"ran": True, "free_gb_before": round(free_gb, 1), "freed_mb": round(freed / 1e6, 1)}
 
 
+def cleanup_after_job(root: Path = ROOT, keep_hours: float = None) -> dict:
+    """Run at the end of every successful render, without asking. Deletes render-cache files (work/_segments) that have not been
+    touched for `keep_hours` (default 24, or ZENO_KEEP_CACHE_HOURS), so a quick fix and re-render stays fast while old jobs do not pile up.
+    Transcripts, alignments, finished videos and raw footage are never touched. ZENO_AUTO_CLEAN=0 turns it off."""
+    if os.environ.get("ZENO_AUTO_CLEAN", "1") == "0":
+        return {"ran": False}
+    hours = float(keep_hours if keep_hours is not None else os.environ.get("ZENO_KEEP_CACHE_HOURS", "24"))
+    seg = root / "work" / "_segments"
+    freed = kept = files = 0
+    cutoff = time.time() - hours * 3600
+    try:
+        if seg.is_dir():
+            for f in list(seg.iterdir()):
+                n = size_of(f)
+                if newest_mtime(f) < cutoff:
+                    safe_delete(f, root)
+                    freed += n
+                    files += 1
+                else:
+                    kept += n
+        return {"ran": True, "freed_mb": round(freed / 1e6, 1), "kept_mb": round(kept / 1e6, 1), "files": files}
+    except Exception as exc:   # noqa: BLE001  (tidying must never fail a finished job)
+        return {"ran": True, "error": str(exc)[:120], "freed_mb": round(freed / 1e6, 1), "files": files}
+
+
 def main():
     ap = argparse.ArgumentParser(description="Free disk space (dry run unless --apply)")
     ap.add_argument("--apply", action="store_true", help="actually delete")

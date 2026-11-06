@@ -585,6 +585,11 @@ def order_gate(plan: dict, plan_path: pathlib.Path) -> str:
     if not script:
         return "[BLOCKED] This plan names no script, so it cannot be checked. Add #script <path> to plan.edl."
     g = script_order.full_gate(plan, common.resolve(script), plan_path.parent, plan_path)
+    try:
+        import job_report
+        job_report.record_plan_check(plan_path.parent, g)
+    except Exception:
+        pass
     if g.get("voice_note"):
         print(f"[VOICE] {g['voice_note']}. Say so in the report.")
     for t in g.get("tighten") or []:
@@ -990,6 +995,12 @@ def main() -> None:
             gain_db=args.gain_db,
             draft=args.draft,
         )
+        if rc != 0:
+            try:
+                import job_report
+                job_report.record_failure(common.resolve(args.execute).parent, "render", f"render or verify stopped with code {rc}")
+            except Exception:
+                pass
         if rc == 0:
             common.job_done()
             try:

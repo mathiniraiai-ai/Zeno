@@ -101,6 +101,8 @@ tel = client.post("/v1/telemetry", headers={"Authorization": "Bearer " + r3.json
     "clips_count": 2, "video_seconds": 24.5, "transcribe_in_tokens": 820, "transcribe_out_tokens": 190, "transcribe_total_tokens": 1010,
     "agent_in_tokens": 4200, "agent_cached_tokens": 12000, "agent_out_tokens": 950, "agent_total_tokens": 5150,
     "grand_total_tokens": 6160, "clips": [{"clip": "S1", "input_tokens": 410, "output_tokens": 95, "total_tokens": 505}],
+    "job_report": {"format": "micro narrative", "plan_check_runs": 2, "plan_check_blocked": 1,
+                   "failures": [{"stage": "plan_check", "detail": "WRONG VOICE: L3"}], "cleanup": {"ran": True, "freed_mb": 12.5}},
 })
 check("telemetry endpoint stores run in DB", tel.status_code == 200 and tel.json().get("ok") is True, str(tel.json()))
 admin_data = client.get("/admin/api/keys", headers=basic("admin-pw")).json()
@@ -108,6 +110,9 @@ check("admin API returns stored runs", len(admin_data.get("runs") or []) == 1 an
 usage = client.get("/api/usage", headers=basic("admin-pw"))
 check("usage log needs a sign-in", client.get("/api/usage").status_code == 401)
 ur = (usage.json().get("runs") or [{}])[0] if usage.status_code == 200 else {}
+check("usage log carries the job report (type, plan checks, failures, cleanup)",
+      usage.status_code == 200 and (ur.get("job_report") or {}).get("format") == "micro narrative" and ur["job_report"].get("plan_check_blocked") == 1
+      and ur["job_report"]["failures"][0]["stage"] == "plan_check" and ur["job_report"]["cleanup"]["freed_mb"] == 12.5, str(ur.get("job_report")))
 check("usage log returns the run's numbers", usage.status_code == 200 and ur.get("agent_in_tokens") == 4200 and ur.get("agent_out_tokens") == 950
       and ur.get("agent_model") == "Gemini 4 Argon" and ur.get("transcribe_total_tokens") == 1010, str(ur)[:160])
 check("usage log carries no plan files or key hashes", usage.status_code == 200 and "final_edl" not in ur and "initial_edl" not in ur

@@ -194,7 +194,8 @@ function Dashboard({data, days, setDays, q, setQ, rate, setRate, showAll, setSho
         h('thead', null, h('tr', null, h(Th, null, 'When'), h(Th, null, 'Editor'), h(Th, null, 'Email'), h(Th, null, 'Project'), h(Th, null, 'Lang'),
           h(Th, null, 'Coding agent'), h(Th, null, 'Model'), h(Th, {right: true}, 'Clips'), h(Th, {right: true}, 'Seconds'),
           h(Th, {right: true}, 'Agent in'), h(Th, {right: true}, 'Cached'), h(Th, {right: true}, 'Agent out'), h(Th, {right: true}, 'Agent total'),
-          h(Th, {right: true}, 'Gemini in'), h(Th, {right: true}, 'Gemini out'), h(Th, {right: true}, 'Gemini total'), h(Th, {right: true}, 'Est. cost'))),
+          h(Th, {right: true}, 'Gemini in'), h(Th, {right: true}, 'Gemini out'), h(Th, {right: true}, 'Gemini total'), h(Th, {right: true}, 'Est. cost'),
+          h(Th, null, 'Video type'), h(Th, null, 'Plan checks'), h(Th, null, 'Failures'), h(Th, {right: true}, 'Cleaned MB'))),
         h('tbody', null, shown.length ? shown.map(r => { const c = costUsd(r); return h('tr', {key: r.id},
           h('td', {className: 'muted'}, fmtDate(r.created_at)), h('td', null, r.editor_name), h('td', {className: 'mail'}, r.user_email), h('td', null, r.project),
           h('td', null, r.language), h('td', null, r.agent_name), h('td', null, r.agent_model),
@@ -202,8 +203,12 @@ function Dashboard({data, days, setDays, q, setQ, rate, setRate, showAll, setSho
           h('td', {className: 'n'}, fmtNum(r.agent_in_tokens)), h('td', {className: 'n muted'}, fmtNum(r.agent_cached_tokens)), h('td', {className: 'n'}, fmtNum(r.agent_out_tokens)),
           h('td', {className: 'n'}, h('b', null, fmtNum(r.agent_total_tokens))),
           h('td', {className: 'n'}, fmtNum(r.transcribe_in_tokens)), h('td', {className: 'n'}, fmtNum(r.transcribe_out_tokens)), h('td', {className: 'n'}, fmtNum(r.transcribe_total_tokens)),
-          h('td', {className: 'n'}, c === null ? '–' : inr(c, rate))); })
-          : h('tr', null, h('td', {colSpan: 17}, 'No runs in this period')))))),
+          h('td', {className: 'n'}, c === null ? '–' : inr(c, rate)),
+          h('td', null, (r.job_report || {}).format || ''),
+          h('td', null, (r.job_report || {}).plan_check_runs ? ((r.job_report.plan_check_runs - r.job_report.plan_check_blocked) + ' passed, ' + r.job_report.plan_check_blocked + ' blocked') : ''),
+          h('td', {title: ((r.job_report || {}).failures || []).map(f => f.stage + ': ' + f.detail).join(' | ')}, ((r.job_report || {}).failures || []).length ? h('b', null, String(r.job_report.failures.length) + ' (' + r.job_report.failures[r.job_report.failures.length - 1].stage + ': ' + r.job_report.failures[r.job_report.failures.length - 1].detail + ')') : ''),
+          h('td', {className: 'n'}, (r.job_report || {}).cleanup && r.job_report.cleanup.ran ? String(r.job_report.cleanup.freed_mb) : '')); })
+          : h('tr', null, h('td', {colSpan: 21}, 'No runs in this period')))))),
     h('p', {className: 'foot'},
       'Numbers are what each editor\\'s Zeno reported after a job (agent tokens from the coding agent\\'s log for that edit, Gemini tokens from transcription). ' +
       'Cost is an estimate from list prices per million tokens (' + PRICES.map(p => p[0] + ' $' + p[1] + '/$' + p[2] + '/$' + p[3]).join(', ') + ' for in / cached / out). ' +
