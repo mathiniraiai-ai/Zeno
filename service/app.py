@@ -163,7 +163,7 @@ class _Gemini:
             res = json.loads(m.group(1))
         return res if isinstance(res, dict) else {"words": res if isinstance(res, list) else []}
 
-    def transcribe(self, audio: bytes, prompt: str, duration: float) -> Dict[str, Any]:
+    def transcribe(self, audio: bytes, prompt: str, duration: float, trace: Optional[List[str]] = None) -> Dict[str, Any]:
         """Try each model in order, twice each. A transcript far shorter than the audio is treated as incomplete: keep it
         only if no model does better, and mark it with "warning"."""
         from google import genai
@@ -201,6 +201,8 @@ class _Gemini:
                     break   # a different model may do better
                 except Exception as exc:
                     self.key_idx += 1
+                    if trace is not None:
+                        trace.append(f"{model}: {_why(exc)}")
                     busy = "429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc)
                     time.sleep(min(4.0, 1.0 + attempt + random.uniform(0.1, 0.5)) if busy else 0.3)
         if best is not None:
@@ -210,6 +212,26 @@ class _Gemini:
 
 
 _gemini = _Gemini()
+
+
+def _why(exc: BaseException) -> str:
+    """A short plain-language reason for a Gemini failure: no key, no text, only the kind of problem."""
+    s = f"{type(exc).__name__} {exc}"
+    for needle, words in (("504", "timed out at Google (504)"), ("DEADLINE", "timed out at Google"), ("timed out", "timed out"), ("Timeout", "timed out"),
+                          ("429", "rate limit or quota (429)"), ("RESOURCE_EXHAUSTED", "rate limit or quota"), ("503", "Google overloaded (503)"),
+                          ("500", "Google error (500)"), ("UNAVAILABLE", "Google unavailable"), ("403", "key not allowed (403)"),
+                          ("401", "key rejected (401)"), ("SAFETY", "blocked by safety filter"), ("JSON", "answer was not valid JSON")):
+        if needle in s:
+            return words
+    return type(exc).__name__
+
+
+def _log_transcription(key_id, name: str, **fields: Any) -> None:
+    """Never lets monitoring break a transcription."""
+    try:
+        store().log_transcription(key_id, name, **fields)
+    except Exception:
+        log.exception("could not record transcription event")
 
 
 def _allowed_domains() -> List[str]:
@@ -392,6 +414,7 @@ def transcribe(
         hashlib.sha256(json.dumps(lines, ensure_ascii=False).encode("utf-8")).hexdigest()[:16],
     ])
     result = None
+    trace: List[str] = []
     try:
         cached = store().get_cached_transcript(cache_key)
         if cached:   # same audio, prompt and script lines: no Gemini call, no tokens
@@ -400,9 +423,11 @@ def transcribe(
         log.exception("transcript cache unavailable")
     if result is None:
         try:
-            result = _gemini.transcribe(audio, build_transcribe_prompt(lines, language_hint=language_hint or "auto"), duration)
+            result = _gemini.transcribe(audio, build_transcribe_prompt(lines, language_hint=language_hint or "auto"), duration, trace)
         except HTTPException as exc:
             log.info("user=%s bytes=%d status=%d seconds=%.1f", name, len(audio), exc.status_code, time.time() - started)
+            _log_transcription(key_id, name, status="failed", http_status=exc.status_code, failed_models="; ".join(trace), audio_seconds=duration,
+                               size=len(audio), seconds=time.time() - started, reason=(trace[-1].split(": ", 1)[-1] if trace else str(exc.detail)))
             raise
         if result.get("words") and not result.get("warning"):   # an incomplete transcript is never cached
             try:
@@ -418,6 +443,10 @@ def transcribe(
             store().record_use(key_id, duration, input_tokens=in_tok, output_tokens=out_tok, total_tokens=tot_tok)
         except Exception:
             log.exception("could not record usage")
+    _log_transcription(key_id, name, status="incomplete" if result.get("warning") else "ok", model=str(result.get("model_used") or ""),
+                       failed_models="; ".join(trace), words=len(result.get("words") or []), audio_seconds=duration, size=len(audio),
+                       seconds=time.time() - started, in_tokens=in_tok, out_tokens=out_tok, cached=bool(result.get("cached")),
+                       reason=str(result.get("warning") or ""))
     log.info("user=%s bytes=%d status=200 model=%s words=%d in_tok=%d out_tok=%d seconds=%.1f%s", name, len(audio), result.get("model_used"), len(result.get("words") or []), in_tok, out_tok, time.time() - started, " WARNING=" + result["warning"] if result.get("warning") else "")
     return result
 
@@ -1005,7 +1034,8 @@ def usage_log(authorization: Optional[str] = Header(None), x_admin_password: Opt
     ks = store()
     keep = ("name", "email", "created_at", "last_used_at", "revoked_at", "requests", "audio_seconds", "input_tokens", "output_tokens", "total_tokens")
     return JSONResponse(
-        {"keys": [{k: row.get(k) for k in keep} for row in ks.list()], "runs": ks.usage_runs(), "now": time.time()},
+        {"keys": [{k: row.get(k) for k in keep} for row in ks.list()], "runs": ks.usage_runs(), "now": time.time(),
+         "transcriptions": ks.transcription_events(since=time.time() - 30 * 86400)},
         headers=NO_STORE,
     )
 

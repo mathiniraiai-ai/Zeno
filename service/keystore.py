@@ -163,6 +163,25 @@ class KeyStore:
             result_json TEXT NOT NULL,
             hits INTEGER NOT NULL DEFAULT 0,
             created_at {real} NOT NULL)""")
+        # One row per transcription call: who, which model answered, which failed, how long, and why it failed. Numbers and short
+        # reasons only: no audio, no transcript text.
+        self._run(f"""CREATE TABLE IF NOT EXISTS zeno_transcriptions (
+            id {rule_pk},
+            key_id INTEGER,
+            user_name TEXT NOT NULL DEFAULT '',
+            created_at {real} NOT NULL,
+            status TEXT NOT NULL,
+            http_status INTEGER NOT NULL DEFAULT 200,
+            model TEXT NOT NULL DEFAULT '',
+            failed_models TEXT NOT NULL DEFAULT '',
+            words INTEGER NOT NULL DEFAULT 0,
+            audio_seconds {real} NOT NULL DEFAULT 0,
+            bytes INTEGER NOT NULL DEFAULT 0,
+            seconds {real} NOT NULL DEFAULT 0,
+            in_tokens INTEGER NOT NULL DEFAULT 0,
+            out_tokens INTEGER NOT NULL DEFAULT 0,
+            cached INTEGER NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL DEFAULT '')""")
         self._run(f"""CREATE TABLE IF NOT EXISTS zeno_format_observations (
             id {rule_pk},
             key_id INTEGER,
@@ -525,6 +544,27 @@ class KeyStore:
                 "transcribe_in_tokens", "transcribe_out_tokens", "transcribe_total_tokens",
                 "agent_in_tokens", "agent_cached_tokens", "agent_out_tokens", "agent_total_tokens", "grand_total_tokens", "created_at")
         return [dict(zip(cols, r)) for r in rows]
+
+    _TX_COLS = ("id", "user_name", "created_at", "status", "http_status", "model", "failed_models", "words", "audio_seconds",
+                "bytes", "seconds", "in_tokens", "out_tokens", "cached", "reason")
+
+    def log_transcription(self, key_id: Optional[int], user_name: str, status: str, http_status: int = 200, model: str = "",
+                          failed_models: str = "", words: int = 0, audio_seconds: float = 0.0, size: int = 0, seconds: float = 0.0,
+                          in_tokens: int = 0, out_tokens: int = 0, cached: bool = False, reason: str = "") -> None:
+        """status is ok, incomplete (transcript far shorter than the audio) or failed."""
+        self._run(
+            """INSERT INTO zeno_transcriptions (key_id, user_name, created_at, status, http_status, model, failed_models, words,
+                   audio_seconds, bytes, seconds, in_tokens, out_tokens, cached, reason)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (key_id, user_name[:120], time.time(), status, int(http_status), model[:80], failed_models[:300], int(words),
+             float(audio_seconds), int(size), float(seconds), int(in_tokens), int(out_tokens), 1 if cached else 0, reason[:300]),
+        )
+
+    def transcription_events(self, since: float = 0.0, limit: int = 3000) -> List[Dict[str, Any]]:
+        rows = self._run(
+            "SELECT " + ", ".join(self._TX_COLS) + " FROM zeno_transcriptions WHERE created_at >= %s ORDER BY id DESC LIMIT %s",
+            (float(since), int(limit)), "all")
+        return [dict(zip(self._TX_COLS, r)) for r in rows]
 
     def list_runs(self, limit: int = 100) -> List[Dict[str, Any]]:
         rows = self._run(

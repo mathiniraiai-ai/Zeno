@@ -192,7 +192,7 @@ with patch.object(service, "_gemini_ping", return_value={"ok": False, "detail": 
 _calls = []
 
 
-def _fake_gemini(audio, prompt, duration):
+def _fake_gemini(audio, prompt, duration, trace=None):
     _calls.append(1)
     return {"words": ["hello", "world"], "model_used": "stub", "usage": {"input_tokens": 50, "output_tokens": 10, "total_tokens": 60}}
 
@@ -212,7 +212,7 @@ with patch.object(service._gemini, "transcribe", side_effect=_fake_gemini):
 _calls.clear()
 
 
-def _warn_gemini(audio, prompt, duration):
+def _warn_gemini(audio, prompt, duration, trace=None):
     _calls.append(1)
     return {"words": ["x"], "warning": "incomplete", "model_used": "stub"}
 
@@ -223,6 +223,40 @@ with _wave.open(_other, "wb") as _w2:
 with patch.object(service._gemini, "transcribe", side_effect=_warn_gemini):
     transcribe(wav=_other.getvalue()); transcribe(wav=_other.getvalue())
     check("transcript cache: an incomplete transcript is never cached", len(_calls) == 2)
+
+# Transcription monitoring: every call is recorded with its result, model and the reason a model failed
+def _dead_gemini(audio, prompt, duration, trace=None):
+    if trace is not None:
+        trace.append("gemini-3.5-flash-lite: timed out at Google (504)")
+        trace.append("gemini-2.5-flash: timed out at Google (504)")
+    raise service.HTTPException(502, "Transcription failed upstream")
+
+
+def _fallback_gemini(audio, prompt, duration, trace=None):
+    if trace is not None:
+        trace.append("gemini-3.5-flash-lite: timed out at Google (504)")
+    return {"words": ["hello", "world"], "model_used": "gemini-2.5-flash", "usage": {"input_tokens": 5, "output_tokens": 2, "total_tokens": 7}}
+
+
+_third = _io.BytesIO()
+with _wave.open(_third, "wb") as _w3:
+    _w3.setnchannels(1); _w3.setsampwidth(2); _w3.setframerate(16000); _w3.writeframes(b"\x02\x00" * 24000)
+_fourth = _io.BytesIO()
+with _wave.open(_fourth, "wb") as _w4:
+    _w4.setnchannels(1); _w4.setsampwidth(2); _w4.setframerate(16000); _w4.writeframes(b"\x03\x00" * 24000)
+with patch.object(service._gemini, "transcribe", side_effect=_dead_gemini):
+    failed_call = transcribe(wav=_third.getvalue())
+with patch.object(service._gemini, "transcribe", side_effect=_fallback_gemini):
+    transcribe(wav=_fourth.getvalue())
+events = service.store().transcription_events()
+by_status = {e["status"]: e for e in events}
+check("monitoring: a failed call is recorded with its reason", failed_call.status_code == 502 and by_status.get("failed", {}).get("reason") == "timed out at Google (504)")
+check("monitoring: the failed models are listed", "gemini-2.5-flash" in by_status.get("failed", {}).get("failed_models", ""))
+check("monitoring: a call saved by a fallback model is recorded as ok with the model that answered",
+      any(e["status"] == "ok" and e["model"] == "gemini-2.5-flash" and "504" in e["failed_models"] for e in events))
+check("monitoring: an incomplete transcript is recorded as incomplete", any(e["status"] == "incomplete" for e in events))
+check("monitoring: events carry no audio or transcript text", all(set(e) <= set(service.store()._TX_COLS) for e in events))
+check("monitoring: the usage API returns the events", client.get("/api/usage", headers=basic("admin-pw")).json().get("transcriptions"))
 
 # Per-job format observations -> candidates -> approval -> approved recipes
 def observe(script_hash, verified=True, seconds=2.5, fmt="split_h"):

@@ -105,6 +105,40 @@ function csvOf(runs) {
 function Tags({items}) { return h('span', null, [...items].map(x => h('span', {className: 'tag', key: x}, x))); }
 function Th({children, right}) { return h('th', {className: right ? 'n' : ''}, children); }
 
+function TranscriptionHealth({data, days}) {
+  const ev = (data.transcriptions || []).filter(e => inPeriod(e, days, data.now));
+  const bad = ev.filter(e => e.status !== 'ok');
+  const failed = ev.filter(e => e.status === 'failed').length;
+  const avg = a => a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0;
+  const rate = ev.length ? Math.round(100 * (ev.length - bad.length) / ev.length) : 100;
+  const models = {};
+  ev.filter(e => e.model).forEach(e => { const m = models[e.model] || (models[e.model] = {n: 0, s: []}); m.n += 1; m.s.push(n(e.seconds)); });
+  const by = {};
+  ev.forEach(e => { const u = by[e.user_name] || (by[e.user_name] = {name: e.user_name, n: 0, bad: 0, last: 0}); u.n += 1; if (e.status !== 'ok') u.bad += 1; u.last = Math.max(u.last, e.created_at); });
+  const users = Object.values(by).sort((a, b) => b.bad - a.bad || b.n - a.n);
+  const stat = (v, label) => h('div', {className: 'stat', key: label}, h('b', null, v), h('span', null, label));
+  const fell = ev.filter(e => e.status === 'ok' && e.failed_models).length;
+  return h('div', {className: 'card'},
+    h('h1', null, 'Transcription health'),
+    h('p', {className: 'sub'}, 'Every Gemini transcription call: who, which model answered, how long it took, and why a call failed. Numbers and short reasons only, never audio or text.'),
+    h('div', {className: 'stats'},
+      stat(fmtNum(ev.length), 'transcription calls'), stat(rate + '%', 'answered fully'), stat(fmtNum(failed), 'failed'),
+      stat(fmtNum(bad.length - failed), 'incomplete'), stat(fmtNum(fell), 'saved by a fallback model'),
+      stat(avg(ev.map(e => n(e.seconds))).toFixed(1) + ' s', 'average time')),
+    Object.keys(models).length ? h('p', {className: 'sub'}, 'Models that answered: ' + Object.keys(models).map(m => m + ' ' + models[m].n + ' calls, ' + avg(models[m].s).toFixed(1) + ' s').join(' · ')) : null,
+    h('div', {className: 'scroll'}, h('table', null,
+      h('thead', null, h('tr', null, h(Th, null, 'Editor'), h(Th, {right: true}, 'Calls'), h(Th, {right: true}, 'Problems'), h(Th, null, 'Last call'))),
+      h('tbody', null, users.length ? users.map(u => h('tr', {key: u.name},
+        h('td', null, h('b', null, u.name)), h('td', {className: 'n'}, fmtNum(u.n)),
+        h('td', {className: 'n'}, u.bad ? h('b', null, fmtNum(u.bad)) : '0'), h('td', {className: 'muted'}, fmtDate(u.last))))
+        : h('tr', null, h('td', {colSpan: 4}, 'No transcription calls recorded in this period yet'))))),
+    bad.length ? h('div', {className: 'scroll'}, h('table', null,
+      h('thead', null, h('tr', null, h(Th, null, 'When'), h(Th, null, 'Editor'), h(Th, null, 'Result'), h(Th, null, 'Why'), h(Th, null, 'Models that failed'), h(Th, {right: true}, 'Audio s'), h(Th, {right: true}, 'Took s'))),
+      h('tbody', null, bad.slice(0, 50).map(e => h('tr', {key: e.id},
+        h('td', {className: 'muted'}, fmtDate(e.created_at)), h('td', null, e.user_name), h('td', null, h('b', null, e.status)), h('td', null, e.reason),
+        h('td', {className: 'muted'}, e.failed_models), h('td', {className: 'n'}, Math.round(n(e.audio_seconds))), h('td', {className: 'n'}, n(e.seconds).toFixed(1))))))) : null);
+}
+
 function Dashboard({data, days, setDays, q, setQ, rate, setRate, showAll, setShowAll}) {
   const runs = data.runs.filter(r => inPeriod(r, days, data.now) && matches(r, q));
   const {users, total: t} = aggregate(runs);
@@ -152,6 +186,7 @@ function Dashboard({data, days, setDays, q, setQ, rate, setRate, showAll, setSho
             h('td', {className: 'n'}, fmtNum(t.gin)), h('td', {className: 'n'}, fmtNum(t.gout)), h('td', {className: 'n'}, fmtNum(t.gtotal)),
             h('td', {className: 'n'}, inr(t.usd, rate) + star), h('td', null))
             : h('tr', null, h('td', {colSpan: 15}, 'No runs in this period')))))),
+    h(TranscriptionHealth, {data, days}),
     h('div', {className: 'card'},
       h('h1', null, 'Every run ', runs.length > 100 ? h('button', {className: 'chip', style: {marginLeft: 12}, onClick: () => setShowAll(!showAll)},
         showAll ? 'Show latest 100' : 'Show all ' + runs.length) : null),
