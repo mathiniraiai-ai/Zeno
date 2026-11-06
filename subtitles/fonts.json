@@ -1,0 +1,322 @@
+[
+ {
+  "file": "AnekBangla-Bold.ttf",
+  "family": "Anek Bangla",
+  "weight": 700
+ },
+ {
+  "file": "AnekDevanagari-Bold.ttf",
+  "family": "Anek Devanagari",
+  "weight": 700
+ },
+ {
+  "file": "AnekGujarati-Bold.ttf",
+  "family": "Anek Gujarati",
+  "weight": 700
+ },
+ {
+  "file": "AnekGurmukhi-Bold.ttf",
+  "family": "Anek Gurmukhi",
+  "weight": 700
+ },
+ {
+  "file": "AnekKannada-Bold.ttf",
+  "family": "Anek Kannada",
+  "weight": 700
+ },
+ {
+  "file": "AnekMalayalam-Bold.ttf",
+  "family": "Anek Malayalam",
+  "weight": 700
+ },
+ {
+  "file": "AnekOdia-Bold.ttf",
+  "family": "Anek Odia",
+  "weight": 700
+ },
+ {
+  "file": "AnekTamil-Bold.ttf",
+  "family": "Anek Tamil",
+  "weight": 700
+ },
+ {
+  "file": "AnekTelugu-Bold.ttf",
+  "family": "Anek Telugu",
+  "weight": 700
+ },
+ {
+  "file": "BalooTamma2-700.ttf",
+  "family": "Baloo Tamma 2",
+  "weight": 700
+ },
+ {
+  "file": "Catamaran-Bold.ttf",
+  "family": "Catamaran",
+  "weight": 700
+ },
+ {
+  "file": "Montserrat-400.ttf",
+  "family": "Montserrat",
+  "weight": 400
+ },
+ {
+  "file": "Montserrat-500.ttf",
+  "family": "Montserrat",
+  "weight": 500
+ },
+ {
+  "file": "Montserrat-600.ttf",
+  "family": "Montserrat",
+  "weight": 600
+ },
+ {
+  "file": "Montserrat-700.ttf",
+  "family": "Montserrat",
+  "weight": 700
+ },
+ {
+  "file": "Montserrat-800.ttf",
+  "family": "Montserrat",
+  "weight": 800
+ },
+ {
+  "file": "Montserrat-900.ttf",
+  "family": "Montserrat",
+  "weight": 900
+ },
+ {
+  "file": "NotoSans-400.ttf",
+  "family": "Noto Sans",
+  "weight": 400
+ },
+ {
+  "file": "NotoSans-500.ttf",
+  "family": "Noto Sans",
+  "weight": 500
+ },
+ {
+  "file": "NotoSans-600.ttf",
+  "family": "Noto Sans",
+  "weight": 600
+ },
+ {
+  "file": "NotoSans-700.ttf",
+  "family": "Noto Sans",
+  "weight": 700
+ },
+ {
+  "file": "NotoSans-800.ttf",
+  "family": "Noto Sans",
+  "weight": 800
+ },
+ {
+  "file": "NotoSans-900.ttf",
+  "family": "Noto Sans",
+  "weight": 900
+ },
+ {
+  "file": "NotoSansBengali-400.ttf",
+  "family": "Noto Sans Bengali",
+  "weight": 400
+ },
+ {
+  "file": "NotoSansBengali-700.ttf",
+  "family": "Noto Sans Bengali",
+  "weight": 700
+ },
+ {
+  "file": "NotoSansDevanagari-400.ttf",
+  "family": "Noto Sans Devanagari",
+  "weight": 400
+ },
+ {
+  "file": "NotoSansDevanagari-500.ttf",
+  "family": "Noto Sans Devanagari",
+  "weight": 500
+ },
+ {
+  "file": "NotoSansDevanagari-600.ttf",
+  "family": "Noto Sans Devanagari",
+  "weight": 600
+ },
+ {
+  "file": "NotoSansDevanagari-700.ttf",
+  "family": "Noto Sans Devanagari",
+  "weight": 700
+ },
+ {
+  "file": "NotoSansDevanagari-800.ttf",
+  "family": "Noto Sans Devanagari",
+  "weight": 800
+ },
+ {
+  "file": "NotoSansDevanagari-900.ttf",
+  "family": "Noto Sans Devanagari",
+  "weight": 900
+ },
+ {
+  "file": "NotoSansGujarati-400.ttf",
+  "family": "Noto Sans Gujarati",
+  "weight": 400
+ },
+ {
+  "file": "NotoSansGujarati-700.ttf",
+  "family": "Noto Sans Gujarati",
+  "weight": 700
+ },
+ {
+  "file": "NotoSansGurmukhi-Bold.ttf",
+  "family": "Noto Sans Gurmukhi",
+  "weight": 700
+ },
+ {
+  "file": "NotoSansKannada-400.ttf",
+  "family": "Noto Sans Kannada",
+  "weight": 400
+ },
+ {
+  "file": "NotoSansKannada-700.ttf",
+  "family": "Noto Sans Kannada",
+  "weight": 700
+ },
+ {
+  "file": "NotoSansMalayalam-400.ttf",
+  "family": "Noto Sans Malayalam",
+  "weight": 400
+ },
+ {
+  "file": "NotoSansMalayalam-700.ttf",
+  "family": "Noto Sans Malayalam",
+  "weight": 700
+ },
+ {
+  "file": "NotoSansTamil-400.ttf",
+  "family": "Noto Sans Tamil",
+  "weight": 400
+ },
+ {
+  "file": "NotoSansTamil-500.ttf",
+  "family": "Noto Sans Tamil",
+  "weight": 500
+ },
+ {
+  "file": "NotoSansTamil-600.ttf",
+  "family": "Noto Sans Tamil",
+  "weight": 600
+ },
+ {
+  "file": "NotoSansTamil-700.ttf",
+  "family": "Noto Sans Tamil",
+  "weight": 700
+ },
+ {
+  "file": "NotoSansTamil-800.ttf",
+  "family": "Noto Sans Tamil",
+  "weight": 800
+ },
+ {
+  "file": "NotoSansTamil-900.ttf",
+  "family": "Noto Sans Tamil",
+  "weight": 900
+ },
+ {
+  "file": "NotoSansTelugu-400.ttf",
+  "family": "Noto Sans Telugu",
+  "weight": 400
+ },
+ {
+  "file": "NotoSansTelugu-500.ttf",
+  "family": "Noto Sans Telugu",
+  "weight": 500
+ },
+ {
+  "file": "NotoSansTelugu-600.ttf",
+  "family": "Noto Sans Telugu",
+  "weight": 600
+ },
+ {
+  "file": "NotoSansTelugu-700.ttf",
+  "family": "Noto Sans Telugu",
+  "weight": 700
+ },
+ {
+  "file": "NotoSansTelugu-800.ttf",
+  "family": "Noto Sans Telugu",
+  "weight": 800
+ },
+ {
+  "file": "NotoSansTelugu-900.ttf",
+  "family": "Noto Sans Telugu",
+  "weight": 900
+ },
+ {
+  "file": "Outfit-300.ttf",
+  "family": "Outfit",
+  "weight": 300
+ },
+ {
+  "file": "Outfit-400.ttf",
+  "family": "Outfit",
+  "weight": 400
+ },
+ {
+  "file": "Outfit-500.ttf",
+  "family": "Outfit",
+  "weight": 500
+ },
+ {
+  "file": "Outfit-600.ttf",
+  "family": "Outfit",
+  "weight": 600
+ },
+ {
+  "file": "Outfit-700.ttf",
+  "family": "Outfit",
+  "weight": 700
+ },
+ {
+  "file": "Outfit-800.ttf",
+  "family": "Outfit",
+  "weight": 800
+ },
+ {
+  "file": "Outfit-900.ttf",
+  "family": "Outfit",
+  "weight": 900
+ },
+ {
+  "file": "PermanentMarker-400.ttf",
+  "family": "Permanent Marker",
+  "weight": 400
+ },
+ {
+  "file": "PlusJakartaSans-400.ttf",
+  "family": "Plus Jakarta Sans",
+  "weight": 400
+ },
+ {
+  "file": "PlusJakartaSans-500.ttf",
+  "family": "Plus Jakarta Sans",
+  "weight": 500
+ },
+ {
+  "file": "PlusJakartaSans-600.ttf",
+  "family": "Plus Jakarta Sans",
+  "weight": 600
+ },
+ {
+  "file": "PlusJakartaSans-700.ttf",
+  "family": "Plus Jakarta Sans",
+  "weight": 700
+ },
+ {
+  "file": "PlusJakartaSans-800.ttf",
+  "family": "Plus Jakarta Sans",
+  "weight": 800
+ },
+ {
+  "file": "Ramabhadra-400.ttf",
+  "family": "Ramabhadra",
+  "weight": 400
+ }
+]

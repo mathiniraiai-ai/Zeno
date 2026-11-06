@@ -109,6 +109,23 @@ Writers use "vertical" and "horizontal" split loosely, so the explicit words win
 - A "Stop saying" hook: `banner:"header:Stop saying"@0.3`, then one banner per phrase on its spoken word (`banner:"What do you mean?"@<word start>`). The stack is placed below the measured face automatically.
 - Strike-through lines (`(X Sign and Text Strikethrough)`): `banner:"<text>"@<time>` on the spoken word. No captions, call-to-action text, B-roll or graphics that the script or the style did not ask for.
 
+## Subtitles (only when the user or the script asks for them)
+Add `#subs "<style name>" [y=68]` under the plan header and Zeno burns the spoken words in as the last step (an `.srt` is saved next to the video). The words are exactly what is said, Kannada in Kannada and English in English, shifted to the finished timeline, so there is nothing to translate and no tokens to spend. `y` is the caption's height as a percent of the frame (default 70): low enough to clear faces, high enough to clear the platform's buttons at the bottom; lower it to about 62 when a `banner:` stack is on screen. Captions go over splits too, across both panels.
+Eight styles are stored in `subtitles/styles.json`, each tested on real footage in Kannada, Malayalam and English. Pick by the mood of the video and vary them from job to job (the editor's recent looks are in the job reports); never pick one that is not in that file.
+
+| Style | Look | Use it for |
+|---|---|---|
+| Docu Split-Bar | dark bar, yellow accent, the spoken word lights up | the default for a clean, professional ad |
+| Frosted Lyric | frosted dark pill, glass highlight | calm teaching and drill scenes |
+| Glass Grey | plain dark rounded box | a very busy picture |
+| Blue Highlight | white bold text, blue box on the spoken word | everyday friendly default |
+| Gradient Badge | white bold text, gradient badge on the spoken word | app and product lines |
+| Cinema 35mm | yellow text, black outline | story scenes, film feel |
+| 3D Comic Slap | big uppercase, black outline, yellow spoken word | high-energy Meta hooks |
+| Sticker Cutout | one coloured sticker per word | comedy and the loudest hooks |
+
+Check the review sheet after the render: captions must not cover a face or a banner.
+
 ## plan.edl
 `zeno.py --inspect` writes the header; you add one line per segment, in script order:
 

@@ -738,6 +738,18 @@ def main() -> None:
     loud = float(plan.get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
     master_gain_db = float(plan.get("audio", {}).get("gain_db", 0.0) or 0.0)
     mix = WORK / "_segments" / "mix.mkv"
+    # Subtitles (only when the plan has `#subs <style>`): one image sequence of caption PNGs laid over the finished picture
+    try:
+        import subtitles
+        sub_list = subtitles.build_overlay(plan, segs, starts, total, W, H, WORK, srt_path=out_path.with_suffix(".srt"))
+    except Exception as exc:   # noqa: BLE001  (a subtitle problem never stops the video)
+        print(f"  [SUBS] could not build subtitles: {exc}")
+        sub_list = None
+    if sub_list:
+        inputs += ["-f", "concat", "-safe", "0", "-i", str(sub_list)]
+        fc.append(f"{v}[{n}:v]overlay=0:0:format=auto:eof_action=pass[vsub]")
+        v = "[vsub]"
+        n += 1
     fc.append(f"{v}null[vout]")
     fc.append(f"{au}anull[aout]")
     ffmpeg_encode(

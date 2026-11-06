@@ -1669,5 +1669,61 @@ class TestHookTransitionLimit(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class TestSubtitles(unittest.TestCase):
+    def setUp(self):
+        global subtitles, json
+        import json, subtitles
+
+    def test_styles_resolve_by_id_and_name(self):
+        self.assertEqual(subtitles.resolve_style(4)["name"], "Blue Highlight")
+        self.assertEqual(subtitles.resolve_style("docu split-bar")["id"], 28)
+        self.assertIsNone(subtitles.resolve_style("nope"))
+        self.assertEqual(len(subtitles.styles()), 8)
+        self.assertTrue(all(s.get("kind") and s.get("note") for s in subtitles.styles()))
+        self.assertTrue(all(s["fontFamily"] != "The Bold Font" for s in subtitles.styles()))
+
+    def test_cues_follow_the_cut_group_four_words_and_drop_stray_and_ghost_words(self):
+        from unittest.mock import patch
+        words = [{"w": "I'll", "start": 1.0, "end": 1.2}, {"w": "be", "start": 1.2, "end": 1.4}, {"w": "right", "start": 1.4, "end": 1.7},
+                 {"w": "back.", "start": 1.7, "end": 2.0}, {"w": "ಸರಿ", "start": 2.1, "end": 2.3},           # a word of the NEXT line
+                 {"w": "ghost", "start": 5.0, "end": 5.3},                                                  # nobody speaks here
+                 {"w": "later", "start": 9.0, "end": 9.4}]                                                  # outside the cut
+        lines = [{"id": "L6", "tokens": ["i'll", "be", "right", "back"]}, {"id": "L7", "tokens": ["ಸರಿ", "ಇತ್ತು"]}]
+        seg = {"id": "L6", "src": "S3.mp4", "start": 0.9, "end": 3.0}
+        with patch.object(subtitles, "_words_of_clip", return_value=words), patch.object(subtitles, "_speech_spans", return_value=[(0.9, 2.5)]):
+            cues = subtitles.build_cues([seg], [10.0], lines)
+        self.assertEqual(len(cues), 1)
+        self.assertEqual(cues[0]["text"], "I'll be right back.")
+        self.assertAlmostEqual(cues[0]["words"][0]["startTime"], 10.1, places=2)      # 1.0 in the clip, the cut starts at 0.9, the cut sits at 10.0 on the timeline
+
+    def test_long_turn_is_split_into_short_captions(self):
+        from unittest.mock import patch
+        words = [{"w": f"w{i}", "start": 1.0 + i * 0.3, "end": 1.0 + i * 0.3 + 0.25} for i in range(9)]
+        with patch.object(subtitles, "_words_of_clip", return_value=words), patch.object(subtitles, "_speech_spans", return_value=[]):
+            cues = subtitles.build_cues([{"id": "L1", "src": "a.mp4", "start": 0.0, "end": 5.0}], [0.0], [])
+        self.assertEqual([len(c["words"]) for c in cues], [4, 4, 1])
+
+    def test_concat_list_covers_the_whole_video_with_gaps_transparent(self):
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        frames = [{"path": str(d / "a.png"), "startMs": 1000, "durationMs": 500}, {"path": str(d / "b.png"), "startMs": 2000, "durationMs": 500}]
+        lst = subtitles.write_concat_list(frames, 4.0, 108, 192, d).read_text(encoding="utf-8")
+        durations = [float(x.split()[1]) for x in lst.splitlines() if x.startswith("duration")]
+        self.assertAlmostEqual(sum(durations), 4.0, places=2)
+        self.assertEqual(lst.count("blank.png"), 4)        # lead gap, middle gap, tail gap, and the repeated last file
+
+    def test_srt_text(self):
+        import tempfile
+        p = Path(tempfile.mkdtemp()) / "new_folder" / "a.srt"      # the job folder does not exist yet on a first render
+        subtitles.write_srt([{"startTime": 1.5, "endTime": 3.25, "text": "hello there"}], p)
+        self.assertIn("00:00:01,500 --> 00:00:03,250", p.read_text(encoding="utf-8"))
+
+    def test_plan_header_roundtrip(self):
+        import edl_parser
+        plan = edl_parser.parse_edl('#output x\n#subs "Hormozi Punch" y=68\n')
+        self.assertEqual(plan["subs"], {"style": "Hormozi Punch", "y": 68.0})
+        self.assertIn('#subs "Hormozi Punch" y=68', edl_parser.format_edl(plan))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

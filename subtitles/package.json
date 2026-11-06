@@ -1,0 +1,8 @@
+{
+  "name": "zeno-subtitles",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Caption PNG renderer for Zeno (adapted from Edit Flow AI caption-renderer.js)",
+  "license": "MIT",
+  "dependencies": { "canvas": "3.2.3" }
+}

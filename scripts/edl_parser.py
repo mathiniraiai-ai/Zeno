@@ -195,7 +195,7 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
 
         # 1. Check Header Directives
         if line.startswith("#"):
-            m_dir = re.match(r"^#\s*(output|script|style|src_dir|canvas|speakers|audio|preset|mark_pack|sfx_pack|concept_brief|characters|scene_\d+)\b\s*:?\s*(.*)$", line, re.I)
+            m_dir = re.match(r"^#\s*(output|script|style|subs|src_dir|canvas|speakers|audio|preset|mark_pack|sfx_pack|concept_brief|characters|scene_\d+)\b\s*:?\s*(.*)$", line, re.I)
             if not m_dir:
                 continue
             directive = m_dir.group(1).lower()
@@ -207,6 +207,18 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                 plan["script"] = _unquote(rest.split("|")[0].strip())
             elif directive == "style":
                 plan["style"] = re.sub(r"[^a-z0-9_-]", "", _unquote(rest.split("|")[0].strip()).lower())
+            elif directive == "subs":
+                # `#subs <style id or name> [y=70]`: burn-in subtitles in that style, caption centre at y percent of the frame height
+                toks = _tokenize_line(rest)
+                subs: Dict[str, Any] = {"style": "", "y": 70.0}
+                for tok in toks:
+                    m_y = re.match(r"^y=([0-9.]+)$", tok)
+                    if m_y:
+                        subs["y"] = float(m_y.group(1))
+                    elif not subs["style"]:
+                        subs["style"] = _unquote(tok)
+                if subs["style"]:
+                    plan["subs"] = subs
             elif directive == "src_dir":
                 src_dir = _unquote(rest.split("|")[0].strip())
             elif directive in ("concept_brief", "characters") or directive.startswith("scene_"):
@@ -605,6 +617,8 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
         lines.append(f"#script {_quote_if_needed(str(plan_dict['script']))}")
     if plan_dict.get("style"):
         lines.append(f"#style {plan_dict['style']}")
+    if isinstance(plan_dict.get("subs"), dict) and plan_dict["subs"].get("style"):
+        lines.append(f"#subs {_quote_if_needed(str(plan_dict['subs']['style']))} y={_fmt_num(float(plan_dict['subs'].get('y', 70.0)))}")
 
     segs = plan_dict.get("segments") or []
     src_dir = str(plan_dict.get("src_dir") or _detect_common_src_dir(segs))

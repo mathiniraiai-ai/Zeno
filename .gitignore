@@ -49,3 +49,4 @@ zeno_keys.db*
 
 # Owner dev copy marker: installers never move this folder
 .zeno-dev
+node_modules/
