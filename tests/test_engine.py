@@ -1590,5 +1590,54 @@ class TestFactsNoise(unittest.TestCase):
         self.assertFalse(prepare.clip_has_no_sound(wav, []))           # nothing measured: never assume silence
 
 
+class TestAdTempoAndCoverage(unittest.TestCase):
+    def setUp(self):
+        global json, script_order
+        import json, script_order
+    def _segs(self, n, moving, transition_every=0):
+        segs = []
+        for i in range(n):
+            seg = {"id": f"L{i + 1}", "src": "S1.mp4", "start": 0.0, "end": 4.0, "layout": "single", "zoom": 1.0}
+            if moving:
+                seg.update({"zoom": 1.08, "zoom_style": "sudden_in" if i % 2 == 0 else "sudden_out"})
+            if transition_every and i and i % transition_every == 0:
+                seg["transition"] = "whip_left"
+            segs.append(seg)
+        return {"segments": segs, "canvas": {"fps": 25}, "sfx": []}
+
+    def test_flat_live_conversation_gets_advice_for_meta_ads(self):
+        out = script_order.style_report(self._segs(10, moving=False))
+        self.assertTrue(any("Meta ad" in x and "move" in x for x in out))
+        self.assertTrue(any("transition" in x for x in out))
+
+    def test_lively_live_conversation_gets_no_tempo_advice(self):
+        out = script_order.style_report(self._segs(10, moving=True, transition_every=3))
+        self.assertFalse(any("Meta ad" in x for x in out), out)
+        self.assertFalse(any("transition(s)" in x for x in out), out)
+
+    def test_splits_are_not_asked_to_move(self):
+        plan = self._segs(10, moving=False)
+        for s in plan["segments"]:
+            s["layout"] = "split_h"
+        self.assertEqual([x for x in script_order.style_report(plan) if "Meta ad" in x or "transition(s)" in x], [])
+
+    def test_coverage_accepts_decided_lines_and_ignores_a_word_straddling_a_cut(self):
+        import tempfile
+        from unittest.mock import patch
+        import verify
+        wd = Path(tempfile.mkdtemp())
+        (wd / "words.json").write_text(json.dumps([
+            {"w": "hello", "start": 0.5, "end": 1.0}, {"w": "ghost", "start": 2.1, "end": 2.7}, {"w": "friend", "start": 2.8, "end": 3.2}]), encoding="utf-8")
+        plan_dir = Path(tempfile.mkdtemp())
+        (plan_dir / "decisions.txt").write_text("accept L1 visual brief, not spoken\n", encoding="utf-8")
+        lines = [{"id": "L1", "tokens": ["inside", "an", "airplane", "cabin"]}, {"id": "L2", "tokens": ["hello", "ghost"]}, {"id": "L3", "tokens": ["friend"]}]
+        plan = {"_plan_dir": str(plan_dir), "segments": [
+            {"id": "L2", "src": "a.mp4", "start": 0.4, "end": 2.3, "note": ""},
+            {"id": "L3", "src": "a.mp4", "start": 2.4, "end": 3.3, "note": ""}]}
+        with patch.object(verify, "clip_work_dir", return_value=wd), patch.object(verify, "parse_script_file", return_value=({}, lines)):
+            ok, covered, total, dups = verify.check_script_coverage(plan, script_path=wd / "words.json")
+        self.assertEqual((covered, total, dups), (3, 3, 0))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,6 +1,6 @@
 {
   "style": "micronarrative",
-  "updated_at": "2026-11-04",
+  "updated_at": "2026-11-06",
   "rules": [
     {
       "id": "HOOK_FIRST_ZOOM_IN",
@@ -10,12 +10,12 @@
     {
       "id": "SUPERNOVA_AND_KEYPOINT_ZOOM_IN",
       "category": "zoom",
-      "rule": "In single-character live shots (layout=single), trigger a sudden zoom-in (sudden_in:1.08@<word_t>) on Supernova callouts or strong value points ([STRESS] vocal peak words), and pair follow-up beats with sudden_out:1.08 or smooth 1.0->1.06."
+      "rule": "In full-frame live shots (layout=single, in-frame two-shots included), trigger a sudden zoom-in (sudden_in:1.08@<word_t>) on Supernova callouts or strong value points ([STRESS] vocal peak words), aimed at the speaker, and let go with sudden_out:1.08 or a smooth 1.0->1.06 on the next cut."
     },
     {
       "id": "HOOK_CLIP_TRANSITIONS_1_TO_2",
       "category": "transitions",
-      "rule": "Place 1 to 2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside a single-character hook or at Scene N boundaries; keep intra-clip and intra-scene splits as clean jump cuts (tr=cut, zero whoosh spam)."
+      "rule": "Place 1 to 2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside a single-character hook or at Scene N boundaries. In a full-frame live conversation made for Meta ads, use a crisp transition about every 14 s (whip, slide_up, zoom_burst on a reveal); inside a split keep clean cuts (tr=cut, no whoosh between turns)."
     },
     {
       "id": "SPLIT_SCREEN_100_STATIC",
@@ -30,7 +30,7 @@
     {
       "id": "ACTOR_READINESS_ANTI_FREEZE",
       "category": "cutting",
-      "rule": "Trim the actor's getting-ready stare before the first word and the freeze after the last: start 0.06-0.10 s before the first kept word and end 0.08-0.12 s after the last; the `speech` spans in facts.md show where speech really starts and stops."
+      "rule": "Respect [FACE_READY] bounds to trim pre-speech 'actor getting ready' stares and post-speech 'end-of-take freeze' frames."
     },
     {
       "id": "TOP_PIP_FLOATING_RECTANGLE_WINDOW",
@@ -41,6 +41,36 @@
       "id": "INTERLEAVED_MULTITURN_AND_HEAD_REPEAT_CUTS",
       "category": "cutting",
       "rule": "When single-character clips (e.g. R1.mp4, M1.mp4, M2.mp4) contain multiple alternating dialogue turns separated by silent listening gaps, split them at each inter-turn silence midpoint to interleave with the partner's turns, and trim false-start head repeats (e.g. R2.mp4 0.00-1.02s)."
+    },
+    {
+      "id": "rule_304cc075ab3a1135",
+      "category": "audio_mux",
+      "rule": "When a folder contains both <stem>.mp4 (listening actor video) and <stem>VO.mp4 (phone-partner voiceover audio), mux <stem>.mp4 video (0:v:0) with <stem>VO.mp4 audio (1:a:0) and transfer <stem>VO's word timestamps so the phone reaction shot plays with clean voiceover audio."
+    },
+    {
+      "id": "TWO_SHOT_AND_HOLOGRAM_ZOOM_LOCK",
+      "category": "zoom",
+      "rule": "Lock zoom=1.0 (no sudden_in:1.08, sudden_out, or PACING_PASS 1.0->1.06) on all multi-speaker (len(spk_list) >= 2) and two-shot / galley / hologram scenes (Scene 2 & Scene 3) so characters framed near the left/right edges are never cropped."
+    },
+    {
+      "id": "MULTI_SPEAKER_SINGLE_CLIP_TURN_PRESERVATION",
+      "category": "alignment",
+      "rule": "When an 8s-10s AI clip contains the tail of Speaker A's line + Speaker B's short question + the head of Speaker A's next line, _match_sequence must match all covered lines without early continue, and apply_speaker_check must never amputate legitimate second-speaker turns."
+    },
+    {
+      "id": "STATIONARY_NOISE_VS_ONE_WORD_LINE_BEAT_GUARD",
+      "category": "cutting",
+      "rule": "Treat clips with stationary ambient noise (rms_p90 - rms_p50 <= 4.2 dB and active_frac >= 0.90) as silent beat clips (_is_silent=True, clearing any LLM-echoed words), while never misclassifying 1-2 word spoken script lines (e.g. 'Whatever!') as silent beats."
+    },
+    {
+      "id": "RAW_COLORS_AND_SYNC_LOCK",
+      "category": "color_audio",
+      "rule": "Keep color_match OFF (false) by default so raw clip colours are never altered, and never apply J/L audio-video offsets unless explicitly requested."
+    },
+    {
+      "id": "rule_60aba46b87d5aac9",
+      "category": "transitions",
+      "rule": "Place 1 to 2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside a single-character hook; keep intra-clip splits as clean jump cuts (tr=cut, zero whoosh spam)."
     }
   ]
 }

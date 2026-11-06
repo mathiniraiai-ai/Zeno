@@ -28,7 +28,7 @@ The reference videos this style was learned from used **no digital zoom and no e
 
 - **The Director analyses the script first** and writes `work/<project>/script_analysis.md`: per spoken line the emotion (with intensity 1 to 3), the beat, the zoom kind and the effect sound, with at most 3 PEAK moments in the whole video. The full method, the emotion-to-zoom table (rapid and slow zooms, where on the word) and the effect-sound table with exact timing are in [`agent/EDIT_RULES.md`](../../agent/EDIT_RULES.md) -> "Emotion plan", "Zoom" and "Sound effects".
 - **Values for this style (starting points, tune from the owner's feedback):** rapid zoom `1.08` (one `flash_zoom 1.12` at most), slow push `1.04` to `1.06`, closing call to action `1.05`; at most 8 rapid zooms a minute and never two in a row; at least a quarter of the single-speaker cuts stand still.
-- **Splits, two-shots and holograms stay still** (`z=1`). Their energy comes from the cut and the effect.
+- **Splits and holograms stay still** (`z=1`); their energy comes from the cut and the effect. The full-frame live conversation, two-shots of live actors included, is for Meta ads and moves more: see "Ad tempo for Meta ads" in `EDIT_RULES.md`.
 - The library has no laugh, gasp, heartbeat or sad sting. Use the footage's own sound or a short silence, or ask the owner for licensed files.
 
 ---
@@ -79,7 +79,7 @@ Always check how the raw footage was generated before assigning layouts in `plan
 - **How the raw clips look**: Portrait `9:16` (`720×1280`) clips where Scene 1 uses single/OTS shots, Scene 2 frames two characters side-by-side in a galley/room two-shot, and Scene 3 features Miss Nova's 3D hologram popping out of a phone in-frame with the learner.
 - **How Zeno edits them**:
   - Keep **`layout=single`** across all scenes.
-  - Lock **`zoom=1.0`** on all Scene 2 and Scene 3 two-shots and hologram shots so characters near the left/right frame edges and the glowing 3D hologram are never cropped.
+  - Lock **`zoom=1.0`** on hologram shots and on any two-shot whose faces sit near the left or right frame edge, so no one and no part of the 3D hologram is cropped. Other live two-shots may zoom up to `1.10` aimed at the speaker (`focus=`).
   - Preserve visual action beats (e.g., opening seat-recline/spill hook, silent embarrassment beat `L6`, and the 2.5s hologram pop-out tail at the end of Scene 2).
 
 ### Mode D — Top-Center Rounded-Rectangle Floating Window (`top_pip` — Subtopic `1.1` / `3.1`)
@@ -102,7 +102,7 @@ Always check how the raw footage was generated before assigning layouts in `plan
    - If separate HeyGen clips: `layout=split_h` / `split_v` with `peer=` compositing, `zoom=1.0`.
 3. **Where to Zoom vs. Where NOT to Zoom**:
    - **NO Zoom / NO Zoom-Out (`zoom=1.0`)**:
-     - **Never** put zoom-ins or zoom-outs on **pre-stitched split-screen clips**, **in-frame two-shots**, or **3D hologram two-shots**.
+     - **Never** put zoom-ins or zoom-outs on **pre-stitched split-screen clips**, **3D hologram shots** or two-shots with faces at the frame edge.
      - **Never** put zoom on clips that already have camera movement (detected automatically by OpenCV `detect_static_camera_motion()`).
    - **Where to Apply Zoom**:
      - Apply zoom **only** on static single-speaker close-ups/mid-shots in Scene 1 or single-speaker turns when needed:

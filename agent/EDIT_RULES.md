@@ -25,9 +25,9 @@ One line per spoken line:
 - **emotion:** neutral, curious, joy/excited, confident, surprised/shock, tense/worried, frustrated/angry, embarrassed, sad/lonely, relieved, proud/success, with an **intensity 1 to 3**. **beat:** hook, problem, mistake, correction, reveal, tip, demo, proof, reaction, CTA.
 - Read the emotion from the script (stage directions in parentheses, `[ ]` notes, punctuation, capitals, the scene's visual notes), then from the voice (`emphasis` words) and the face (clip sheet).
 - Mark at most three PEAK moments in the whole video: about one per 25 to 30 seconds, so two or three in a 60 to 90 second video. Peaks get the strongest treatment (a rapid zoom and an effect); other lines get less or nothing. A line with no real emotion is `neutral`, no zoom, no effect.
-- Splits, two-shots and holograms cannot zoom, so their peaks are carried by the cut and the effect. Say so in the analysis when the peaks sit there.
+- Splits and holograms cannot zoom, so their peaks are carried by the cut and the effect. Say so in the analysis when the peaks sit there. In the full-frame live conversation (including in-frame two-shots) peaks get the zoom as well.
 
-## Zoom: emotion decides the kind (a single static speaker only)
+## Zoom: emotion decides the kind (full-frame live conversation; never a split)
 A rapid zoom is a snap on a word; a slow zoom is a push or a pull over the whole cut. These are a style choice added by the owner, not measured from the reference videos (which had no zoom).
 
 | Emotion or beat | Zoom | Syntax |
@@ -45,9 +45,17 @@ A rapid zoom is a snap on a word; a slow zoom is a push or a pull over the whole
 
 - A rapid zoom starts **0.05 s before the stressed word** so the snap lands on it: `@<word start - cut start - 0.05>`. Take the word from `emphasis` or from the script's key word. The snap takes about 0.18 s, then the picture holds.
 - A slow zoom runs over the whole cut, so the beat needs a cut of 2 s or more. A slow push into a rapid zoom on one cut is the strongest build; keep it for a peak.
-- Starting limits: at most 8 rapid zooms a minute and never two in a row; at least a quarter of the single-speaker cuts have no animated zoom (a fixed crop such as `z=1.08` counts as still) so the zooms mean something; the first cut of a hook usually opens with a rapid zoom on its first strong word; `z=1.08` fixed on the second half of a same-clip jump cut hides the jump.
-- Do not zoom a split screen, a two-shot, a hologram, a pre-stitched split or a clip with deliberate camera movement such as a pan or a dolly (`z=1`); ordinary handheld shake, as in a selfie clip, is fine to zoom. The renderer holds splits still and verify fails a moving split.
+- Starting limits: at most 16 rapid zooms a minute of live conversation and never two zoom-ins in a row (a zoom-in followed by a zoom-out is the pattern); at least a quarter of the single-speaker cuts have no animated zoom (a fixed crop such as `z=1.08` counts as still) so the zooms mean something; the first cut of a hook usually opens with a rapid zoom on its first strong word; `z=1.08` fixed on the second half of a same-clip jump cut hides the jump.
+- Do not zoom a split screen (`split_h`, `split_v`, `top_pip`), a hologram, a split already baked into one clip, or a clip with deliberate camera movement such as a pan or a dolly (`z=1`); ordinary handheld shake, as in a selfie clip, is fine to zoom. The renderer holds splits still and verify fails a moving split. An in-frame two-shot of live actors in the full-frame conversation may zoom (owner decision, Meta ads): aim it at the speaker with `focus=x,y` (the speaker's side of the frame, from the clip sheet), keep it to `1.10` or less so both faces stay inside the frame, and look at the review sheet for cropped faces.
 - `focus=x,y` from `facts.md` keeps the eyes in place while zooming.
+
+## Ad tempo for Meta ads (the full-frame live conversation; the split stays still)
+The video is a Meta ad, so the live part before a split has to keep moving. Start from these and tune them from the owner's feedback; a still, calm cut is still right where the emotion is quiet.
+- **Most live cuts move:** at least 60% of them carry a zoom or open with a transition, and at least a quarter stay still so the moves mean something. The check prints `[STYLE]` advice when the live part is flatter than this.
+- **Breathe in and out:** zoom in on the stressed word of a line (`z=sudden_in:1.06 to 1.10@<t>`), then let go on the next speaker's cut (`z=sudden_out:1.08@0.10` or `z=1.08->1`). Alternate the directions and vary the strength between `1.05` and `1.10`. A cut of 3 s or more can take a slow push or pull (`z=1->1.05`, `z=1.06->1`) that ends in a rapid zoom on its last stressed word.
+- **A crisp transition about every 14 s** across clip changes: `whip_left` / `whip_right` (alternate the sides), `slide_up` for a move in time or place, `zoom_burst` on a reveal, `dip_to_black` only for a real time jump. A whoosh attaches to the kinetic ones by itself. Keep the straight cut for a fast back-and-forth between two speakers, which already feels quick.
+- **Sound on the moves:** one effect per beat, on most zooms and transitions, varied so it does not repeat (`pop.wav` on a rapid zoom, `sn_swish_1.wav` on a soft whip, `click.wav` on a phone or screen beat, `sn_punch_1.wav` on a shock, a riser into the big reveal), gain -12 to -6 dB, always under the voice. A transition and an emotion effect on the same join: keep the strongest.
+- **Never in the split.** Say in the plan summary which tempo you used and where the live part is deliberately calm.
 
 ## Sound effects (library `assets/sfx`; `sfx:<file>@<t>/<gain dB>`, `t` relative to the cut)
 One effect per beat at most, under the voice (gain -12 to -4 dB, never above 0), never on a listener-only moment. Timing uses each file's measured loudest point.
@@ -80,7 +88,8 @@ One effect per beat at most, under the voice (gain -12 to -4 dB, never above 0),
 | Situation | Layout |
 |---|---|
 | One person talking: hook, teaching line, two people in one frame | `single` (default) |
-| A clip that already is a split or a hologram (`shot_type` baked/two_shot, or the sheet) | `single`, `z=1` |
+| A clip that already is a split or a hologram (the sheet shows it) | `single`, `z=1` |
+| An ordinary two-shot of live actors (`shot_type=two_shot`, both in one scene) | `single`, may zoom (see Ad tempo) |
 | Two characters in separate clips | `split_h` (left/right) or `split_v` (top/bottom) |
 | The script names a floating window, a split or a call | follow the script |
 | A language drill "How to say X?" | `chat_bar` with `chat:` |

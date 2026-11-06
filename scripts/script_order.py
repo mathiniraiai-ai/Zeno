@@ -31,7 +31,9 @@ STRONG = 0.55         # evidence needed to call a segment out of order from its 
 TIGHT_JOIN_SEC = 0.25     # silence across a join (end of one cut + start of the next) above this is reported
 TIGHT_PAUSE_SEC = 0.30    # a pause between two words inside one cut above this is reported
 RAPID_ZOOM_STYLES = ('sudden_in', 'flash_zoom')
-MAX_RAPID_PER_MIN = 8        # starting value for the emotion plan; tune from the owner's feedback
+MAX_RAPID_PER_MIN = 16       # rapid zooms a minute of full-frame live conversation (Meta-ad tempo, owner decision 2026-11-06); splits never zoom
+AD_MIN_MOVING_SHARE = 0.60   # of the live conversation's cuts, at least this share should move (a zoom, or a transition into the cut)
+AD_SECONDS_PER_TRANSITION = 14.0  # aim for a crisp transition about this often in the live conversation
 MIN_STILL_SHARE = 0.25       # at least this share of single-speaker cuts should not move, so a zoom means something
 SNAP_REACH_SEC = 0.12   # a cut may move at most this far to reach a quiet point
 REPEAT_RECALL = 0.8   # two separate segments that each hold this much of a line say it twice
@@ -516,6 +518,7 @@ def style_report(plan: Dict[str, Any], work_dir: Optional[Path] = None) -> List[
     total = sum(float(s["end"]) - float(s["start"]) for s in segs) or 1.0
     rapid, flash, singles, still = [], 0, 0, 0
     prev_rapid = False
+    live_total, live_cuts, live_moving, live_trans = 0.0, 0, 0, 0
     for s in segs:
         lay = str(s.get("layout") or "single").lower()
         style = str(s.get("zoom_style") or "")
@@ -525,6 +528,12 @@ def style_report(plan: Dict[str, Any], work_dir: Optional[Path] = None) -> List[
         if lay in ("split_h", "split_v", "top_pip") and moves:
             out.append(f"{s.get('id')}: zoom on a {lay} cut is ignored (splits stay still)")
         if lay == "single":
+            live_total += dur
+            has_tr = bool(s.get("transition")) and str(s.get("transition")) != "cut"
+            live_trans += 1 if has_tr else 0
+            if dur >= 1.0:
+                live_cuts += 1
+                live_moving += 1 if (moves or has_tr) else 0
             if dur >= 1.5:
                 singles += 1
                 still += 0 if moves else 1
@@ -540,9 +549,15 @@ def style_report(plan: Dict[str, Any], work_dir: Optional[Path] = None) -> List[
             prev_rapid = False
     if flash > 1:
         out.append(f"{flash} flash zooms: keep it to the single biggest beat of the video")
-    per_min = len(rapid) / (total / 60.0)
+    per_min = len(rapid) / (max(live_total, 1.0) / 60.0)
     if per_min > MAX_RAPID_PER_MIN:
-        out.append(f"{len(rapid)} rapid zooms in {total:.0f}s ({per_min:.1f} a minute; starting limit {MAX_RAPID_PER_MIN}): keep the rapid ones for the peak beats")
+        out.append(f"{len(rapid)} rapid zooms in {live_total:.0f}s of live conversation ({per_min:.1f} a minute; starting limit {MAX_RAPID_PER_MIN}): thin them out so the peaks still stand out")
+    if live_total >= 25.0 and live_cuts >= 5:
+        if live_moving / live_cuts < AD_MIN_MOVING_SHARE:
+            out.append(f"only {live_moving} of {live_cuts} live cuts move (a zoom or a transition): this is for a Meta ad, so aim for at least {int(AD_MIN_MOVING_SHARE * 100)}% (rapid zoom in on a stressed word, slow push or pull on longer cuts, a zoom out on release)")
+        want = int(live_total // AD_SECONDS_PER_TRANSITION)
+        if live_trans < want:
+            out.append(f"{live_trans} transition(s) in {live_total:.0f}s of live conversation: for a Meta ad aim for about {want} (whip_left/whip_right across clip changes, slide_up, zoom_burst on a reveal)")
     if singles >= 4 and still / singles < MIN_STILL_SHARE:
         out.append(f"only {still} of {singles} single-speaker cuts stand still (aim for at least {int(MIN_STILL_SHARE * 100)}%): stillness is what gives a zoom its weight")
     ids = {str(s.get("id")): s for s in segs}

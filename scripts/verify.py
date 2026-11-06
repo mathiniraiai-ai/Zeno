@@ -278,6 +278,7 @@ def check_script_coverage(
 
     segs = plan.get("segments", [])
     seg_word_slices: List[List[str]] = []
+    seg_word_keys: List[List[Tuple[str, float]]] = []   # (clip, start time) of each kept word: the same transcript word on both sides of a cut is not said twice
     boundary_dups = 0
 
     for s in segs:
@@ -300,8 +301,10 @@ def check_script_coverage(
                         break
                 except Exception:
                     pass
-        toks = [_clean_token(w.get("w") or w.get("word", "")) for w in words if _clean_token(w.get("w") or w.get("word", ""))]
+        kept = [w for w in words if _clean_token(w.get("w") or w.get("word", ""))]
+        toks = [_clean_token(w.get("w") or w.get("word", "")) for w in kept]
         seg_word_slices.append(toks)
+        seg_word_keys.append([(stem, round(float(w.get("start", 0.0)), 3)) for w in kept])
 
     # Check intra-segment consecutive repeated words/phrases not in script (e.g. "Almost, almost")
     script_text_all = " ".join(" ".join(sl.get("tokens", [])) for sl in script_lines).lower()
@@ -319,7 +322,8 @@ def check_script_coverage(
             w_first = seg_word_slices[i + 1][0]
             if len(w_last) >= 3 and _word_similarity(w_last, w_first) >= 0.85:
                 pair_str = f"{w_last} {w_first}"
-                if pair_str not in script_text_all:
+                same_word = seg_word_keys[i][-1] == seg_word_keys[i + 1][0]   # one transcript word straddling the cut (a mistimed ghost word)
+                if pair_str not in script_text_all and not same_word:
                     boundary_dups += 1
 
     if not script_lines:
@@ -330,9 +334,18 @@ def check_script_coverage(
 
     covered = 0
     last_seg_idx = 0
+    try:
+        import script_order as _so
+
+        accepted = set(_so.read_accepted(Path(plan["_plan_dir"]))) if plan.get("_plan_dir") else set()
+    except Exception:   # noqa: BLE001
+        accepted = set()
     for sline in script_lines:
         lid = sline["id"]
         stokens = sline["tokens"]
+        if lid in accepted:     # a deliberate exception in decisions.txt (a visual brief, a scene cue): the plan check already accepted it
+            covered += 1
+            continue
         # Check if line ID is explicitly covered in segment IDs/notes in order OR token overlap >= 0.35
         matched_seg = None
         for idx in range(last_seg_idx, len(segs)):
