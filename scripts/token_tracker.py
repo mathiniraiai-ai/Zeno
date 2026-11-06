@@ -57,10 +57,13 @@ def claude_window_usage(lines: List[str], cutoff: float, ceiling: float) -> Opti
     """Exact token sums of the assistant turns of one Claude Code transcript that fall inside [cutoff, ceiling]: fresh input, cache writes, cache
     reads and output, each summed over every turn (the old report took the last turn's cache and the growth of the context). It also notes whether the
     window holds work on Zeno's own code, in which case the number is not the cost of one edit."""
-    turns: List[Tuple[float, Dict[str, Any]]] = []
+    # Claude Code writes one log line per content block of a response (each parallel tool call is its own line) and every line repeats that response's
+    # usage, so lines are grouped by message id and each response is counted once, taking the largest value of each field.
+    by_id: Dict[str, Tuple[float, Dict[str, int]]] = {}
+    order: List[str] = []
     code_edits = 0
     model_name = "Claude Sonnet 5.5"
-    for line in lines:
+    for n, line in enumerate(lines):
         if not line.strip():
             continue
         d = json.loads(line)
@@ -75,16 +78,24 @@ def claude_window_usage(lines: List[str], cutoff: float, ceiling: float) -> Opti
             continue
         if msg.get("model"):
             model_name = str(msg["model"])
-        turns.append((ts, u))
+        mid = str(msg.get("id") or f"line{n}")
+        cur = by_id.get(mid)
+        if cur is None:
+            by_id[mid] = (ts, {k: int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")})
+            order.append(mid)
+        else:
+            for k in cur[1]:
+                cur[1][k] = max(cur[1][k], int(u.get(k) or 0))
         for blk in msg.get("content") or []:
             if isinstance(blk, dict) and blk.get("type") == "tool_use" and blk.get("name") in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
                 path = str((blk.get("input") or {}).get("file_path") or "").replace("\\", "/")
                 if any(h in path for h in CODE_PATH_HINTS) or path.endswith(".py"):
                     code_edits += 1
             elif isinstance(blk, dict) and blk.get("type") == "tool_use" and blk.get("name") == "Bash":
-                cmd = str((blk.get("input") or {}).get("command") or "")      # code changed through the shell: a commit, a push, an in-place edit, a script that writes files
+                cmd = str((blk.get("input") or {}).get("command") or "").replace("scripts/zeno.py", "")      # running Zeno is the edit; changing code through the shell (a commit, a push, an in-place edit, a script that writes files) is development
                 if any(w in cmd for w in ("git commit", "git push", "sed -i", ".write_text(", "unittest")) and (any(h in cmd for h in CODE_PATH_HINTS) or ".py" in cmd):
                     code_edits += 1
+    turns = [by_id[m] for m in order]
     if not turns:
         return None
     g = lambda u, k: int(u.get(k) or 0)   # noqa: E731

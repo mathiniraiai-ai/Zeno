@@ -1811,6 +1811,16 @@ class TestExactTokenCount(unittest.TestCase):
         self.assertEqual(got["total_tokens"], 2030)
         self.assertEqual((got["turns"], got["window_minutes"], got["mixed_with_development"]), (2, 5.0, False))
 
+    def test_one_response_logged_as_several_lines_is_counted_once(self):
+        import token_tracker
+        t0 = token_tracker._iso_to_epoch("2026-11-06T10:00:00Z")
+        def line(mid, ts, out):
+            return json.dumps({"type": "assistant", "timestamp": ts, "message": {"id": mid, "model": "m", "usage": {"input_tokens": 5, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 1000, "output_tokens": out}, "content": []}})
+        lines = [line("msg_A", "2026-11-06T10:00:00Z", 40), line("msg_A", "2026-11-06T10:00:01Z", 40), line("msg_A", "2026-11-06T10:00:02Z", 40),     # three parallel tool calls
+                 line("msg_B", "2026-11-06T10:01:00Z", 10)]
+        got = token_tracker.claude_window_usage(lines, t0 - 1, t0 + 600)
+        self.assertEqual((got["turns"], got["input_tokens"], got["cache_write_tokens"], got["cached_tokens"], got["output_tokens"]), (2, 210, 200, 2000, 50))
+
     def test_code_work_in_the_window_is_flagged(self):
         import token_tracker
         t0 = token_tracker._iso_to_epoch("2026-11-06T10:00:00Z")
@@ -1820,7 +1830,7 @@ class TestExactTokenCount(unittest.TestCase):
         self.assertTrue(got["mixed_with_development"])
         self.assertIsNone(token_tracker.claude_window_usage(lines, t0 + 100, t0 + 200))
         shell = [json.dumps({"type": "assistant", "timestamp": "2026-11-06T10:00:00Z", "message": {"usage": {"output_tokens": 1}, "content": [
-            {"type": "tool_use", "name": "Bash", "input": {"command": "python3 scripts/zeno.py --check-plan work/p/plan.edl"}},
+            {"type": "tool_use", "name": "Bash", "input": {"command": "cd Zeno && python3 scripts/zeno.py --check-plan work/p/plan.edl && python3 - <<EOF\nPath('work/p/plan.edl').write_text(t)\nEOF"}},
             {"type": "tool_use", "name": "Bash", "input": {"command": "git commit -m x && python3 -m unittest tests/test_engine.py"}}]}})]
         self.assertEqual(token_tracker.claude_window_usage(shell, t0 - 1, t0 + 60)["code_edits"], 1)       # running Zeno is the edit; committing code is development
 
