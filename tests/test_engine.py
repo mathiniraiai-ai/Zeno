@@ -1652,5 +1652,22 @@ class TestSafeZoomFocus(unittest.TestCase):
         self.assertIsNone(prepare.safe_zoom_focus([], 1.08))
 
 
+class TestHookTransitionLimit(unittest.TestCase):
+    def _plan(self, n_cuts, cut_secs, trans):
+        segs = [{"id": f"L{i}", "src": "a.mp4", "start": 0.0, "end": cut_secs, "layout": "single", "zoom": 1.0,
+                 "transition": "whip_left" if i in trans else "cut"} for i in range(n_cuts)]
+        return {"segments": segs, "sfx": []}
+
+    def test_limit_grows_with_the_live_conversation(self):
+        ok, msg = verify.check_split_and_hook_rules(self._plan(10, 5.0, {2, 4, 6, 8}))      # 50 s, 4 transitions
+        self.assertTrue(ok, msg)
+        ok, msg = verify.check_split_and_hook_rules(self._plan(10, 5.0, {1, 2, 3, 4, 5, 6, 7, 8, 9}))   # 9 in 50 s is too many
+        self.assertFalse(ok)
+        ok, msg = verify.check_split_and_hook_rules(self._plan(3, 4.0, {1, 2}))             # a 12 s hook still allows two
+        self.assertTrue(ok, msg)
+        ok, msg = verify.check_split_and_hook_rules(self._plan(4, 3.0, {1, 2, 3}))          # three in 12 s is too many
+        self.assertFalse(ok)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

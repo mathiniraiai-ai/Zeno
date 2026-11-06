@@ -556,6 +556,7 @@ def check_split_and_hook_rules(plan: Dict[str, Any]) -> Tuple[bool, str]:
     split_segs = 0
     split_violations: List[str] = []
     hook_transitions = 0
+    hook_secs = 0.0
     in_initial_hook = True
     common_hr_val: Optional[float] = None
 
@@ -573,6 +574,8 @@ def check_split_and_hook_rules(plan: Dict[str, Any]) -> Tuple[bool, str]:
         if lay != "single":
             in_initial_hook = False
 
+        if in_initial_hook:
+            hook_secs += max(0.0, float(s.get("end", 0.0)) - float(s.get("start", 0.0)))
         if in_initial_hook and i > 0 and tr != "cut":
             hook_transitions += 1
 
@@ -600,8 +603,10 @@ def check_split_and_hook_rules(plan: Dict[str, Any]) -> Tuple[bool, str]:
                     else:
                         common_hr_val = float(c_live["common_headroom_pct"])
 
-    if hook_transitions > 2:
-        split_violations.append(f"hook_transitions={hook_transitions}(>2)")
+    # The live conversation before a split is a Meta ad: a crisp transition about every 10 s is the ceiling (at least 2 are always fine).
+    max_hook_transitions = max(2, int(round(hook_secs / 10.0)))
+    if hook_transitions > max_hook_transitions:
+        split_violations.append(f"hook_transitions={hook_transitions}(>{max_hook_transitions})")
 
     ok = len(split_violations) == 0
     hr_str = f", common headroom {common_hr_val:.1f}%" if common_hr_val is not None else ""
