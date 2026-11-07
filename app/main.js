@@ -38,7 +38,7 @@ function createWindow() {
   nativeTheme.themeSource = 'dark';
   const size = (arg('size') || '1240x800').split('x').map(Number);
   const win = new BrowserWindow({
-    width: size[0], height: size[1], minWidth: 980, minHeight: 640, backgroundColor: '#141618', show: !arg('screenshot'),
+    width: size[0], height: size[1], minWidth: 980, minHeight: 640, backgroundColor: '#000000', show: !arg('screenshot'),
     titleBarStyle: IS_MAC ? 'hiddenInset' : 'default', trafficLightPosition: { x: 16, y: 16 }, title: 'Zeno',
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: false },
   });
