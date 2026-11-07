@@ -151,3 +151,11 @@ body.dragging { cursor: grabbing; } body.dragging * { pointer-events: none; } bo
 .lt .cl { position: absolute; top: 0; line-height: 15px; font: 8.5px var(--mono); color: var(--muted); white-space: nowrap; }
 .tall .lt .cl { top: 50%; transform: translateY(-50%); line-height: 1; }
 .seg.blk b { color: #0a0a0a; font-weight: 700; right: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* render question */
+.askbtn { margin-left: auto; margin-right: 10px; background: var(--green); color: #0A0A0A; border: 0; border-radius: 999px; padding: 3px 13px; font-weight: 600; font-size: 11.5px; } .askbtn:hover { background: #cddb85; }
+#ask { position: fixed; inset: 0; background: rgba(0,0,0,.62); display: flex; align-items: center; justify-content: center; z-index: 50; }
+.askcard { width: 360px; background: var(--panel2); border: 1px solid var(--line2); border-radius: 14px; padding: 20px 22px; box-shadow: 0 20px 60px rgba(0,0,0,.6); display: flex; flex-direction: column; gap: 12px; }
+.askcard h3 { margin: 0; font-size: 16px; } .askrows { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; font-size: 13px; color: var(--muted); } .askrows b { color: var(--green); font-size: 15px; margin-right: 3px; }
+.askact { display: flex; gap: 10px; justify-content: flex-end; margin-top: 4px; } .askno { background: transparent; border: 1px solid var(--line2); border-radius: 8px; padding: 8px 14px; color: var(--muted); } .askyes { width: auto; padding: 8px 20px; }
+.top { display: flex; align-items: center; }

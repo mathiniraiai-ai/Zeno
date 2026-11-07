@@ -71,6 +71,16 @@ app.whenReady().then(() => {
     else spawn('x-terminal-emulator', ['-e', 'bash', path.join(ROOT, 'edit.command')], { detached: true, stdio: 'ignore' }).unref();
     return true;
   });
+  // the editor's Yes: render the approved plan (reel and square) in the background; the app then follows it live
+  ipcMain.handle('zeno:render', (_e, name, planFile) => {
+    if (!ROOT || !/^[\w.\-]+$/.test(String(name)) || !/^[\w.\-]+\.edl$/.test(String(planFile))) return { ok: false, text: 'Not a valid job.' };
+    const plan = path.join(ROOT, 'work', String(name), String(planFile));
+    if (!fs.existsSync(plan)) return { ok: false, text: 'The plan file is missing.' };
+    const log = fs.openSync(path.join(ROOT, 'work', String(name), '_render.log'), 'a');
+    const child = spawn(pythonFor(ROOT), [path.join(ROOT, 'scripts', 'zeno.py'), '--execute', plan, '--square'], { cwd: ROOT, detached: true, stdio: ['ignore', log, log], env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
+    child.unref();
+    return { ok: true };
+  });
   ipcMain.handle('zeno:update', () => new Promise((resolve) => {
     if (!ROOT) return resolve({ ok: false, text: 'Zeno folder not found' });
     const code = "import sys;sys.path.insert(0,'scripts');import auto_updater;print(auto_updater.ensure_latest_update(force=True,quiet=True))";

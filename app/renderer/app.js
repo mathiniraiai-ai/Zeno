@@ -7,7 +7,7 @@ const mmss = (s) => { s = Math.round(s || 0); return `${Math.floor(s / 60)}:${St
 const hms = (t) => new Date(t * 1000).toTimeString().slice(0, 8);
 const ago = (t) => { const s = Math.max(0, Date.now() / 1000 - t); if (s < 60) return 'just now'; if (s < 3600) return `${Math.floor(s / 60)} min ago`; if (s < 86400) return `${Math.floor(s / 3600)} h ago`; return `${Math.floor(s / 86400)} d ago`; };
 
-const state = { tab: 'scan', scans: [], scanIdx: 0, jobs: [], selected: new URLSearchParams(location.search).get('select') || null, detail: null, events: [], last: 0, filter: 'all', info: null, busy: false };
+const state = { picked: new URLSearchParams(location.search).has('select'), tab: 'scan', scans: [], scanIdx: 0, jobs: [], selected: new URLSearchParams(location.search).get('select') || null, detail: null, events: [], last: 0, filter: 'all', info: null, busy: false };
 const KIND = { face: ['FACE', 'face'], speech: ['VOICE', 'speech'], stage: ['STEP', 'stage'], cut: ['CUT', 'cut'], render: ['REND', 'render'], check: ['CHK', 'check'], verify: ['QA', 'verify'], subs: ['SUBS', 'subs'], info: ['INFO', 'info'], warn: ['WARN', 'warn'], error: ['ERR', 'error'] };
 
 // ---------------------------------------------------------------- sidebar
@@ -137,7 +137,7 @@ function mainHtml(d) {
     return `<div class="top"><h1>Zeno</h1></div><div class="body" style="display:flex"><div class="welcome"><h1>No edit selected</h1><div>${state.jobs.length ? 'Pick an edit on the left.' : 'Press New edit to start one. This window then shows every step.'}</div></div></div>`;
   }
   const s = d.status;
-  return `<div class="top"><h1 title="${esc(d.title)}">${esc(shortTitle(d.title))}</h1><span class="pill ${s.phase}">${esc(s.phase === 'working' ? `Working${d.elapsed ? ' · ' + d.elapsed : ''}` : shortStatus(s))}</span></div>
+  return `<div class="top"><h1 title="${esc(d.title)}">${esc(shortTitle(d.title))}</h1>${s.phase === 'plan' ? '<button class="askbtn" data-ask="1">Render…</button>' : ''}<span class="pill ${s.phase}">${esc(s.phase === 'working' ? `Working${d.elapsed ? ' · ' + d.elapsed : ''}` : shortStatus(s))}</span></div>
   <div class="pipe">${pipeHtml(d)}</div>
   <div class="body">
     <div class="col">
@@ -154,6 +154,21 @@ function mainHtml(d) {
   </div>`;
 }
 
+// the render question: a small pop-up when a plan is waiting for the editor's Yes
+const asked = new Set();
+function paintAsk() {
+  const d = state.detail; let box = document.getElementById('ask');
+  const want = d && d.status.phase === 'plan' && d.plan && state.askOpen === d.name && !state.rendering;
+  if (!want) { if (box) box.remove(); return; }
+  if (box) return;
+  box = document.createElement('div'); box.id = 'ask';
+  const p = d.plan, spk = new Set(p.timeline.map((x) => x.speaker).filter(Boolean)).size;
+  box.innerHTML = `<div class="askcard"><h3>Plan ready</h3><div class="muted">${esc(shortTitle(d.title))}</div>
+    <div class="askrows"><div><b>${p.cuts}</b> cuts</div><div><b>${mmss(p.seconds)}</b> long</div><div><b>${spk}</b> speakers</div><div><b>${Object.keys(p.layouts || {}).length}</b> layouts</div></div>
+    <div class="muted">Renders the 9:16 reel and the 1:1 square into your Zeno Outputs folder.</div>
+    <div class="askact"><button class="askno" data-ask-no="1">Not now</button><button class="primary askyes" data-render="1">Render</button></div></div>`;
+  document.body.appendChild(box);
+}
 let lastMain = '';
 function renderMain() {
   const html = mainHtml(state.detail);
@@ -161,6 +176,8 @@ function renderMain() {
   lastMain = html;
   const keep = $('#scanview'); if (keep) keep.remove();           // the scan player is moved, not rebuilt, so it never restarts or flickers
   $('#main').innerHTML = html;
+  if (state.detail && state.detail.status.phase === 'plan' && !asked.has(state.detail.name)) { asked.add(state.detail.name); state.askOpen = state.detail.name; }
+  paintAsk();
   const slot = $('#scanview'); if (keep && slot) { slot.replaceWith(keep); }
   paintScan();
 }
@@ -319,6 +336,14 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeBox()
 document.addEventListener('click', async (e) => {
   const zm = e.target.closest('[data-zoom]'); if (zm) { openBox(zm.dataset.zoom, zm.dataset.title); return; }
   if (e.target.closest('#lbClose') || e.target.id === 'lightbox') { closeBox(); return; }
+  if (e.target.closest('[data-ask]')) { state.askOpen = state.detail && state.detail.name; paintAsk(); return; }
+  if (e.target.closest('[data-ask-no]')) { state.askOpen = null; paintAsk(); return; }
+  if (e.target.closest('[data-render]')) {
+    const d = state.detail; if (!d || !d.plan) return;
+    state.rendering = d.name; state.askOpen = null; paintAsk();
+    window.zeno.render(d.name, d.plan.file).then((r) => { if (!r || !r.ok) { state.rendering = null; alert((r && r.text) || 'Could not start the render.'); } else { setTimeout(() => { state.rendering = null; }, 20000); } });
+    return;
+  }
   const chip = e.target.closest('.schips button'); if (chip) { sp.pin = sp.pin === chip.dataset.clip ? null : chip.dataset.clip; sp.idx = 0; sp.sig = ''; paintScan(); return; }
   const li = e.target.closest('#jobs li[data-name]');
   if (li) { state.picked = true; state.selected = li.dataset.name; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; lastMain = ''; renderSide(); renderMain(); loadDetail(); return; }

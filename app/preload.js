@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('zeno', {
   reveal: (p) => ipcRenderer.invoke('zeno:reveal', p),
   open: (p) => ipcRenderer.invoke('zeno:open', p),
   newEdit: () => ipcRenderer.invoke('zeno:newEdit'),
+  render: (name, planFile) => ipcRenderer.invoke('zeno:render', name, planFile),
   update: () => ipcRenderer.invoke('zeno:update'),
   platform: process.platform,
 });
