@@ -198,3 +198,10 @@ body.dragging { cursor: grabbing; } body.dragging * { pointer-events: none; } bo
 /* the chat bar that is always visible */
 .dock { flex: none; display: flex; align-items: center; gap: 12px; background: var(--panel); border: 1px solid var(--line2); border-radius: 12px; padding: 10px 14px; cursor: text; } .dock:hover { border-color: var(--greenLine); }
 .dock .dk { font: 600 11px var(--mono); color: var(--green); background: var(--greenDim); border: 1px solid var(--greenLine); border-radius: 999px; padding: 2px 10px; } .dock .dt { flex: 1; color: var(--faint); font-size: 13px; } .dock .dgo { color: var(--green); font-size: 12px; font-weight: 600; }
+
+/* Claude status pill, instructions box, quick prompts */
+.cpill { align-self: flex-start; margin-bottom: 8px; cursor: pointer; font: 11px var(--mono); padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line2); color: var(--muted); } .cpill:hover { border-color: var(--greenLine); }
+.cpill.ok { color: var(--green); border-color: var(--greenLine); background: var(--greenDim); } .cpill.bad { color: var(--amber); border-color: rgba(228,178,76,.4); }
+.cform textarea { background: var(--panel); border: 1px solid var(--line2); border-radius: 8px; padding: 9px 11px; color: var(--text); font: inherit; font-size: 13px; outline: none; resize: vertical; user-select: text; } .cform textarea:focus { border-color: var(--greenLine); }
+.cchips { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 16px 8px; } .cchips button { background: var(--panel); border: 1px solid var(--line2); border-radius: 999px; color: var(--muted); font-size: 11.5px; padding: 3px 11px; } .cchips button:hover { color: var(--green); border-color: var(--greenLine); }
+.side-f { display: flex; flex-direction: column; }

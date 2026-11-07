@@ -150,7 +150,7 @@ function rightCard(d) {
 }
 // the chat bar that is always in view: click it to open the chat with Claude
 function dockHtml() {
-  return `<div class="dock" data-open-chat="1"><span class="dk">Claude</span><span class="dt">Start a new edit: script link, Notion name and clips folder…</span><span class="dgo">Open chat</span></div>`;
+  return `<div class="dock" data-open-chat="1"><span class="dk">New edit</span><span class="dt">Script link, Notion name, clips folder… then tell Claude what you want</span><span class="dgo">Open chat</span></div>`;
 }
 function mainHtml(d) {
   if (!d) {

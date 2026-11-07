@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('zeno', {
   render: (name, planFile) => ipcRenderer.invoke('zeno:render', name, planFile),
   download: (p) => ipcRenderer.invoke('zeno:download', p),
   claudeStatus: () => ipcRenderer.invoke('zeno:claudeStatus'),
+  claudeLogin: (opts) => ipcRenderer.invoke('zeno:claudeLogin', opts),
   claudeConnect: () => ipcRenderer.invoke('zeno:claudeConnect'),
   pickFolder: () => ipcRenderer.invoke('zeno:pickFolder'),
   copy: (t) => ipcRenderer.invoke('zeno:copy', t),

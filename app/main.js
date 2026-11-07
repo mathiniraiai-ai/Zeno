@@ -111,12 +111,22 @@ app.whenReady().then(() => {
     try { await fs.promises.copyFile(p, r.filePath); shell.showItemInFolder(r.filePath); return { ok: true, path: r.filePath }; } catch (err) { return { ok: false, text: String(err.message || err) }; }
   });
 
-  // is Claude Code installed, and does it have the Zeno connector?
+  // is Claude Code installed, which account is it signed in with, and does it have the Zeno connector?
   ipcMain.handle('zeno:claudeStatus', async () => {
-    if (!claudePath()) return { installed: false, connected: false };
-    const r = await runClaude(['mcp', 'list'], 45000);
-    const connected = r.ok && new RegExp('^' + ZENO_MCP_NAME + ':', 'm').test(r.text);
-    return { installed: true, connected, detail: connected ? '' : r.text.slice(0, 200) };
+    if (!claudePath()) return { installed: false, loggedIn: false, connected: false };
+    const [auth, mcp] = await Promise.all([runClaude(['auth', 'status'], 20000), runClaude(['mcp', 'get', ZENO_MCP_NAME], 45000)]);
+    let a = {}; try { a = JSON.parse(auth.text); } catch (e) { a = {}; }
+    const connected = mcp.ok && /Connected/.test(mcp.text);
+    return { installed: true, loggedIn: !!a.loggedIn, email: a.email || '', plan: a.subscriptionType || '', connected };
+  });
+  // sign in (opens the browser); a wrong account can be switched by signing out first
+  ipcMain.handle('zeno:claudeLogin', async (_e, opts) => {
+    const o = opts || {};
+    if (o.switch) await runClaude(['auth', 'logout'], 20000);
+    const bin = claudePath(); if (!bin) return { ok: false, text: 'Claude Code is not installed on this computer.' };
+    const args = ['auth', 'login'].concat(o.email ? ['--email', String(o.email)] : []);
+    spawn(bin, args, { env: claudeEnv(), detached: true, stdio: 'ignore' }).unref();
+    return { ok: true };
   });
   // one click: add the Zeno connector to Claude Code (for this user, on this computer)
   ipcMain.handle('zeno:claudeConnect', async () => {
