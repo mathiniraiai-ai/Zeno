@@ -1942,6 +1942,8 @@ class TestEventsAndJobs(unittest.TestCase):
         work, d = self._job(with_plan=True, with_output=True)
         with patch.object(jobs, "WORK", work), patch.object(events, "WORK", work), patch.dict(os.environ, {"ZENO_JOB_PROJECT": "demo_job", "ZENO_EVENTS": "on"}):
             events.emit("face", "S1: 1 face(s)", clip="S1.mp4", faces=[[0.2, 0.5]], shot="single", silent=False)
+            events.emit("info", "S1.mp4: scanned 8 frames", clip="S1.mp4")
+            events.emit("face", "S1.mp4: scanned 8 frames, summary without faces", clip="S1.mp4")
             events.emit("verify", "Loudness: pass", ok=True, tag="Loudness")
             r = jobs.detail("demo_job")
         self.assertEqual(r["plan"]["cuts"], 2)
@@ -1951,6 +1953,7 @@ class TestEventsAndJobs(unittest.TestCase):
         self.assertEqual(r["plan"]["subs"], "auto")
         self.assertEqual(r["outputs"][0]["kind"], "reel")
         self.assertEqual(r["clips"][0]["clip"], "S1.mp4")
+        self.assertEqual(r["clips"][0]["faces"], 1)            # a later summary line without faces must not overwrite it
         self.assertEqual(r["verify"][0]["tag"], "Loudness")
         self.assertEqual(len(r["events"]), 2)
         self.assertEqual(jobs.detail("missing")["error"], "No job named missing")
