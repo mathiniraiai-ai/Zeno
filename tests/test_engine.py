@@ -1955,7 +1955,7 @@ class TestEventsAndJobs(unittest.TestCase):
         self.assertEqual(r["clips"][0]["clip"], "S1.mp4")
         self.assertEqual(r["clips"][0]["faces"], 1)            # a later summary line without faces must not overwrite it
         self.assertEqual(r["verify"][0]["tag"], "Loudness")
-        self.assertEqual(len(r["events"]), 2)
+        self.assertEqual(len(r["events"]), 4)
         self.assertEqual(jobs.detail("missing")["error"], "No job named missing")
 
 
