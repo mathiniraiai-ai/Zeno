@@ -135,7 +135,8 @@ function mainHtml(d) {
   <div class="pipe">${pipeHtml(d)}</div>
   <div class="body">
     <div class="col">
-      <div class="card"><h2>Timeline<span>${d.plan ? `${d.plan.cuts} cuts · ${mmss(d.plan.seconds)}` : ''}</span></h2>${timelineHtml(d)}${statsLine(d)}</div>
+      <div class="card tlcard"><h2>Timeline<span>${d.plan ? `${d.plan.cuts} cuts · ${mmss(d.plan.seconds)}` : ''}</span></h2>${timelineHtml(d)}${statsLine(d)}</div>
+      <div class="hsplit" id="lsplit" title="Drag to enlarge the timeline layers (double-click to reset)"></div>
       <div class="card fill"><h2>Live<span>${s.phase === 'working' ? 'working' : ''}</span></h2><div id="feed">${feedHtml()}</div></div>
     </div>
     <div class="vsplit" id="vsplit" title="Drag to resize"></div>
@@ -246,22 +247,27 @@ function restoreLayout() {
   const main = $('#main'); const w = main ? main.getBoundingClientRect().width : 1000;
   setVar('--rw', clamp(store.get('zenoRightW', 400), 250, Math.max(250, w - 40 - 380)));
   setVar('--ph', clamp(store.get('zenoPicsH', 128), 100, 360));
+  const th = store.get('zenoTlH', 0), col = $('.col');
+  if (th > 0 && col) { setVar('--tlh', clamp(th, 190, Math.max(190, col.getBoundingClientRect().height - 190))); document.documentElement.classList.add('tall'); }
+  else { document.documentElement.style.removeProperty('--tlh'); document.documentElement.classList.remove('tall'); }
 }
+document.addEventListener('dblclick', (e) => { if (e.target.id === 'lsplit') { store.set('zenoTlH', 0); restoreLayout(); } });
 let drag = null;
 document.addEventListener('mousedown', (e) => {
-  if (e.target.id === 'vsplit') drag = 'v'; else if (e.target.id === 'hsplit') drag = 'h'; else return;
+  if (e.target.id === 'vsplit') drag = 'v'; else if (e.target.id === 'hsplit') drag = 'h'; else if (e.target.id === 'lsplit') drag = 'l'; else return;
   document.body.classList.add('dragging'); e.preventDefault();
 });
 document.addEventListener('mousemove', (e) => {
   if (!drag) return;
   if (drag === 'v') { const r = $('#main').getBoundingClientRect(); setVar('--rw', clamp(r.right - 20 - e.clientX - 7, 250, r.width - 40 - 380)); }
+  else if (drag === 'l') { const col = $('.col'); if (!col) return; const r = col.getBoundingClientRect(); setVar('--tlh', clamp(e.clientY - r.top - 7, 190, Math.max(190, r.height - 190))); document.documentElement.classList.add('tall'); }
   else { const col = $('.col.right'); if (!col) return; const r = col.getBoundingClientRect(); setVar('--ph', clamp(r.bottom - e.clientY - 7, 100, Math.max(100, r.height - 200))); }
   const sv = $('#scanview'); if (sv) fitFrame(sv);
 });
 document.addEventListener('mouseup', () => {
   if (!drag) return;
   const cs = getComputedStyle(document.documentElement);
-  if (drag === 'v') store.set('zenoRightW', parseFloat(cs.getPropertyValue('--rw'))); else store.set('zenoPicsH', parseFloat(cs.getPropertyValue('--ph')));
+  if (drag === 'v') store.set('zenoRightW', parseFloat(cs.getPropertyValue('--rw'))); else if (drag === 'l') store.set('zenoTlH', parseFloat(cs.getPropertyValue('--tlh'))); else store.set('zenoPicsH', parseFloat(cs.getPropertyValue('--ph')));
   drag = null; document.body.classList.remove('dragging');
 });
 
