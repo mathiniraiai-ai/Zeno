@@ -149,9 +149,7 @@ function rightCard(d) {
     <div class="rvid"><video controls preload="metadata" src="file://${encodeURI(src.path)}"></video></div></div></div>`;
 }
 // the chat bar that is always in view: click it to open the chat with Claude
-function dockHtml() {
-  return `<div class="dock" data-open-chat="1"><span class="dk">New edit</span><span class="dt">Script link, Notion name, clips folder… then tell Claude what you want</span><span class="dgo">Open chat</span></div>`;
-}
+function dockHtml() { return ''; }
 function mainHtml(d) {
   if (!d) {
     return `<div class="top"><h1>Zeno</h1></div><div class="body" style="display:flex"><div class="welcome"><h1>No edit selected</h1><div>${state.jobs.length ? 'Pick an edit on the left.' : 'Press New edit to start one. This window then shows every step.'}</div></div></div>${dockHtml()}`;
