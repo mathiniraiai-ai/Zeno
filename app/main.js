@@ -1,5 +1,5 @@
 // Zeno desktop app: the window and its bridge to the Python backend. It only reads job state (scripts/jobs.py) and opens things; it never edits a job.
-const { app, BrowserWindow, ipcMain, shell, nativeTheme, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, nativeTheme, dialog, clipboard } = require('electron');
 const { execFile, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -34,6 +34,27 @@ function runJobs(root, args, timeout = 20000) {
 }
 
 let ROOT = null;
+// ---------------------------------------------------------------- Claude connection (Claude Code runs behind the chat box)
+function claudePath() {
+  const home = process.env.HOME || process.env.USERPROFILE || '';
+  const dirs = IS_WIN ? [path.join(process.env.APPDATA || '', 'npm'), path.join(home, '.local', 'bin')] : [path.join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'];
+  for (const d of dirs) { for (const n of (IS_WIN ? ['claude.exe', 'claude.cmd'] : ['claude'])) { const p = path.join(d, n); if (fs.existsSync(p)) return p; } }
+  return null;
+}
+function claudeEnv() {
+  const extra = process.env.ZENO_CLAUDE_CONFIG_DIR ? { CLAUDE_CONFIG_DIR: process.env.ZENO_CLAUDE_CONFIG_DIR } : {};     // a test can point Claude at a temporary settings folder
+  const home = process.env.HOME || '';
+  return { ...process.env, ...extra, PATH: [path.join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH || ''].join(path.delimiter), ZENO_EVENTS: 'on' };
+}
+function runClaude(args, timeout = 30000) {
+  return new Promise((resolve) => {
+    const bin = claudePath(); if (!bin) return resolve({ ok: false, text: 'Claude Code is not installed on this computer.' });
+    execFile(bin, args, { cwd: ROOT || undefined, timeout, env: claudeEnv(), maxBuffer: 10 * 1024 * 1024 }, (err, out, errout) => resolve({ ok: !err, text: String(out || errout || (err && err.message) || '') }));
+  });
+}
+const ZENO_MCP_NAME = 'zeno';
+let chatProc = null;
+
 function createWindow() {
   nativeTheme.themeSource = 'dark';
   const size = (arg('size') || '1240x800').split('x').map(Number);
@@ -89,6 +110,57 @@ app.whenReady().then(() => {
     if (r.canceled || !r.filePath) return { ok: false, canceled: true };
     try { await fs.promises.copyFile(p, r.filePath); shell.showItemInFolder(r.filePath); return { ok: true, path: r.filePath }; } catch (err) { return { ok: false, text: String(err.message || err) }; }
   });
+
+  // is Claude Code installed, and does it have the Zeno connector?
+  ipcMain.handle('zeno:claudeStatus', async () => {
+    if (!claudePath()) return { installed: false, connected: false };
+    const r = await runClaude(['mcp', 'list'], 45000);
+    const connected = r.ok && new RegExp('^' + ZENO_MCP_NAME + ':', 'm').test(r.text);
+    return { installed: true, connected, detail: connected ? '' : r.text.slice(0, 200) };
+  });
+  // one click: add the Zeno connector to Claude Code (for this user, on this computer)
+  ipcMain.handle('zeno:claudeConnect', async () => {
+    if (!ROOT) return { ok: false, text: 'Zeno folder not found.' };
+    const r = await runClaude(['mcp', 'add', '--scope', 'user', ZENO_MCP_NAME, '--', pythonFor(ROOT), path.join(ROOT, 'scripts', 'zeno_mcp.py')], 45000);
+    return { ok: r.ok, text: r.text.slice(0, 300) };
+  });
+  ipcMain.handle('zeno:pickFolder', async (e) => {
+    const r = await dialog.showOpenDialog(BrowserWindow.fromWebContents(e.sender), { properties: ['openDirectory'] });
+    return r.canceled ? null : r.filePaths[0];
+  });
+  ipcMain.handle('zeno:copy', (_e, text) => { clipboard.writeText(String(text || '')); return true; });
+  // the chat: one Claude Code run per message, streamed back; a follow-up resumes the same session
+  ipcMain.handle('zeno:chatSend', (e, message, sessionId) => {
+    const bin = claudePath(); if (!bin || !ROOT) return { ok: false, text: 'Claude Code is not installed on this computer.' };
+    if (chatProc) return { ok: false, text: 'Claude is still working on the last message.' };
+    const send = (evt) => { try { e.sender.send('zeno:chat', evt); } catch (er) { /* window closed */ } };
+    const args = ['-p', String(message), '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits',
+      '--allowedTools', 'Bash(python3:*)', 'Bash(.venv/bin/python:*)', 'Bash(ls:*)', 'Bash(grep:*)', 'Bash(cat:*)', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'mcp__zeno'];
+    // only the Zeno connector is loaded for these runs: the editor's other connectors are not needed and would cost tokens
+    args.push('--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: { [ZENO_MCP_NAME]: { command: pythonFor(ROOT), args: [path.join(ROOT, 'scripts', 'zeno_mcp.py')] } } }));
+    if (sessionId) args.push('--resume', String(sessionId));
+    chatProc = spawn(bin, args, { cwd: ROOT, env: claudeEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
+    let buf = '';
+    chatProc.stdout.on('data', (d) => {
+      buf += d.toString('utf8'); let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue;
+        let j; try { j = JSON.parse(line); } catch (er) { continue; }
+        if (j.type === 'system' && j.session_id) send({ kind: 'session', id: j.session_id });
+        else if (j.type === 'assistant' && j.message && Array.isArray(j.message.content)) {
+          for (const b of j.message.content) {
+            if (b.type === 'text' && b.text) send({ kind: 'text', text: b.text });
+            else if (b.type === 'tool_use') send({ kind: 'tool', name: b.name, input: (b.input && (b.input.command || b.input.file_path || b.input.pattern || '')) || '' });
+          }
+        } else if (j.type === 'result') send({ kind: 'result', ok: !j.is_error, text: j.result || '', session: j.session_id, cost: j.total_cost_usd });
+      }
+    });
+    let errTxt = '';
+    chatProc.stderr.on('data', (d) => { errTxt += d.toString('utf8'); });
+    chatProc.on('close', (code) => { chatProc = null; send({ kind: 'done', code, error: code ? errTxt.slice(-300) : '' }); });
+    return { ok: true };
+  });
+  ipcMain.handle('zeno:chatStop', () => { if (chatProc) { chatProc.kill('SIGTERM'); } return true; });
   ipcMain.handle('zeno:update', () => new Promise((resolve) => {
     if (!ROOT) return resolve({ ok: false, text: 'Zeno folder not found' });
     const code = "import sys;sys.path.insert(0,'scripts');import auto_updater;print(auto_updater.ensure_latest_update(force=True,quiet=True))";

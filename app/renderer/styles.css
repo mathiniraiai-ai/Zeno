@@ -179,3 +179,18 @@ body.dragging { cursor: grabbing; } body.dragging * { pointer-events: none; } bo
 .closebtn { background: transparent; border: 1px solid var(--line2); border-radius: 999px; padding: 3px 12px; color: var(--muted); font-size: 11.5px; margin-right: 10px; } .closebtn:hover { color: var(--text); border-color: var(--greenLine); }
 .askbtn + .closebtn { margin-left: 0; } .top > .closebtn:first-of-type { margin-left: auto; }
 .tl-foot { flex-wrap: wrap; gap: 6px 16px; } .tl-foot > span { white-space: nowrap; } .tl-foot .acts { margin-left: auto; flex: none; }
+
+/* chat box and connect card */
+#chat, #conn { position: fixed; inset: 0; background: rgba(0,0,0,.62); display: flex; align-items: center; justify-content: center; z-index: 55; }
+.chatcard { width: min(720px, calc(100vw - 80px)); height: min(640px, calc(100vh - 80px)); background: var(--panel2); border: 1px solid var(--line2); border-radius: 14px; box-shadow: 0 20px 60px rgba(0,0,0,.6); display: flex; flex-direction: column; overflow: hidden; }
+.chead { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); } .chead b { font-size: 14px; }
+.cstat { font: 11px var(--mono); padding: 2px 9px; border-radius: 999px; border: 1px solid var(--line2); color: var(--muted); } .cstat.ok { color: var(--green); border-color: var(--greenLine); background: var(--greenDim); } .cstat.bad { color: var(--amber); border-color: rgba(228,178,76,.4); }
+.cx { margin-left: auto; display: flex; gap: 6px; } .cx button { background: transparent; border: 1px solid var(--line2); border-radius: 8px; color: var(--muted); padding: 3px 10px; } .cx button:hover { color: var(--text); }
+.cform { padding: 16px; display: flex; flex-direction: column; gap: 12px; overflow: auto; } .cform label { display: flex; flex-direction: column; gap: 5px; font-size: 11.5px; color: var(--muted); }
+.cform input, .cin input { background: var(--panel); border: 1px solid var(--line2); border-radius: 8px; padding: 9px 11px; color: var(--text); font: inherit; font-size: 13px; outline: none; user-select: text; } .cform input:focus, .cin input:focus { border-color: var(--greenLine); }
+.frow { display: flex; gap: 8px; } .frow input { flex: 1; } .frow .btn { flex: none; }
+.fact { display: flex; gap: 10px; justify-content: flex-end; } .ferr { color: var(--amber); font-size: 12px; min-height: 16px; }
+.cmsgs { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; user-select: text; }
+.cm { font-size: 13px; line-height: 1.45; white-space: pre-wrap; } .cm.user { align-self: flex-end; max-width: 80%; background: var(--greenDim); border: 1px solid var(--greenLine); border-radius: 10px; padding: 7px 11px; } .cm.claude { color: var(--text); } .cm.tool { color: var(--faint); font: 11px var(--mono); } .cm.error { color: var(--red); }
+.cin { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); } .cin input { flex: 1; } .cin .btn { flex: none; display: none; } .cin.busy .btn { display: block; } .cin.busy .primary { opacity: .5; }
+#conn .askcard { width: 380px; }

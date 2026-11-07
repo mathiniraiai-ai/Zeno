@@ -9,6 +9,13 @@ contextBridge.exposeInMainWorld('zeno', {
   newEdit: () => ipcRenderer.invoke('zeno:newEdit'),
   render: (name, planFile) => ipcRenderer.invoke('zeno:render', name, planFile),
   download: (p) => ipcRenderer.invoke('zeno:download', p),
+  claudeStatus: () => ipcRenderer.invoke('zeno:claudeStatus'),
+  claudeConnect: () => ipcRenderer.invoke('zeno:claudeConnect'),
+  pickFolder: () => ipcRenderer.invoke('zeno:pickFolder'),
+  copy: (t) => ipcRenderer.invoke('zeno:copy', t),
+  chatSend: (msg, session) => ipcRenderer.invoke('zeno:chatSend', msg, session),
+  chatStop: () => ipcRenderer.invoke('zeno:chatStop'),
+  onChat: (fn) => ipcRenderer.on('zeno:chat', (_e, evt) => fn(evt)),
   update: () => ipcRenderer.invoke('zeno:update'),
   platform: process.platform,
 });
