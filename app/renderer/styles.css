@@ -144,3 +144,10 @@ body.dragging { cursor: grabbing; } body.dragging * { pointer-events: none; } bo
 .tall .tl-scale, .tall .spk { flex: none; }
 
 .ssplit { flex: none; width: 9px; margin-left: -5px; margin-right: -4px; cursor: col-resize; position: relative; z-index: 3; } .ssplit::after { content: ""; position: absolute; left: 3px; top: 40px; bottom: 14px; width: 2px; border-radius: 2px; background: transparent; transition: background .12s; }
+
+/* transitions and sound effects drawn as clips */
+.seg.blk { min-width: 8px; border-radius: 3px; border-right: 0; } .seg.blk b { color: rgba(0,0,0,.7); font-size: 8.5px; line-height: 14px; top: 0; }
+.seg.tr { background: #e6ebf2; } .seg.k-sfx { background: var(--amber); } .seg.k-auto { background: #7aa2d6; } .seg.k-mark { background: var(--red); }
+.lt .cl { position: absolute; top: 0; line-height: 15px; font: 8.5px var(--mono); color: var(--muted); white-space: nowrap; }
+.tall .lt .cl { top: 50%; transform: translateY(-50%); line-height: 1; }
+.seg.blk b { color: #0a0a0a; font-weight: 700; right: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

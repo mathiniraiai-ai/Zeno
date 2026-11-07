@@ -67,16 +67,16 @@ function timelineHtml(d) {
   }).join('');
   const voice = p.timeline.map((s) => `<div class="seg vo" title="${esc(`${s.id} · ${s.speaker || 'speaker not set'} · ${s.dur}s`)}" style="left:${pct(s.start)};width:${pct(s.dur)};background:${s.speaker ? col(s.speaker) : '#475569'}">${s.dur / total > 0.045 && s.speaker ? `<b>${esc(s.speaker.split(' ').map((w) => w[0]).join(''))}</b>` : ''}</div>`).join('');
   const zooms = p.timeline.filter((s) => s.zoom).map((s) => `<div class="seg zm" title="${esc(`${s.id} · zoom ${s.zoom}`)}" style="left:${pct(s.start)};width:${pct(s.dur)}">${s.dur / total > 0.05 ? `<b>${esc(s.zoom)}</b>` : ''}</div>`).join('');
-  const trans = p.timeline.filter((s) => s.transition !== 'cut').map((s) => `<div class="mk tr" title="${esc(`${s.id} · ${s.transition}`)}" style="left:${pct(s.start)}"><i></i><span>${esc(s.transition.replace(/_/g, ' '))}</span></div>`).join('');
-  const sfx = (p.sfx || []).map((x, k, arr) => {
-    const next = arr[k + 1]; const room = !next || (next.t - x.t) / total > 0.07;
-    return `<div class="mk ${x.kind}" title="${esc(`${x.file}${x.gain != null ? ' · ' + x.gain + ' dB' : ''} · ${mmss(x.t)}${x.kind === 'auto' ? ' · on the transition' : ''}`)}" style="left:${pct(x.t)}"><i></i>${room ? `<span>${esc(x.file.replace(/\.[a-z0-9]+$/i, ''))}</span>` : ''}</div>`;
-  }).join('');
+  // transitions and sound effects are real clips with a length, like on an editor's timeline (a clip too narrow for its name shows the name beside it)
+  const clip = (cls, t0, dur, name, tip) => { const w = Math.max(dur / total, 0.004); return `<div class="seg blk ${cls}" title="${esc(tip)}" style="left:${(t0 / total) * 100}%;width:${w * 100}%">${w > 0.05 ? `<b>${esc(name)}</b>` : ''}</div>${w > 0.05 ? '' : `<span class="cl" style="left:calc(${((t0 / total) + w) * 100}% + 3px)">${esc(name)}</span>`}`; };
+  const trans = (p.transition_list || []).map((x) => clip('tr', Math.max(0, x.t - x.dur / 2), x.dur, x.name.replace(/_/g, ' '), `${x.id} · ${x.name} · ${x.dur}s`)).join('');
+  const sfx = (p.sfx || []).map((x) => clip('k-' + x.kind, x.t, x.dur || 0.3, x.file.replace(/\.[a-z0-9]+$/i, ''), `${x.file}${x.gain != null ? ' · ' + x.gain + ' dB' : ''} · ${mmss(x.t)}${x.kind === 'auto' ? ' · whoosh on the transition' : ''}`)).join('');
   const lane = (name, cls, inner, empty) => `<div class="lane"><span class="ln">${name}</span><div class="lt ${cls}">${inner || `<em>${empty || ''}</em>`}</div></div>`;
   const subs = d.subs && d.subs.style ? d.subs.style : (p.subs || '');
   return `<div class="tl-wrap">
     ${subs ? lane('Subs', 'sub', `<div class="seg sb" style="left:0;width:100%"><b>${esc(subs)}</b></div>`) : ''}
-    ${lane('Effects', 'fx', zooms + trans, 'no zooms or transitions')}
+    ${lane('Zoom', 'fx', zooms, 'no zooms')}
+    ${lane('Trans', 'fx', trans, 'cuts only, no transitions')}
     ${lane('Video', 'tl', video)}
     ${lane('Voice', 'au', voice)}
     ${lane('SFX', 'au', sfx, 'no sound effects')}
