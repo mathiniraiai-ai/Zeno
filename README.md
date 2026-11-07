@@ -40,7 +40,7 @@ Third-party components keep their own licenses (see Section 7 of [LICENSE](LICEN
 |  `agent/` | The Director (`DIRECTOR.md`, the one decision-making agent) and one `concepts/<topic>/CONCEPT.md` per topic | **Committed** |
 | `styles/` | One folder per learned video style (`SKILL.md`, `spec.json`, `map.json`, `refs/`) | **Committed** |
 | `CLAUDE.md` / `AGENTS.md` | Always-on low-token operational manuals for Claude Code & Antigravity | **Committed** |
-| `.claude/commands/edit.md` | `/edit` slash command for 1-step execution in Claude Code | **Committed** |
+| `.claude/commands/zeno.md` | `/zeno` slash command (`/edit` still works) for 1-step execution in Claude Code | **Committed** |
 | `.agent/` | Antigravity workspace rule (`rules/editor-workflow.md`) & skill (`skills/video-edit/SKILL.md`) | **Committed** |
 
 ---
@@ -79,7 +79,7 @@ On Apple Silicon / macOS: `uv venv --python 3.12 .venv && uv pip install --pytho
 
 ## The 3-Step Low-Token Workflow
 
-In Claude Code, simply type **`/edit`** (or follow these 3 steps manually in Claude Code or Antigravity):
+In Claude Code, simply type **`/zeno`** (or follow these 3 steps manually in Claude Code or Antigravity):
 
 ### 1. Analyse & Auto-Plan (`1 command`)
 ```bash
