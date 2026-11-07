@@ -13,7 +13,7 @@ body { background: var(--bg); color: var(--text); font: 12.5px/1.4 -apple-system
 button { font: inherit; color: inherit; cursor: pointer; }
 
 /* sidebar: no scrolling, the list shows as many edits as fit */
-.side { width: 232px; flex: none; background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 0 10px 10px; min-height: 0; }
+.side { width: var(--sw, 232px); flex: none; background: var(--side); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 0 10px 10px; min-height: 0; }
 .drag { height: 40px; -webkit-app-region: drag; flex: none; }
 .brand { display: flex; align-items: center; gap: 8px; padding: 0 6px 12px; font-size: 14px; }
 .mark { width: 11px; height: 11px; border-radius: 4px; background: var(--green); box-shadow: 0 0 0 3px var(--greenDim); }
@@ -130,8 +130,8 @@ h1 { font-size: 15px; font-weight: 600; margin: 0; flex: 1; min-width: 0; overfl
 .pics img { height: clamp(40px, calc(var(--ph, 128px) - 78px), 240px); }
 .vsplit { cursor: col-resize; position: relative; } .vsplit::after { content: ""; position: absolute; left: 6px; top: 6px; bottom: 6px; width: 2px; border-radius: 2px; background: var(--line2); transition: background .12s; }
 .hsplit { cursor: row-resize; position: relative; flex: none; height: 14px; } .hsplit::after { content: ""; position: absolute; top: 6px; left: 6px; right: 6px; height: 2px; border-radius: 2px; background: var(--line2); transition: background .12s; }
-.vsplit:hover::after, .hsplit:hover::after, body.dragging .vsplit::after, body.dragging .hsplit::after { background: var(--green); }
-body.dragging { cursor: grabbing; } body.dragging * { pointer-events: none; } body.dragging .vsplit, body.dragging .hsplit { pointer-events: auto; }
+.vsplit:hover::after, .hsplit:hover::after, .ssplit:hover::after, .vsplit.active::after, .hsplit.active::after, .ssplit.active::after { background: var(--green); }
+body.dragging { cursor: grabbing; } body.dragging * { pointer-events: none; } body.dragging .active { pointer-events: auto; }
 
 .schips { grid-column: 1 / -1; display: flex; gap: 5px; overflow-x: auto; scrollbar-width: none; flex-wrap: nowrap; } .schips::-webkit-scrollbar { display: none; } .schips button { flex: none; background: var(--line2); color: var(--muted); border: 0; border-radius: 10px; padding: 2px 8px; font: 600 10.5px var(--mono); cursor: pointer; } .schips button.cur { background: #2a3015; color: var(--green); } .schips button.pin { outline: 1px solid var(--green); }
 .sdots i.seen { background: #6b7a38; }
@@ -142,3 +142,5 @@ body.dragging { cursor: grabbing; } body.dragging * { pointer-events: none; } bo
 .tall .lane { flex: 1 1 0; min-height: 15px; max-height: 96px; margin-bottom: 4px; align-items: stretch; } .tall .lane .lt { height: auto; } .tall .lane:has(.lt.tl) { flex-grow: 2; }
 .tall .lt .seg b, .tall .lt .mk span { top: 50%; transform: translateY(-50%); line-height: 1; } .tall .lane .ln { align-self: center; } .tall .lt em { top: 50%; transform: translateY(-50%); line-height: 1; }
 .tall .tl-scale, .tall .spk { flex: none; }
+
+.ssplit { flex: none; width: 9px; margin-left: -5px; margin-right: -4px; cursor: col-resize; position: relative; z-index: 3; } .ssplit::after { content: ""; position: absolute; left: 3px; top: 40px; bottom: 14px; width: 2px; border-radius: 2px; background: transparent; transition: background .12s; }
