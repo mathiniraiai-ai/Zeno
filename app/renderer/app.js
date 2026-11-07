@@ -148,9 +148,13 @@ function rightCard(d) {
     <div class="rtop">${square ? `<span class="seg2"><button data-rsrc="reel" class="${src === reel ? 'on' : ''}">Reel 9:16</button><button data-rsrc="square" class="${src === square ? 'on' : ''}">Square 1:1</button></span>` : '<span></span>'}<span class="racts"><button class="btn" data-reveal="${esc(src.path)}">Show in folder</button><button class="btn dl" data-download="${esc(src.path)}">Download</button></span></div>
     <div class="rvid"><video controls preload="metadata" src="file://${encodeURI(src.path)}"></video></div></div></div>`;
 }
+// the chat bar that is always in view: click it to open the chat with Claude
+function dockHtml() {
+  return `<div class="dock" data-open-chat="1"><span class="dk">Claude</span><span class="dt">Start a new edit: script link, Notion name and clips folder…</span><span class="dgo">Open chat</span></div>`;
+}
 function mainHtml(d) {
   if (!d) {
-    return `<div class="top"><h1>Zeno</h1></div><div class="body" style="display:flex"><div class="welcome"><h1>No edit selected</h1><div>${state.jobs.length ? 'Pick an edit on the left.' : 'Press New edit to start one. This window then shows every step.'}</div></div></div>`;
+    return `<div class="top"><h1>Zeno</h1></div><div class="body" style="display:flex"><div class="welcome"><h1>No edit selected</h1><div>${state.jobs.length ? 'Pick an edit on the left.' : 'Press New edit to start one. This window then shows every step.'}</div></div></div>${dockHtml()}`;
   }
   const s = d.status;
   return `<div class="top"><h1 title="${esc(d.title)}">${esc(shortTitle(d.title))}</h1>${s.phase === 'plan' ? '<button class="askbtn" data-ask="1">Render…</button>' : ''}${s.phase !== 'working' ? '<button class="closebtn" data-close="1" title="Close this project and start fresh">Close project</button>' : ''}${s.phase === 'working' ? `<span class="ovr" title="Overall progress"><i style="width:${d.pct || 0}%"></i></span><b class="ovn">${d.pct || 0}%</b>` : ''}<span class="pill ${s.phase}">${esc(s.phase === 'working' ? `Working${d.elapsed ? ' · ' + d.elapsed : ''}` : shortStatus(s))}</span></div>
@@ -167,7 +171,7 @@ function mainHtml(d) {
       <div class="hsplit" id="hsplit" title="Drag to resize"></div>
       <div class="card pcard"><h2>Pictures<span>click to enlarge</span></h2>${picsHtml(d)}</div>
     </div>
-  </div>`;
+  </div>${dockHtml()}`;
 }
 
 // the render question: a small pop-up when a plan is waiting for the editor's Yes

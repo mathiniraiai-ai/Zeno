@@ -96,7 +96,7 @@ if (window.zeno && window.zeno.onChat) window.zeno.onChat((evt) => {
 });
 document.addEventListener('click', async (e) => {
   const t = e.target;
-  if (t.closest('#newEdit')) { openChat(); e.stopImmediatePropagation(); return; }
+  if (t.closest('#newEdit') || t.closest('[data-open-chat]')) { openChat(); e.stopImmediatePropagation(); return; }
   if (t.closest('[data-chat-x]')) { if (chat.busy) window.zeno.chatStop(); chat.open = false; chat.started = false; chat.msgs = []; chat.session = null; chat.busy = false; paintChat(); paintConnect(); return; }
   if (t.closest('[data-chat-hide]')) { chat.open = false; paintChat(); return; }
   if (t.closest('[data-pick]')) { const p = await window.zeno.pickFolder(); if (p) { chat.form.footage = p; const el = document.getElementById('f_footage'); if (el) el.value = p; } return; }

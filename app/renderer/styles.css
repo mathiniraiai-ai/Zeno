@@ -194,3 +194,7 @@ body.dragging { cursor: grabbing; } body.dragging * { pointer-events: none; } bo
 .cm { font-size: 13px; line-height: 1.45; white-space: pre-wrap; } .cm.user { align-self: flex-end; max-width: 80%; background: var(--greenDim); border: 1px solid var(--greenLine); border-radius: 10px; padding: 7px 11px; } .cm.claude { color: var(--text); } .cm.tool { color: var(--faint); font: 11px var(--mono); } .cm.error { color: var(--red); }
 .cin { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); } .cin input { flex: 1; } .cin .btn { flex: none; display: none; } .cin.busy .btn { display: block; } .cin.busy .primary { opacity: .5; }
 #conn .askcard { width: 380px; }
+
+/* the chat bar that is always visible */
+.dock { flex: none; display: flex; align-items: center; gap: 12px; background: var(--panel); border: 1px solid var(--line2); border-radius: 12px; padding: 10px 14px; cursor: text; } .dock:hover { border-color: var(--greenLine); }
+.dock .dk { font: 600 11px var(--mono); color: var(--green); background: var(--greenDim); border: 1px solid var(--greenLine); border-radius: 999px; padding: 2px 10px; } .dock .dt { flex: 1; color: var(--faint); font-size: 13px; } .dock .dgo { color: var(--green); font-size: 12px; font-weight: 600; }
