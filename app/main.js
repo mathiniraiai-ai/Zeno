@@ -34,6 +34,18 @@ function runJobs(root, args, timeout = 20000) {
 }
 
 let ROOT = null;
+let scanChild = null;
+function stopScan() { if (scanChild) { try { scanChild.kill(); } catch (e) { /* already ended */ } scanChild = null; } }
+// the newest scan events straight from the job's event file (no Python start, so the live view can poll fast)
+function readScanEvents(project, since) {
+  try {
+    const f = path.join(ROOT, 'work', String(project).replace(/[\\/]/g, ''), 'events.jsonl');
+    const lines = fs.readFileSync(f, 'utf8').split('\n').slice(-3000);
+    const out = [];
+    for (const l of lines) { if (!l || l.indexOf('"kind": "scan"') < 0) continue; try { const e = JSON.parse(l); if (e.id > since) out.push(e); } catch (err) { /* partial line */ } }
+    return out.slice(-400);
+  } catch (e) { return []; }
+}
 function createWindow() {
   nativeTheme.themeSource = 'dark';
   const size = (arg('size') || '1240x800').split('x').map(Number);
@@ -46,8 +58,7 @@ function createWindow() {
   const shot = arg('screenshot');
   if (shot) {
     win.webContents.on('did-finish-load', () => setTimeout(async () => {
-      const clickSel = arg('click');
-      if (clickSel) { await win.webContents.executeJavaScript(`(document.querySelector(${JSON.stringify(clickSel)})||{click(){}}).click()`); await new Promise((r) => setTimeout(r, 900)); }
+      for (const clickSel of (arg('click') || '').split('|').filter(Boolean)) { await win.webContents.executeJavaScript(`(document.querySelector(${JSON.stringify(clickSel)})||{click(){}}).click()`); await new Promise((r) => setTimeout(r, 1200)); }
       const img = await win.webContents.capturePage();
       fs.writeFileSync(shot, img.toPNG());
       app.quit();
@@ -62,6 +73,15 @@ app.whenReady().then(() => {
   ipcMain.handle('zeno:jobs', () => (ROOT ? runJobs(ROOT, ['list']) : { error: 'Zeno folder not found' }));
   ipcMain.handle('zeno:detail', (_e, name, since) => (ROOT ? runJobs(ROOT, ['detail', String(name), '--since', String(since || 0)]) : { error: 'Zeno folder not found' }));
   ipcMain.handle('zeno:info', (_e, check) => (ROOT ? runJobs(ROOT, ['info', ...(check ? [] : ['--no-update-check'])], 30000) : { error: 'Zeno folder not found' }));
+  ipcMain.handle('zeno:scanEvents', (_e, project, since) => (ROOT ? readScanEvents(project, since || 0) : []));
+  ipcMain.handle('zeno:startScan', (_e, project, clip, step) => {
+    if (!ROOT || !fs.existsSync(clip)) return false;
+    stopScan();
+    scanChild = spawn(pythonFor(ROOT), [path.join(ROOT, 'scripts', 'vision_scan.py'), clip, '--step', String(step || 0.12), '--max', '140', '--pause', '0.05', '--thumb', '360', '--project', String(project)], { cwd: ROOT, stdio: 'ignore' });
+    scanChild.on('exit', () => { scanChild = null; });
+    return true;
+  });
+  ipcMain.handle('zeno:stopScan', () => { stopScan(); return true; });
   ipcMain.handle('zeno:reveal', (_e, p) => { if (p && fs.existsSync(p)) shell.showItemInFolder(p); });
   ipcMain.handle('zeno:open', (_e, p) => { if (p && fs.existsSync(p)) return shell.openPath(p); });
   ipcMain.handle('zeno:newEdit', () => {
@@ -79,4 +99,5 @@ app.whenReady().then(() => {
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
+app.on('before-quit', stopScan);
 app.on('window-all-closed', () => { if (!IS_MAC || arg('screenshot')) app.quit(); });

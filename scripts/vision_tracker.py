@@ -11,6 +11,7 @@ import json
 import math
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -915,7 +916,14 @@ def analyze_clip_vision(
                 seam = detect_baked_split_seam(frame)
                 if seam:
                     baked_seams.append(seam)
+                _t_scan = time.perf_counter()
                 faces = prominent_faces(detect_faces_in_frame(frame, is_bgr=True))
+                try:
+                    import vision_scan
+
+                    vision_scan.record(resolved.name, f_idx / max(1.0, fps), frame, faces, indices.index(f_idx) + 1, len(indices), (time.perf_counter() - _t_scan) * 1000.0)
+                except Exception:
+                    pass
                 if faces:
                     sampled_faces.append(faces)
             cap.release()

@@ -64,10 +64,11 @@ def _plan_summary(d: Path) -> Optional[Dict[str, Any]]:
                      "src": Path(str(s.get("src", ""))).name, "zoom": s.get("zoom_style") or ("move" if s.get("zoom_to") else ("fixed" if float(s.get("zoom") or 1) != 1.0 else "")),
                      "transition": str(s.get("transition") or "cut"), "speaker": str(s.get("speaker") or "")})
         t += dur
+    footage = next((str(Path(str(s.get('src'))).parent) for s in segs if Path(str(s.get('src', ''))).is_absolute()), '')
     layouts: Dict[str, int] = {}
     for r in rows:
         layouts[r["layout"]] = layouts.get(r["layout"], 0) + 1
-    return {"file": f.name, "cuts": len(rows), "seconds": round(t, 1), "layouts": layouts, "timeline": rows,
+    return {"file": f.name, "footage": footage, "cuts": len(rows), "seconds": round(t, 1), "layouts": layouts, "timeline": rows,
             "transitions": sum(1 for r in rows if r["transition"] != "cut"),
             "subs": (plan.get("subs") or {}).get("style") if isinstance(plan.get("subs"), dict) else None, "output": str(plan.get("output") or "")}
 
@@ -149,7 +150,9 @@ def detail(name: str, since: int = 0) -> Dict[str, Any]:
     outs = _outputs(plan["output"]) if plan else []
     tele = _read(d / "token_telemetry.json") or {}
     rep = _read(d / "job_report.json") or {}
-    ev = events.read(d, since=since, limit=400)
+    allev = events.read(d, since=since, limit=1500)
+    scans = [e for e in allev if e.get("kind") == "scan"][-120:]
+    ev = [e for e in allev if e.get("kind") != "scan"][-400:]
     # footage: the newest face event of each clip
     clips: Dict[str, Dict[str, Any]] = {}
     for e in events.read(d, since=0, limit=4000):
@@ -169,7 +172,7 @@ def detail(name: str, since: int = 0) -> Dict[str, Any]:
                   "mixed": bool(agent.get("mixed_with_development")), "turns": agent.get("turns")}
     base.update({"stages": STAGES, "detail": prog.get("detail", ""), "plan": plan, "outputs": outs, "clips": sorted(clips.values(), key=lambda c: c["clip"].lower()),
                  "verify": checks, "plan_check": last_check, "subs": rep.get("subs"), "cleanup": rep.get("cleanup"), "failures": rep.get("failures") or [],
-                 "tokens": tokens, "images": images, "events": ev, "last_event": ev[-1]["id"] if ev else since, "format": rep.get("format")})
+                 "tokens": tokens, "images": images, "events": ev, "scans": scans, "last_event": allev[-1]["id"] if allev else since, "format": rep.get("format")})
     return base
 
 

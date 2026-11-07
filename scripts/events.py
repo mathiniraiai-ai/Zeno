@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / "work"
 FILE = "events.jsonl"
-KINDS = ("stage", "face", "speech", "cut", "render", "check", "verify", "subs", "info", "warn", "error")
+KINDS = ("stage", "face", "scan", "speech", "cut", "render", "check", "verify", "subs", "info", "warn", "error")
 _lock = threading.Lock()
 
 

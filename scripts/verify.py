@@ -728,6 +728,13 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
                     for name, (x0, y0, x1, y1) in panels:
                         seen[name] += 1
                         faces = vision_tracker.prominent_faces(vision_tracker.detect_faces_in_frame(frame[y0:y1, x0:x1]))
+                        if result["frames"] % 6 == 1 and name in ("frame", "left", "top"):
+                            try:
+                                import vision_scan
+
+                                vision_scan.record(f"final video {sid}", t0 + t, frame, faces, result["frames"], 0, 0.0)
+                            except Exception:
+                                pass
                         if not faces:
                             missing[name].append(round(t0 + t, 1))
                         elif name == "frame":

@@ -1956,5 +1956,30 @@ class TestEventsAndJobs(unittest.TestCase):
         self.assertEqual(jobs.detail("missing")["error"], "No job named missing")
 
 
+class TestVisionScan(unittest.TestCase):
+    def test_a_scanned_frame_is_saved_and_reported_with_its_faces(self):
+        import os, tempfile, json
+        import numpy as np
+        from unittest.mock import patch
+        import events, vision_scan
+        work = Path(tempfile.mkdtemp())
+        d = work / "demo_job"
+        d.mkdir()
+        frame = np.zeros((320, 180, 3), dtype="uint8")
+        face = {"bbox_norm": [0.2, 0.1, 0.5, 0.4], "eye_center_norm": [0.35, 0.2], "mouth_roi_norm": [0.3, 0.3, 0.4, 0.34], "mar_score": 0.2, "is_speaking": True, "confidence": 0.93}
+        with patch.object(events, "WORK", work), patch.dict(os.environ, {"ZENO_JOB_PROJECT": "demo_job", "ZENO_EVENTS": "on"}):
+            vision_scan.record("S4.mp4", 1.5, frame, [face], 3, 10, 18.4, thumb_w=90)
+            rows = [e for e in events.read(d) if e["kind"] == "scan"]
+        self.assertEqual(len(rows), 1)
+        e = rows[0]
+        self.assertEqual((e["clip"], e["t_clip"], e["i"], e["n"]), ("S4.mp4", 1.5, 3, 10))
+        self.assertEqual(e["faces"][0]["box"], [0.2, 0.1, 0.5, 0.4])
+        self.assertTrue(e["faces"][0]["speaking"])
+        self.assertEqual(e["size"], [180, 320])
+        self.assertTrue(Path(e["thumb"]).is_file())
+        import cv2
+        self.assertEqual(cv2.imread(e["thumb"]).shape[1], 90)          # the picture is the size the viewer asked for
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
