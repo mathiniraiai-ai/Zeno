@@ -46,6 +46,8 @@ function createWindow() {
   const shot = arg('screenshot');
   if (shot) {
     win.webContents.on('did-finish-load', () => setTimeout(async () => {
+      const clickSel = arg('click');
+      if (clickSel) { await win.webContents.executeJavaScript(`(document.querySelector(${JSON.stringify(clickSel)})||{click(){}}).click()`); await new Promise((r) => setTimeout(r, 900)); }
       const img = await win.webContents.capturePage();
       fs.writeFileSync(shot, img.toPNG());
       app.quit();

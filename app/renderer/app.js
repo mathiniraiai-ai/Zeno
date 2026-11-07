@@ -92,20 +92,26 @@ function footageHtml(d) {
   return `<div class="clips">${rows}</div>`;
 }
 
-function statsHtml(d) {
+function statsLine(d) {
   const p = d.plan; const reel = d.outputs.find((o) => o.kind === 'reel' && o.mb > 1);
   const v = d.verify || []; const bad = v.filter((x) => !x.ok).length;
-  const cells = [];
-  cells.push(`<div class="stat"><b>${p ? p.cuts : '–'}</b><span>Cuts</span></div>`);
-  cells.push(`<div class="stat"><b>${p ? mmss(p.seconds) : '–'}</b><span>Length</span></div>`);
-  cells.push(`<div class="stat"><b>${reel ? reel.mb + ' MB' : '–'}</b><span>Reel</span></div>`);
-  const chk = v.length ? `${v.length - bad}/${v.length}` : (d.plan_check ? (d.plan_check.result === 'passed' ? 'Plan ok' : 'Blocked') : '–');
-  cells.push(`<div class="stat ${bad ? 'warn' : (v.length || (d.plan_check && d.plan_check.result === 'passed') ? 'good' : '')}"><b>${chk}</b><span>Checks</span></div>`);
-  if (d.tokens && d.tokens.total && !d.tokens.mixed) cells.push(`<div class="stat"><b>${(d.tokens.total / 1000).toFixed(0)}k</b><span>Tokens</span></div>`);
-  if (p && p.subs) cells.push(`<div class="stat"><b>${esc(d.subs ? d.subs.style : p.subs)}</b><span>Subtitles</span></div>`);
+  const chk = v.length ? `${v.length - bad}/${v.length} checks` : (d.plan_check ? (d.plan_check.result === 'passed' ? 'plan ok' : 'plan blocked') : '');
+  const bits = [];
+  if (reel) bits.push(`<span><b>${reel.mb} MB</b> reel</span>`);
+  if (chk) bits.push(`<span class="${bad || (d.plan_check && d.plan_check.result !== 'passed' && !v.length) ? 'warn' : 'good'}"><b>${chk}</b></span>`);
+  if (d.tokens && d.tokens.total && !d.tokens.mixed) bits.push(`<span><b>${(d.tokens.total / 1000).toFixed(0)}k</b> tokens</span>`);
+  if (p && p.subs) bits.push(`<span><b>${esc(d.subs ? d.subs.style : p.subs)}</b> subtitles</span>`);
   const out = d.outputs.find((o) => ['reel', 'video'].includes(o.kind) && o.mb > 1);
-  const act = out ? `<div class="actions"><button class="btn" data-reveal="${esc(out.path)}">Show in folder</button><button class="btn" data-open="${esc(out.path)}">Play</button></div>` : '';
-  return `<div class="stats">${cells.join('')}</div>${act}`;
+  const act = out ? `<span class="acts"><button class="btn" data-reveal="${esc(out.path)}">Show in folder</button><button class="btn" data-open="${esc(out.path)}">Play</button></span>` : '';
+  return `<div class="tl-foot">${bits.join('')}${act}</div>`;
+}
+
+function picsHtml(d) {
+  const im = d.images || {};
+  const items = [['clip_sheet', 'Clips'], ['review_sheet', 'Every cut'], ['marks', 'Marks']].filter(([k]) => im[k]).slice(0, 3);
+  if (!items.length) return '<div class="empty">Pictures appear as they are made.</div>';
+  const v = Math.floor(Date.now() / 60000);
+  return `<div class="pics">${items.map(([k, n]) => `<figure data-zoom="${esc(im[k])}" data-title="${esc(n)}"><img src="file://${encodeURI(im[k])}?v=${v}" alt="${esc(n)}"><figcaption>${n}</figcaption></figure>`).join('')}</div>`;
 }
 
 function mainHtml(d) {
@@ -117,12 +123,12 @@ function mainHtml(d) {
   <div class="pipe">${pipeHtml(d)}</div>
   <div class="body">
     <div class="col">
-      <div class="card"><h2>Timeline<span>${d.plan ? `${d.plan.cuts} cuts · ${mmss(d.plan.seconds)}` : ''}</span></h2>${timelineHtml(d)}</div>
+      <div class="card"><h2>Timeline<span>${d.plan ? `${d.plan.cuts} cuts · ${mmss(d.plan.seconds)}` : ''}</span></h2>${timelineHtml(d)}${statsLine(d)}</div>
       <div class="card fill"><h2>Live<span>${s.phase === 'working' ? 'working' : ''}</span></h2><div id="feed">${feedHtml()}</div></div>
     </div>
     <div class="col">
       <div class="card fill"><h2>Faces<span>${d.clips.length ? d.clips.length + ' clips' : ''}</span></h2>${footageHtml(d)}</div>
-      <div class="card">${statsHtml(d)}</div>
+      <div class="card"><h2>Pictures<span>click to enlarge</span></h2>${picsHtml(d)}</div>
     </div>
   </div>`;
 }
@@ -170,7 +176,17 @@ async function loadDetail() {
 }
 async function loadInfo(check) { const i = await window.zeno.info(check); if (i && !i.error) { state.info = i; renderSide(); } }
 
+function closeBox() { const b = $('#lightbox'); if (b) b.remove(); }
+function openBox(path, title) {
+  closeBox();
+  const b = document.createElement('div'); b.id = 'lightbox';
+  b.innerHTML = `<div class="lb-top"><span>${esc(title)}</span><span><button class="btn" data-open="${esc(path)}">Open outside</button><button class="btn" id="lbClose">Close</button></span></div><img src="file://${encodeURI(path)}?v=${Date.now()}" alt="${esc(title)}">`;
+  document.body.appendChild(b);
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeBox(); });
 document.addEventListener('click', async (e) => {
+  const zm = e.target.closest('[data-zoom]'); if (zm) { openBox(zm.dataset.zoom, zm.dataset.title); return; }
+  if (e.target.closest('#lbClose') || e.target.id === 'lightbox') { closeBox(); return; }
   const li = e.target.closest('#jobs li[data-name]');
   if (li) { state.selected = li.dataset.name; state.detail = null; state.events = []; state.last = 0; lastMain = ''; renderSide(); renderMain(); loadDetail(); return; }
   const rv = e.target.closest('[data-reveal]'); if (rv) { window.zeno.reveal(rv.dataset.reveal); return; }
