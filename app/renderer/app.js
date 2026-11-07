@@ -7,7 +7,7 @@ const mmss = (s) => { s = Math.round(s || 0); return `${Math.floor(s / 60)}:${St
 const hms = (t) => new Date(t * 1000).toTimeString().slice(0, 8);
 const ago = (t) => { const s = Math.max(0, Date.now() / 1000 - t); if (s < 60) return 'just now'; if (s < 3600) return `${Math.floor(s / 60)} min ago`; if (s < 86400) return `${Math.floor(s / 3600)} h ago`; return `${Math.floor(s / 86400)} d ago`; };
 
-const state = { tab: 'faces', scans: [], scanIdx: 0, jobs: [], selected: new URLSearchParams(location.search).get('select') || null, detail: null, events: [], last: 0, filter: 'all', info: null, busy: false };
+const state = { tab: 'scan', scans: [], scanIdx: 0, jobs: [], selected: new URLSearchParams(location.search).get('select') || null, detail: null, events: [], last: 0, filter: 'all', info: null, busy: false };
 const KIND = { face: ['FACE', 'face'], speech: ['VOICE', 'speech'], stage: ['STEP', 'stage'], cut: ['CUT', 'cut'], render: ['REND', 'render'], check: ['CHK', 'check'], verify: ['QA', 'verify'], subs: ['SUBS', 'subs'], info: ['INFO', 'info'], warn: ['WARN', 'warn'], error: ['ERR', 'error'] };
 
 // ---------------------------------------------------------------- sidebar
@@ -83,14 +83,6 @@ function feedHtml() {
   }).join('');
 }
 
-function footageHtml(d) {
-  if (!d.clips.length) return '<div class="empty">Each clip appears here as it is scanned.</div>';
-  const rows = d.clips.map((c) => {
-    const blocks = c.spans.map((s) => `<i style="left:${Math.max(0, s[0]) * 100}%;width:${Math.max(1, (s[1] - s[0]) * 100)}%"></i>`).join('');
-    return `<div class="clip" title="${esc(c.clip)}${c.silent ? ' · silent' : ''}"><div class="n">${esc(c.clip.replace(/\.[^.]+$/, ''))}</div><div class="fbar ${c.silent ? 'silent' : ''}">${blocks}</div><div class="m">${c.silent ? '–' : c.faces}</div></div>`;
-  }).join('');
-  return `<div class="clips">${rows}</div>`;
-}
 
 function statsLine(d) {
   const p = d.plan; const reel = d.outputs.find((o) => o.kind === 'reel' && o.mb > 1);
@@ -128,7 +120,7 @@ function mainHtml(d) {
     </div>
     <div class="vsplit" id="vsplit" title="Drag to resize"></div>
     <div class="col right">
-      <div class="card fill"><h2><span class="tabs"><button data-tab="faces" class="${state.tab === 'faces' ? 'on' : ''}">Faces</button><button data-tab="scan" class="${state.tab === 'scan' ? 'on' : ''}">Scan</button></span><span>${state.tab === 'faces' ? (d.clips.length ? d.clips.length + ' clips' : '') : 'frame by frame <button class="x" data-tab="faces" title="Close the scan view">×</button>'}</span></h2>${state.tab === 'faces' ? footageHtml(d) : '<div id="scanview" class="scan"></div>'}</div>
+      <div class="card fill"><h2>Scan<span>frame by frame</span></h2><div id="scanview" class="scan"></div></div>
       <div class="hsplit" id="hsplit" title="Drag to resize"></div>
       <div class="card pcard"><h2>Pictures<span>click to enlarge</span></h2>${picsHtml(d)}</div>
     </div>
@@ -143,7 +135,6 @@ function renderMain() {
   const keep = $('#scanview'); if (keep) keep.remove();           // the scan player is moved, not rebuilt, so it never restarts or flickers
   $('#main').innerHTML = html;
   const slot = $('#scanview'); if (keep && slot) { slot.replaceWith(keep); }
-  fitClips();
   paintScan();
 }
 // when a clip was scanned more than once, keep only its newest scan (the one with the same frame count as its last frame)
@@ -243,7 +234,6 @@ document.addEventListener('mousemove', (e) => {
   if (!drag) return;
   if (drag === 'v') { const r = $('#main').getBoundingClientRect(); setVar('--rw', clamp(r.right - 20 - e.clientX - 7, 250, r.width - 40 - 380)); }
   else { const col = $('.col.right'); if (!col) return; const r = col.getBoundingClientRect(); setVar('--ph', clamp(r.bottom - e.clientY - 7, 100, Math.max(100, r.height - 200))); }
-  fitClips();
   const sv = $('#scanview'); if (sv) fitFrame(sv);
 });
 document.addEventListener('mouseup', () => {
@@ -252,17 +242,6 @@ document.addEventListener('mouseup', () => {
   if (drag === 'v') store.set('zenoRightW', parseFloat(cs.getPropertyValue('--rw'))); else store.set('zenoPicsH', parseFloat(cs.getPropertyValue('--ph')));
   drag = null; document.body.classList.remove('dragging');
 });
-
-// no scrolling: show the clips that fit and say how many more there are
-function fitClips() {
-  const box = $('.clips'); if (!box) return;
-  const card = box.closest('.card'); const items = [...box.querySelectorAll('.clip')];
-  items.forEach((el) => { el.style.display = ''; });
-  const bottom = card.getBoundingClientRect().bottom - 30;
-  let hidden = 0;
-  items.forEach((el) => { if (el.getBoundingClientRect().bottom > bottom) { el.style.display = 'none'; hidden++; } });
-  if (hidden) { const m = document.createElement('div'); m.className = 'more'; m.textContent = `+${hidden} more`; box.appendChild(m); }
-}
 
 // ---------------------------------------------------------------- data
 async function loadJobs() {
@@ -298,7 +277,6 @@ function openBox(path, title) {
 }
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeBox(); });
 document.addEventListener('click', async (e) => {
-  const tb = e.target.closest('[data-tab]'); if (tb) { state.tab = tb.dataset.tab; lastMain = ''; renderMain(); return; }
   const zm = e.target.closest('[data-zoom]'); if (zm) { openBox(zm.dataset.zoom, zm.dataset.title); return; }
   if (e.target.closest('#lbClose') || e.target.id === 'lightbox') { closeBox(); return; }
   const chip = e.target.closest('.schips button'); if (chip) { sp.pin = sp.pin === chip.dataset.clip ? null : chip.dataset.clip; sp.idx = 0; sp.sig = ''; paintScan(); return; }
