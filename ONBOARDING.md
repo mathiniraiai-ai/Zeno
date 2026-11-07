@@ -38,6 +38,9 @@ Wherever this page says `python`, use the project's Python: `.venv/bin/python` o
 
 ## 2. Before every video: the checks and the one question
 
+**Claude Code:** start each video with `edit.command` (Mac, first time right-click > Open) or `edit.bat` (Windows). It opens a new Claude Code session in this folder with the claude.ai connectors and extra MCP servers off (about 7.5k tokens smaller at the start) and runs `/edit`. After the first edit, `python3 scripts/setup.py --session-check` shows how big the session started; above 60k means something heavy is loaded.
+**Antigravity or another agent:** start a **new agent session for each video**, open the Zeno folder, and say you want to edit a video.
+
 Start a **new agent session for each video** (it keeps token use low), open the Zeno folder, and say you want to edit a video. The agent reads `agent/DIRECTOR.md` and does this, in this order:
 
 1. **Live checks** (`python scripts/zeno.py --preflight`). The agent shows you a PASS/FAIL table:

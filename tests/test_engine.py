@@ -1845,5 +1845,30 @@ class TestExactTokenCount(unittest.TestCase):
             self.assertEqual(common.job_begin(), first)                   # inspect again a minute later: the same edit
 
 
+class TestLeanSession(unittest.TestCase):
+    def setUp(self):
+        global session_check, json
+        import json, session_check
+
+    def test_lean_setting_is_merged_and_never_touches_other_keys(self):
+        import tempfile
+        root = Path(tempfile.mkdtemp())
+        f = root / ".claude" / "settings.local.json"
+        f.parent.mkdir()
+        f.write_text(json.dumps({"permissions": {"allow": ["Bash(ls)"]}, "env": {"FOO": "1"}}), encoding="utf-8")
+        r = session_check.write_lean_settings(root)
+        d = json.loads(f.read_text(encoding="utf-8"))
+        self.assertTrue(r["changed"])
+        self.assertEqual(d["env"], {"FOO": "1", "ENABLE_CLAUDEAI_MCP_SERVERS": "false"})
+        self.assertEqual(d["permissions"], {"allow": ["Bash(ls)"]})
+        self.assertFalse(session_check.write_lean_settings(root)["changed"])          # a second run changes nothing
+
+    def test_first_turn_size_is_read_from_the_first_model_call(self):
+        line = lambda w, r: json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": 2, "cache_creation_input_tokens": w, "cache_read_input_tokens": r, "output_tokens": 9}}})
+        got = session_check.first_turn_context(["", json.dumps({"type": "user"}), line(55000, 45000), line(100, 99000)])
+        self.assertEqual(got, {"new": 55002, "cached": 45000, "total": 100002})
+        self.assertIsNone(session_check.first_turn_context([json.dumps({"type": "user"})]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

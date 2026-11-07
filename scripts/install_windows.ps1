@@ -105,6 +105,7 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "[Auth] Opening your browser to sign in with Google (@gosupernova.live)..."
     & .venv\Scripts\python.exe scripts\setup.py --login
 }
+& .venv\Scripts\python.exe scripts\setup.py --lean-session | Out-Null
 & .venv\Scripts\python.exe scripts\setup.py --smoke
 
 Write-Host ""

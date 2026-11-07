@@ -258,7 +258,19 @@ def main():
     ap.add_argument("--login", action="store_true", help="Open browser for Google Sign-In and auto-save session token")
     ap.add_argument("--whoami", action="store_true", help="Check active Zeno Cloud / Gemini authentication status")
     ap.add_argument("--logout", action="store_true", help="Clear saved local Zeno Cloud session token")
+    ap.add_argument("--lean-session", action="store_true", help="Switch the claude.ai connectors off for edit sessions in this folder (saves about 4.6k tokens a session)")
+    ap.add_argument("--session-check", action="store_true", help="Show how many tokens the newest edit session started with, and warn when it is heavy")
     args = ap.parse_args()
+
+    if args.lean_session or args.session_check:
+        import session_check
+
+        if args.lean_session:
+            r = session_check.write_lean_settings(common.ROOT)
+            print(f"  [OK] Claude connectors are off for edit sessions in this folder ({'updated' if r['changed'] else 'already set'}): {r['path']}")
+        if args.session_check:
+            print("  " + session_check.report(common.ROOT))
+        sys.exit(0)
 
     common.load_dotenv()
     import auth_session

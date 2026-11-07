@@ -89,6 +89,7 @@ if ! .venv/bin/python scripts/setup.py --whoami >/dev/null 2>&1; then
   .venv/bin/python scripts/setup.py --login || true
 fi
 
+.venv/bin/python scripts/setup.py --lean-session || true
 .venv/bin/python scripts/setup.py --smoke || true
 
 echo ""
