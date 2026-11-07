@@ -1872,6 +1872,18 @@ class TestLeanSession(unittest.TestCase):
         self.assertIsNone(session_check.first_turn_context([json.dumps({"type": "user"})]))
 
 
+class TestJobFreshness(unittest.TestCase):
+    def test_utc_progress_stamp_is_not_shifted_by_the_time_zone(self):
+        import datetime as dt
+        import jobs
+        fresh = dt.datetime.now(dt.timezone.utc).isoformat()
+        d = Path(__import__("tempfile").mkdtemp())
+        st = jobs._status(d, {"state": "running", "updated_at": fresh, "detail": "x"}, None, [])
+        self.assertEqual(st["phase"], "working")        # a stamp just written in UTC must not read as hours old
+        old = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=30)).isoformat()
+        self.assertEqual(jobs._status(d, {"state": "running", "updated_at": old}, None, [])["phase"], "stalled")
+
+
 class TestEventsAndJobs(unittest.TestCase):
     def setUp(self):
         global events, jobs, json

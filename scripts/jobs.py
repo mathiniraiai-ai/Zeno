@@ -143,7 +143,10 @@ def _status(d: Path, prog: Optional[Dict[str, Any]], plan: Optional[Dict[str, An
     age = None
     if prog and prog.get("updated_at"):
         try:
-            age = now - time.mktime(time.strptime(str(prog["updated_at"])[:19], "%Y-%m-%dT%H:%M:%S")) if "T" in str(prog["updated_at"]) else None
+            import datetime as _dt
+
+            stamp = _dt.datetime.fromisoformat(str(prog["updated_at"]))      # progress.json stores UTC with an offset; a naive stamp is local time
+            age = now - (stamp.timestamp() if stamp.tzinfo else time.mktime(stamp.timetuple()))
         except ValueError:
             age = None
     if prog and prog.get("state") == "running" and (age is None or age < STALE_SEC):
