@@ -139,6 +139,15 @@ _META_TRANSITIONS: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _say(kind: str, text: str, **data: Any) -> None:
+    try:
+        import events
+
+        events.emit(kind, text, **data)
+    except Exception:
+        pass
+
+
 def even(x: float) -> int:
     return int(round(x / 2)) * 2
 
@@ -460,8 +469,10 @@ def main() -> None:
 
         if f.exists():
             durs.append(round((float(s["end"]) - float(s["start"])) * fps) / fps)
+            _say("render", f"Cut {s['id']} ready (from cache): {Path(str(s['src'])).name} {float(s['start']):.2f}-{float(s['end']):.2f}, {lay}", cut=s['id'], i=i + 1, n=len(segs))
         else:
             print(f"  segment {s['id']}: {s['src']} {float(s['start']):.2f}-{float(s['end']):.2f} ({lay})")
+            _say("render", f"Cutting {s['id']}: {Path(str(s['src'])).name} {float(s['start']):.2f}-{float(s['end']):.2f}, {lay}", cut=s['id'], i=i + 1, n=len(segs))
             if layouts is not None and hasattr(layouts, "render_segment_layout"):
                 durs.append(layouts.render_segment_layout(s, plan, W, H, fps, f, a.draft))
             else:
@@ -756,6 +767,7 @@ def main() -> None:
         # with subtitles this file is an intermediate (the captions are added, and the video encoded once more, in the last step)
         bitrate_kbps=max(final_bitrate_kbps(total) * 3, 30000) if plan.get("subs") else final_bitrate_kbps(total),
     )
+    _say("render", "Picture and sound mixed; measuring loudness")
     r = ffmpeg("-i", mix, "-af", f"loudnorm=I={loud}:TP={DEFAULT_PEAK_CAP_DB}:LRA=11:print_format=json", "-f", "null", "-")
     meas = json.loads(re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr).group(0))
     vol_extra = f",volume={master_gain_db:+.2f}dB" if abs(master_gain_db) >= 0.05 else ""

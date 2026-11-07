@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' file: data:; style-src 'self' 'unsafe-inline'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zeno</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <aside class="side">
+    <div class="drag"></div>
+    <div class="brand"><span class="mark"></span><b>Zeno</b><span class="ver" id="ver"></span></div>
+    <button id="newEdit" class="primary">New edit</button>
+    <div class="side-h"><span>Edits</span><span id="count" class="muted"></span></div>
+    <ul id="jobs"></ul>
+    <div class="side-f"><div id="who" class="muted"></div><div id="upd"></div></div>
+  </aside>
+  <main id="main"></main>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

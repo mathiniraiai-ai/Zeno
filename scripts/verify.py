@@ -885,6 +885,22 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
     for kind, lines in (("BLACK", frames["black"]), ("BANNER ON FACE", frames["banner_on_face"]), ("NO FACE (warning)", frames["no_face"])):
         for ln in lines[:4]:
             print(f"          {kind}: {ln}")
+    try:
+        import events
+
+        for _tag, _ok, _txt in (
+            ("Video", video_ok, f"{info['width']}x{info['height']}, {tc(actual_dur)}"),
+            ("Loudness", audio_ok, f"{i_lufs:.1f} LUFS, peak {tp_db:.1f} dBTP"),
+            ("Cuts", cuts_ok, f"{len(plan.get('segments', []))} cuts, {clipped_w} clipped words, {b_clicks} clicks"),
+            ("Script order", script_ok, f"{cov_lines}/{tot_lines} lines present in order"),
+            ("Marks", marks_ok, f"{m_pass}/{m_tot} verified"),
+            ("Split screen", split_hook_ok, split_hook_summary),
+            ("Frames", frames['ok'], frames['note'] or detail),
+            ("Picture vs plan", pic_ok, f"{pic_n} cuts matched" if pic_ok else "; ".join(pic_bad)[:200]),
+        ):
+            events.emit("verify", f"{_tag}: {'pass' if _ok else 'FAIL'}, {_txt}", ok=bool(_ok), tag=_tag)
+    except Exception:
+        pass
     print(f"[PICTURE {'PASS' if pic_ok else 'FAIL'}] {pic_n} cuts: the picture at the middle of each cut matches the plan" + ("" if pic_ok else ": " + "; ".join(pic_bad)))
 
     return bool(video_ok and audio_ok and cuts_ok and script_ok and marks_ok and split_hook_ok and pic_ok and frames['ok'])

@@ -1,0 +1,50 @@
+{
+  "name": "zeno-desktop",
+  "productName": "Zeno",
+  "version": "1.0.0",
+  "description": "Zeno desktop app: watch every edit, step by step",
+  "main": "main.js",
+  "private": true,
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dist:mac": "electron-builder --mac dmg",
+    "dist:win": "electron-builder --win nsis"
+  },
+  "build": {
+    "appId": "live.gosupernova.zeno",
+    "productName": "Zeno",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.video",
+      "target": [
+        "dmg"
+      ],
+      "icon": "build/icon.icns",
+      "identity": null
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    }
+  },
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "25.1.8"
+  }
+}

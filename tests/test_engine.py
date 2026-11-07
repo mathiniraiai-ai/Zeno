@@ -1870,5 +1870,89 @@ class TestLeanSession(unittest.TestCase):
         self.assertIsNone(session_check.first_turn_context([json.dumps({"type": "user"})]))
 
 
+class TestEventsAndJobs(unittest.TestCase):
+    def setUp(self):
+        global events, jobs, json
+        import json, events, jobs
+
+    def _job(self, with_plan=False, with_output=False):
+        import tempfile, os
+        from unittest.mock import patch
+        root = Path(tempfile.mkdtemp())
+        work = root / "work"
+        d = work / "demo_job"
+        d.mkdir(parents=True)
+        (d / "line_map.md").write_text("x", encoding="utf-8")
+        out_dir = root / "out" / "My Video"
+        if with_plan:
+            (d / "plan.edl").write_text('#output "%s"\n#subs auto y=68\nL1 a.mp4 0.0-2.0 layout=single z=sudden_in:1.08@0.1  # a\nL2 b.mp4 1.0-4.0 layout=split_h tr=whip_left@0.2  # b\n' % (out_dir / "reel_My Video.mp4"), encoding="utf-8")
+        if with_output:
+            out_dir.mkdir(parents=True)
+            (out_dir / "reel_My Video.mp4").write_bytes(b"x" * 2000)
+        return work, d
+
+    def test_events_are_appended_read_back_in_order_and_after_a_marker(self):
+        import os
+        from unittest.mock import patch
+        work, d = self._job()
+        with patch.object(events, "WORK", work), patch.dict(os.environ, {"ZENO_JOB_PROJECT": "demo_job"}):
+            events.emit("face", "S4: 2 face(s)", clip="S4.mp4", faces=[[0.1, 0.4]])
+            events.emit("nonsense-kind", "x")
+            rows = events.read(d)
+            self.assertEqual([r["kind"] for r in rows], ["face", "info"])
+            self.assertEqual(rows[0]["clip"], "S4.mp4")
+            self.assertEqual(events.read(d, since=rows[0]["id"])[0]["kind"], "info")
+            events.emit("info", "no project folder yet") if False else None
+        with patch.object(events, "WORK", work), patch.dict(os.environ, {"ZENO_JOB_PROJECT": "no_such_job"}):
+            events.emit("info", "goes nowhere")                                # never raises, never creates a folder
+            self.assertFalse((work / "no_such_job").exists())
+
+    def test_status_follows_the_files(self):
+        from unittest.mock import patch
+        work, d = self._job()
+        with patch.object(jobs, "WORK", work):
+            self.assertEqual(jobs.summary(d)["status"]["phase"], "measured")
+        work, d = self._job(with_plan=True)
+        with patch.object(jobs, "WORK", work):
+            s = jobs.summary(d)
+            self.assertEqual(s["status"]["phase"], "plan")
+            self.assertEqual(s["title"], "My Video")
+        work, d = self._job(with_plan=True, with_output=True)
+        with patch.object(jobs, "WORK", work):
+            self.assertEqual(jobs.summary(d)["status"]["phase"], "done")
+
+    def test_running_and_stalled_are_told_apart(self):
+        import time
+        from unittest.mock import patch
+        work, d = self._job(with_plan=True)
+        now = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
+        old = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 3600))
+        (d / "progress.json").write_text(json.dumps({"state": "running", "stage": 2, "stage_name": "Transcribing", "pct": 30, "detail": "clip 3/11", "updated_at": now}), encoding="utf-8")
+        with patch.object(jobs, "WORK", work):
+            self.assertEqual(jobs.summary(d)["status"]["phase"], "working")
+        (d / "progress.json").write_text(json.dumps({"state": "running", "stage": 2, "pct": 30, "updated_at": old}), encoding="utf-8")
+        with patch.object(jobs, "WORK", work):
+            self.assertEqual(jobs.summary(d)["status"]["phase"], "stalled")
+
+    def test_detail_has_the_plan_timeline_outputs_footage_and_events(self):
+        import os
+        from unittest.mock import patch
+        work, d = self._job(with_plan=True, with_output=True)
+        with patch.object(jobs, "WORK", work), patch.object(events, "WORK", work), patch.dict(os.environ, {"ZENO_JOB_PROJECT": "demo_job"}):
+            events.emit("face", "S1: 1 face(s)", clip="S1.mp4", faces=[[0.2, 0.5]], shot="single", silent=False)
+            events.emit("verify", "Loudness: pass", ok=True, tag="Loudness")
+            r = jobs.detail("demo_job")
+        self.assertEqual(r["plan"]["cuts"], 2)
+        self.assertEqual(r["plan"]["layouts"], {"single": 1, "split_h": 1})
+        self.assertEqual(r["plan"]["transitions"], 1)
+        self.assertEqual([t["start"] for t in r["plan"]["timeline"]], [0.0, 2.0])
+        self.assertEqual(r["plan"]["subs"], "auto")
+        self.assertEqual(r["outputs"][0]["kind"], "reel")
+        self.assertEqual(r["clips"][0]["clip"], "S1.mp4")
+        self.assertEqual(r["verify"][0]["tag"], "Loudness")
+        self.assertEqual(len(r["events"]), 2)
+        self.assertEqual(jobs.detail("missing")["error"], "No job named missing")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

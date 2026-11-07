@@ -58,6 +58,12 @@ class ProgressTracker:
         self.work_root = self.repo_root / "work"
         self.work_dir = pathlib.Path(work_dir).resolve() if work_dir else (self.work_root / project_name)
         self.project_name = project_name
+        try:
+            import events
+
+            events.set_project(self.work_dir.name)
+        except Exception:
+            pass
         self.heartbeat_sec = float(heartbeat_sec)
         self.total_stages = int(total_stages)
 
@@ -79,6 +85,12 @@ class ProgressTracker:
             self.work_dir = pathlib.Path(work_dir).resolve()
             if project_name:
                 self.project_name = project_name
+            try:
+                import events
+
+                events.set_project(self.work_dir.name)
+            except Exception:
+                pass
             self._write_snapshot_unlocked()
 
     def start_heartbeat(self) -> "ProgressTracker":
@@ -129,6 +141,13 @@ class ProgressTracker:
             self._write_snapshot_unlocked()
             if emit_now:
                 self._print_line_unlocked(prefix="STAGE")
+            if detail is not None:
+                try:
+                    import events
+
+                    events.emit("stage", f"{self.stage_name}: {self.detail}", stage=self.stage, pct=self.pct)
+                except Exception:
+                    pass
 
     def _snapshot_dict_unlocked(self) -> dict:
         elapsed = round(time.monotonic() - self._start_ts, 1)

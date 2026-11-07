@@ -730,6 +730,12 @@ def ensure_clip_transcribed(
 
     if not hq_words:
         hq_words = base_words
+    try:
+        import events
+
+        events.emit("speech", f"{clip_stem}: {len(hq_words)} words transcribed and aligned" if hq_words else f"{clip_stem}: no speech found", clip=clip_stem, words=len(hq_words))
+    except Exception:
+        pass
     if not base_words:
         base_words = hq_words
 
@@ -993,6 +999,13 @@ def format_facts(clips_data: List[Dict[str, Any]]) -> str:
             if owner:
                 tags.append(owner)
         out.append(f"## {name} ({' '.join(tags)})")
+        try:
+            import events
+
+            _fs = [(round(float(f['bbox_norm'][0]), 2), round(float(f['bbox_norm'][2]), 2)) for f in (vis.get('faces') or []) if f.get('bbox_norm') and len(f['bbox_norm']) >= 4]
+            events.emit("face", f"{name}: {vis.get('face_count', 0)} face(s), {vis.get('shot_type', 'unknown')}" + (", silent clip" if clip_is_silent(c) else ""), clip=name, faces=_fs, shot=vis.get('shot_type'), silent=clip_is_silent(c))
+        except Exception:
+            pass
         spans = [(float(f["bbox_norm"][0]), float(f["bbox_norm"][2])) for f in (vis.get("faces") or []) if f.get("bbox_norm") and len(f["bbox_norm"]) >= 4]
         if len(spans) >= 2:
             parts = []

@@ -51,3 +51,5 @@ zeno_keys.db*
 .zeno-dev
 node_modules/
 .claude/settings.local.json
+app/node_modules/
+app/dist/

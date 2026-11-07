@@ -586,6 +586,14 @@ def order_gate(plan: dict, plan_path: pathlib.Path) -> str:
         return "[BLOCKED] This plan names no script, so it cannot be checked. Add #script <path> to plan.edl."
     g = script_order.full_gate(plan, common.resolve(script), plan_path.parent, plan_path)
     try:
+        import events
+
+        events.set_project(plan_path.parent.name)
+        _n = sum(len(v) for v in (g.get('problems') or {}).values())
+        events.emit("check", (f"Plan check blocked: {_n} problem(s)" if g.get('blocked') else "Plan check passed") + f", {len(g.get('tighten') or [])} tight-cut note(s), {len(g.get('style') or [])} style note(s)", ok=not g.get('blocked'), problems=_n)
+    except Exception:
+        pass
+    try:
         import job_report
         job_report.record_plan_check(plan_path.parent, g)
     except Exception:

@@ -36,6 +36,9 @@ Running the installer again is always safe; it skips what is already there. Neve
 
 Wherever this page says `python`, use the project's Python: `.venv/bin/python` on Mac, `.venv\Scripts\python` on Windows.
 
+## The Zeno app (optional, recommended)
+Install the Zeno desktop app (`app/README.md`) to watch each edit live: stages, face scan, who speaks, every cut and check. Its **New edit** button opens the lean Claude Code session.
+
 ## 2. Before every video: the checks and the one question
 
 **Claude Code:** start each video with `edit.command` (Mac, first time right-click > Open) or `edit.bat` (Windows). It opens a new Claude Code session in this folder with the claude.ai connectors and extra MCP servers off (about 7.5k tokens smaller at the start) and runs `/edit`. After the first edit, `python3 scripts/setup.py --session-check` shows how big the session started; above 60k means something heavy is loaded.

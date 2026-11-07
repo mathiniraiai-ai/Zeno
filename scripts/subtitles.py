@@ -425,4 +425,10 @@ def build_overlay(plan: Dict[str, Any], segs: List[Dict[str, Any]], starts: List
         except Exception:   # noqa: BLE001
             pass
     print(f"  [SUBS] {len(cues)} captions, {len(frames)} frames, style '{style['name']}', colours adapted on {adapted} captions")
+    try:
+        import events
+
+        events.emit("subs", f"Subtitles: {len(cues)} captions in '{style['name']}', colours adapted to the picture on {adapted}", style=style['name'], captions=len(cues))
+    except Exception:
+        pass
     return write_concat_list(frames, total, width, height, out_dir)
