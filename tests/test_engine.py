@@ -1872,6 +1872,20 @@ class TestLeanSession(unittest.TestCase):
         self.assertIsNone(session_check.first_turn_context([json.dumps({"type": "user"})]))
 
 
+class TestZenoConnector(unittest.TestCase):
+    def test_handshake_lists_tools_and_refuses_bad_input(self):
+        import zeno_mcp
+        init = zeno_mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}})
+        self.assertEqual(init["result"]["serverInfo"]["name"], "zeno")
+        self.assertIsNone(zeno_mcp.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}))     # notifications get no answer
+        names = [t["name"] for t in zeno_mcp.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]]
+        self.assertIn("zeno_start_edit", names)
+        bad = zeno_mcp.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "zeno_start_edit", "arguments": {"script": "https://docs.google.com/document/d/x/edit", "footage": "/nope", "name": "t"}}})
+        self.assertTrue(bad["result"]["isError"])                                  # a whole-document link is refused before anything runs
+        bad2 = zeno_mcp.handle({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "zeno_job", "arguments": {"name": "../x"}}})
+        self.assertTrue(bad2["result"]["isError"])                                 # no path tricks
+
+
 class TestJobFreshness(unittest.TestCase):
     def test_utc_progress_stamp_is_not_shifted_by_the_time_zone(self):
         import datetime as dt
