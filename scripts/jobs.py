@@ -151,7 +151,7 @@ def detail(name: str, since: int = 0) -> Dict[str, Any]:
     tele = _read(d / "token_telemetry.json") or {}
     rep = _read(d / "job_report.json") or {}
     allev = events.read(d, since=since, limit=1500)
-    scans = [e for e in allev if e.get("kind") == "scan"][-120:]
+    scans = [e for e in allev if e.get("kind") == "scan"][-900:]
     ev = [e for e in allev if e.get("kind") != "scan"][-400:]
     # footage: the newest face event of each clip
     clips: Dict[str, Dict[str, Any]] = {}

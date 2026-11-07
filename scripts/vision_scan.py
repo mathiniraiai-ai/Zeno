@@ -2,7 +2,7 @@
 """Watch the face tracker work: scan a clip frame by frame with the same YuNet detector Zeno uses, print one line per frame, and report each frame
 (a small picture plus the faces found) to the desktop app's live view. It measures only; it changes nothing.
 
-    python3 scripts/vision_scan.py "<clip>" [--step 0.5] [--max 60] [--project <work folder>]
+    python3 scripts/vision_scan.py "<clip or folder>" [--step 0.5] [--max 60] [--project <work folder>]
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import events  # noqa: E402
 
 THUMB_W = 220
+VIDEO_EXT = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
 
 
 def _face_row(f: Dict[str, Any]) -> Dict[str, Any]:
@@ -96,8 +97,12 @@ def main() -> int:
     ap.add_argument("--pause", type=float, default=0.0, help="wait this long after each frame (to watch it live)")
     ap.add_argument("--thumb", type=int, default=THUMB_W, help="width in pixels of the picture saved for each frame")
     a = ap.parse_args()
-    for c in a.clips:
-        scan_clip(Path(c), a.step, a.max, a.project, a.pause, thumb_w=a.thumb)
+    clips: List[Path] = []
+    for c in a.clips:                      # a folder means every video in it
+        q = Path(c)
+        clips += sorted(x for x in q.iterdir() if x.suffix.lower() in VIDEO_EXT and not x.name.startswith(".")) if q.is_dir() else [q]
+    for c in clips:
+        scan_clip(c, a.step, a.max, a.project, a.pause, thumb_w=a.thumb)
     return 0
 
 

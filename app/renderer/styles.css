@@ -102,10 +102,11 @@ h1 { font-size: 15px; font-weight: 600; margin: 0; flex: 1; min-width: 0; overfl
 
 .tabs { display: inline-flex; gap: 4px; } .tabs button { background: transparent; border: 0; padding: 0 8px 0 0; font: inherit; letter-spacing: inherit; text-transform: inherit; color: var(--faint); cursor: pointer; }
 .tabs button.on { color: var(--text); } .tabs button:hover { color: var(--green); }
-.scan { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 150px; grid-template-rows: minmax(0, 1fr) auto; gap: 10px 12px; padding: 10px 13px 10px; }
+.scan { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 150px; grid-template-rows: minmax(0, 1fr) auto auto; gap: 10px 12px; padding: 10px 13px 10px; }
 .sarea { min-width: 0; min-height: 0; }
 .sframe { position: relative; background: #000; border-radius: 6px; overflow: hidden; border: 1px solid var(--line2); align-self: start; }
 .sframe img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.sfaces { position: absolute; inset: 0; } .sfaces .fbox, .sfaces .eye, .sfaces .mouth { transition: left .15s linear, top .15s linear, width .15s linear, height .15s linear; } .sfaces.jump .fbox, .sfaces.jump .eye, .sfaces.jump .mouth { transition: none; }
 .fbox { position: absolute; border: 1.5px solid var(--green); border-radius: 3px; box-shadow: 0 0 0 1px rgba(0,0,0,.4); } .fbox b { position: absolute; left: -1px; top: -14px; background: var(--green); color: #06150d; font: 700 9px var(--mono); padding: 0 4px; border-radius: 3px 3px 0 0; }
 .eye { position: absolute; width: 4px; height: 4px; margin: -2px 0 0 -2px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 1px #000; }
 .mouth { position: absolute; border: 1px solid rgba(228,178,76,.9); border-radius: 2px; } .mouth.talk { background: rgba(228,178,76,.35); }
@@ -124,3 +125,6 @@ h1 { font-size: 15px; font-weight: 600; margin: 0; flex: 1; min-width: 0; overfl
 .hsplit { cursor: row-resize; position: relative; flex: none; height: 14px; } .hsplit::after { content: ""; position: absolute; top: 6px; left: 6px; right: 6px; height: 2px; border-radius: 2px; background: var(--line2); transition: background .12s; }
 .vsplit:hover::after, .hsplit:hover::after, body.dragging .vsplit::after, body.dragging .hsplit::after { background: var(--green); }
 body.dragging { cursor: grabbing; } body.dragging * { pointer-events: none; } body.dragging .vsplit, body.dragging .hsplit { pointer-events: auto; }
+
+.schips { grid-column: 1 / -1; display: flex; gap: 5px; overflow-x: auto; scrollbar-width: none; flex-wrap: nowrap; } .schips::-webkit-scrollbar { display: none; } .schips button { flex: none; background: var(--line2); color: var(--muted); border: 0; border-radius: 10px; padding: 2px 8px; font: 600 10.5px var(--mono); cursor: pointer; } .schips button.cur { background: #1d3d2e; color: var(--green); } .schips button.pin { outline: 1px solid var(--green); }
+.sdots i.seen { background: #2e6b4c; }

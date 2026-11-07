@@ -140,31 +140,80 @@ function renderMain() {
   const html = mainHtml(state.detail);
   if (html === lastMain) return;
   lastMain = html;
+  const keep = $('#scanview'); if (keep) keep.remove();           // the scan player is moved, not rebuilt, so it never restarts or flickers
   $('#main').innerHTML = html;
+  const slot = $('#scanview'); if (keep && slot) { slot.replaceWith(keep); }
   fitClips();
   paintScan();
 }
-// the scan view: plays the scanned frames in a loop (the newest frame stays up while a scan is running)
+// when a clip was scanned more than once, keep only its newest scan (the one with the same frame count as its last frame)
+function latestRuns(list) {
+  const last = new Map(); list.forEach((e) => last.set(e.clip, e.n));
+  const seen = new Set();
+  return list.filter((e) => e.n === last.get(e.clip)).reverse().filter((e) => { const k = e.clip + '|' + e.i; if (seen.has(k)) return false; seen.add(k); return true; }).reverse();
+}
+// the scan view: one persistent player. It is built once and only its picture, boxes and numbers change, so nothing flickers.
+// It plays every scanned clip one after the other (click a clip name to loop just that one).
+const sp = { built: null, idx: 0, pin: null, prevClip: '', cache: new Map(), faceEls: [], sig: '' };
+function preload(url) { if (!sp.cache.has(url)) { const im = new Image(); im.src = url; sp.cache.set(url, im); if (sp.cache.size > 1200) sp.cache.delete(sp.cache.keys().next().value); } }
+function scanSkeleton(box) {
+  box.innerHTML = `<div class="sarea"><div class="sframe" data-ar="0.5625"><img alt=""><div class="sfaces"></div></div></div>
+    <div class="sinfo"><div class="sclip"></div><div class="muted sfr"></div><div class="shead"></div><div class="srows"></div><div class="muted sfoot"></div></div>
+    <div class="schips"></div><div class="sdots"></div>`;
+  sp.built = box; sp.faceEls = []; sp.sig = '';
+}
+function scanClips() { const m = new Map(); state.scans.forEach((e, k) => { if (!m.has(e.clip)) m.set(e.clip, []); m.get(e.clip).push(k); }); return m; }
 function paintScan() {
   const box = $('#scanview'); if (!box) return;
   const list = state.scans;
-  if (!list.length) { box.innerHTML = '<div class="empty">No frame scans yet. Run: python3 scripts/vision_scan.py "&lt;clip&gt;"</div>'; return; }
+  if (!list.length) { sp.built = null; box.innerHTML = '<div class="empty">No frame scans yet. Run: python3 scripts/vision_scan.py "&lt;clip or folder&gt;"</div>'; return; }
+  if (sp.built !== box) scanSkeleton(box);
+  const clips = scanClips();
+  // which frames play: all of them in order, or only the pinned clip
+  let seq = sp.pin && clips.has(sp.pin) ? clips.get(sp.pin) : list.map((_, k) => k);
+  if (sp.pin && !clips.has(sp.pin)) sp.pin = null;
+  if (sp.idx >= seq.length) sp.idx = 0;
   const live = Date.now() - (state.lastScanAt || 0) < 4000;
-  const i = live ? list.length - 1 : state.scanIdx % list.length;
-  const e = list[i]; const w = (e.size && e.size[0]) || 9, h = (e.size && e.size[1]) || 16;
-  const faces = (e.faces || []).map((f, k) => {
-    const b = f.box || [0, 0, 0, 0]; const mo = f.mouth;
-    const eye = f.eyes ? `<i class="eye" style="left:${f.eyes[0] * 100}%;top:${f.eyes[1] * 100}%"></i>` : '';
-    const mouth = mo ? `<i class="mouth ${f.speaking ? 'talk' : ''}" style="left:${mo[0] * 100}%;top:${mo[1] * 100}%;width:${(mo[2] - mo[0]) * 100}%;height:${(mo[3] - mo[1]) * 100}%"></i>` : '';
-    return `<div class="fbox" style="left:${b[0] * 100}%;top:${b[1] * 100}%;width:${(b[2] - b[0]) * 100}%;height:${(b[3] - b[1]) * 100}%"><b>${k + 1}</b></div>${eye}${mouth}`;
-  }).join('');
-  const rows = (e.faces || []).map((f, k) => `<div class="srow"><span>Face ${k + 1}</span><span class="${f.speaking ? 'talk' : ''}">${f.speaking ? 'mouth open' : 'mouth closed'}</span></div>`).join('') || '<div class="srow"><span>No face</span><span></span></div>';
-  const dots = list.map((x, k) => `<i class="${k === i ? 'cur' : ''} ${x.faces && x.faces.length ? '' : 'none'}"></i>`).join('');
-  box.innerHTML = `<div class="sarea"><div class="sframe" data-ar="${w / h}"><img src="file://${encodeURI(e.thumb)}" alt="">${faces}</div></div>
-    <div class="sinfo"><div class="sclip" title="${esc(e.clip)}">${esc(e.clip)}</div><div class="muted">frame ${e.i}${e.n ? '/' + e.n : ''} · ${e.t_clip}s</div><div class="shead"><b>${(e.faces || []).length}</b> face${(e.faces || []).length === 1 ? '' : 's'} · ${e.ms ? Math.round(e.ms) + ' ms' : 'scan'}</div>${rows}<div class="muted sfoot">${live ? 'scanning live' : 'replaying the scan'}</div></div>
-    <div class="sdots">${dots}</div>`;
-  fitFrame(box);
+  if (live && !sp.pin && list.length - sp.idx > 40) sp.idx = list.length - 30;      // a scan far ahead: catch up instead of replaying it slowly
+  const e = list[seq[sp.idx]]; if (!e) return;
+  const w = (e.size && e.size[0]) || 9, h = (e.size && e.size[1]) || 16;
+  const fr = box.querySelector('.sframe'), img = fr.querySelector('img'), layer = fr.querySelector('.sfaces');
+  const ar = w / h;
+  if (String(ar) !== fr.dataset.ar) { fr.dataset.ar = ar; fitFrame(box); }
+  const url = 'file://' + encodeURI(e.thumb);
+  if (img.getAttribute('src') !== url) img.setAttribute('src', url);
+  for (let k = 1; k <= 8; k++) { const n = list[seq[(sp.idx + k) % seq.length]]; if (n) preload('file://' + encodeURI(n.thumb)); }
+  const jump = e.clip !== sp.prevClip; sp.prevClip = e.clip;
+  layer.classList.toggle('jump', jump);
+  const fs = e.faces || [];
+  while (sp.faceEls.length < fs.length) {
+    const g = document.createElement('div'); g.className = 'fg';
+    g.innerHTML = '<div class="fbox"><b></b></div><i class="eye"></i><i class="mouth"></i>'; layer.appendChild(g); sp.faceEls.push(g);
+  }
+  sp.faceEls.forEach((g, k) => {
+    const f = fs[k]; g.style.display = f ? '' : 'none'; if (!f) return;
+    const b = f.box || [0, 0, 0, 0], bx = g.children[0], ey = g.children[1], mo = g.children[2];
+    bx.style.cssText = `left:${b[0] * 100}%;top:${b[1] * 100}%;width:${(b[2] - b[0]) * 100}%;height:${(b[3] - b[1]) * 100}%`; bx.firstChild.textContent = k + 1;
+    ey.style.display = f.eyes ? '' : 'none'; if (f.eyes) { ey.style.left = f.eyes[0] * 100 + '%'; ey.style.top = f.eyes[1] * 100 + '%'; }
+    const m = f.mouth; mo.style.display = m ? '' : 'none';
+    if (m) { mo.style.cssText = `left:${m[0] * 100}%;top:${m[1] * 100}%;width:${(m[2] - m[0]) * 100}%;height:${(m[3] - m[1]) * 100}%`; mo.className = 'mouth' + (f.speaking ? ' talk' : ''); }
+  });
+  const q = (s) => box.querySelector(s), setT = (el, v) => { if (el.textContent !== v) el.textContent = v; };
+  setT(q('.sclip'), e.clip); q('.sclip').title = e.clip;
+  setT(q('.sfr'), `frame ${e.i}${e.n ? '/' + e.n : ''} · ${e.t_clip}s`);
+  q('.shead').innerHTML = `<b>${fs.length}</b> face${fs.length === 1 ? '' : 's'} · ${e.ms ? Math.round(e.ms) + ' ms' : 'scan'}`;
+  q('.srows').innerHTML = fs.map((f, k) => `<div class="srow"><span>Face ${k + 1}</span><span class="${f.speaking ? 'talk' : ''}">${f.speaking ? 'mouth open' : 'mouth closed'}</span></div>`).join('') || '<div class="srow"><span>No face</span><span></span></div>';
+  setT(q('.sfoot'), sp.pin ? 'looping this clip' : live ? 'scanning live' : `clip ${[...clips.keys()].indexOf(e.clip) + 1} of ${clips.size}`);
+  // clip chips (rebuilt only when the set of clips changes) and the progress through the current clip
+  const sig = [...clips.keys()].join('|') + '#' + (sp.pin || '');
+  if (sig !== sp.sig) { sp.sig = sig; q('.schips').innerHTML = [...clips.keys()].map((n) => `<button data-clip="${esc(n)}" class="${n === sp.pin ? 'pin' : ''}">${esc(n.replace(/\.[^.]+$/, ''))}</button>`).join(''); }
+  box.querySelectorAll('.schips button').forEach((b) => { const on = b.dataset.clip === e.clip; b.classList.toggle('cur', on); if (on && !b.classList.contains('was')) { box.querySelectorAll('.schips .was').forEach((x) => x.classList.remove('was')); b.classList.add('was'); const sc = b.parentElement; sc.scrollLeft = b.offsetLeft - sc.offsetLeft - 8; } });
+  const mine = clips.get(e.clip), dots = q('.sdots');
+  if (dots.children.length !== mine.length) dots.innerHTML = mine.map(() => '<i></i>').join('');
+  const at = mine.indexOf(seq[sp.idx]);
+  Array.from(dots.children).forEach((d, k) => { d.className = (list[mine[k]].faces || []).length ? (k === at ? 'cur' : k < at ? 'seen' : '') : (k === at ? 'cur none' : 'none'); });
 }
+function frameFit(box) { return fitFrame(box); }
 // the frame keeps the video's own shape and takes the largest size the card allows, so the face boxes always sit on the faces
 function fitFrame(box) {
   const area = box.querySelector('.sarea'); const fr = box.querySelector('.sframe'); if (!area || !fr) return;
@@ -172,7 +221,7 @@ function fitFrame(box) {
   let fw = r.width, fh = fw / ar; if (fh > r.height) { fh = r.height; fw = fh * ar; }
   fr.style.width = Math.max(40, fw) + 'px'; fr.style.height = Math.max(40, fh) + 'px';
 }
-setInterval(() => { if (state.tab === 'scan' && state.scans.length) { state.scanIdx = (state.scanIdx + 1) % state.scans.length; paintScan(); } }, 380);
+setInterval(() => { if (state.tab === 'scan' && state.scans.length) { sp.idx++; paintScan(); } }, 170);
 
 
 
@@ -232,7 +281,7 @@ async function loadDetail() {
     const d = await window.zeno.detail(name, state.last);
     if (name !== state.selected || !d || d.error) return;
     state.events = state.events.concat(d.events || []).slice(-600);
-    if (d.scans && d.scans.length) { state.scans = state.scans.concat(d.scans).slice(-150); state.lastScanAt = Date.now(); }
+    if (d.scans && d.scans.length) { state.scans = latestRuns(state.scans.concat(d.scans)).slice(-900); state.lastScanAt = Date.now(); }
     state.last = d.last_event || state.last;
     state.detail = d;
     renderMain();
@@ -252,6 +301,7 @@ document.addEventListener('click', async (e) => {
   const tb = e.target.closest('[data-tab]'); if (tb) { state.tab = tb.dataset.tab; lastMain = ''; renderMain(); return; }
   const zm = e.target.closest('[data-zoom]'); if (zm) { openBox(zm.dataset.zoom, zm.dataset.title); return; }
   if (e.target.closest('#lbClose') || e.target.id === 'lightbox') { closeBox(); return; }
+  const chip = e.target.closest('.schips button'); if (chip) { sp.pin = sp.pin === chip.dataset.clip ? null : chip.dataset.clip; sp.idx = 0; sp.sig = ''; paintScan(); return; }
   const li = e.target.closest('#jobs li[data-name]');
   if (li) { state.selected = li.dataset.name; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; lastMain = ''; renderSide(); renderMain(); loadDetail(); return; }
   const rv = e.target.closest('[data-reveal]'); if (rv) { window.zeno.reveal(rv.dataset.reveal); return; }
