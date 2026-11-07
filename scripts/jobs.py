@@ -170,7 +170,7 @@ def summary(d: Path) -> Dict[str, Any]:
     outs = _outputs(plan["output"]) if plan else []
     st = _status(d, prog, plan, outs)
     return {"name": d.name, "title": _title(d, plan), "status": st, "stage": (prog or {}).get("stage"), "stage_name": (prog or {}).get("stage_name"),
-            "pct": (prog or {}).get("pct", 0), "elapsed": (prog or {}).get("elapsed_mmss"), "updated": max((p.stat().st_mtime for p in d.iterdir() if p.is_file()), default=0)}
+            "pct": (prog or {}).get("pct", 0), "completed": (prog or {}).get("completed"), "total": (prog or {}).get("total"), "elapsed": (prog or {}).get("elapsed_mmss"), "updated": max((p.stat().st_mtime for p in d.iterdir() if p.is_file()), default=0)}
 
 
 def list_jobs(limit: int = 40) -> List[Dict[str, Any]]:

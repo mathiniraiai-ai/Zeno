@@ -46,7 +46,9 @@ function pipeHtml(d) {
   const out = [];
   names.forEach((name, i) => {
     const cls = i < done ? 'done' : (i === waitAt ? 'wait' : (i === cur - 1 && (ph === 'working' || ph === 'stalled') ? 'active' : ''));
-    out.push(`<div class="step ${cls}"><div class="c">${cls === 'done' ? '✓' : i + 1}</div>${name}</div>`);
+    const n = d.total || 0, c = d.completed || 0, sp = n ? Math.min(100, Math.round((c / n) * 100)) : 0;
+    const num = cls === 'done' ? '100%' : (cls === 'active' ? (i === 4 ? `${d.pct || 0}%` : (n ? `${sp}% · ${c}/${n}` : '…')) : '');
+    out.push(`<div class="step ${cls}"><div class="c">${cls === 'done' ? '✓' : i + 1}</div>${name}${num ? `<span class="sn">${num}</span>` : ''}</div>`);
     if (i < names.length - 1) out.push(`<div class="bar"><i style="width:${i < done ? 100 : (i === cur - 1 && ph === 'working' ? Math.min(100, ((d.pct || 0) % 20) * 5) : 0)}%"></i></div>`);
   });
   return out.join('');
@@ -151,7 +153,7 @@ function mainHtml(d) {
     return `<div class="top"><h1>Zeno</h1></div><div class="body" style="display:flex"><div class="welcome"><h1>No edit selected</h1><div>${state.jobs.length ? 'Pick an edit on the left.' : 'Press New edit to start one. This window then shows every step.'}</div></div></div>`;
   }
   const s = d.status;
-  return `<div class="top"><h1 title="${esc(d.title)}">${esc(shortTitle(d.title))}</h1>${s.phase === 'plan' ? '<button class="askbtn" data-ask="1">Render…</button>' : ''}<span class="pill ${s.phase}">${esc(s.phase === 'working' ? `Working${d.elapsed ? ' · ' + d.elapsed : ''}` : shortStatus(s))}</span></div>
+  return `<div class="top"><h1 title="${esc(d.title)}">${esc(shortTitle(d.title))}</h1>${s.phase === 'plan' ? '<button class="askbtn" data-ask="1">Render…</button>' : ''}${s.phase === 'working' ? `<span class="ovr" title="Overall progress"><i style="width:${d.pct || 0}%"></i></span><b class="ovn">${d.pct || 0}%</b>` : ''}<span class="pill ${s.phase}">${esc(s.phase === 'working' ? `Working${d.elapsed ? ' · ' + d.elapsed : ''}` : shortStatus(s))}</span></div>
   <div class="pipe">${pipeHtml(d)}</div>
   <div class="body">
     <div class="col">
