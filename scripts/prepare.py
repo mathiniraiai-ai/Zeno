@@ -974,6 +974,38 @@ def safe_zoom_focus(spans: List[Tuple[float, float]], z: float) -> Optional[Tupl
     return (round(lo, 2), round(hi, 2)) if lo <= hi else None
 
 
+_SCAN_QUEUE: List[str] = []
+_FACE_SEEN: set = set()
+_SCAN_LAUNCHED: set = set()
+
+
+def _start_background_scan() -> None:
+    """Scan every clip frame by frame for the desktop app's Scan view in ONE separate low-priority process, so the job itself never waits for it."""
+    try:
+        if os.environ.get("ZENO_EVENTS", "").lower() == "off" or not _SCAN_QUEUE:
+            return
+        import subprocess
+        import events
+
+        project = events._project_dir()
+        if project is None:
+            return
+        paths = [p for p in dict.fromkeys(_SCAN_QUEUE) if p not in _SCAN_LAUNCHED]
+        if not paths:
+            return
+        _SCAN_LAUNCHED.update(paths)
+        cmd = [sys.executable, str(Path(__file__).resolve().parent / "vision_scan.py"), *paths, "--step", "0.5", "--max", "24", "--project", project.name, "--thumb", "220"]
+        kw: Dict[str, Any] = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "stdin": subprocess.DEVNULL}
+        if os.name == "nt":
+            kw["creationflags"] = 0x00000008 | 0x00004000          # detached, below normal priority
+        else:
+            kw["start_new_session"] = True
+            kw["preexec_fn"] = lambda: os.nice(10)
+        subprocess.Popen(cmd, **kw)
+    except Exception:   # noqa: BLE001  (the display pass must never stop a job)
+        pass
+
+
 def format_facts(clips_data: List[Dict[str, Any]]) -> str:
     """Everything measured about each clip, as text for the Director: `start word` for every word, a line break at each gap."""
     out = ["# FACTS: measured by Zeno. Times are seconds in the clip. `1.20 word` = the word starts at 1.20; `|2.31` = speech stops at 2.31.", ""]
@@ -1003,17 +1035,13 @@ def format_facts(clips_data: List[Dict[str, Any]]) -> str:
             import events
 
             _fs = [(round(float(f['bbox_norm'][0]), 2), round(float(f['bbox_norm'][2]), 2)) for f in (vis.get('faces') or []) if f.get('bbox_norm') and len(f['bbox_norm']) >= 4]
+            if (name, vis.get("face_count"), vis.get("shot_type")) in _FACE_SEEN:
+                raise StopIteration                  # the same clip was already reported in this run
+            _FACE_SEEN.add((name, vis.get("face_count"), vis.get("shot_type")))
             events.emit("face", f"{name}: {vis.get('face_count', 0)} face(s), {vis.get('shot_type', 'unknown')}" + (", silent clip" if clip_is_silent(c) else ""), clip=name, faces=_fs, shot=vis.get('shot_type'), silent=clip_is_silent(c))
         except Exception:
             pass
-        try:                                   # a dense frame-by-frame pass of every clip, only so the desktop app can show the scan (about a second a clip)
-            if os.environ.get("ZENO_EVENTS", "").lower() != "off":
-                import vision_scan
-
-                vision_scan.scan_clip(Path(resolve(c["src"])), step=0.5, max_frames=24, echo=False)
-        except BaseException as _e:            # noqa: BLE001  (never let the display pass stop a job)
-            if isinstance(_e, KeyboardInterrupt):
-                raise
+        _SCAN_QUEUE.append(str(resolve(c["src"])))       # shown in the app's Scan view; scanned in the background after the facts are written
         spans = [(float(f["bbox_norm"][0]), float(f["bbox_norm"][2])) for f in (vis.get("faces") or []) if f.get("bbox_norm") and len(f["bbox_norm"]) >= 4]
         if len(spans) >= 2:
             parts = []
@@ -1051,6 +1079,7 @@ def format_facts(clips_data: List[Dict[str, Any]]) -> str:
         for a in c.get("anomalies") or []:
             out.append(f"  ! {a}")
         out.append("")
+    _start_background_scan()
     return "\n".join(out)
 
 
