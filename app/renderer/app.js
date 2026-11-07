@@ -56,7 +56,10 @@ function pipeHtml(d) {
 const SPK_COLORS = ['#bacf65', '#e4b24c', '#7aa2d6', '#c98bd0', '#6fc7b8', '#e08a6a', '#9aa5b1'];
 function timelineHtml(d) {
   const p = d.plan;
-  if (!p || !p.timeline.length) return '<div class="empty">The timeline appears when the editor has written a plan.</div>';
+  if (!p || !p.timeline.length) {
+    const lane = (n, t) => `<div class="lane"><span class="ln">${n}</span><div class="lt"><em>${t}</em></div></div>`;
+    return `<div class="tl-wrap">${lane('Zoom', 'fills in when the editor writes the plan')}${lane('Trans', '')}${lane('Video', 'waiting for the plan')}${lane('Voice', '')}${lane('SFX', '')}</div>`;
+  }
   const total = p.seconds || 1, pct = (t) => (t / total) * 100 + '%';
   const spk = [...new Set(p.timeline.map((s) => s.speaker).filter(Boolean))];
   const col = (n) => SPK_COLORS[spk.indexOf(n) % SPK_COLORS.length];
@@ -279,6 +282,9 @@ async function loadJobs() {
   const r = await window.zeno.jobs();
   if (Array.isArray(r)) {
     state.jobs = r;
+    // follow the job that is running right now, unless the user picked another one by hand
+    const run = r.find((j) => j.status.phase === 'working');
+    if (run && !state.picked && run.name !== state.selected) { state.selected = run.name; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; lastMain = ''; renderMain(); }
     if (!state.selected || !r.find((j) => j.name === state.selected)) { const w = r.find((j) => j.status.phase === 'working') || r[0]; state.selected = w ? w.name : null; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; }
   }
   renderSide();
@@ -312,7 +318,7 @@ document.addEventListener('click', async (e) => {
   if (e.target.closest('#lbClose') || e.target.id === 'lightbox') { closeBox(); return; }
   const chip = e.target.closest('.schips button'); if (chip) { sp.pin = sp.pin === chip.dataset.clip ? null : chip.dataset.clip; sp.idx = 0; sp.sig = ''; paintScan(); return; }
   const li = e.target.closest('#jobs li[data-name]');
-  if (li) { state.selected = li.dataset.name; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; lastMain = ''; renderSide(); renderMain(); loadDetail(); return; }
+  if (li) { state.picked = true; state.selected = li.dataset.name; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; lastMain = ''; renderSide(); renderMain(); loadDetail(); return; }
   const rv = e.target.closest('[data-reveal]'); if (rv) { window.zeno.reveal(rv.dataset.reveal); return; }
   const op = e.target.closest('[data-open]'); if (op) { window.zeno.open(op.dataset.open); return; }
   if (e.target.closest('#newEdit')) { window.zeno.newEdit(); return; }
