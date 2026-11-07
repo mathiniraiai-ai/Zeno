@@ -1872,6 +1872,26 @@ class TestLeanSession(unittest.TestCase):
         self.assertIsNone(session_check.first_turn_context([json.dumps({"type": "user"})]))
 
 
+class TestConnectClaudeStep(unittest.TestCase):
+    def test_asks_first_and_never_changes_settings_without_a_yes(self):
+        import setup as zsetup
+        from unittest.mock import patch
+        calls = []
+        class R:                      # a fake `claude` result
+            def __init__(self, code=1, out="", err=""): self.returncode, self.stdout, self.stderr = code, out, err
+        def fake_run(cmd, **kw):
+            calls.append(cmd[1:3]); return R(1) if cmd[1:3] == ["mcp", "get"] else R(0)
+        with patch.object(zsetup, "_claude_bin", return_value="claude"), patch("subprocess.run", fake_run):
+            self.assertEqual(zsetup.connect_claude(ask=lambda q: "n", interactive=True), 0)
+            self.assertNotIn(["mcp", "add"], calls)                                  # a No changes nothing
+            calls.clear()
+            self.assertEqual(zsetup.connect_claude(ask=lambda q: "y", interactive=False), 0)
+            self.assertNotIn(["mcp", "add"], calls)                                  # no keyboard means it never asks, never adds
+            calls.clear()
+            self.assertEqual(zsetup.connect_claude(ask=lambda q: "y", interactive=True), 0)
+            self.assertIn(["mcp", "add"], calls)                                     # a Yes adds the connector
+
+
 class TestZenoConnector(unittest.TestCase):
     def test_handshake_lists_tools_and_refuses_bad_input(self):
         import zeno_mcp

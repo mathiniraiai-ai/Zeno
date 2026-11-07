@@ -250,6 +250,54 @@ def smoke_test() -> bool:
     return ok
 
 
+def _claude_bin():
+    import shutil
+
+    found = shutil.which("claude")
+    if found:
+        return found
+    home = Path.home()
+    for p in (home / ".local" / "bin" / "claude", Path("/opt/homebrew/bin/claude"), Path("/usr/local/bin/claude"), home / "AppData" / "Roaming" / "npm" / "claude.cmd"):
+        if p.exists():
+            return str(p)
+    return None
+
+
+def connect_claude(ask=input, interactive=None):
+    """One-time step at the end of the install: connect Claude Code to Zeno (the Zeno connector, a local MCP server).
+    It changes the editor's own Claude Code settings, so it asks first. Returns 0 when connected or politely skipped."""
+    import subprocess
+
+    claude = _claude_bin()
+    if not claude:
+        print("  [i] Claude Code was not found on this computer, so the Zeno connector was not added. Install Claude Code, then run: python3 scripts/setup.py --connect-claude")
+        return 0
+    try:
+        have = subprocess.run([claude, "mcp", "get", "zeno"], capture_output=True, text=True, timeout=60)
+        if have.returncode == 0 and "Connected" in have.stdout:
+            print("  [OK] Claude is already connected to Zeno.")
+            return 0
+    except Exception:   # noqa: BLE001
+        pass
+    if interactive is None:
+        interactive = sys.stdin is not None and sys.stdin.isatty()
+    if not interactive:
+        print("  [i] Not asking about the Claude connection (no keyboard). Later, run: python3 scripts/setup.py --connect-claude")
+        return 0
+    answer = ask("  Connect Claude Code to Zeno now? It adds one entry to your Claude settings on this computer. (y/N) ").strip().lower()
+    if answer not in ("y", "yes"):
+        print("  Skipped. You can connect later: python3 scripts/setup.py --connect-claude")
+        return 0
+    py = common.ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    py = py if py.exists() else Path(sys.executable)
+    r = subprocess.run([claude, "mcp", "add", "--scope", "user", "zeno", "--", str(py), str(common.ROOT / "scripts" / "zeno_mcp.py")], capture_output=True, text=True, timeout=120)
+    if r.returncode == 0:
+        print("  [OK] Claude is connected to Zeno.")
+        return 0
+    print(f"  [i] Could not connect Claude: {(r.stderr or r.stdout).strip()[:200]}")
+    return 1
+
+
 def main():
     ap = argparse.ArgumentParser(description="Bootstrap and verify Zeno cross-platform setup.")
     ap.add_argument("--init-venv", action="store_true", help="Create local .venv and install dependencies")
@@ -259,8 +307,12 @@ def main():
     ap.add_argument("--whoami", action="store_true", help="Check active Zeno Cloud / Gemini authentication status")
     ap.add_argument("--logout", action="store_true", help="Clear saved local Zeno Cloud session token")
     ap.add_argument("--lean-session", action="store_true", help="Switch the claude.ai connectors off for edit sessions in this folder (saves about 4.6k tokens a session)")
+    ap.add_argument("--connect-claude", action="store_true", help="Offer to connect Claude Code to Zeno (asks first; skips when already connected or when there is no keyboard)")
     ap.add_argument("--session-check", action="store_true", help="Show how many tokens the newest edit session started with, and warn when it is heavy")
     args = ap.parse_args()
+
+    if args.connect_claude:
+        sys.exit(connect_claude())
 
     if args.lean_session or args.session_check:
         import session_check

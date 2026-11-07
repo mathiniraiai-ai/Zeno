@@ -106,6 +106,7 @@ if ($LASTEXITCODE -ne 0) {
     & .venv\Scripts\python.exe scripts\setup.py --login
 }
 & .venv\Scripts\python.exe scripts\setup.py --lean-session | Out-Null
+& .venv\Scripts\python.exe scripts\setup.py --connect-claude
 & .venv\Scripts\python.exe scripts\setup.py --smoke
 
 Write-Host ""

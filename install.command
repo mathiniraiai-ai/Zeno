@@ -90,6 +90,7 @@ if ! .venv/bin/python scripts/setup.py --whoami >/dev/null 2>&1; then
 fi
 
 .venv/bin/python scripts/setup.py --lean-session || true
+.venv/bin/python scripts/setup.py --connect-claude || true
 .venv/bin/python scripts/setup.py --smoke || true
 
 echo ""
