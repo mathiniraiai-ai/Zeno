@@ -1,5 +1,5 @@
 // Zeno desktop app: the window and its bridge to the Python backend. It only reads job state (scripts/jobs.py) and opens things; it never edits a job.
-const { app, BrowserWindow, ipcMain, shell, nativeTheme } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, nativeTheme, dialog } = require('electron');
 const { execFile, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -80,6 +80,14 @@ app.whenReady().then(() => {
     const child = spawn(pythonFor(ROOT), [path.join(ROOT, 'scripts', 'zeno.py'), '--execute', plan, '--square'], { cwd: ROOT, detached: true, stdio: ['ignore', log, log], env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
     child.unref();
     return { ok: true };
+  });
+  // Download: save a copy of the finished video wherever the editor chooses
+  ipcMain.handle('zeno:download', async (e, p) => {
+    if (!p || !fs.existsSync(p)) return { ok: false, text: 'The file is missing.' };
+    const win = BrowserWindow.fromWebContents(e.sender);
+    const r = await dialog.showSaveDialog(win, { defaultPath: path.join(app.getPath('downloads'), path.basename(p)), buttonLabel: 'Save' });
+    if (r.canceled || !r.filePath) return { ok: false, canceled: true };
+    try { await fs.promises.copyFile(p, r.filePath); shell.showItemInFolder(r.filePath); return { ok: true, path: r.filePath }; } catch (err) { return { ok: false, text: String(err.message || err) }; }
   });
   ipcMain.handle('zeno:update', () => new Promise((resolve) => {
     if (!ROOT) return resolve({ ok: false, text: 'Zeno folder not found' });

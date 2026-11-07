@@ -132,6 +132,20 @@ function picsHtml(d) {
   return `<div class="pics">${items.map(([k, n]) => `<figure data-zoom="${esc(im[k])}" data-title="${esc(n)}"><img src="file://${encodeURI(im[k])}?v=${v}" alt="${esc(n)}"><figcaption>${n}</figcaption></figure>`).join('')}</div>`;
 }
 
+// the right card: the finished video (with a player and Download) once the job is done, and the frame-by-frame scan
+function reelOf(d) { const o = (d && d.outputs) || []; return { reel: o.find((x) => x.kind === 'reel' && x.mb > 1), square: o.find((x) => x.kind === 'square' && x.mb > 1) }; }
+function rightCard(d) {
+  const { reel, square } = reelOf(d);
+  const done = d.status.phase === 'done' && reel;
+  if (!done) return '<div class="card fill"><h2>Scan<span>frame by frame</span></h2><div id="scanview" class="scan"></div></div>';
+  const tab = state.rtab === 'scan' ? 'scan' : 'result';
+  const src = state.rsrc === 'square' && square ? square : reel;
+  const head = `<h2><span class="tabs"><button data-rtab="result" class="${tab === 'result' ? 'on' : ''}">Result</button><button data-rtab="scan" class="${tab === 'scan' ? 'on' : ''}">Scan</button></span><span>${tab === 'result' ? `${src.mb} MB` : 'frame by frame'}</span></h2>`;
+  if (tab === 'scan') return `<div class="card fill">${head}<div id="scanview" class="scan"></div></div>`;
+  return `<div class="card fill">${head}<div id="resview" class="res" data-src="${esc(src.path)}">
+    <div class="rtop">${square ? `<span class="seg2"><button data-rsrc="reel" class="${src === reel ? 'on' : ''}">Reel 9:16</button><button data-rsrc="square" class="${src === square ? 'on' : ''}">Square 1:1</button></span>` : '<span></span>'}<span class="racts"><button class="btn" data-reveal="${esc(src.path)}">Show in folder</button><button class="btn dl" data-download="${esc(src.path)}">Download</button></span></div>
+    <div class="rvid"><video controls preload="metadata" src="file://${encodeURI(src.path)}"></video></div></div></div>`;
+}
 function mainHtml(d) {
   if (!d) {
     return `<div class="top"><h1>Zeno</h1></div><div class="body" style="display:flex"><div class="welcome"><h1>No edit selected</h1><div>${state.jobs.length ? 'Pick an edit on the left.' : 'Press New edit to start one. This window then shows every step.'}</div></div></div>`;
@@ -147,7 +161,7 @@ function mainHtml(d) {
     </div>
     <div class="vsplit" id="vsplit" title="Drag to resize"></div>
     <div class="col right">
-      <div class="card fill"><h2>Scan<span>frame by frame</span></h2><div id="scanview" class="scan"></div></div>
+      ${rightCard(d)}
       <div class="hsplit" id="hsplit" title="Drag to resize"></div>
       <div class="card pcard"><h2>Pictures<span>click to enlarge</span></h2>${picsHtml(d)}</div>
     </div>
@@ -169,16 +183,30 @@ function paintAsk() {
     <div class="askact"><button class="askno" data-ask-no="1">Not now</button><button class="primary askyes" data-render="1">Render</button></div></div>`;
   document.body.appendChild(box);
 }
+// "Job finished": a pop-up with a tick when a render that was running comes to an end
+function paintDone() {
+  let box = document.getElementById('done'); const d = state.detail;
+  if (!(state.doneOpen && d && d.name === state.doneOpen && d.status.phase === 'done')) { if (box) box.remove(); return; }
+  if (box) return;
+  const { reel, square } = reelOf(d);
+  box = document.createElement('div'); box.id = 'done';
+  box.innerHTML = `<div class="askcard donecard"><div class="tick"><svg viewBox="0 0 52 52"><circle cx="26" cy="26" r="24"/><path d="M15 27l8 8 14-16"/></svg></div><h3>Job finished</h3><div class="muted">${esc(shortTitle(d.title))}</div>
+    <div class="askrows">${reel ? `<div><b>${reel.mb}</b> MB reel</div>` : ''}${square ? `<div><b>${square.mb}</b> MB square</div>` : ''}${d.plan ? `<div><b>${mmss(d.plan.seconds)}</b> long</div><div><b>${d.plan.cuts}</b> cuts</div>` : ''}</div>
+    <div class="askact"><button class="askno" data-done-close="1">Close</button>${reel ? `<button class="askno" data-download="${esc(reel.path)}">Download</button><button class="primary askyes" data-done-watch="1">Watch</button>` : ''}</div></div>`;
+  document.body.appendChild(box);
+}
 let lastMain = '';
 function renderMain() {
   const html = mainHtml(state.detail);
   if (html === lastMain) return;
   lastMain = html;
-  const keep = $('#scanview'); if (keep) keep.remove();           // the scan player is moved, not rebuilt, so it never restarts or flickers
+  const keep = $('#scanview'); if (keep) keep.remove();
+  const keepRes = $('#resview'); if (keepRes) keepRes.remove();           // the scan player is moved, not rebuilt, so it never restarts or flickers
   $('#main').innerHTML = html;
   if (state.detail && state.detail.status.phase === 'plan' && !asked.has(state.detail.name)) { asked.add(state.detail.name); state.askOpen = state.detail.name; }
-  paintAsk();
+  paintAsk(); paintDone();
   const slot = $('#scanview'); if (keep && slot) { slot.replaceWith(keep); }
+  const slotR = $('#resview'); if (keepRes && slotR && keepRes.dataset.src === slotR.dataset.src) slotR.replaceWith(keepRes);
   paintScan();
 }
 // when a clip was scanned more than once, keep only its newest scan (the one with the same frame count as its last frame)
@@ -302,6 +330,8 @@ async function loadJobs() {
   const r = await window.zeno.jobs();
   if (Array.isArray(r)) {
     state.jobs = r;
+    for (const x of r) { const was = state.phases && state.phases[x.name]; if (was === 'working' && x.status.phase === 'done') { state.doneOpen = x.name; if (!state.picked || state.selected === x.name) { state.selected = x.name; state.rtab = 'result'; lastMain = ''; } } }
+    state.phases = Object.fromEntries(r.map((x) => [x.name, x.status.phase]));
     // follow the job that is running right now, unless the user picked another one by hand
     const run = r.find((j) => j.status.phase === 'working');
     if (run && !state.picked && run.name !== state.selected) { state.selected = run.name; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; lastMain = ''; renderMain(); }
@@ -336,6 +366,11 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeBox()
 document.addEventListener('click', async (e) => {
   const zm = e.target.closest('[data-zoom]'); if (zm) { openBox(zm.dataset.zoom, zm.dataset.title); return; }
   if (e.target.closest('#lbClose') || e.target.id === 'lightbox') { closeBox(); return; }
+  const dl = e.target.closest('[data-download]'); if (dl) { window.zeno.download(dl.dataset.download).then((r) => { if (r && !r.ok && !r.canceled) alert(r.text || 'Could not save the file.'); }); return; }
+  if (e.target.closest('[data-done-close]')) { state.doneOpen = null; paintDone(); return; }
+  if (e.target.closest('[data-done-watch]')) { state.doneOpen = null; state.rtab = 'result'; paintDone(); lastMain = ''; renderMain(); return; }
+  const rt = e.target.closest('[data-rtab]'); if (rt) { state.rtab = rt.dataset.rtab; lastMain = ''; renderMain(); return; }
+  const rs = e.target.closest('[data-rsrc]'); if (rs) { state.rsrc = rs.dataset.rsrc; lastMain = ''; renderMain(); return; }
   if (e.target.closest('[data-ask]')) { state.askOpen = state.detail && state.detail.name; paintAsk(); return; }
   if (e.target.closest('[data-ask-no]')) { state.askOpen = null; paintAsk(); return; }
   if (e.target.closest('[data-render]')) {
