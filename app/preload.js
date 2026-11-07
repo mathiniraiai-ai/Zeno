@@ -14,7 +14,7 @@ contextBridge.exposeInMainWorld('zeno', {
   claudeConnect: () => ipcRenderer.invoke('zeno:claudeConnect'),
   pickFolder: () => ipcRenderer.invoke('zeno:pickFolder'),
   copy: (t) => ipcRenderer.invoke('zeno:copy', t),
-  chatSend: (msg, session) => ipcRenderer.invoke('zeno:chatSend', msg, session),
+  chatSend: (msg, session, opts) => ipcRenderer.invoke('zeno:chatSend', msg, session, opts),
   chatStop: () => ipcRenderer.invoke('zeno:chatStop'),
   onChat: (fn) => ipcRenderer.on('zeno:chat', (_e, evt) => fn(evt)),
   update: () => ipcRenderer.invoke('zeno:update'),

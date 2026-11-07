@@ -140,7 +140,7 @@ app.whenReady().then(() => {
   });
   ipcMain.handle('zeno:copy', (_e, text) => { clipboard.writeText(String(text || '')); return true; });
   // the chat: one Claude Code run per message, streamed back; a follow-up resumes the same session
-  ipcMain.handle('zeno:chatSend', (e, message, sessionId) => {
+  ipcMain.handle('zeno:chatSend', (e, message, sessionId, opts) => {
     const bin = claudePath(); if (!bin || !ROOT) return { ok: false, text: 'Claude Code is not installed on this computer.' };
     if (chatProc) return { ok: false, text: 'Claude is still working on the last message.' };
     const send = (evt) => { try { e.sender.send('zeno:chat', evt); } catch (er) { /* window closed */ } };
@@ -148,6 +148,9 @@ app.whenReady().then(() => {
       '--allowedTools', 'Bash(python3:*)', 'Bash(.venv/bin/python:*)', 'Bash(ls:*)', 'Bash(grep:*)', 'Bash(cat:*)', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'mcp__zeno'];
     // only the Zeno connector is loaded for these runs: the editor's other connectors are not needed and would cost tokens
     args.push('--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: { [ZENO_MCP_NAME]: { command: pythonFor(ROOT), args: [path.join(ROOT, 'scripts', 'zeno_mcp.py')] } } }));
+    const o = opts || {};
+    if (/^[\w.\-]+$/.test(String(o.model || ''))) args.push('--model', String(o.model));                     // which Claude model answers
+    if (['low', 'medium', 'high', 'xhigh', 'max'].includes(String(o.effort || ''))) args.push('--effort', String(o.effort));   // how hard it thinks
     if (sessionId) args.push('--resume', String(sessionId));
     chatProc = spawn(bin, args, { cwd: ROOT, env: claudeEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
     let buf = '';

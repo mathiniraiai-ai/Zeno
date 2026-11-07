@@ -3,6 +3,9 @@
 // a click on it opens the sign-in (or the connect card) when something is missing.
 const OFFICE_DOMAIN = '@gosupernova.live';
 const chat = { open: false, session: null, busy: false, acct: null, msgs: [], started: false, form: { script: '', name: '', footage: '', extra: '' }, skipConnect: false, lastText: '', waiting: false };
+const opt = { model: (() => { try { return localStorage.getItem('zenoModel') || ''; } catch (e) { return ''; } })(), effort: (() => { try { return localStorage.getItem('zenoEffort') || ''; } catch (e) { return ''; } })() };
+const MODELS = [['', 'Default model'], ['fable', 'Fable'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku']];
+const EFFORTS = [['', 'Default effort'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High']];
 const QUICK = ['What is the status of this edit?', 'Explain the plan in plain words', 'What did the checks say?', 'Make the hook faster'];
 
 function chatPrompt(f) {
@@ -66,7 +69,7 @@ function paintChat() {
   if (box) return;
   box = document.createElement('div'); box.id = 'chat';
   box.innerHTML = `<div class="chatcard">
-    <div class="chead"><b>New edit</b><span id="cstat" class="cstat"></span><span class="cx"><button data-chat-hide="1" title="Hide (Claude keeps working)">Hide</button><button data-chat-x="1" title="Close">×</button></span></div>
+    <div class="chead"><b>New edit</b><span id="cstat" class="cstat"></span><select id="sel_model" class="csel" title="Which Claude model does the editing">${MODELS.map(([v, n]) => `<option value="${v}"${v === opt.model ? ' selected' : ''}>${n}</option>`).join('')}</select><select id="sel_effort" class="csel" title="How hard Claude thinks (higher costs more tokens)">${EFFORTS.map(([v, n]) => `<option value="${v}"${v === opt.effort ? ' selected' : ''}>${n}</option>`).join('')}</select><span class="cx"><button data-chat-hide="1" title="Hide (Claude keeps working)">Hide</button><button data-chat-x="1" title="Close">×</button></span></div>
     <div class="cform" id="cform">
       <label>Script link (Google Doc tab)<input id="f_script" placeholder="https://docs.google.com/document/d/…?tab=t.…"></label>
       <label>Notion name<input id="f_name" placeholder="Name of the video in Notion"></label>
@@ -82,6 +85,7 @@ function paintChat() {
   document.body.appendChild(box);
   ['script', 'name', 'footage', 'extra'].forEach((k) => { const el = document.getElementById('f_' + k); el.value = chat.form[k] || ''; el.addEventListener('input', () => { chat.form[k] = el.value; }); });
   document.getElementById('cmsg').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') sendChatInput(); });
+  [['sel_model', 'model', 'zenoModel'], ['sel_effort', 'effort', 'zenoEffort']].forEach(([id, k, key]) => { const el = document.getElementById(id); el.addEventListener('change', () => { opt[k] = el.value; try { localStorage.setItem(key, el.value); } catch (e) { /* not saved */ } }); });
   setStat(document.getElementById('cstat')); refreshChat();
   const list = document.getElementById('cmsgs'); chat.msgs.forEach((m) => list.appendChild(msgNode(m))); list.scrollTop = list.scrollHeight;
 }
@@ -108,7 +112,7 @@ async function startChat() {
 }
 async function sendToClaude(text) {
   chat.busy = true; refreshChat();
-  const r = await window.zeno.chatSend(text, chat.session);
+  const r = await window.zeno.chatSend(text, chat.session, { model: opt.model, effort: opt.effort });
   if (!r || !r.ok) { chat.busy = false; refreshChat(); addMsg('error', (r && r.text) || 'Could not start Claude.'); }
 }
 function sendChatInput(text) {
