@@ -173,7 +173,7 @@ function scanSkeleton(box) {
     <div class="schips"></div><div class="sdots"></div>`;
   sp.built = box; sp.faceEls = []; sp.sig = '';
   if (sp.ro) sp.ro.disconnect();
-  sp.ro = new ResizeObserver(() => fitFrame(box)); sp.ro.observe(box.querySelector('.sarea'));   // refit whenever the space around the picture changes
+  sp.ro = new ResizeObserver(() => { box.classList.toggle('compact', box.clientWidth < 380); fitFrame(box); }); sp.ro.observe(box.querySelector('.sarea'));   // refit whenever the space around the picture changes
 }
 function scanClips() { const m = new Map(); state.scans.forEach((e, k) => { if (!m.has(e.clip)) m.set(e.clip, []); m.get(e.clip).push(k); }); return m; }
 function paintScan() {
