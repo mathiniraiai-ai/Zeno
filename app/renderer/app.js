@@ -52,17 +52,37 @@ function pipeHtml(d) {
   return out.join('');
 }
 
+// the timeline as layers, like an editor's: subtitles, effects (zooms, transitions), video cuts, voice per speaker, sound effects
+const SPK_COLORS = ['#bacf65', '#e4b24c', '#7aa2d6', '#c98bd0', '#6fc7b8', '#e08a6a', '#9aa5b1'];
 function timelineHtml(d) {
   const p = d.plan;
   if (!p || !p.timeline.length) return '<div class="empty">The timeline appears when the editor has written a plan.</div>';
-  const total = p.seconds || 1;
-  const segs = p.timeline.map((s) => {
+  const total = p.seconds || 1, pct = (t) => (t / total) * 100 + '%';
+  const spk = [...new Set(p.timeline.map((s) => s.speaker).filter(Boolean))];
+  const col = (n) => SPK_COLORS[spk.indexOf(n) % SPK_COLORS.length];
+  const video = p.timeline.map((s) => {
     const split = /^split|top_pip|left_right|top_bottom/.test(s.layout), other = !split && s.layout !== 'single';
     const tip = `${s.id} · ${s.src} · ${s.layout}${s.zoom ? ' · zoom ' + s.zoom : ''}${s.transition !== 'cut' ? ' · ' + s.transition : ''} · ${s.dur}s`;
-    return `<div class="seg ${split ? 'split' : other ? 'other' : ''}" title="${esc(tip)}" style="left:${(s.start / total) * 100}%;width:${(s.dur / total) * 100}%">${s.dur / total > 0.045 ? `<b>${esc(s.id)}</b>` : ''}</div>` +
-      (s.transition !== 'cut' ? `<div class="tick" style="left:${(s.start / total) * 100}%"></div>` : '');
+    return `<div class="seg ${split ? 'split' : other ? 'other' : ''}" title="${esc(tip)}" style="left:${pct(s.start)};width:${pct(s.dur)}">${s.dur / total > 0.03 ? `<b>${esc(s.id)}</b>` : ''}</div>`;
   }).join('');
-  return `<div class="tl-wrap"><div class="tl">${segs}</div><div class="tl-scale"><span>0:00</span><span>${mmss(total / 2)}</span><span>${mmss(total)}</span></div></div>`;
+  const voice = p.timeline.map((s) => `<div class="seg vo" title="${esc(`${s.id} · ${s.speaker || 'speaker not set'} · ${s.dur}s`)}" style="left:${pct(s.start)};width:${pct(s.dur)};background:${s.speaker ? col(s.speaker) : '#475569'}">${s.dur / total > 0.045 && s.speaker ? `<b>${esc(s.speaker.split(' ').map((w) => w[0]).join(''))}</b>` : ''}</div>`).join('');
+  const zooms = p.timeline.filter((s) => s.zoom).map((s) => `<div class="seg zm" title="${esc(`${s.id} · zoom ${s.zoom}`)}" style="left:${pct(s.start)};width:${pct(s.dur)}">${s.dur / total > 0.05 ? `<b>${esc(s.zoom)}</b>` : ''}</div>`).join('');
+  const trans = p.timeline.filter((s) => s.transition !== 'cut').map((s) => `<div class="mk tr" title="${esc(`${s.id} · ${s.transition}`)}" style="left:${pct(s.start)}"><i></i><span>${esc(s.transition.replace(/_/g, ' '))}</span></div>`).join('');
+  const sfx = (p.sfx || []).map((x, k, arr) => {
+    const next = arr[k + 1]; const room = !next || (next.t - x.t) / total > 0.07;
+    return `<div class="mk ${x.kind}" title="${esc(`${x.file}${x.gain != null ? ' · ' + x.gain + ' dB' : ''} · ${mmss(x.t)}${x.kind === 'auto' ? ' · on the transition' : ''}`)}" style="left:${pct(x.t)}"><i></i>${room ? `<span>${esc(x.file.replace(/\.[a-z0-9]+$/i, ''))}</span>` : ''}</div>`;
+  }).join('');
+  const lane = (name, cls, inner, empty) => `<div class="lane"><span class="ln">${name}</span><div class="lt ${cls}">${inner || `<em>${empty || ''}</em>`}</div></div>`;
+  const subs = d.subs && d.subs.style ? d.subs.style : (p.subs || '');
+  return `<div class="tl-wrap">
+    ${subs ? lane('Subs', 'sub', `<div class="seg sb" style="left:0;width:100%"><b>${esc(subs)}</b></div>`) : ''}
+    ${lane('Effects', 'fx', zooms + trans, 'no zooms or transitions')}
+    ${lane('Video', 'tl', video)}
+    ${lane('Voice', 'au', voice)}
+    ${lane('SFX', 'au', sfx, 'no sound effects')}
+    <div class="tl-scale"><span>0:00</span><span>${mmss(total / 2)}</span><span>${mmss(total)}</span></div>
+    ${spk.length ? `<div class="spk">${spk.map((n) => `<span><i style="background:${col(n)}"></i>${esc(n)}</span>`).join('')}</div>` : ''}
+  </div>`;
 }
 
 function feedText(e) {
@@ -152,6 +172,8 @@ function scanSkeleton(box) {
     <div class="sinfo"><div class="sclip"></div><div class="muted sfr"></div><div class="shead"></div><div class="srows"></div><div class="muted sfoot"></div></div>
     <div class="schips"></div><div class="sdots"></div>`;
   sp.built = box; sp.faceEls = []; sp.sig = '';
+  if (sp.ro) sp.ro.disconnect();
+  sp.ro = new ResizeObserver(() => fitFrame(box)); sp.ro.observe(box.querySelector('.sarea'));   // refit whenever the space around the picture changes
 }
 function scanClips() { const m = new Map(); state.scans.forEach((e, k) => { if (!m.has(e.clip)) m.set(e.clip, []); m.get(e.clip).push(k); }); return m; }
 function paintScan() {

@@ -68,7 +68,22 @@ def _plan_summary(d: Path) -> Optional[Dict[str, Any]]:
     layouts: Dict[str, int] = {}
     for r in rows:
         layouts[r["layout"]] = layouts.get(r["layout"], 0) + 1
-    return {"file": f.name, "footage": footage, "cuts": len(rows), "seconds": round(t, 1), "layouts": layouts, "timeline": rows,
+    # the layers of the timeline: sound effects, marks and transitions placed on the final timeline (the whoosh rule mirrors render.py)
+    starts = {r["id"]: r["start"] for r in rows}
+    sfx: List[Dict[str, Any]] = []
+    for x in plan.get("sfx") or []:
+        if str(x.get("segment")) in starts:
+            sfx.append({"t": round(starts[str(x["segment"])] + float(x.get("at") or 0), 2), "file": str(x.get("file", "")), "gain": x.get("gain_db"), "kind": "sfx"})
+    for m in plan.get("marks") or []:
+        seg_id = str(m.get("segment"))
+        if seg_id in starts:
+            sfx.append({"t": round(starts[seg_id] + float(m.get("at") or 0), 2), "file": str(m.get("sfx") or m.get("type") or "mark"), "gain": m.get("gain_db"), "kind": "mark", "mark": str(m.get("type") or "")})
+    whoosh = {"whip_left", "whip_right", "flash_zoom", "zoom_burst", "slide_up", "smoothleft", "smoothright", "warm_flash"}
+    for r in rows[1:]:
+        if r["transition"].lower() in whoosh and not any(abs(x["t"] - r["start"]) <= 0.35 and "whoosh" in x["file"].lower() for x in sfx):
+            sfx.append({"t": r["start"], "file": "whoosh.wav", "gain": None, "kind": "auto"})
+    sfx.sort(key=lambda x: x["t"])
+    return {"file": f.name, "footage": footage, "cuts": len(rows), "seconds": round(t, 1), "layouts": layouts, "timeline": rows, "sfx": sfx,
             "transitions": sum(1 for r in rows if r["transition"] != "cut"),
             "subs": (plan.get("subs") or {}).get("style") if isinstance(plan.get("subs"), dict) else None, "output": str(plan.get("output") or "")}
 
