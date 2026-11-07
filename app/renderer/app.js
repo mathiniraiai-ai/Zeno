@@ -150,9 +150,28 @@ function rightCard(d) {
 }
 // the chat bar that is always in view: click it to open the chat with Claude
 function dockHtml() { return ''; }
+// the whole layout with nothing in it yet: pipeline, timeline layers, live feed, scan box and pictures (used when there is no edit, or no Zeno folder)
+function skeletonHtml(title, message, warn) {
+  const idle = { status: { phase: 'new' }, stage: 0 };
+  return `<div class="top"><h1>${esc(title)}</h1><span class="pill ${warn ? 'stalled' : ''}">${warn ? 'Set up needed' : 'Idle'}</span></div>
+  <div class="pipe">${pipeHtml(idle)}</div>
+  <div class="body">
+    <div class="col">
+      <div class="card tlcard"><h2>Timeline<span></span></h2>${timelineHtml({ plan: null })}</div>
+      <div class="hsplit" id="lsplit" title="Drag to enlarge the timeline layers (double-click to reset)"></div>
+      <div class="card fill"><h2>Live<span></span></h2><div id="feed"><div class="empty ${warn ? 'warnmsg' : ''}">${message}</div></div></div>
+    </div>
+    <div class="vsplit" id="vsplit" title="Drag to resize"></div>
+    <div class="col right">
+      <div class="card fill"><h2>Scan<span>frame by frame</span></h2><div class="scan"><div class="empty">Each clip is scanned frame by frame here: faces, eyes and mouths.</div></div></div>
+      <div class="hsplit" id="hsplit" title="Drag to resize"></div>
+      <div class="card pcard"><h2>Pictures<span>click to enlarge</span></h2><div class="empty">Clip sheet, every cut and marks appear here.</div></div>
+    </div>
+  </div>`;
+}
 function mainHtml(d) {
   if (!d) {
-    return `<div class="top"><h1>Zeno</h1></div><div class="body" style="display:flex"><div class="welcome"><h1>No edit selected</h1><div>${state.jobs.length ? 'Pick an edit on the left.' : 'Press New edit to start one. This window then shows every step.'}</div></div></div>${dockHtml()}`;
+    return skeletonHtml('No edit selected', state.jobs.length ? 'Pick an edit on the left, or start a new one in Claude with /zeno and it appears here live.' : 'Start an edit in Claude with /zeno. This window then shows every step live.', false);
   }
   const s = d.status;
   return `<div class="top"><h1 title="${esc(d.title)}">${esc(shortTitle(d.title))}</h1>${s.phase === 'plan' ? '<button class="askbtn" data-ask="1">Render…</button>' : ''}${s.phase !== 'working' ? '<button class="closebtn" data-close="1" title="Close this project and start fresh">Close project</button>' : ''}${s.phase === 'working' ? `<span class="ovr" title="Overall progress"><i style="width:${d.pct || 0}%"></i></span><b class="ovn">${d.pct || 0}%</b>` : ''}<span class="pill ${s.phase}">${esc(s.phase === 'working' ? `Working${d.elapsed ? ' · ' + d.elapsed : ''}` : shortStatus(s))}</span></div>
@@ -400,7 +419,7 @@ document.addEventListener('click', async (e) => {
 
 (async function start() {
   const root = await window.zeno.root();
-  if (!root) { $('#main').innerHTML = '<div class="top"><h1>Zeno</h1></div><div class="scroll" style="display:flex"><div class="welcome"><h1>Zeno folder not found</h1><div>Install Zeno first (install.command on Mac, install.bat on Windows), or set ZENO_HOME to its folder.</div></div></div>'; return; }
+  if (!root) { $('#main').innerHTML = skeletonHtml('Zeno', '<b>Zeno folder not found.</b><br>Install Zeno first (install.command on Mac, install.bat on Windows), then open this window again. Or set ZENO_HOME to the Zeno folder.', true); restoreLayout(); return; }
   restoreLayout();
   await loadInfo(false);
   await loadJobs();

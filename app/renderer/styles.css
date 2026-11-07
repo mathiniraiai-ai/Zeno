@@ -207,3 +207,7 @@ body.dragging { cursor: grabbing; } body.dragging * { pointer-events: none; } bo
 .side-f { display: flex; flex-direction: column; }
 
 .csel { background: var(--panel); border: 1px solid var(--line2); border-radius: 8px; color: var(--muted); font-size: 11.5px; padding: 3px 6px; outline: none; } .csel:hover { border-color: var(--greenLine); color: var(--text); }
+
+.empty.warnmsg { color: var(--amber); line-height: 1.6; } .empty.warnmsg b { color: var(--text); }
+.card .empty { padding: 14px 16px; color: var(--faint); font-size: 12.5px; }
+#feed > .empty { margin-bottom: auto; }
