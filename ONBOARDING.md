@@ -37,7 +37,7 @@ Running the installer again is always safe; it skips what is already there. Neve
 Wherever this page says `python`, use the project's Python: `.venv/bin/python` on Mac, `.venv\Scripts\python` on Windows.
 
 ## The Zeno app (optional, recommended)
-Install the Zeno desktop app (`app/README.md`) to watch each edit live: stages, face scan, who speaks, every cut and check. Its **New edit** button opens the lean Claude Code session.
+Install the Zeno desktop app (`app/README.md`) to watch each edit live: stages, face scan, who speaks, every cut and check. It only shows the work: start each video in Claude with `/zeno` (or by double-clicking `edit.command`), then watch it here and press **Render** in the pop-up when the plan is ready.
 
 ## 2. Before every video: the checks and the one question
 
