@@ -83,7 +83,7 @@ def scan_clip(path: Path, step: float = 0.5, max_frames: int = 60, project: Opti
     cap.release()
     if echo and rows:
         print(f"  done: {len(rows)} frames, average {sum(r['ms'] for r in rows) / len(rows):.0f} ms a frame")
-    events.emit("face", f"{path.name}: scanned {len(rows)} frames, faces seen in {sum(1 for r in rows if r['faces'])}", clip=path.name)
+    events.emit("info", f"{path.name}: scanned {len(rows)} frames, faces seen in {sum(1 for r in rows if r['faces'])}", clip=path.name)
     return rows
 
 

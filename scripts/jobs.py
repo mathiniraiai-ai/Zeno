@@ -156,7 +156,7 @@ def detail(name: str, since: int = 0) -> Dict[str, Any]:
     # footage: the newest face event of each clip
     clips: Dict[str, Dict[str, Any]] = {}
     for e in events.read(d, since=0, limit=4000):
-        if e.get("kind") == "face" and e.get("clip"):
+        if e.get("kind") == "face" and e.get("clip") and "faces" in e:      # a face-scan result, not a summary line
             clips[e["clip"]] = {"clip": e["clip"], "faces": len(e.get("faces") or []), "shot": e.get("shot"), "silent": bool(e.get("silent")), "spans": e.get("faces") or []}
     checks = [e for e in events.read(d, since=0, limit=4000) if e.get("kind") == "verify"][-8:]
     last_check = None
