@@ -46,6 +46,7 @@ function createWindow() {
   const shot = arg('screenshot');
   if (shot) {
     win.webContents.on('did-finish-load', () => setTimeout(async () => {
+      if (arg('eval')) { await win.webContents.executeJavaScript(arg('eval')); await new Promise((r) => setTimeout(r, 500)); }
       for (const clickSel of (arg('click') || '').split('|').filter(Boolean)) { await win.webContents.executeJavaScript(`(document.querySelector(${JSON.stringify(clickSel)})||{click(){}}).click()`); await new Promise((r) => setTimeout(r, 1200)); }
       const img = await win.webContents.capturePage();
       fs.writeFileSync(shot, img.toPNG());

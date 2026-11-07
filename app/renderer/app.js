@@ -126,9 +126,11 @@ function mainHtml(d) {
       <div class="card"><h2>Timeline<span>${d.plan ? `${d.plan.cuts} cuts · ${mmss(d.plan.seconds)}` : ''}</span></h2>${timelineHtml(d)}${statsLine(d)}</div>
       <div class="card fill"><h2>Live<span>${s.phase === 'working' ? 'working' : ''}</span></h2><div id="feed">${feedHtml()}</div></div>
     </div>
-    <div class="col">
+    <div class="vsplit" id="vsplit" title="Drag to resize"></div>
+    <div class="col right">
       <div class="card fill"><h2><span class="tabs"><button data-tab="faces" class="${state.tab === 'faces' ? 'on' : ''}">Faces</button><button data-tab="scan" class="${state.tab === 'scan' ? 'on' : ''}">Scan</button></span><span>${state.tab === 'faces' ? (d.clips.length ? d.clips.length + ' clips' : '') : 'frame by frame <button class="x" data-tab="faces" title="Close the scan view">×</button>'}</span></h2>${state.tab === 'faces' ? footageHtml(d) : '<div id="scanview" class="scan"></div>'}</div>
-      <div class="card"><h2>Pictures<span>click to enlarge</span></h2>${picsHtml(d)}</div>
+      <div class="hsplit" id="hsplit" title="Drag to resize"></div>
+      <div class="card pcard"><h2>Pictures<span>click to enlarge</span></h2>${picsHtml(d)}</div>
     </div>
   </div>`;
 }
@@ -158,12 +160,49 @@ function paintScan() {
   }).join('');
   const rows = (e.faces || []).map((f, k) => `<div class="srow"><span>Face ${k + 1}</span><span class="${f.speaking ? 'talk' : ''}">${f.speaking ? 'mouth open' : 'mouth closed'}</span></div>`).join('') || '<div class="srow"><span>No face</span><span></span></div>';
   const dots = list.map((x, k) => `<i class="${k === i ? 'cur' : ''} ${x.faces && x.faces.length ? '' : 'none'}"></i>`).join('');
-  box.innerHTML = `<div class="sframe" style="aspect-ratio:${w}/${h}"><img src="file://${encodeURI(e.thumb)}" alt="">${faces}</div>
+  box.innerHTML = `<div class="sarea"><div class="sframe" data-ar="${w / h}"><img src="file://${encodeURI(e.thumb)}" alt="">${faces}</div></div>
     <div class="sinfo"><div class="sclip" title="${esc(e.clip)}">${esc(e.clip)}</div><div class="muted">frame ${e.i}${e.n ? '/' + e.n : ''} · ${e.t_clip}s</div><div class="shead"><b>${(e.faces || []).length}</b> face${(e.faces || []).length === 1 ? '' : 's'} · ${e.ms ? Math.round(e.ms) + ' ms' : 'scan'}</div>${rows}<div class="muted sfoot">${live ? 'scanning live' : 'replaying the scan'}</div></div>
     <div class="sdots">${dots}</div>`;
+  fitFrame(box);
+}
+// the frame keeps the video's own shape and takes the largest size the card allows, so the face boxes always sit on the faces
+function fitFrame(box) {
+  const area = box.querySelector('.sarea'); const fr = box.querySelector('.sframe'); if (!area || !fr) return;
+  const r = area.getBoundingClientRect(); const ar = parseFloat(fr.dataset.ar) || 0.5625;
+  let fw = r.width, fh = fw / ar; if (fh > r.height) { fh = r.height; fw = fh * ar; }
+  fr.style.width = Math.max(40, fw) + 'px'; fr.style.height = Math.max(40, fh) + 'px';
 }
 setInterval(() => { if (state.tab === 'scan' && state.scans.length) { state.scanIdx = (state.scanIdx + 1) % state.scans.length; paintScan(); } }, 380);
 
+
+
+// draggable bars: the middle bar sets the width of the right-hand column, the lower one the height of the Pictures card (both remembered)
+const store = { get: (k, d) => { try { return Number(localStorage.getItem(k)) || d; } catch (e) { return d; } }, set: (k, v) => { try { localStorage.setItem(k, String(Math.round(v))); } catch (e) { /* not saved */ } } };
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const setVar = (k, v) => document.documentElement.style.setProperty(k, `${Math.round(v)}px`);
+function restoreLayout() {
+  const main = $('#main'); const w = main ? main.getBoundingClientRect().width : 1000;
+  setVar('--rw', clamp(store.get('zenoRightW', 400), 250, Math.max(250, w - 40 - 380)));
+  setVar('--ph', clamp(store.get('zenoPicsH', 128), 100, 360));
+}
+let drag = null;
+document.addEventListener('mousedown', (e) => {
+  if (e.target.id === 'vsplit') drag = 'v'; else if (e.target.id === 'hsplit') drag = 'h'; else return;
+  document.body.classList.add('dragging'); e.preventDefault();
+});
+document.addEventListener('mousemove', (e) => {
+  if (!drag) return;
+  if (drag === 'v') { const r = $('#main').getBoundingClientRect(); setVar('--rw', clamp(r.right - 20 - e.clientX - 7, 250, r.width - 40 - 380)); }
+  else { const col = $('.col.right'); if (!col) return; const r = col.getBoundingClientRect(); setVar('--ph', clamp(r.bottom - e.clientY - 7, 100, Math.max(100, r.height - 200))); }
+  fitClips();
+  const sv = $('#scanview'); if (sv) fitFrame(sv);
+});
+document.addEventListener('mouseup', () => {
+  if (!drag) return;
+  const cs = getComputedStyle(document.documentElement);
+  if (drag === 'v') store.set('zenoRightW', parseFloat(cs.getPropertyValue('--rw'))); else store.set('zenoPicsH', parseFloat(cs.getPropertyValue('--ph')));
+  drag = null; document.body.classList.remove('dragging');
+});
 
 // no scrolling: show the clips that fit and say how many more there are
 function fitClips() {
@@ -225,6 +264,7 @@ document.addEventListener('click', async (e) => {
 (async function start() {
   const root = await window.zeno.root();
   if (!root) { $('#main').innerHTML = '<div class="top"><h1>Zeno</h1></div><div class="scroll" style="display:flex"><div class="welcome"><h1>Zeno folder not found</h1><div>Install Zeno first (install.command on Mac, install.bat on Windows), or set ZENO_HOME to its folder.</div></div></div>'; return; }
+  restoreLayout();
   await loadInfo(false);
   await loadJobs();
   renderMain();
@@ -233,5 +273,5 @@ document.addEventListener('click', async (e) => {
   setInterval(loadJobs, 2500);
   setInterval(loadDetail, 1000);
   setInterval(() => loadInfo(true), 600000);
-  window.addEventListener('resize', () => { fitList(); lastMain = ''; renderMain(); });
+  window.addEventListener('resize', () => { restoreLayout(); fitList(); lastMain = ''; renderMain(); });
 })();
