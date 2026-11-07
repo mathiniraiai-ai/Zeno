@@ -58,7 +58,7 @@ function timelineHtml(d) {
   const p = d.plan;
   if (!p || !p.timeline.length) {
     const lane = (n, t) => `<div class="lane"><span class="ln">${n}</span><div class="lt"><em>${t}</em></div></div>`;
-    return `<div class="tl-wrap">${lane('Zoom', 'fills in when the editor writes the plan')}${lane('Trans', '')}${lane('Video', 'waiting for the plan')}${lane('Voice', '')}${lane('SFX', '')}</div>`;
+    return `<div class="tl-wrap">${lane('Subs', '', '')}${lane('Zoom', 'fills in when the editor writes the plan')}${lane('Trans', '')}${lane('Video', 'waiting for the plan')}${lane('Voice', '')}${lane('SFX', '')}</div>`;
   }
   const total = p.seconds || 1, pct = (t) => (t / total) * 100 + '%';
   const spk = [...new Set(p.timeline.map((s) => s.speaker).filter(Boolean))];
@@ -80,7 +80,7 @@ function timelineHtml(d) {
   const lane = (name, cls, inner, empty) => `<div class="lane"><span class="ln">${name}</span><div class="lt ${cls}">${inner || `<em>${empty || ''}</em>`}</div></div>`;
   const subs = d.subs && d.subs.style ? d.subs.style : (p.subs || '');
   return `<div class="tl-wrap">
-    ${subs ? lane('Subs', 'sub', `<div class="seg sb" style="left:0;width:100%"><b>${esc(subs)}</b></div>`) : ''}
+    ${lane('Subs', 'sub', subs ? `<div class="seg sb" style="left:0;width:100%"><b>${esc(subs)}</b></div>` : '', 'no subtitles in this plan')}
     ${lane('Zoom', 'fx', zooms, 'no zooms')}
     ${lane('Trans', 'fx', trans, 'cuts only, no transitions')}
     ${lane('Video', 'tl', video)}
