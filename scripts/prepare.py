@@ -1006,6 +1006,14 @@ def format_facts(clips_data: List[Dict[str, Any]]) -> str:
             events.emit("face", f"{name}: {vis.get('face_count', 0)} face(s), {vis.get('shot_type', 'unknown')}" + (", silent clip" if clip_is_silent(c) else ""), clip=name, faces=_fs, shot=vis.get('shot_type'), silent=clip_is_silent(c))
         except Exception:
             pass
+        try:                                   # a dense frame-by-frame pass of every clip, only so the desktop app can show the scan (about a second a clip)
+            if os.environ.get("ZENO_EVENTS", "").lower() != "off":
+                import vision_scan
+
+                vision_scan.scan_clip(Path(resolve(c["src"])), step=0.5, max_frames=24, echo=False)
+        except BaseException as _e:            # noqa: BLE001  (never let the display pass stop a job)
+            if isinstance(_e, KeyboardInterrupt):
+                raise
         spans = [(float(f["bbox_norm"][0]), float(f["bbox_norm"][2])) for f in (vis.get("faces") or []) if f.get("bbox_norm") and len(f["bbox_norm"]) >= 4]
         if len(spans) >= 2:
             parts = []
