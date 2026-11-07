@@ -71,9 +71,12 @@ function timelineHtml(d) {
   const voice = p.timeline.map((s) => `<div class="seg vo" title="${esc(`${s.id} · ${s.speaker || 'speaker not set'} · ${s.dur}s`)}" style="left:${pct(s.start)};width:${pct(s.dur)};background:${s.speaker ? col(s.speaker) : '#475569'}">${s.dur / total > 0.045 && s.speaker ? `<b>${esc(s.speaker.split(' ').map((w) => w[0]).join(''))}</b>` : ''}</div>`).join('');
   const zooms = p.timeline.filter((s) => s.zoom).map((s) => `<div class="seg zm" title="${esc(`${s.id} · zoom ${s.zoom}`)}" style="left:${pct(s.start)};width:${pct(s.dur)}">${s.dur / total > 0.05 ? `<b>${esc(s.zoom)}</b>` : ''}</div>`).join('');
   // transitions and sound effects are real clips with a length, like on an editor's timeline (a clip too narrow for its name shows the name beside it)
-  const clip = (cls, t0, dur, name, tip) => { const w = Math.max(dur / total, 0.004); return `<div class="seg blk ${cls}" title="${esc(tip)}" style="left:${(t0 / total) * 100}%;width:${w * 100}%">${w > 0.05 ? `<b>${esc(name)}</b>` : ''}</div>${w > 0.05 ? '' : `<span class="cl" style="left:calc(${((t0 / total) + w) * 100}% + 3px)">${esc(name)}</span>`}`; };
-  const trans = (p.transition_list || []).map((x) => clip('tr', Math.max(0, x.t - x.dur / 2), x.dur, x.name.replace(/_/g, ' '), `${x.id} · ${x.name} · ${x.dur}s`)).join('');
-  const sfx = (p.sfx || []).map((x) => clip('k-' + x.kind, x.t, x.dur || 0.3, x.file.replace(/\.[a-z0-9]+$/i, ''), `${x.file}${x.gain != null ? ' · ' + x.gain + ' dB' : ''} · ${mmss(x.t)}${x.kind === 'auto' ? ' · whoosh on the transition' : ''}`)).join('');
+  const clip = (cls, t0, dur, name, tip, room = true) => { const w = Math.max(dur / total, 0.004); return `<div class="seg blk ${cls}" title="${esc(tip)}" style="left:${(t0 / total) * 100}%;width:${w * 100}%">${w > 0.05 ? `<b>${esc(name)}</b>` : ''}</div>${w > 0.05 || !room ? '' : `<span class="cl" style="left:calc(${((t0 / total) + w) * 100}% + 3px)">${esc(name)}</span>`}`; };
+  const roomAfter = (list, k, t, need = 0.1) => { const n = list[k + 1]; return !n || (n.t - t) / total > need; };
+  const tl_ = p.transition_list || [];
+  const trans = tl_.map((x, k) => clip('tr', Math.max(0, x.t - x.dur / 2), x.dur, x.name.replace(/_/g, ' '), `${x.id} · ${x.name} · ${x.dur}s`, roomAfter(tl_, k, x.t, 0.17))).join('');
+  const sx_ = p.sfx || [];
+  const sfx = sx_.map((x, k) => clip('k-' + x.kind, x.t, x.dur || 0.3, x.file.replace(/\.[a-z0-9]+$/i, ''), `${x.file}${x.gain != null ? ' · ' + x.gain + ' dB' : ''} · ${mmss(x.t)}${x.kind === 'auto' ? ' · whoosh on the transition' : ''}`, roomAfter(sx_, k, x.t))).join('');
   const lane = (name, cls, inner, empty) => `<div class="lane"><span class="ln">${name}</span><div class="lt ${cls}">${inner || `<em>${empty || ''}</em>`}</div></div>`;
   const subs = d.subs && d.subs.style ? d.subs.style : (p.subs || '');
   return `<div class="tl-wrap">
