@@ -26,6 +26,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import edl_parser  # noqa: E402
 import layouts  # noqa: E402
+import os as _os
+_os.environ.setdefault("ZENO_EVENTS", "off")      # tests never write live events into a real job
 import prepare  # noqa: E402
 import style_config  # noqa: E402
 import verify  # noqa: E402
@@ -1895,7 +1897,7 @@ class TestEventsAndJobs(unittest.TestCase):
         import os
         from unittest.mock import patch
         work, d = self._job()
-        with patch.object(events, "WORK", work), patch.dict(os.environ, {"ZENO_JOB_PROJECT": "demo_job"}):
+        with patch.object(events, "WORK", work), patch.dict(os.environ, {"ZENO_JOB_PROJECT": "demo_job", "ZENO_EVENTS": "on"}):
             events.emit("face", "S4: 2 face(s)", clip="S4.mp4", faces=[[0.1, 0.4]])
             events.emit("nonsense-kind", "x")
             rows = events.read(d)
@@ -1938,7 +1940,7 @@ class TestEventsAndJobs(unittest.TestCase):
         import os
         from unittest.mock import patch
         work, d = self._job(with_plan=True, with_output=True)
-        with patch.object(jobs, "WORK", work), patch.object(events, "WORK", work), patch.dict(os.environ, {"ZENO_JOB_PROJECT": "demo_job"}):
+        with patch.object(jobs, "WORK", work), patch.object(events, "WORK", work), patch.dict(os.environ, {"ZENO_JOB_PROJECT": "demo_job", "ZENO_EVENTS": "on"}):
             events.emit("face", "S1: 1 face(s)", clip="S1.mp4", faces=[[0.2, 0.5]], shot="single", silent=False)
             events.emit("verify", "Loudness: pass", ok=True, tag="Loudness")
             r = jobs.detail("demo_job")

@@ -35,6 +35,8 @@ def _project_dir() -> Optional[Path]:
 
 def emit(kind: str, text: str, **data: Any) -> None:
     """Add one event. `kind` is one of KINDS; `data` carries small facts (clip name, counts, pass/fail) for the app to show."""
+    if os.environ.get("ZENO_EVENTS") == "off":      # the tests set this so they never write into a real job
+        return
     try:
         d = _project_dir()
         if d is None or not d.is_dir():
