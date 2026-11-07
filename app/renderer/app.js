@@ -7,7 +7,7 @@ const mmss = (s) => { s = Math.round(s || 0); return `${Math.floor(s / 60)}:${St
 const hms = (t) => new Date(t * 1000).toTimeString().slice(0, 8);
 const ago = (t) => { const s = Math.max(0, Date.now() / 1000 - t); if (s < 60) return 'just now'; if (s < 3600) return `${Math.floor(s / 60)} min ago`; if (s < 86400) return `${Math.floor(s / 3600)} h ago`; return `${Math.floor(s / 86400)} d ago`; };
 
-const state = { picked: new URLSearchParams(location.search).has('select'), tab: 'scan', scans: [], scanIdx: 0, jobs: [], selected: new URLSearchParams(location.search).get('select') || null, detail: null, events: [], last: 0, filter: 'all', info: null, busy: false };
+const state = { blank: !new URLSearchParams(location.search).has('select') && (() => { try { return localStorage.getItem('zenoBlank') === '1'; } catch (e) { return false; } })(), picked: new URLSearchParams(location.search).has('select'), tab: 'scan', scans: [], scanIdx: 0, jobs: [], selected: new URLSearchParams(location.search).get('select') || null, detail: null, events: [], last: 0, filter: 'all', info: null, busy: false };
 const KIND = { face: ['FACE', 'face'], speech: ['VOICE', 'speech'], stage: ['STEP', 'stage'], cut: ['CUT', 'cut'], render: ['REND', 'render'], check: ['CHK', 'check'], verify: ['QA', 'verify'], subs: ['SUBS', 'subs'], info: ['INFO', 'info'], warn: ['WARN', 'warn'], error: ['ERR', 'error'] };
 
 // ---------------------------------------------------------------- sidebar
@@ -153,7 +153,7 @@ function mainHtml(d) {
     return `<div class="top"><h1>Zeno</h1></div><div class="body" style="display:flex"><div class="welcome"><h1>No edit selected</h1><div>${state.jobs.length ? 'Pick an edit on the left.' : 'Press New edit to start one. This window then shows every step.'}</div></div></div>`;
   }
   const s = d.status;
-  return `<div class="top"><h1 title="${esc(d.title)}">${esc(shortTitle(d.title))}</h1>${s.phase === 'plan' ? '<button class="askbtn" data-ask="1">Render…</button>' : ''}${s.phase === 'working' ? `<span class="ovr" title="Overall progress"><i style="width:${d.pct || 0}%"></i></span><b class="ovn">${d.pct || 0}%</b>` : ''}<span class="pill ${s.phase}">${esc(s.phase === 'working' ? `Working${d.elapsed ? ' · ' + d.elapsed : ''}` : shortStatus(s))}</span></div>
+  return `<div class="top"><h1 title="${esc(d.title)}">${esc(shortTitle(d.title))}</h1>${s.phase === 'plan' ? '<button class="askbtn" data-ask="1">Render…</button>' : ''}${s.phase !== 'working' ? '<button class="closebtn" data-close="1" title="Close this project and start fresh">Close project</button>' : ''}${s.phase === 'working' ? `<span class="ovr" title="Overall progress"><i style="width:${d.pct || 0}%"></i></span><b class="ovn">${d.pct || 0}%</b>` : ''}<span class="pill ${s.phase}">${esc(s.phase === 'working' ? `Working${d.elapsed ? ' · ' + d.elapsed : ''}` : shortStatus(s))}</span></div>
   <div class="pipe">${pipeHtml(d)}</div>
   <div class="body">
     <div class="col">
@@ -336,8 +336,8 @@ async function loadJobs() {
     state.phases = Object.fromEntries(r.map((x) => [x.name, x.status.phase]));
     // follow the job that is running right now, unless the user picked another one by hand
     const run = r.find((j) => j.status.phase === 'working');
-    if (run && !state.picked && run.name !== state.selected) { state.selected = run.name; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; lastMain = ''; renderMain(); }
-    if (!state.selected || !r.find((j) => j.name === state.selected)) { const w = r.find((j) => j.status.phase === 'working') || r[0]; state.selected = w ? w.name : null; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; }
+    if (run && !state.picked && run.name !== state.selected) { state.blank = false; state.selected = run.name; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; lastMain = ''; renderMain(); }
+    if (!state.blank && (!state.selected || !r.find((j) => j.name === state.selected))) { const w = r.find((j) => j.status.phase === 'working') || r[0]; state.selected = w ? w.name : null; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; }
   }
   renderSide();
 }
@@ -373,6 +373,11 @@ document.addEventListener('click', async (e) => {
   if (e.target.closest('[data-done-watch]')) { state.doneOpen = null; state.rtab = 'result'; paintDone(); lastMain = ''; renderMain(); return; }
   const rt = e.target.closest('[data-rtab]'); if (rt) { state.rtab = rt.dataset.rtab; lastMain = ''; renderMain(); return; }
   const rs = e.target.closest('[data-rsrc]'); if (rs) { state.rsrc = rs.dataset.rsrc; lastMain = ''; renderMain(); return; }
+  if (e.target.closest('[data-close]')) {
+    state.blank = true; state.picked = false; state.selected = null; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; state.askOpen = null; state.doneOpen = null; state.rtab = 'result';
+    try { localStorage.setItem('zenoBlank', '1'); } catch (er) { /* not saved */ }
+    lastMain = ''; paintAsk(); paintDone(); renderSide(); renderMain(); return;
+  }
   if (e.target.closest('[data-ask]')) { state.askOpen = state.detail && state.detail.name; paintAsk(); return; }
   if (e.target.closest('[data-ask-no]')) { state.askOpen = null; paintAsk(); return; }
   if (e.target.closest('[data-render]')) {
@@ -383,7 +388,7 @@ document.addEventListener('click', async (e) => {
   }
   const chip = e.target.closest('.schips button'); if (chip) { sp.pin = sp.pin === chip.dataset.clip ? null : chip.dataset.clip; sp.idx = 0; sp.sig = ''; paintScan(); return; }
   const li = e.target.closest('#jobs li[data-name]');
-  if (li) { state.picked = true; state.selected = li.dataset.name; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; lastMain = ''; renderSide(); renderMain(); loadDetail(); return; }
+  if (li) { state.blank = false; try { localStorage.setItem('zenoBlank', '0'); } catch (e) { /* not saved */ } state.picked = true; state.selected = li.dataset.name; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; lastMain = ''; renderSide(); renderMain(); loadDetail(); return; }
   const rv = e.target.closest('[data-reveal]'); if (rv) { window.zeno.reveal(rv.dataset.reveal); return; }
   const op = e.target.closest('[data-open]'); if (op) { window.zeno.open(op.dataset.open); return; }
   if (e.target.closest('#newEdit')) { window.zeno.newEdit(); return; }
