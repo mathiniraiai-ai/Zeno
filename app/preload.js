@@ -22,5 +22,6 @@ contextBridge.exposeInMainWorld('zeno', {
   reload: () => ipcRenderer.invoke('zeno:reload'),
   signIn: () => ipcRenderer.invoke('zeno:signIn'),
   signOut: () => ipcRenderer.invoke('zeno:signOut'),
+  runSetup: () => ipcRenderer.invoke('zeno:runSetup'),
   platform: process.platform,
 });

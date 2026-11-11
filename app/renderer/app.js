@@ -174,6 +174,12 @@ function skeletonHtml(title, message, warn) {
 }
 function mainHtml(d) {
   if (!d) {
+    if (state.info && state.info.signed_in && !state.info.engine_ready) {
+      const msg = !state.info.root
+        ? '<b>Connected to Zeno Cloud.</b><br>Click below to download the Zeno editing engine to your Documents folder.<br><br><button class="primary" id="doCloudUpdate" style="width:auto;padding:8px 16px">Download Zeno Engine</button>'
+        : '<b>Zeno workspace downloaded!</b><br>Click once below to finish setting up local FFmpeg &amp; AI timing models on this computer.<br><br><button class="primary" id="runEngineSetup" style="width:auto;padding:8px 16px">Finish One-Time Engine Setup</button>';
+      return skeletonHtml('Welcome to Zeno', msg, true);
+    }
     return skeletonHtml('No edit selected', state.jobs.length ? 'Pick an edit on the left, or start a new one in Claude with /zeno and it appears here live.' : 'Start an edit in Claude with /zeno. This window then shows every step live.', false);
   }
   const s = d.status;
@@ -353,6 +359,7 @@ document.addEventListener('mouseup', () => {
 
 // ---------------------------------------------------------------- data
 async function loadJobs() {
+  if (!state.info || !state.info.signed_in) return;
   const r = await window.zeno.jobs();
   if (Array.isArray(r)) {
     state.jobs = r;
@@ -366,7 +373,7 @@ async function loadJobs() {
   renderSide();
 }
 async function loadDetail() {
-  if (!state.selected || state.busy) return;
+  if (!state.info || !state.info.signed_in || !state.selected || state.busy) return;
   state.busy = true;
   try {
     const name = state.selected;
@@ -405,18 +412,20 @@ async function loadInfo(check) {
 
 function paintSignIn() {
   let el = $('#signin');
-  const need = state.info && !state.info.signed_in;
+  const need = !state.info || !state.info.signed_in;
   if (!need) { if (el) el.remove(); return; }
   if (!el) { el = document.createElement('div'); el.id = 'signin'; document.body.appendChild(el); }
   const sig = `${state.signingIn ? 1 : 0}|${state.signInError || ''}`;
   if (el.dataset.sig === sig) return;
   el.dataset.sig = sig;
-  el.innerHTML = `<div class="upd-card si-card">
-    <div class="upd-top"><span class="upd-pill">WELCOME</span></div>
+  const gIcon = '<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M21.35 11.1h-9.18v2.92h5.27c-.23 1.38-1.56 4.05-5.27 4.05-3.17 0-5.76-2.63-5.76-5.87s2.59-5.87 5.76-5.87c1.81 0 3.02.77 3.71 1.43l2.53-2.44C16.79 3.8 14.69 2.9 12.17 2.9 6.95 2.9 2.73 7.13 2.73 12.2s4.22 9.3 9.44 9.3c5.45 0 9.06-3.83 9.06-9.22 0-.62-.07-1.09-.15-1.58z"/></svg>';
+  el.innerHTML = `<div class="si-drag"></div><div class="upd-card si-card">
+    <div class="si-logo"><i></i><span>Zeno</span></div>
     <h3>Sign in to Zeno</h3>
-    <div class="upd-sub">Use your company Google account to connect to Zeno Cloud.</div>
+    <div class="upd-sub">Continue in your browser with your Google account to connect Zeno Cloud &amp; automatic updates.</div>
     ${state.signInError ? `<div class="upd-err">${esc(state.signInError)}</div>` : ''}
-    <div class="upd-acts"><button class="primary si-btn" id="doSignIn" ${state.signingIn ? 'disabled' : ''}>${state.signingIn ? 'Waiting for Google in your browser…' : 'Sign in with Google'}</button></div>
+    <div class="upd-acts"><button class="primary si-btn" id="doSignIn" ${state.signingIn ? 'disabled' : ''}>${gIcon}<span>${state.signingIn ? 'Waiting for Google in your browser…' : 'Continue with Google'}</span></button></div>
+    <div class="si-hint">${state.signingIn ? 'Complete Google sign-in in the browser tab that just opened. Zeno will connect automatically.' : 'Redirects securely to Zeno Cloud in your default browser — just like Figma.'}</div>
   </div>`;
 }
 async function doSignIn() {
@@ -424,7 +433,17 @@ async function doSignIn() {
   state.signingIn = true; state.signInError = ''; paintSignIn();
   const r = await window.zeno.signIn();
   state.signingIn = false;
-  if (r && r.ok) { state.signInError = ''; await loadInfo(false); await loadInfo('force'); } else { state.signInError = (r && r.text) || 'Sign-in failed.'; }
+  if (r && r.ok) {
+    state.signInError = '';
+    if (r.bootstrapped) { window.zeno.reload(); return; }
+    await loadInfo(false);
+    await loadJobs();
+    lastMain = ''; renderMain();
+    loadDetail();
+    loadInfo('force');
+  } else {
+    state.signInError = (r && r.text) || 'Sign-in failed.';
+  }
   paintSignIn();
 }
 
@@ -523,16 +542,25 @@ document.addEventListener('click', async (e) => {
     return;
   }
   if (e.target.closest('#doCloudUpdate') || e.target.closest('#doUpdate')) { triggerCloudUpdate(); return; }
+  if (e.target.closest('#runEngineSetup')) { window.zeno.runSetup(); return; }
   if (e.target.closest('#doSignIn')) { doSignIn(); return; }
-  if (e.target.closest('#doSignOut')) { e.preventDefault(); await window.zeno.signOut(); await loadInfo(false); return; }
+  if (e.target.closest('#doSignOut')) {
+    e.preventDefault();
+    await window.zeno.signOut();
+    state.jobs = []; state.detail = null; state.selected = null; lastMain = '';
+    await loadInfo(false);
+    renderSide();
+    renderMain();
+    return;
+  }
 });
 
 (async function start() {
-  const root = await window.zeno.root();
-  if (!root) { $('#main').innerHTML = skeletonHtml('Zeno', '<b>Zeno folder not found.</b><br>Install Zeno first (install.command on Mac, install.bat on Windows), then open this window again. Or set ZENO_HOME to the Zeno folder.', true); restoreLayout(); return; }
   restoreLayout();
+  paintSignIn();
   await loadInfo(false);
   await loadJobs();
+  lastMain = '';
   renderMain();
   loadDetail();
   loadInfo(true);
