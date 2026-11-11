@@ -1,6 +1,6 @@
 {
   "style": "micronarrative",
-  "updated_at": "2026-11-06",
+  "updated_at": "2026-11-07",
   "rules": [
     {
       "id": "HOOK_FIRST_ZOOM_IN",
@@ -71,6 +71,21 @@
       "id": "rule_60aba46b87d5aac9",
       "category": "transitions",
       "rule": "Place 1 to 2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside a single-character hook; keep intra-clip splits as clean jump cuts (tr=cut, zero whoosh spam)."
+    },
+    {
+      "id": "rule_02ae8145b64c5159",
+      "category": "cutting",
+      "rule": "Trim the actor's getting-ready stare before the first word and the freeze after the last: start 0.06-0.10 s before the first kept word and end 0.08-0.12 s after the last; the `speech` spans in facts.md show where speech really starts and stops."
+    },
+    {
+      "id": "rule_ae9d980cf5bc569d",
+      "category": "transitions",
+      "rule": "Place 1 to 2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside a single-character hook or at Scene N boundaries; keep intra-clip and intra-scene splits as clean jump cuts (tr=cut, zero whoosh spam)."
+    },
+    {
+      "id": "rule_b2c2f96eae9b8371",
+      "category": "zoom",
+      "rule": "In single-character live shots (layout=single), trigger a sudden zoom-in (sudden_in:1.08@<word_t>) on Supernova callouts or strong value points ([STRESS] vocal peak words), and pair follow-up beats with sudden_out:1.08 or smooth 1.0->1.06."
     }
   ]
 }

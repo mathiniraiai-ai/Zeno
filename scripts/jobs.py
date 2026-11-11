@@ -222,30 +222,56 @@ def detail(name: str, since: int = 0) -> Dict[str, Any]:
     return base
 
 
-def zeno_info(check_updates: bool = True) -> Dict[str, Any]:
-    info: Dict[str, Any] = {"version": "", "sha": "", "behind": None, "root": str(ROOT), "signed_in": None}
+def zeno_info(check_updates: bool = True, force_check: bool = False) -> Dict[str, Any]:
+    info: Dict[str, Any] = {"version": "", "sha": "", "behind": None, "update": None, "root": str(ROOT), "signed_in": None}
     try:
         info["version"] = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     except OSError:
         pass
-    try:
-        info["sha"] = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True, text=True, timeout=5).stdout.strip()
-    except Exception:   # noqa: BLE001
-        pass
-    cache = WORK / "_update_check.json"
-    cached = _read(cache)
+    rel_state = _read(WORK / ".cloud_release_state.json") or {}
+    if rel_state.get("sha"):
+        info["sha"] = str(rel_state["sha"])
     if check_updates:
-        if cached and time.time() - float(cached.get("at", 0)) < 900:
-            info["behind"] = cached.get("behind")
-        else:
-            try:
-                subprocess.run(["git", "fetch", "--quiet", "origin"], cwd=ROOT, capture_output=True, timeout=12)
-                n = subprocess.run(["git", "rev-list", "--count", "HEAD..origin/main"], cwd=ROOT, capture_output=True, text=True, timeout=5).stdout.strip()
-                info["behind"] = int(n) if n.isdigit() else None
-                WORK.mkdir(exist_ok=True)
-                cache.write_text(json.dumps({"at": time.time(), "behind": info["behind"]}), encoding="utf-8")
-            except Exception:   # noqa: BLE001
+        try:
+            import auto_updater
+
+            chk = auto_updater.check_cloud_update(force=force_check, timeout_sec=8.0, cache_ttl_sec=120.0)
+            if chk.get("ok"):
+                avail = bool(chk.get("available"))
+                info["behind"] = 1 if avail else 0
+                if chk.get("sha"):
+                    info["sha"] = str(chk["sha"])
+                info["update"] = {
+                    "available": avail,
+                    "current_version": chk.get("current_version") or info["version"],
+                    "latest_version": chk.get("latest_version") or info["version"],
+                    "notes": chk.get("notes") or "",
+                    "size_mb": chk.get("size_mb") or 0.0,
+                    "mandatory": bool(chk.get("mandatory")),
+                    "dmg_url": chk.get("dmg_url") or "",
+                    "exe_url": chk.get("exe_url") or "",
+                    "bundle_sha256": chk.get("bundle_sha256") or "",
+                }
+            else:
                 info["behind"] = None
+        except Exception:   # noqa: BLE001
+            info["behind"] = None
+    else:
+        cached = _read(WORK / "_update_check.json") or {}
+        if cached.get("ok"):
+            avail = bool(cached.get("available"))
+            info["behind"] = 1 if avail else 0
+            info["update"] = {
+                "available": avail,
+                "current_version": cached.get("current_version") or info["version"],
+                "latest_version": cached.get("latest_version") or info["version"],
+                "notes": cached.get("notes") or "",
+                "size_mb": cached.get("size_mb") or 0.0,
+                "mandatory": bool(cached.get("mandatory")),
+                "dmg_url": cached.get("dmg_url") or "",
+                "exe_url": cached.get("exe_url") or "",
+                "bundle_sha256": cached.get("bundle_sha256") or "",
+            }
     try:
         import auth_session
 
@@ -264,7 +290,7 @@ def main(argv: List[str]) -> int:
         since = int(argv[argv.index("--since") + 1]) if "--since" in argv else 0
         out = detail(argv[2], since)
     elif cmd == "info":
-        out = zeno_info("--no-update-check" not in argv)
+        out = zeno_info("--no-update-check" not in argv, "--force-update-check" in argv)
     else:
         print(__doc__)
         return 2

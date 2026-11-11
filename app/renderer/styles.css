@@ -211,3 +211,23 @@ body.dragging { cursor: grabbing; } body.dragging * { pointer-events: none; } bo
 .empty.warnmsg { color: var(--amber); line-height: 1.6; } .empty.warnmsg b { color: var(--text); }
 .card .empty { padding: 14px 16px; color: var(--faint); font-size: 12.5px; }
 #feed > .empty { margin-bottom: auto; }
+
+/* Cloud OTA "New update arrived" modal popup */
+#updModal { position: fixed; inset: 0; background: rgba(0,0,0,.68); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 80; animation: fadeInUpd .18s ease-out; }
+@keyframes fadeInUpd { from { opacity: 0; transform: scale(.97); } to { opacity: 1; transform: scale(1); } }
+.upd-card { width: min(430px, calc(100vw - 40px)); background: var(--panel2); border: 1px solid var(--greenLine); border-radius: 14px; padding: 18px 20px; box-shadow: 0 24px 64px rgba(0,0,0,.75), 0 0 0 1px rgba(186,207,101,.12); display: flex; flex-direction: column; gap: 10px; }
+.upd-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.upd-pill { font: 600 10px var(--mono); letter-spacing: .08em; color: var(--green); background: var(--greenDim); border: 1px solid var(--greenLine); border-radius: 999px; padding: 3px 10px; }
+.upd-size { font: 11px var(--mono); color: var(--faint); }
+.upd-card h3 { margin: 2px 0 0; font-size: 16px; font-weight: 600; color: var(--text); }
+.upd-sub { font: 11.5px var(--mono); color: var(--faint); margin-top: -4px; }
+.upd-notes { background: var(--panel); border: 1px solid var(--line2); border-radius: 9px; padding: 10px 12px; color: var(--muted); font-size: 12.5px; line-height: 1.45; max-height: 140px; overflow-y: auto; white-space: pre-wrap; user-select: text; }
+.upd-err { color: var(--red); font-size: 12px; }
+.upd-ok { color: var(--green); font-size: 12px; font-weight: 600; }
+.upd-acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+.upd-acts .btn { flex: none; padding: 7px 14px; }
+.upd-acts .primary { width: auto; padding: 8px 16px; }
+.upd-acts .primary:disabled { opacity: .65; cursor: wait; }
+#signin { position: fixed; inset: 0; background: #000; display: flex; align-items: center; justify-content: center; z-index: 90; }
+.si-card { width: min(400px, calc(100vw - 40px)); } .si-card .upd-acts { justify-content: stretch; } .si-btn { width: 100% !important; }
+#who a { text-decoration: underline; cursor: pointer; }

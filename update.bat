@@ -1,20 +1,17 @@
 @echo off
-REM Zeno updater for Windows. Double-click this file.
-REM Pulls the latest Zeno, then refreshes packages. Your .env, clips, work\ and output\ are never touched.
+REM Zeno Cloud updater for Windows. Double-click this file.
+REM Downloads the latest Zeno update from Zeno Cloud (no GitHub needed). Your .env, clips, work\ and output\ are never touched.
 cd /d "%~dp0"
-if not exist ".git" (
-  echo This copy is not connected to GitHub yet. Connecting it now...
-  if not exist ".venv\Scripts\python.exe" (
-    echo Run install.bat first.
-    pause
-    exit /b 1
-  )
-  ".venv\Scripts\python.exe" scripts\auto_updater.py --connect-git
-  if errorlevel 1 (
-    pause
-    exit /b 1
-  )
+if not exist ".venv\Scripts\python.exe" (
+  echo Run install.bat first.
+  pause
+  exit /b 1
 )
-echo Getting the latest Zeno...
-git pull --ff-only || (pause & exit /b 1)
-call install.bat
+echo Checking Zeno Cloud for the latest update...
+".venv\Scripts\python.exe" scripts\auto_updater.py
+if errorlevel 1 (
+  pause
+  exit /b 1
+)
+echo Done.
+pause

@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('zeno', {
   info: (check) => ipcRenderer.invoke('zeno:info', check),
   reveal: (p) => ipcRenderer.invoke('zeno:reveal', p),
   open: (p) => ipcRenderer.invoke('zeno:open', p),
+  openExternal: (u) => ipcRenderer.invoke('zeno:openExternal', u),
   newEdit: () => ipcRenderer.invoke('zeno:newEdit'),
   render: (name, planFile) => ipcRenderer.invoke('zeno:render', name, planFile),
   download: (p) => ipcRenderer.invoke('zeno:download', p),
@@ -18,5 +19,8 @@ contextBridge.exposeInMainWorld('zeno', {
   chatStop: () => ipcRenderer.invoke('zeno:chatStop'),
   onChat: (fn) => ipcRenderer.on('zeno:chat', (_e, evt) => fn(evt)),
   update: () => ipcRenderer.invoke('zeno:update'),
+  reload: () => ipcRenderer.invoke('zeno:reload'),
+  signIn: () => ipcRenderer.invoke('zeno:signIn'),
+  signOut: () => ipcRenderer.invoke('zeno:signOut'),
   platform: process.platform,
 });

@@ -340,5 +340,24 @@ with patch.object(service, "_embed", return_value=None):
 check("match needs a key -> 401", client.post("/v1/match", json={"text": "x"}).status_code == 401)
 check("match refuses an empty question -> 400", client.post("/v1/match", headers=_auth, json={"text": " "}).status_code == 400)
 
+# Cloud OTA software release publishing & client download
+import io as _io, zipfile as _zf
+_zbuf = _io.BytesIO()
+with _zf.ZipFile(_zbuf, "w", compression=_zf.ZIP_DEFLATED) as _z:
+    _z.writestr("VERSION", "1.0.5\n")
+    _z.writestr("scripts/zeno.py", "# zeno 1.0.5\n")
+_zbytes = _zbuf.getvalue()
+check("version check needs a key -> 401", client.get("/v1/version").status_code == 401)
+check("before first release, has_release is false", client.get("/v1/version", headers=_auth).json().get("has_release") is False)
+check("regular user cannot publish release -> 403", client.post("/v1/admin/release", headers={**_auth, "X-Zeno-Admin": "1"}, data={"version": "1.0.5"}, files={"file": ("u.zip", _zbytes, "application/zip")}).status_code == 403)
+check("invalid zip rejected -> 400", client.post("/v1/admin/release", headers=_adm, data={"version": "1.0.5"}, files={"file": ("u.zip", b"not-a-zip", "application/zip")}).status_code == 400)
+_pub = client.post("/v1/admin/release", headers=_adm, data={"version": "1.0.5", "sha": "abc9999", "notes": "New zoom transitions"}, files={"file": ("u.zip", _zbytes, "application/zip")})
+check("admin publishes OTA release -> 200", _pub.status_code == 200 and _pub.json()["release"]["version"] == "1.0.5")
+_ver = client.get("/v1/version", headers=_auth).json()
+check("client sees published version & notes", _ver["has_release"] is True and _ver["version"] == "1.0.5" and _ver["notes"] == "New zoom transitions")
+_dl = client.get("/v1/update-bundle", headers=_auth)
+check("client downloads exact OTA zip bundle", _dl.status_code == 200 and _dl.content == _zbytes and _dl.headers.get("X-Zeno-Version") == "1.0.5")
+check("If-None-Match returns 304 Not Modified", client.get("/v1/update-bundle", headers={**_auth, "If-None-Match": _ver["bundle_sha256"]}).status_code == 304)
+
 print(f"\n{sum(results)}/{len(results)} checks passed")
 sys.exit(0 if all(results) else 1)

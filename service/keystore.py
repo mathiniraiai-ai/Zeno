@@ -209,6 +209,20 @@ class KeyStore:
             updated_by TEXT NOT NULL DEFAULT '',
             updated_at {real} NOT NULL,
             PRIMARY KEY (kind, name))""")
+        blob_type = "BYTEA" if self.postgres else "BLOB"
+        self._run(f"""CREATE TABLE IF NOT EXISTS zeno_releases (
+            id {rule_pk},
+            version TEXT NOT NULL,
+            sha TEXT NOT NULL DEFAULT '',
+            bundle_sha256 TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            notes TEXT NOT NULL DEFAULT '',
+            mandatory INTEGER NOT NULL DEFAULT 0,
+            dmg_url TEXT NOT NULL DEFAULT '',
+            exe_url TEXT NOT NULL DEFAULT '',
+            published_by TEXT NOT NULL DEFAULT '',
+            created_at {real} NOT NULL,
+            bundle_zip {blob_type})""")
 
     # -- operations --------------------------------------------------------------------------
     def create(self, name: str, email: str) -> str:
@@ -704,6 +718,128 @@ class KeyStore:
 
     def set_knowledge_embedding(self, kind: str, name: str, embedding: List[float]) -> None:
         self._run("UPDATE zeno_knowledge SET embedding_json = %s WHERE kind = %s AND name = %s", (json.dumps(embedding), kind, name))
+
+    # -- cloud OTA software releases (served to clients without GitHub) ----------------------
+    KEEP_RELEASE_BUNDLES = 3
+
+    def save_release(
+        self,
+        version: str,
+        sha: str,
+        bundle_bytes: bytes,
+        notes: str = "",
+        mandatory: bool = False,
+        dmg_url: str = "",
+        exe_url: str = "",
+        published_by: str = "",
+    ) -> Dict[str, Any]:
+        now = time.time()
+        digest = hashlib.sha256(bundle_bytes).hexdigest()
+        size_bytes = len(bundle_bytes)
+        ver = (version or "1.0.0").strip()[:40]
+        short_sha = (sha or digest[:7]).strip()[:40]
+        self._run(
+            "INSERT INTO zeno_releases (version, sha, bundle_sha256, size_bytes, notes, mandatory, dmg_url, exe_url, published_by, created_at, bundle_zip) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (ver, short_sha, digest, size_bytes, (notes or "").strip()[:4000], 1 if mandatory else 0,
+             (dmg_url or "").strip()[:500], (exe_url or "").strip()[:500], (published_by or "").strip()[:80], now, bundle_bytes),
+        )
+        # Keep full ZIP bytes only on the newest N releases so PostgreSQL stays tiny forever
+        rows = self._run("SELECT id FROM zeno_releases WHERE bundle_zip IS NOT NULL ORDER BY id DESC", (), "all") or []
+        for old_row in rows[self.KEEP_RELEASE_BUNDLES:]:
+            self._run("UPDATE zeno_releases SET bundle_zip = NULL WHERE id = %s", (int(old_row[0]),))
+        return {
+            "version": ver,
+            "sha": short_sha,
+            "bundle_sha256": digest,
+            "size_bytes": size_bytes,
+            "notes": (notes or "").strip()[:4000],
+            "mandatory": bool(mandatory),
+            "dmg_url": (dmg_url or "").strip()[:500],
+            "exe_url": (exe_url or "").strip()[:500],
+            "published_by": (published_by or "").strip()[:80],
+            "published_at": now,
+        }
+
+    def latest_release_meta(self) -> Optional[Dict[str, Any]]:
+        row = self._run(
+            "SELECT id, version, sha, bundle_sha256, size_bytes, notes, mandatory, dmg_url, exe_url, published_by, created_at "
+            "FROM zeno_releases WHERE bundle_zip IS NOT NULL ORDER BY id DESC LIMIT 1",
+            (),
+            "one",
+        )
+        if not row:
+            return None
+        return {
+            "id": int(row[0]),
+            "version": str(row[1]),
+            "sha": str(row[2]),
+            "bundle_sha256": str(row[3]),
+            "size_bytes": int(row[4]),
+            "notes": str(row[5] or ""),
+            "mandatory": bool(row[6]),
+            "dmg_url": str(row[7] or ""),
+            "exe_url": str(row[8] or ""),
+            "published_by": str(row[9] or ""),
+            "published_at": float(row[10]),
+        }
+
+    def latest_release_bundle(self, bundle_sha256: Optional[str] = None) -> Optional[Tuple[Dict[str, Any], bytes]]:
+        if bundle_sha256:
+            row = self._run(
+                "SELECT id, version, sha, bundle_sha256, size_bytes, notes, mandatory, dmg_url, exe_url, published_by, created_at, bundle_zip "
+                "FROM zeno_releases WHERE bundle_sha256 = %s AND bundle_zip IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (bundle_sha256.strip().lower(),),
+                "one",
+            )
+        else:
+            row = self._run(
+                "SELECT id, version, sha, bundle_sha256, size_bytes, notes, mandatory, dmg_url, exe_url, published_by, created_at, bundle_zip "
+                "FROM zeno_releases WHERE bundle_zip IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (),
+                "one",
+            )
+        if not row or row[11] is None:
+            return None
+        meta = {
+            "id": int(row[0]),
+            "version": str(row[1]),
+            "sha": str(row[2]),
+            "bundle_sha256": str(row[3]),
+            "size_bytes": int(row[4]),
+            "notes": str(row[5] or ""),
+            "mandatory": bool(row[6]),
+            "dmg_url": str(row[7] or ""),
+            "exe_url": str(row[8] or ""),
+            "published_by": str(row[9] or ""),
+            "published_at": float(row[10]),
+        }
+        return meta, bytes(row[11])
+
+    def list_releases(self, limit: int = 20) -> List[Dict[str, Any]]:
+        rows = self._run(
+            "SELECT id, version, sha, bundle_sha256, size_bytes, notes, mandatory, dmg_url, exe_url, published_by, created_at, (bundle_zip IS NOT NULL) "
+            "FROM zeno_releases ORDER BY id DESC LIMIT %s",
+            (int(limit),),
+            "all",
+        ) or []
+        return [
+            {
+                "id": int(r[0]),
+                "version": str(r[1]),
+                "sha": str(r[2]),
+                "bundle_sha256": str(r[3]),
+                "size_bytes": int(r[4]),
+                "notes": str(r[5] or ""),
+                "mandatory": bool(r[6]),
+                "dmg_url": str(r[7] or ""),
+                "exe_url": str(r[8] or ""),
+                "published_by": str(r[9] or ""),
+                "published_at": float(r[10]),
+                "has_bundle": bool(r[11]),
+            }
+            for r in rows
+        ]
 
     def revoke(self, key_id: int) -> bool:
         before = self._run("SELECT COUNT(*) FROM zeno_keys WHERE id = %s AND revoked_at IS NULL", (key_id,), "one")[0]

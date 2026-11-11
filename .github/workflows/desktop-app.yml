@@ -1,7 +1,12 @@
 name: Zeno desktop app
-# Builds the installers for the desktop app (app/). Run it by hand from the Actions tab: Mac (Apple Silicon) .dmg and Windows .exe.
+# Builds the installers for the desktop app (app/): Mac (Apple Silicon) .dmg and Windows .exe.
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - '.github/workflows/desktop-app.yml'
 jobs:
   build:
     strategy:

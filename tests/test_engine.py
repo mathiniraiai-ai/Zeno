@@ -824,83 +824,102 @@ Woman: Yes please, I am ready to begin
         self.assertEqual(zeno.style_hint("micronarrative"), "[style] micronarrative")
         self.assertIn("not a learned style", zeno.style_hint("nonsense"))
 
-    def test_a_zip_installed_folder_can_be_connected_to_github_and_then_updates(self):
-        """Windows PC with no Git and a ZIP download: connect the folder to the repository without touching its files, then update."""
-        import shutil
-        import subprocess
+    def test_cloud_ota_updater_updates_folder_without_git_and_preserves_secrets(self):
+        """Client PC with no Git: downloads OTA ZIP from Zeno Cloud, verifies SHA-256, updates code, preserves .env & work/."""
+        import hashlib
+        import io
         import tempfile
+        import threading
+        import zipfile
+        from http.server import BaseHTTPRequestHandler, HTTPServer
         from unittest.mock import patch
 
         import auto_updater
 
-        git = shutil.which("git")
-        if not git:
-            self.skipTest("git is not installed here")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("VERSION", "1.0.1\n")
+            zf.writestr("scripts/zeno.py", "# v1.0.1\n")
+            zf.writestr("scripts/tool.py", "v2\n")
+            zf.writestr(".env", "MALICIOUS_OVERWRITE=1\n")
+        bundle_bytes = buf.getvalue()
+        bundle_sha256 = hashlib.sha256(bundle_bytes).hexdigest()
 
-        def g(cwd, *args):
-            return subprocess.run([git, "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=str(cwd), capture_output=True, text=True, check=True)
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
 
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_p = Path(tmp)
-            remote, seed, zipdir = tmp_p / "remote.git", tmp_p / "seed", tmp_p / "Zeno"
-            subprocess.run([git, "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
-            seed.mkdir()
-            g(seed, "init", "-q", "-b", "main")
-            (seed / "scripts").mkdir()
-            (seed / "scripts" / "tool.py").write_text("v1\n", encoding="utf-8")
-            (seed / ".gitignore").write_text(".env\nwork/\n.venv/\n", encoding="utf-8")
-            g(seed, "add", "-A")
-            g(seed, "commit", "-q", "-m", "one")
-            g(seed, "remote", "add", "origin", str(remote))
-            g(seed, "push", "-q", "origin", "main")
-            # the folder as a ZIP download plus what the installer made: no .git, a secret, a venv and work files
-            shutil.copytree(seed, zipdir, ignore=shutil.ignore_patterns(".git"))
-            (zipdir / ".env").write_text("SECRET=1\n", encoding="utf-8")
-            (zipdir / "work").mkdir()
-            (zipdir / "work" / "keep.txt").write_text("mine\n", encoding="utf-8")
+            def do_GET(self):
+                if self.path.startswith("/v1/version"):
+                    body = json.dumps({
+                        "ok": True,
+                        "has_release": True,
+                        "version": "1.0.1",
+                        "sha": "abc1234",
+                        "bundle_sha256": bundle_sha256,
+                        "size_bytes": len(bundle_bytes),
+                        "notes": "Faster zooms",
+                        "mandatory": False,
+                    }).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(body)
+                elif self.path.startswith("/v1/update-bundle"):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/zip")
+                    self.end_headers()
+                    self.wfile.write(bundle_bytes)
+                else:
+                    self.send_response(404)
+                    self.end_headers()
 
-            with patch.object(auto_updater, "ROOT", zipdir), patch.object(auto_updater, "WORK", zipdir / "work"), \
-                    patch.object(auto_updater, "STATE_FILE", zipdir / "work" / ".state.json"), patch.object(auto_updater, "LOG_FILE", zipdir / "work" / "u.log"), \
-                    patch.dict("os.environ", {k: "" for k in ("ZENO_NO_AUTO_UPDATE", "CLAUDE_EDITOR_OFFLINE", "SCRIPTCUT_OFFLINE", "ZENO_NO_LIVE")}):
-                blocked = auto_updater.ensure_latest_update(force=True, quiet=True, sync_brain=False)
-                self.assertEqual(blocked["status"], "no_git_repo")
-                self.assertIn("install.bat", blocked["message"], "it says what to do instead of failing silently")
+        srv = HTTPServer(("127.0.0.1", 0), Handler)
+        port = srv.server_address[1]
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                zipdir = Path(tmp) / "Zeno"
+                (zipdir / "scripts").mkdir(parents=True)
+                (zipdir / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+                (zipdir / "scripts" / "zeno.py").write_text("# v1.0.0\n", encoding="utf-8")
+                (zipdir / "scripts" / "tool.py").write_text("v1\n", encoding="utf-8")
+                (zipdir / ".env").write_text("SECRET=1\n", encoding="utf-8")
+                (zipdir / "work").mkdir()
+                (zipdir / "work" / "keep.txt").write_text("mine\n", encoding="utf-8")
 
-                res = auto_updater.connect_to_git(zipdir, remote=str(remote), branch="main")
-                self.assertEqual(res["status"], "connected", res)
-                self.assertEqual((zipdir / ".env").read_text(), "SECRET=1\n", "the secret is untouched")
-                self.assertEqual((zipdir / "work" / "keep.txt").read_text(), "mine\n")
-                self.assertEqual(g(zipdir, "status", "--porcelain").stdout.strip(), "", "the files already match the repository")
-                self.assertEqual(g(zipdir, "config", "core.fileMode").stdout.strip(), "false", "lost executable flags are not edits")
-                self.assertEqual(auto_updater.connect_to_git(zipdir, remote=str(remote))["status"], "already_connected")
+                with patch.object(auto_updater, "ROOT", zipdir), \
+                     patch.object(auto_updater, "WORK", zipdir / "work"), \
+                     patch.object(auto_updater, "STATE_FILE", zipdir / "work" / ".state.json"), \
+                     patch.object(auto_updater, "RELEASE_STATE_FILE", zipdir / "work" / ".rel.json"), \
+                     patch.object(auto_updater, "CHECK_CACHE_FILE", zipdir / "work" / "_chk.json"), \
+                     patch.object(auto_updater, "LOG_FILE", zipdir / "work" / "u.log"), \
+                     patch.object(auto_updater, "_cloud_credentials", return_value=(f"http://127.0.0.1:{port}", "zeno_test_tok")), \
+                     patch.dict("os.environ", {k: "" for k in ("ZENO_NO_AUTO_UPDATE", "CLAUDE_EDITOR_OFFLINE", "SCRIPTCUT_OFFLINE", "ZENO_NO_LIVE")}):
+                    chk = auto_updater.check_cloud_update(force=True)
+                    self.assertTrue(chk["available"], chk)
+                    self.assertEqual(chk["latest_version"], "1.0.1")
 
-                (seed / "scripts" / "tool.py").write_text("v2\n", encoding="utf-8")
-                g(seed, "commit", "-aq", "-m", "two")
-                g(seed, "push", "-q", "origin", "main")
-                upd = auto_updater.ensure_latest_update(force=True, quiet=True, sync_brain=False)
-                self.assertEqual(upd["status"], "updated", upd)
-                self.assertEqual((zipdir / "scripts" / "tool.py").read_text(), "v2\n")
-                self.assertEqual((zipdir / ".env").read_text(), "SECRET=1\n")
+                    upd = auto_updater.ensure_latest_update(force=True, quiet=True, sync_brain=False)
+                    self.assertEqual(upd["status"], "updated", upd)
+                    self.assertEqual((zipdir / "VERSION").read_text(encoding="utf-8").strip(), "1.0.1")
+                    self.assertEqual((zipdir / "scripts" / "tool.py").read_text(encoding="utf-8"), "v2\n")
+                    self.assertEqual((zipdir / ".env").read_text(encoding="utf-8"), "SECRET=1\n", "secrets in .env are strictly protected")
+                    self.assertEqual((zipdir / "work" / "keep.txt").read_text(encoding="utf-8"), "mine\n")
 
-            # a repository that cannot be reached leaves no half-made .git behind, so a retry starts clean
-            other = tmp_p / "Other"
-            other.mkdir()
-            bad = auto_updater.connect_to_git(other, remote=str(tmp_p / "does_not_exist.git"), branch="main")
-            self.assertEqual(bad["status"], "fetch_failed")
-            self.assertFalse((other / ".git").exists())
-            self.assertIn("internet connection", bad["message"])
+                    bad = auto_updater.apply_bundle_bytes(bundle_bytes, expected_sha256="0" * 64, version="1.0.2")
+                    self.assertEqual(bad["status"], "checksum_mismatch")
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
-    def test_missing_git_is_explained(self):
-        from unittest.mock import patch
-
+    def test_connect_to_git_is_cloud_managed_noop(self):
         import auto_updater
 
-        with patch.object(auto_updater, "find_git", return_value=""):
-            self.assertEqual(auto_updater.connect_to_git(Path("."))["status"], "git_missing")
-            self.assertIn("winget install --id Git.Git", auto_updater.connect_to_git(Path("."))["message"])
-            with patch.dict("os.environ", {k: "" for k in ("ZENO_NO_AUTO_UPDATE", "CLAUDE_EDITOR_OFFLINE", "SCRIPTCUT_OFFLINE", "ZENO_NO_LIVE")}):
-                res = auto_updater.ensure_latest_update(force=True, quiet=True, sync_brain=False)
-            self.assertEqual(res["status"], "git_missing")
+        res = auto_updater.connect_to_git(Path("."))
+        self.assertTrue(res["ok"])
+        self.assertEqual(res["status"], "cloud_managed")
 
     def test_layout_hint_wording(self):
         self.assertEqual(prepare.layout_hint_from_direction("a horizontal split screen"), "split_v")

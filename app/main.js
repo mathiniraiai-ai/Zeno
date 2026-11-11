@@ -1,5 +1,5 @@
 // Zeno desktop app: the window and its bridge to the Python backend. It only reads job state (scripts/jobs.py) and opens things; it never edits a job.
-const { app, BrowserWindow, ipcMain, shell, nativeTheme, dialog, clipboard } = require('electron');
+const { app, BrowserWindow, Notification, ipcMain, shell, nativeTheme, dialog, clipboard } = require('electron');
 const { execFile, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -21,6 +21,37 @@ function readSaved() { try { return fs.readFileSync(path.join(app.getPath('userD
 function pythonFor(root) {
   const venv = IS_WIN ? path.join(root, '.venv', 'Scripts', 'python.exe') : path.join(root, '.venv', 'bin', 'python');
   return fs.existsSync(venv) ? venv : (IS_WIN ? 'python' : 'python3');
+}
+
+function semverKey(v) {
+  const m = String(v || '0.0.0').trim().match(/^v?(\d+)\.(\d+)\.(\d+)/);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0];
+}
+function cmpVer(a, b) {
+  const ka = semverKey(a), kb = semverKey(b);
+  for (let i = 0; i < 3; i++) { if (ka[i] !== kb[i]) return ka[i] - kb[i]; }
+  return 0;
+}
+function rendererEntry(root) {
+  try {
+    if (root) {
+      const extHtml = path.join(root, 'app', 'renderer', 'index.html');
+      const extVerFile = path.join(root, 'VERSION');
+      const bundledVer = require('./package.json').version || '1.0.0';
+      const extVer = fs.existsSync(extVerFile) ? fs.readFileSync(extVerFile, 'utf8').trim() : '0.0.0';
+      if (fs.existsSync(extHtml) && cmpVer(extVer, bundledVer) >= 0) return extHtml;
+    }
+  } catch (e) { /* fallback to bundled renderer */ }
+  return path.join(__dirname, 'renderer', 'index.html');
+}
+function preloadEntry(root) {
+  try {
+    if (root) {
+      const extPre = path.join(root, 'app', 'preload.js');
+      if (fs.existsSync(extPre)) return extPre;
+    }
+  } catch (e) { /* fallback */ }
+  return path.join(__dirname, 'preload.js');
 }
 
 function runJobs(root, args, timeout = 20000) {
@@ -61,9 +92,9 @@ function createWindow() {
   const win = new BrowserWindow({
     width: size[0], height: size[1], minWidth: 980, minHeight: 640, backgroundColor: '#000000', show: !arg('screenshot'),
     titleBarStyle: IS_MAC ? 'hiddenInset' : 'default', trafficLightPosition: { x: 16, y: 16 }, title: 'Zeno',
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: false },
+    webPreferences: { preload: preloadEntry(ROOT), contextIsolation: true, nodeIntegration: false, sandbox: false },
   });
-  win.loadFile(path.join(__dirname, 'renderer', 'index.html'), { query: { select: arg('select') || '' } });
+  win.loadFile(rendererEntry(ROOT), { query: { select: arg('select') || '' } });
   const shot = arg('screenshot');
   if (shot) {
     win.webContents.on('did-finish-load', () => setTimeout(async () => {
@@ -77,12 +108,27 @@ function createWindow() {
   return win;
 }
 
+let lastNotifiedVer = '';
+
 app.whenReady().then(() => {
   ROOT = findRoot();
   ipcMain.handle('zeno:root', () => ROOT);
   ipcMain.handle('zeno:jobs', () => (ROOT ? runJobs(ROOT, ['list']) : { error: 'Zeno folder not found' }));
   ipcMain.handle('zeno:detail', (_e, name, since) => (ROOT ? runJobs(ROOT, ['detail', String(name), '--since', String(since || 0)]) : { error: 'Zeno folder not found' }));
-  ipcMain.handle('zeno:info', (_e, check) => (ROOT ? runJobs(ROOT, ['info', ...(check ? [] : ['--no-update-check'])], 30000) : { error: 'Zeno folder not found' }));
+  ipcMain.handle('zeno:info', async (_e, check) => {
+    if (!ROOT) return { error: 'Zeno folder not found' };
+    const flags = check === 'force' ? ['--force-update-check'] : (check ? [] : ['--no-update-check']);
+    const info = await runJobs(ROOT, ['info', ...flags], 30000);
+    if (info && info.update && info.update.available && info.update.latest_version && info.update.latest_version !== lastNotifiedVer) {
+      lastNotifiedVer = info.update.latest_version;
+      try {
+        if (Notification && Notification.isSupported()) {
+          new Notification({ title: `New Zeno Update Arrived (v${info.update.latest_version})`, body: info.update.notes || 'Click Update Now inside Zeno to apply.' }).show();
+        }
+      } catch (e) { /* ignore notification errors */ }
+    }
+    return info;
+  });
   ipcMain.handle('zeno:reveal', (_e, p) => { if (p && fs.existsSync(p)) shell.showItemInFolder(p); });
   ipcMain.handle('zeno:open', (_e, p) => { if (p && fs.existsSync(p)) return shell.openPath(p); });
   ipcMain.handle('zeno:newEdit', () => {
@@ -176,9 +222,55 @@ app.whenReady().then(() => {
   ipcMain.handle('zeno:chatStop', () => { if (chatProc) { chatProc.kill('SIGTERM'); } return true; });
   ipcMain.handle('zeno:update', () => new Promise((resolve) => {
     if (!ROOT) return resolve({ ok: false, text: 'Zeno folder not found' });
-    const code = "import sys;sys.path.insert(0,'scripts');import auto_updater;print(auto_updater.ensure_latest_update(force=True,quiet=True))";
-    execFile(pythonFor(ROOT), ['-c', code], { cwd: ROOT, timeout: 180000 }, (err, out, errout) => resolve({ ok: !err, text: String(out || errout || (err && err.message) || '').slice(-300) }));
+    execFile(pythonFor(ROOT), [path.join(ROOT, 'scripts', 'auto_updater.py'), '--json'], { cwd: ROOT, timeout: 180000, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } }, (err, out, errout) => {
+      if (!err && out) {
+        try {
+          const parsed = JSON.parse(String(out).trim());
+          return resolve({ ok: !!parsed.ok, updated: !!parsed.updated, version: parsed.version || '', text: parsed.message || '' });
+        } catch (e) { /* fall through */ }
+      }
+      resolve({ ok: !err, text: String(out || errout || (err && err.message) || '').slice(-300) });
+    });
   }));
+  ipcMain.handle('zeno:reload', (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (win) win.loadFile(rendererEntry(ROOT));
+    return true;
+  });
+  // Figma-style sign-in: the button opens the real Zeno server page in the browser (Google sign-in there); the app waits and picks up the session by itself.
+  const CLOUD = (process.env.ZENO_CLOUD_URL || 'https://zeno-production-bef7.up.railway.app').replace(/\/+$/, '');
+  const pyRun = (code, extraEnv) => new Promise((resolve) => execFile(pythonFor(ROOT), ['-c', code], { cwd: ROOT, timeout: 30000, env: { ...process.env, ...extraEnv, PYTHONIOENCODING: 'utf-8' } }, (err, out, errout) => resolve({ ok: !err, text: String(out || errout || '').slice(-300) })));
+  let signInBusy = false;
+  ipcMain.handle('zeno:signIn', async () => {
+    if (!ROOT) return { ok: false, text: 'Zeno folder not found. Run the installer first.' };
+    if (signInBusy) return { ok: false, text: 'Sign-in is already open in your browser.' };
+    signInBusy = true;
+    try {
+      const state = 'st_' + require('crypto').randomBytes(18).toString('base64url');
+      shell.openExternal(`${CLOUD}/?cli_state=${encodeURIComponent(state)}&cli=1`);
+      const deadline = Date.now() + 5 * 60 * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 1500));
+        let d = null;
+        try { d = await (await fetch(`${CLOUD}/api/auth/cli-poll?cli_state=${encodeURIComponent(state)}`)).json(); } catch (e) { continue; }
+        if (d && d.ready && (d.token || d.key)) {
+          const saved = await pyRun("import os,sys;sys.path.insert(0,'scripts');import auth_session as a;a.save_session(token=os.environ['ZT'],email=os.environ.get('ZE',''),name=os.environ.get('ZN',''),cloud_url=os.environ['ZU'])", { ZT: d.token || d.key, ZE: d.email || '', ZN: d.name || '', ZU: CLOUD });
+          if (saved.ok) { const w = BrowserWindow.getAllWindows()[0]; if (w) { w.show(); w.focus(); } return { ok: true, email: d.email || '', name: d.name || '' }; }
+          return { ok: false, text: 'Could not save the session on this computer.' };
+        }
+      }
+      return { ok: false, text: 'Sign-in timed out. Please try again.' };
+    } catch (err) {
+      return { ok: false, text: String((err && err.message) || err) };
+    } finally {
+      signInBusy = false;
+    }
+  });
+  ipcMain.handle('zeno:signOut', () => (ROOT ? pyRun("import sys;sys.path.insert(0,'scripts');import auth_session as a;a.logout()", {}) : { ok: false }));
+  ipcMain.handle('zeno:openExternal', (_e, u) => {
+    if (u && /^https?:\/\//i.test(String(u))) shell.openExternal(String(u));
+    return true;
+  });
   createWindow();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });

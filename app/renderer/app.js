@@ -19,8 +19,11 @@ function renderSide() {
   const i = state.info;
   if (i) {
     $('#ver').textContent = i.version ? `v${i.version}` : '';
-    $('#who').textContent = i.signed_in || 'Not signed in';
-    $('#upd').innerHTML = i.behind > 0 ? `<span class="chip" id="doUpdate">Update (${i.behind})</span>` : (i.behind === 0 ? '<span class="chip ok">Up to date</span>' : '<span class="chip ok">Offline</span>');
+    $('#who').innerHTML = i.signed_in ? `${esc(i.signed_in)} · <a href="#" id="doSignOut" class="muted">Sign out</a>` : 'Not signed in';
+    const u = i.update || {};
+    const hasUpd = !!(u.available || i.behind > 0);
+    const nextVer = u.latest_version ? `v${esc(u.latest_version)}` : 'available';
+    $('#upd').innerHTML = hasUpd ? `<span class="chip" id="openUpdatePopup">New update · ${nextVer}</span>` : (i.behind === 0 ? '<span class="chip ok">Up to date</span>' : '<span class="chip ok">Cloud ready</span>');
   }
 }
 // no scrolling: hide the edits that do not fit and say how many there are
@@ -376,7 +379,104 @@ async function loadDetail() {
     renderMain();
   } finally { state.busy = false; }
 }
-async function loadInfo(check) { const i = await window.zeno.info(check); if (i && !i.error) { state.info = i; renderSide(); } }
+async function loadInfo(check) {
+  const i = await window.zeno.info(check);
+  if (i && !i.error) {
+    state.info = i;
+    renderSide();
+    paintSignIn();
+    const u = i.update;
+    if (u && u.available) {
+      const key = u.bundle_sha256 || u.latest_version || 'upd';
+      if (u.mandatory && !state.updating && !state.rendering) {
+        state.updateModalOpen = true;
+        paintUpdateModal();
+        triggerCloudUpdate();
+      } else if (state.dismissedUpdate !== key && !state.updating) {
+        state.updateModalOpen = true;
+        paintUpdateModal();
+      }
+    } else if (state.updateModalOpen && !state.updating) {
+      state.updateModalOpen = false;
+      paintUpdateModal();
+    }
+  }
+}
+
+function paintSignIn() {
+  let el = $('#signin');
+  const need = state.info && !state.info.signed_in;
+  if (!need) { if (el) el.remove(); return; }
+  if (!el) { el = document.createElement('div'); el.id = 'signin'; document.body.appendChild(el); }
+  const sig = `${state.signingIn ? 1 : 0}|${state.signInError || ''}`;
+  if (el.dataset.sig === sig) return;
+  el.dataset.sig = sig;
+  el.innerHTML = `<div class="upd-card si-card">
+    <div class="upd-top"><span class="upd-pill">WELCOME</span></div>
+    <h3>Sign in to Zeno</h3>
+    <div class="upd-sub">Use your company Google account to connect to Zeno Cloud.</div>
+    ${state.signInError ? `<div class="upd-err">${esc(state.signInError)}</div>` : ''}
+    <div class="upd-acts"><button class="primary si-btn" id="doSignIn" ${state.signingIn ? 'disabled' : ''}>${state.signingIn ? 'Waiting for Google in your browser…' : 'Sign in with Google'}</button></div>
+  </div>`;
+}
+async function doSignIn() {
+  if (state.signingIn) return;
+  state.signingIn = true; state.signInError = ''; paintSignIn();
+  const r = await window.zeno.signIn();
+  state.signingIn = false;
+  if (r && r.ok) { state.signInError = ''; await loadInfo(false); await loadInfo('force'); } else { state.signInError = (r && r.text) || 'Sign-in failed.'; }
+  paintSignIn();
+}
+
+function paintUpdateModal() {
+  let el = $('#updModal');
+  const u = (state.info && state.info.update) || {};
+  if (!state.updateModalOpen || (!u.available && !state.updating && !state.updateDoneMsg)) {
+    if (el) el.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'updModal';
+    document.body.appendChild(el);
+  }
+  const installerUrl = window.zeno.platform === 'darwin' ? u.dmg_url : (window.zeno.platform === 'win32' ? u.exe_url : '');
+  const sizeBadge = u.size_mb ? `<span class="upd-size">${esc(String(u.size_mb))} MB</span>` : '';
+  const notesHtml = u.notes ? `<div class="upd-notes">${esc(u.notes)}</div>` : '<div class="upd-notes">New editing engine improvements, fixes, and UI updates are ready from Zeno Cloud.</div>';
+  const statusHtml = state.updateError
+    ? `<div class="upd-err">${esc(state.updateError)}</div>`
+    : (state.updateDoneMsg ? `<div class="upd-ok">${esc(state.updateDoneMsg)}</div>` : '');
+  el.innerHTML = `<div class="upd-card">
+    <div class="upd-top"><span class="upd-pill">${u.mandatory ? 'REQUIRED UPDATE' : 'NEW UPDATE ARRIVED'}</span>${sizeBadge}</div>
+    <h3>Zeno v${esc(u.latest_version || '')} is ready</h3>
+    <div class="upd-sub">Current version: v${esc(u.current_version || (state.info && state.info.version) || '1.0.0')}</div>
+    ${notesHtml}
+    ${statusHtml}
+    <div class="upd-acts">
+      ${!u.mandatory && !state.updating ? '<button class="btn" id="updLater">Later</button>' : ''}
+      ${installerUrl && !state.updating ? `<button class="btn" data-ext-url="${esc(installerUrl)}">Download Installer</button>` : ''}
+      <button class="primary" id="doCloudUpdate" ${state.updating ? 'disabled' : ''}>${state.updating ? 'Downloading from Zeno Cloud…' : 'Update & Reload Now'}</button>
+    </div>
+  </div>`;
+}
+
+async function triggerCloudUpdate() {
+  if (state.updating) return;
+  state.updating = true;
+  state.updateError = '';
+  state.updateDoneMsg = '';
+  paintUpdateModal();
+  const r = await window.zeno.update();
+  state.updating = false;
+  if (r && r.ok) {
+    state.updateDoneMsg = `Updated to v${r.version || ((state.info && state.info.update && state.info.update.latest_version) || '')} · Reloading Zeno…`;
+    paintUpdateModal();
+    setTimeout(() => { window.zeno.reload(); }, 900);
+  } else {
+    state.updateError = (r && r.text) || 'Could not download update from Zeno Cloud. Please check your connection.';
+    paintUpdateModal();
+  }
+}
 
 function closeBox() { const b = $('#lightbox'); if (b) b.remove(); }
 function openBox(path, title) {
@@ -413,8 +513,18 @@ document.addEventListener('click', async (e) => {
   const rv = e.target.closest('[data-reveal]'); if (rv) { window.zeno.reveal(rv.dataset.reveal); return; }
   const op = e.target.closest('[data-open]'); if (op) { window.zeno.open(op.dataset.open); return; }
   if (e.target.closest('#newEdit')) { window.zeno.newEdit(); return; }
-  const up = e.target.closest('#doUpdate');
-  if (up) { up.textContent = 'Updating…'; const r = await window.zeno.update(); up.textContent = r.ok ? 'Updated · restart Zeno' : 'Update failed'; setTimeout(() => loadInfo(true), 1500); }
+  const ext = e.target.closest('[data-ext-url]'); if (ext) { window.zeno.openExternal(ext.dataset.extUrl); return; }
+  if (e.target.closest('#openUpdatePopup')) { state.dismissedUpdate = null; state.updateError = ''; state.updateModalOpen = true; paintUpdateModal(); return; }
+  if (e.target.closest('#updLater')) {
+    const u = (state.info && state.info.update) || {};
+    state.dismissedUpdate = u.bundle_sha256 || u.latest_version || 'upd';
+    state.updateModalOpen = false;
+    paintUpdateModal();
+    return;
+  }
+  if (e.target.closest('#doCloudUpdate') || e.target.closest('#doUpdate')) { triggerCloudUpdate(); return; }
+  if (e.target.closest('#doSignIn')) { doSignIn(); return; }
+  if (e.target.closest('#doSignOut')) { e.preventDefault(); await window.zeno.signOut(); await loadInfo(false); return; }
 });
 
 (async function start() {
@@ -428,6 +538,6 @@ document.addEventListener('click', async (e) => {
   loadInfo(true);
   setInterval(loadJobs, 2500);
   setInterval(loadDetail, 1000);
-  setInterval(() => loadInfo(true), 600000);
+  setInterval(() => loadInfo('force'), 180000);
   window.addEventListener('resize', () => { restoreLayout(); fitList(); lastMain = ''; renderMain(); });
 })();

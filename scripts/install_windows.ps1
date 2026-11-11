@@ -72,21 +72,6 @@ if (Test-Path ".venv\Scripts\python.exe") {
 .venv\Scripts\python.exe scripts\gpu_install.py
 if ($LASTEXITCODE -ne 0) { Write-Host "      Package install reported a problem (see above)."; }
 
-# 3b. Git, so this folder can update itself (also for a copy that came from a ZIP download).
-#     The repository is public: no GitHub account or sign-in is needed.
-$ErrorActionPreference = "Continue"
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-Host "[3b] Git is not installed. Installing it with winget (Windows may ask for your permission)..."
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        winget install --id Git.Git -e --source winget --silent --accept-package-agreements --accept-source-agreements
-        $env:Path = "$env:ProgramFiles\Git\cmd;$env:LOCALAPPDATA\Programs\Git\cmd;$env:Path"
-    } else {
-        Write-Host "      winget is not available on this PC. Install Git from https://git-scm.com/download/win, then run this installer again."
-    }
-}
-& .venv\Scripts\python.exe scripts\auto_updater.py --connect-git
-$ErrorActionPreference = "Stop"
-
 # 4. .env from the template (never overwrites an existing one)
 if (Test-Path ".env") {
     Write-Host "[4/5] .env already exists (kept as is)"

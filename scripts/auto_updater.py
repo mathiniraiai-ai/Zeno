@@ -1,134 +1,60 @@
-"""Automatic Git Pull & Daily 11:00 AM Update Scheduler for Zeno (`scripts/auto_updater.py`).
+"""Cloud OTA Software Updater & Daily 11:00 AM Scheduler for Zeno (`scripts/auto_updater.py`).
 
-Ensures every team PC stays automatically up to date in two ways:
-  1. **Pre-Job Auto-Pull**: Whenever an editor starts a new job (`zeno.py --inspect`, `prepare.py`,
-     `zeno.py --check`) or when >= 12 hours have elapsed since the last check, Zeno automatically runs
-     a fast, safe `git pull --rebase --autostash origin main` (and syncs `brain_memory.json` rules
-     from Zeno Cloud) without touching `.env`, `.zeno_session.json`, `input/`, `work/`, or outputs.
-  2. **Daily 11:00 AM OS Scheduler**: Installs a lightweight background job (`launchd` LaunchAgent on
-     macOS with `Hour=11, Minute=0` + `RunAtLoad=true`; Scheduled Task on Windows at `11:00`) so even
-     before the editor starts a job, Zeno is already updated to the latest commit.
+Delivers software updates directly from Zeno Cloud (`https://zeno-production-bef7.up.railway.app`)
+to every client Mac (`.dmg`) and Windows PC (`.exe`) — zero Git and zero GitHub required on client machines.
+
+Updates happen in three ways:
+  1. **Desktop App Live Popup & One-Click / Auto-Download**: The Zeno desktop app polls `check_cloud_update()`
+     and displays a "New update arrived" popup card (`Update & Reload Now` / `Later`), hot-reloading the UI
+     and Python engine in seconds without reinstalling the `.dmg` or `.exe`.
+  2. **Pre-Job Auto-Update**: Whenever an editor starts a job (`zeno.py --inspect`, `prepare.py`,
+     `zeno.py --check`) or when >= 12 hours have elapsed, Zeno checks `/v1/version` and downloads `/v1/update-bundle`
+     automatically, plus syncs `brain_memory.json` rules.
+  3. **Daily 11:00 AM OS Scheduler**: Runs in the background via macOS `launchd` / Windows Scheduled Task.
 """
 from __future__ import annotations
 
 import argparse
-import base64
 import datetime as dt
+import hashlib
+import io
 import json
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / "work"
 STATE_FILE = WORK / ".last_auto_update.json"
+RELEASE_STATE_FILE = WORK / ".cloud_release_state.json"
+CHECK_CACHE_FILE = WORK / "_update_check.json"
 LOG_FILE = WORK / "auto_update.log"
 LAUNCHD_LABEL = "live.gosupernova.zeno.autoupdate"
 
-
-GITHUB_REMOTE = os.environ.get("ZENO_REPO_URL", "https://github.com/mathiniraiai-ai/Zeno.git")
-
-# Built-in read-only token for private Zeno repository updates (XOR-masked with 0x5A so GitHub
-# secret scanning never auto-revokes it on push). Can also be overridden via ZENO_GIT_READ_TOKEN in .env.
-_RO_PAT_XOR = (
-    61, 51, 46, 50, 47, 56, 5, 42, 59, 46, 5, 107, 107, 25, 28, 13, 11, 18, 111, 11,
-    106, 19, 15, 59, 54, 47, 10, 57, 109, 42, 45, 13, 110, 5, 25, 11, 42, 62, 48, 50,
-    18, 8, 18, 49, 11, 12, 2, 16, 46, 15, 15, 43, 30, 56, 47, 31, 61, 30, 31, 24, 42,
-    25, 60, 21, 9, 28, 14, 42, 10, 53, 108, 56, 40, 12, 10, 50, 44, 109, 21, 25, 19,
-    16, 14, 2, 8, 56, 22, 53, 46, 105, 22, 108, 41,
+# Protected local paths that OTA updates MUST NEVER overwrite or delete
+PROTECTED_PREFIXES = (
+    ".env",
+    ".zeno_session.json",
+    ".zeno-dev",
+    ".git/",
+    ".venv/",
+    "models/",
+    "tools/",
+    "work/",
+    "input/",
+    "output/",
+    "scratch/",
 )
-
-
-def _get_git_read_token() -> str:
-    env_tok = os.environ.get("ZENO_GIT_READ_TOKEN", "").strip()
-    if env_tok:
-        return env_tok
-    env_file = ROOT / ".env"
-    if env_file.is_file():
-        try:
-            for ln in env_file.read_text(encoding="utf-8", errors="ignore").splitlines():
-                ln = ln.strip()
-                if ln.startswith("ZENO_GIT_READ_TOKEN="):
-                    val = ln.split("=", 1)[1].strip().strip('"').strip("'")
-                    if val:
-                        return val
-        except Exception:
-            pass
-    return bytes(b ^ 0x5A for b in _RO_PAT_XOR).decode("utf-8")
-
-
-def _git_auth_args() -> List[str]:
-    """Return `-c http.https://github.com/.extraheader=...` args for read-only fetch/pull."""
-    tok = _get_git_read_token()
-    if not tok:
-        return []
-    b64 = base64.b64encode(f"x-access-token:{tok}".encode("utf-8")).decode("ascii")
-    return ["-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {b64}"]
-
-
-
-def find_git() -> str:
-    """The git executable, or '' when Git is not installed. On Windows, Git is often installed but not yet on PATH."""
-    exe = shutil.which("git")
-    if exe:
-        return exe
-    if sys.platform.startswith("win") or os.name == "nt":
-        for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"), os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")):
-            if base:
-                cand = Path(base) / "Git" / "cmd" / "git.exe"
-                if cand.is_file():
-                    return str(cand)
-    return ""
-
-
-def _git() -> str:
-    return find_git() or "git"
-
-
-def connect_to_git(root: Path = None, remote: str = "", branch: str = "main") -> Dict[str, Any]:
-    """Turn a folder that was installed from a ZIP (no .git) into a normal clone of the Zeno repository so it can update itself.
-    The files are left exactly as they are (only Git's bookkeeping is added), so .env, .venv, models, work/ and input/ are never touched.
-    The repository is public, so no GitHub account or sign-in is needed."""
-    root = Path(root or ROOT)
-    remote = remote or GITHUB_REMOTE
-    git = find_git()
-    if not git:
-        return {"ok": False, "status": "git_missing",
-                "message": "Git is not installed. Install it (Windows: winget install --id Git.Git -e, or https://git-scm.com/download/win) and run this again."}
-    if (root / ".git").exists():
-        return {"ok": True, "status": "already_connected", "message": "This folder is already connected to GitHub."}
-
-    def run(*args: str, timeout: float = 300.0) -> "subprocess.CompletedProcess":
-        return subprocess.run([git, *args], cwd=str(root), capture_output=True, text=True, timeout=timeout, check=False)
-
-    try:
-        run("init", "-q")
-        run("config", "core.fileMode", "false")   # a ZIP loses the executable flag; that must not look like a local edit
-        if not (root / ".zeno-dev").exists() and "Office project" not in str(root):
-            tok = _get_git_read_token()
-            if tok:
-                b64 = base64.b64encode(f"x-access-token:{tok}".encode("utf-8")).decode("ascii")
-                run("config", "http.https://github.com/.extraheader", f"AUTHORIZATION: basic {b64}")
-        run("remote", "add", "origin", remote)
-        fetched = run(*_git_auth_args(), "fetch", "--depth", "1", "origin", branch)
-        if fetched.returncode != 0:
-            shutil.rmtree(root / ".git", ignore_errors=True)   # leave nothing half-made, so a retry starts clean
-            why = (fetched.stderr.strip() or fetched.stdout.strip() or "fetch failed").splitlines()[-1]
-            return {"ok": False, "status": "fetch_failed",
-                    "message": f"Could not reach the repository ({why}). Check your internet connection and try again (no GitHub account is needed)."}
-        run("reset", "-q", f"origin/{branch}")   # mixed reset: the working files stay as they are
-        run("branch", "-M", branch)
-        run("branch", f"--set-upstream-to=origin/{branch}", branch)
-        head = run("rev-parse", "--short", "HEAD").stdout.strip()
-    except Exception as exc:   # noqa: BLE001
-        shutil.rmtree(root / ".git", ignore_errors=True)
-        return {"ok": False, "status": "error", "message": f"Could not connect this folder to GitHub ({type(exc).__name__})."}
-    return {"ok": True, "status": "connected", "head": head, "message": f"Connected to GitHub at {head}. This folder can now update itself."}
 
 
 def _find_python() -> str:
@@ -139,184 +65,388 @@ def _find_python() -> str:
     return str(cand) if cand.is_file() else sys.executable
 
 
-def _read_state() -> Dict[str, Any]:
-    if not STATE_FILE.is_file():
+def _read_json(path: Path) -> Dict[str, Any]:
+    if not path.is_file():
         return {}
     try:
-        data = json.loads(STATE_FILE.read_text(encoding="utf-8", errors="replace"))
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
 
-def _write_state(payload: Dict[str, Any]) -> None:
+def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     try:
-        WORK.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(path)
     except OSError:
         pass
 
 
-def _git_head_sha() -> str:
-    try:
-        r = subprocess.run(
-            [_git(), "rev-parse", "--short", "HEAD"],
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            timeout=3.0,
-            check=False,
-        )
-        return r.stdout.strip() if r.returncode == 0 else ""
-    except Exception:
-        return ""
+def get_local_version() -> str:
+    vf = ROOT / "VERSION"
+    if vf.is_file():
+        try:
+            v = vf.read_text(encoding="utf-8", errors="replace").strip()
+            if v:
+                return v
+        except OSError:
+            pass
+    return "1.0.0"
 
 
-def _has_uncommitted_code_edits() -> bool:
-    """Return True if `.zeno-dev` is present and `scripts/` or `service/` have uncommitted changes."""
-    if not (ROOT / ".zeno-dev").exists():
-        return False
+def _semver_tuple(ver: str) -> Tuple[int, int, int, str]:
+    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(.*)$", (ver or "0.0.0").strip())
+    if not m:
+        return (0, 0, 0, ver or "")
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4) or "")
+
+
+def _cloud_credentials() -> Tuple[str, str]:
+    sys.path.insert(0, str(ROOT / "scripts"))
     try:
-        r = subprocess.run(
-            [_git(), "status", "--porcelain", "--", "scripts", "service", "styles"],
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            timeout=3.0,
-            check=False,
-        )
-        return bool(r.stdout.strip())
+        import auth_session
+
+        url = auth_session.get_cloud_url().rstrip("/")
+        tok = auth_session.get_active_token()
+        return url, tok
     except Exception:
-        return False
+        return "", ""
+
+
+def _is_offline_mode() -> bool:
+    return any(
+        os.environ.get(k, "").strip() == "1"
+        for k in ("ZENO_NO_AUTO_UPDATE", "CLAUDE_EDITOR_OFFLINE", "SCRIPTCUT_OFFLINE", "ZENO_NO_LIVE")
+    )
+
+
+def _is_owner_dev_tree() -> bool:
+    return (ROOT / ".zeno-dev").exists() and os.environ.get("ZENO_FORCE_DEV_OTA", "").strip() != "1"
+
+
+def check_cloud_update(force: bool = False, timeout_sec: float = 8.0, cache_ttl_sec: float = 180.0) -> Dict[str, Any]:
+    """Query Zeno Cloud `/v1/version` and compare against local `VERSION` + `.cloud_release_state.json`."""
+    local_ver = get_local_version()
+    rel_state = _read_json(RELEASE_STATE_FILE)
+    local_sha256 = str(rel_state.get("bundle_sha256") or "").strip()
+    local_sha = str(rel_state.get("sha") or "").strip()
+
+    if _is_offline_mode():
+        return {
+            "ok": True,
+            "status": "skipped_offline",
+            "available": False,
+            "current_version": local_ver,
+            "latest_version": local_ver,
+            "sha": local_sha,
+        }
+
+    now = time.time()
+    cached = _read_json(CHECK_CACHE_FILE)
+    if not force and cached and (now - float(cached.get("checked_at") or 0.0)) < cache_ttl_sec:
+        if cached.get("current_version") == local_ver:
+            return cached
+
+    cloud_url, token = _cloud_credentials()
+    if not cloud_url or not token:
+        return {
+            "ok": False,
+            "status": "not_signed_in",
+            "available": False,
+            "current_version": local_ver,
+            "latest_version": local_ver,
+            "sha": local_sha,
+            "message": "Sign in to Zeno Cloud first (python3 scripts/setup.py --login).",
+        }
+
+    req = urllib.request.Request(
+        f"{cloud_url}/v1/version",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            out = {
+                "ok": True,
+                "status": "no_cloud_release",
+                "available": False,
+                "current_version": local_ver,
+                "latest_version": local_ver,
+                "sha": local_sha,
+                "checked_at": now,
+            }
+            _write_json(CHECK_CACHE_FILE, out)
+            return out
+        return {
+            "ok": False,
+            "status": f"http_{exc.code}",
+            "available": False,
+            "current_version": local_ver,
+            "latest_version": local_ver,
+            "sha": local_sha,
+            "message": f"Cloud server returned HTTP {exc.code}",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "offline",
+            "available": False,
+            "current_version": local_ver,
+            "latest_version": local_ver,
+            "sha": local_sha,
+            "message": f"Could not reach Zeno Cloud ({type(exc).__name__})",
+        }
+
+    if not data.get("has_release"):
+        out = {
+            "ok": True,
+            "status": "no_cloud_release",
+            "available": False,
+            "current_version": local_ver,
+            "latest_version": local_ver,
+            "sha": local_sha,
+            "checked_at": now,
+        }
+        _write_json(CHECK_CACHE_FILE, out)
+        return out
+
+    remote_ver = str(data.get("version") or local_ver).strip()
+    remote_sha256 = str(data.get("bundle_sha256") or "").strip()
+    remote_sha = str(data.get("sha") or "").strip()
+    size_bytes = int(data.get("size_bytes") or 0)
+
+    # Determine whether this client needs the update:
+    # - Newer semantic version on cloud -> update available
+    # - Same version, and client previously recorded a different bundle_sha256 -> hotfix update available
+    # - Fresh install with matching version and no prior bundle_sha256 -> adopt baseline silently (no false popup)
+    rm_tup = _semver_tuple(remote_ver)
+    lc_tup = _semver_tuple(local_ver)
+    if _is_owner_dev_tree():
+        available = False
+    elif rm_tup[:3] > lc_tup[:3]:
+        available = True
+    elif rm_tup[:3] == lc_tup[:3] and local_sha256 and remote_sha256 and local_sha256 != remote_sha256:
+        available = True
+    else:
+        available = False
+        if rm_tup[:3] == lc_tup[:3] and not local_sha256 and remote_sha256:
+            _write_json(
+                RELEASE_STATE_FILE,
+                {
+                    "version": local_ver,
+                    "sha": remote_sha,
+                    "bundle_sha256": remote_sha256,
+                    "synced_at": dt.datetime.now().isoformat(timespec="seconds"),
+                },
+            )
+
+    out = {
+        "ok": True,
+        "status": "update_available" if available else "up_to_date",
+        "available": available,
+        "behind": 1 if available else 0,
+        "current_version": local_ver,
+        "latest_version": remote_ver,
+        "sha": remote_sha or local_sha,
+        "bundle_sha256": remote_sha256,
+        "size_bytes": size_bytes,
+        "size_mb": round(size_bytes / (1024 * 1024), 1) if size_bytes else 0.0,
+        "notes": str(data.get("notes") or "").strip(),
+        "mandatory": bool(data.get("mandatory")),
+        "dmg_url": str(data.get("dmg_url") or "").strip(),
+        "exe_url": str(data.get("exe_url") or "").strip(),
+        "published_at": data.get("published_at"),
+        "checked_at": now,
+    }
+    _write_json(CHECK_CACHE_FILE, out)
+    return out
+
+
+def _is_protected_relpath(rel_posix: str) -> bool:
+    clean = rel_posix.lstrip("/")
+    if not clean or ".." in clean.split("/"):
+        return True
+    for pref in PROTECTED_PREFIXES:
+        if pref.endswith("/"):
+            if clean == pref[:-1] or clean.startswith(pref):
+                return True
+        elif clean == pref:
+            return True
+    return False
+
+
+def apply_bundle_bytes(blob: bytes, expected_sha256: str = "", version: str = "", sha: str = "") -> Dict[str, Any]:
+    """Verify SHA-256 and atomically extract a Zeno OTA update ZIP into `ROOT` without touching user files."""
+    actual_sha256 = hashlib.sha256(blob).hexdigest()
+    if expected_sha256 and actual_sha256.lower() != expected_sha256.strip().lower():
+        return {"ok": False, "status": "checksum_mismatch", "updated": False, "message": "Downloaded bundle checksum mismatch."}
+
+    req_path = ROOT / "requirements.txt"
+    old_req_hash = hashlib.sha256(req_path.read_bytes()).hexdigest() if req_path.is_file() else ""
+
+    stage_dir = WORK / f"_ota_stage_{os.getpid()}_{int(time.time())}"
+    try:
+        if stage_dir.exists():
+            shutil.rmtree(stage_dir, ignore_errors=True)
+        stage_dir.mkdir(parents=True, exist_ok=True)
+
+        with zipfile.ZipFile(io.BytesIO(blob), "r") as zf:
+            names = set(zf.namelist())
+            if "VERSION" not in names or "scripts/zeno.py" not in names:
+                return {"ok": False, "status": "invalid_bundle", "updated": False, "message": "Bundle is missing VERSION or scripts/zeno.py."}
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                rel_posix = info.filename.replace("\\", "/").lstrip("/")
+                if _is_protected_relpath(rel_posix):
+                    continue
+                dest = (stage_dir / rel_posix).resolve()
+                if not str(dest).startswith(str(stage_dir.resolve())):
+                    continue
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(zf.read(info.filename))
+                mode = (info.external_attr >> 16) & 0o777
+                if rel_posix.endswith((".command", ".sh")) or (mode & 0o111):
+                    try:
+                        os.chmod(dest, 0o755)
+                    except OSError:
+                        pass
+
+        # Copy verified staged files over ROOT
+        copied = 0
+        for fp in stage_dir.rglob("*"):
+            if not fp.is_file():
+                continue
+            rel_posix = fp.relative_to(stage_dir).as_posix()
+            if _is_protected_relpath(rel_posix):
+                continue
+            target = ROOT / rel_posix
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp_target = target.with_name(f".{target.name}.ota_tmp")
+            shutil.copy2(fp, tmp_target)
+            tmp_target.replace(target)
+            copied += 1
+    finally:
+        shutil.rmtree(stage_dir, ignore_errors=True)
+
+    new_req_hash = hashlib.sha256(req_path.read_bytes()).hexdigest() if req_path.is_file() else ""
+    if old_req_hash and new_req_hash and old_req_hash != new_req_hash:
+        try:
+            subprocess.run(
+                [_find_python(), str(ROOT / "scripts" / "gpu_install.py")],
+                cwd=str(ROOT),
+                capture_output=True,
+                timeout=600.0,
+                check=False,
+            )
+        except Exception:
+            pass
+
+    final_ver = version or get_local_version()
+    _write_json(
+        RELEASE_STATE_FILE,
+        {
+            "version": final_ver,
+            "sha": sha or actual_sha256[:7],
+            "bundle_sha256": actual_sha256,
+            "files_updated": copied,
+            "updated_at": dt.datetime.now().isoformat(timespec="seconds"),
+        },
+    )
+    return {
+        "ok": True,
+        "status": "updated",
+        "updated": True,
+        "version": final_ver,
+        "sha": sha or actual_sha256[:7],
+        "bundle_sha256": actual_sha256,
+        "files_updated": copied,
+        "message": f"Updated Zeno to v{final_ver} ({copied} files synced from Zeno Cloud).",
+    }
 
 
 def ensure_latest_update(
     force: bool = False,
     min_interval_hours: float = 0.0,
-    timeout_sec: float = 8.0,
+    timeout_sec: float = 45.0,
     quiet: bool = False,
     sync_brain: bool = True,
 ) -> Dict[str, Any]:
-    """Run a fast, non-blocking `git pull --rebase --autostash` + Brain Memory sync.
+    """Check Zeno Cloud and download + install any new software release automatically.
 
-    - Never touches `.env`, `.zeno_session.json`, `input/`, `work/`, or `~/Downloads/Zeno Outputs/`.
-    - Protects uncommitted code in owner dev mode (`.zeno-dev`).
-    - If `min_interval_hours > 0` and the last check was more recent (and `not force`), skips network call.
+    - Zero Git / zero GitHub required on user machines.
+    - Never touches `.env`, `.zeno_session.json`, `.venv/`, `models/`, `tools/`, `work/`, `input/`, or outputs.
+    - Never overwrites the owner's dev copy (`.zeno-dev`).
     """
-    if (
-        os.environ.get("ZENO_NO_AUTO_UPDATE", "").strip() == "1"
-        or os.environ.get("CLAUDE_EDITOR_OFFLINE", "").strip() == "1"
-        or os.environ.get("SCRIPTCUT_OFFLINE", "").strip() == "1"
-        or os.environ.get("ZENO_NO_LIVE", "").strip() == "1"
-    ):
-        return {"ok": True, "status": "skipped_offline", "updated": False}
+    if _is_offline_mode():
+        return {"ok": True, "status": "skipped_offline", "updated": False, "version": get_local_version()}
 
-    problem = ""
-    if not find_git():
-        problem, status = "Git is not installed, so Zeno cannot update itself. Windows: winget install --id Git.Git -e, then run install.bat again.", "git_missing"
-    elif not (ROOT / ".git").exists():
-        problem, status = ("This folder is not connected to GitHub (installed from a ZIP?), so it cannot update itself. Run install.bat (Windows) or "
-                           "install.command (Mac) again, or: python scripts/auto_updater.py --connect-git"), "no_git_repo"
-    if problem:
-        if not quiet:
-            print(f"  [Auto-Update] {problem}")
-        return {"ok": False, "status": status, "updated": False, "message": problem}
+    if _is_owner_dev_tree():
+        ver = get_local_version()
+        return {"ok": True, "status": "skipped_owner_dev", "updated": False, "version": ver, "head": ver}
 
     now = time.time()
-    state = _read_state()
+    state = _read_json(STATE_FILE)
     last_ts = float(state.get("last_checked_epoch") or 0.0)
     if not force and min_interval_hours > 0 and (now - last_ts) < (min_interval_hours * 3600.0):
+        ver = get_local_version()
         return {
             "ok": True,
             "status": "recent",
             "updated": False,
-            "head": state.get("head") or _git_head_sha(),
+            "version": ver,
+            "head": state.get("head") or ver,
             "last_checked": state.get("last_checked_iso", ""),
         }
 
-    if _has_uncommitted_code_edits():
-        head = _git_head_sha()
-        return {
-            "ok": True,
-            "status": "skipped_dev_dirty",
-            "updated": False,
-            "head": head,
-        }
+    before_ver = get_local_version()
+    chk = check_cloud_update(force=True, timeout_sec=min(12.0, timeout_sec))
 
-    before_sha = _git_head_sha()
-    pull_ok = False
-    pull_msg = ""
+    updated = False
+    update_ok = bool(chk.get("ok"))
+    msg = str(chk.get("message") or "Up to date.")
+    after_ver = before_ver
 
-    try:
-        # Detect active branch (e.g., MacBook or main) so team PCs pull their tracked branch
-        br_proc = subprocess.run(
-            [_git(), "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-            check=False,
+    if chk.get("available"):
+        cloud_url, token = _cloud_credentials()
+        sha256 = str(chk.get("bundle_sha256") or "")
+        q = f"?sha256={urllib.parse.quote(sha256)}" if sha256 else ""
+        req = urllib.request.Request(
+            f"{cloud_url}/v1/update-bundle{q}",
+            headers={"Authorization": f"Bearer {token}"},
         )
-        branch_name = (br_proc.stdout or "").strip() if br_proc.returncode == 0 else "main"
-        if not branch_name or branch_name == "HEAD":
-            branch_name = "main"
-
-        r = subprocess.run(
-            [_git(), *_git_auth_args(), "pull", "--rebase", "--autostash", "origin", branch_name],
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-            check=False,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-        )
-        if r.returncode == 0:
-            pull_ok = True
-            pull_msg = (r.stdout.strip() or "Already up to date.").splitlines()[-1]
-        else:
-            # Abort any failed rebase cleanly so the working tree stays untouched
-            subprocess.run(
-                [_git(), "rebase", "--abort"],
-                cwd=str(ROOT),
-                capture_output=True,
-                timeout=3.0,
-                check=False,
-            )
-            pull_msg = (r.stderr.strip() or r.stdout.strip() or "git pull skipped").splitlines()[-1]
-    except Exception as exc:
-        pull_msg = f"offline/timeout ({exc})"
-
-    after_sha = _git_head_sha()
-    updated = bool(pull_ok and before_sha and after_sha and before_sha != after_sha)
-
-    # If requirements.txt changed between before_sha and after_sha, refresh .venv packages automatically
-    if updated:
         try:
-            diff_r = subprocess.run(
-                [_git(), "diff", "--name-only", before_sha, after_sha, "--", "requirements.txt"],
-                cwd=str(ROOT),
-                capture_output=True,
-                text=True,
-                timeout=3.0,
-                check=False,
+            if not quiet:
+                print(f"  [Auto-Update] Downloading Zeno v{chk.get('latest_version')} ({chk.get('size_mb', 0)} MB) from Zeno Cloud...")
+            with urllib.request.urlopen(req, timeout=max(30.0, timeout_sec)) as resp:
+                blob = resp.read()
+            applied = apply_bundle_bytes(
+                blob=blob,
+                expected_sha256=sha256,
+                version=str(chk.get("latest_version") or ""),
+                sha=str(chk.get("sha") or ""),
             )
-            if "requirements.txt" in (diff_r.stdout or ""):
-                # gpu_install keeps a CUDA torch instead of overwriting it with the CPU build listed in requirements.txt
-                subprocess.run(
-                    [_find_python(), str(ROOT / "scripts" / "gpu_install.py")],
-                    cwd=str(ROOT),
-                    capture_output=True,
-                    timeout=600.0,
-                    check=False,
-                )
-        except Exception:
-            pass
+            update_ok = bool(applied.get("ok"))
+            updated = bool(applied.get("updated"))
+            after_ver = str(applied.get("version") or get_local_version())
+            msg = str(applied.get("message") or "")
+            # Refresh cached version check immediately so UI flips to "Up to date"
+            check_cloud_update(force=True, timeout_sec=6.0)
+        except Exception as exc:
+            update_ok = False
+            msg = f"Download failed ({type(exc).__name__}: {exc})"
 
     brain_pulled = 0
     if sync_brain:
         try:
             sys.path.insert(0, str(ROOT / "scripts"))
             import brain_memory
+
             b_res = brain_memory.sync_brain_memory_with_cloud("micronarrative")
             brain_pulled = int(b_res.get("pulled") or 0)
         except Exception:
@@ -324,27 +454,40 @@ def ensure_latest_update(
 
     iso_now = dt.datetime.now().isoformat(timespec="seconds")
     result = {
-        "ok": pull_ok,
-        "status": "updated" if updated else ("up_to_date" if pull_ok else "offline"),
+        "ok": update_ok,
+        "status": "updated" if updated else (str(chk.get("status") or "up_to_date") if update_ok else "offline"),
         "updated": updated,
-        "before_head": before_sha,
-        "head": after_sha,
+        "before_version": before_ver,
+        "version": after_ver,
+        "before_head": before_ver,
+        "head": after_ver,
         "brain_rules_pulled": brain_pulled,
         "last_checked_epoch": now,
         "last_checked_iso": iso_now,
-        "message": pull_msg,
+        "message": msg,
     }
-    _write_state(result)
+    _write_json(STATE_FILE, result)
 
     if not quiet:
         if updated:
-            print(f"  [Auto-Update] ✓ Pulled latest Zeno update ({before_sha} -> {after_sha})")
-        elif pull_ok:
-            print(f"  [Auto-Update] ✓ Up to date ({after_sha})")
+            print(f"  [Auto-Update] ✓ Updated Zeno from Cloud (v{before_ver} -> v{after_ver})")
+        elif update_ok:
+            print(f"  [Auto-Update] ✓ Up to date (v{after_ver})")
+        else:
+            print(f"  [Auto-Update] Note: {msg}")
         if brain_pulled > 0:
             print(f"  [Auto-Update] ✓ Pulled {brain_pulled} new team editorial rule(s) into brain_memory.json")
 
     return result
+
+
+def connect_to_git(root: Path = None, remote: str = "", branch: str = "main") -> Dict[str, Any]:
+    """Legacy compatibility stub: Zeno updates directly from Zeno Cloud without Git or GitHub."""
+    return {
+        "ok": True,
+        "status": "cloud_managed",
+        "message": "Zeno updates automatically via Zeno Cloud — no Git or GitHub account is needed.",
+    }
 
 
 def install_daily_scheduler(hour: int = 11, minute: int = 0) -> Dict[str, Any]:
@@ -403,13 +546,15 @@ def install_daily_scheduler(hour: int = 11, minute: int = 0) -> Dict[str, Any]:
         except Exception as exc:
             return {"ok": False, "platform": "windows_schtasks", "error": str(exc)}
 
-    return {"ok": True, "platform": sys.platform, "schedule": "pre-job auto-pull active"}
+    return {"ok": True, "platform": sys.platform, "schedule": "pre-job cloud auto-update active"}
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Zeno Automatic Git Updater & Daily 11:00 AM Scheduler")
+    ap = argparse.ArgumentParser(description="Zeno Cloud OTA Auto-Updater & Daily 11:00 AM Scheduler")
     ap.add_argument("--scheduled", action="store_true", help="Run as background scheduled job (logs to work/auto_update.log)")
-    ap.add_argument("--connect-git", action="store_true", help="Connect this folder to the GitHub repository (for a copy installed from a ZIP) so it can update itself")
+    ap.add_argument("--check", action="store_true", help="Check Zeno Cloud for a newer release and output JSON")
+    ap.add_argument("--json", action="store_true", help="Output result as JSON (used by Zeno Desktop App)")
+    ap.add_argument("--connect-git", action="store_true", help="Legacy no-op (updates come from Zeno Cloud)")
     ap.add_argument("--install-schedule", action="store_true", help="Install daily 11:00 AM background auto-update schedule")
     ap.add_argument("--hour", type=int, default=11, help="Daily schedule hour in 24h format (default: 11 for 11:00 AM)")
     ap.add_argument("--status", action="store_true", help="Print last auto-update status")
@@ -418,30 +563,39 @@ def main() -> None:
     if args.connect_git:
         res = connect_to_git()
         print(f"  [Auto-Update] {res['message']}")
-        sys.exit(0 if res.get("ok") else 1)
+        return
+
+    if args.check:
+        res = check_cloud_update(force=True)
+        print(json.dumps(res, ensure_ascii=False))
+        return
 
     if args.install_schedule:
         res = install_daily_scheduler(hour=args.hour, minute=0)
         if res.get("ok"):
-            print(f"  [Auto-Update] ✓ Scheduled automatic daily git pull ({res.get('schedule')})")
+            print(f"  [Auto-Update] ✓ Scheduled automatic daily cloud update ({res.get('schedule')})")
         else:
-            print(f"  [Auto-Update] Schedule note: {res.get('error', 'pre-job auto-pull active')}")
+            print(f"  [Auto-Update] Schedule note: {res.get('error', 'pre-job cloud auto-update active')}")
         return
 
     if args.status:
-        st = _read_state()
-        print(json.dumps(st or {"head": _git_head_sha(), "status": "never_checked"}, indent=2))
+        st = _read_json(STATE_FILE)
+        print(json.dumps(st or {"version": get_local_version(), "status": "never_checked"}, indent=2))
         return
 
-    res = ensure_latest_update(force=True, min_interval_hours=0.0, quiet=False)
+    res = ensure_latest_update(force=True, min_interval_hours=0.0, quiet=args.json)
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False))
+        return
+
     if args.scheduled:
         try:
             WORK.mkdir(parents=True, exist_ok=True)
             with LOG_FILE.open("a", encoding="utf-8") as fp:
-                fp.write(f"[{res.get('last_checked_iso')}] status={res.get('status')} head={res.get('head')} msg={res.get('message')}\n")
+                fp.write(f"[{res.get('last_checked_iso')}] status={res.get('status')} version={res.get('version')} msg={res.get('message')}\n")
         except Exception:
             pass
-        try:   # daily housekeeping: frees space only when the disk is nearly full, never asks
+        try:
             import clean
 
             cres = clean.auto_clean()

@@ -32,6 +32,7 @@ import re
 import threading
 import time
 import wave
+import zipfile
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -1086,3 +1087,130 @@ def admin_revoke(
     if x_zeno_admin != "1":
         raise HTTPException(400, "Missing admin header")
     return {"revoked": store().revoke(key_id)}
+
+
+# ---------------------------------------------------------------- cloud OTA software updates (zero GitHub on client PCs)
+def _release_publisher_emails() -> List[str]:
+    raw = os.getenv("ZENO_RELEASE_EMAILS") or os.getenv("ZENO_ADMIN_EMAILS") or "mathiniraiselvan@gosupernova.live"
+    return [e.strip().lower() for e in raw.split(",") if e.strip()]
+
+
+def _check_release_publisher(
+    authorization: Optional[str] = None,
+    x_admin_password: Optional[str] = None,
+) -> Dict[str, str]:
+    try:
+        return _check_admin(authorization, x_admin_password)
+    except HTTPException as exc:
+        if exc.status_code not in (401, 403):
+            raise
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        if token.startswith("zeno_"):
+            found = store().lookup(token)
+            if found:
+                key_email = (store().get_key_email(found[0]) or "").strip().lower()
+                if key_email and key_email in _release_publisher_emails():
+                    return {"name": found[1], "email": key_email, "via": "owner_key"}
+                raise HTTPException(403, "Only the Zeno release owner or an admin can publish software updates")
+    raise HTTPException(401, "Admin credentials or owner Zeno session required to publish updates")
+
+
+@app.get("/v1/version")
+def get_latest_version(authorization: Optional[str] = Header(None)) -> JSONResponse:
+    """Fast metadata check for client auto-updaters and the Zeno desktop app's 'New update arrived' popup."""
+    authenticate(authorization)
+    meta = store().latest_release_meta()
+    if not meta:
+        return JSONResponse({"ok": True, "has_release": False}, headers=NO_STORE)
+    return JSONResponse({"ok": True, "has_release": True, **meta}, headers=NO_STORE)
+
+
+@app.get("/v1/update-bundle")
+def download_update_bundle(
+    sha256: Optional[str] = Query(None),
+    if_none_match: Optional[str] = Header(None),
+    authorization: Optional[str] = Header(None),
+) -> Response:
+    """Authenticated download of the latest Zeno OTA update ZIP bundle."""
+    name, _ = authenticate(authorization)
+    check_rate(name)
+    res = store().latest_release_bundle(bundle_sha256=sha256)
+    if not res:
+        raise HTTPException(404, "No software update bundle has been published yet")
+    meta, blob = res
+    etag = f'"{meta["bundle_sha256"]}"'
+    if if_none_match and if_none_match.strip() in (etag, meta["bundle_sha256"]):
+        return Response(status_code=304, headers={"ETag": etag})
+    log.info("ota_download user=%s version=%s sha=%s bytes=%d", name, meta["version"], meta["sha"], len(blob))
+    return Response(
+        content=blob,
+        media_type="application/zip",
+        headers={
+            "ETag": etag,
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="zeno-update-{meta["version"]}.zip"',
+            "X-Zeno-Version": meta["version"],
+            "X-Zeno-SHA": meta["sha"],
+            "X-Zeno-SHA256": meta["bundle_sha256"],
+        },
+    )
+
+
+@app.post("/v1/admin/release")
+@app.post("/admin/api/releases")
+def publish_release(
+    file: UploadFile = File(...),
+    version: str = Form(...),
+    sha: str = Form(""),
+    notes: str = Form(""),
+    mandatory: str = Form("0"),
+    dmg_url: str = Form(""),
+    exe_url: str = Form(""),
+    authorization: Optional[str] = Header(None),
+    x_zeno_admin: Optional[str] = Header(None),
+    x_admin_password: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    """Publish a new Zeno OTA release bundle (`python3 scripts/release.py`)."""
+    publisher = _check_release_publisher(authorization, x_admin_password)
+    if x_zeno_admin != "1":
+        raise HTTPException(400, "Missing X-Zeno-Admin header")
+    ver = re.sub(r"[^0-9A-Za-z._-]", "", (version or "").strip())[:40]
+    if not ver:
+        raise HTTPException(400, "Valid version string required (e.g. 1.0.1)")
+    max_bytes = int(float(os.getenv("ZENO_MAX_RELEASE_MB", "45")) * 1024 * 1024)
+    blob = file.file.read(max_bytes + 1)
+    if not blob or len(blob) > max_bytes:
+        raise HTTPException(413, f"Release bundle must be non-empty and under {max_bytes // (1024 * 1024)} MB")
+    try:
+        with zipfile.ZipFile(io.BytesIO(blob), "r") as zf:
+            names = set(zf.namelist())
+            if "VERSION" not in names or "scripts/zeno.py" not in names:
+                raise HTTPException(400, "Invalid Zeno update bundle: missing VERSION or scripts/zeno.py")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(400, "Uploaded file is not a valid ZIP archive")
+
+    is_mandatory = str(mandatory).strip().lower() in ("1", "true", "yes")
+    saved = store().save_release(
+        version=ver,
+        sha=re.sub(r"[^0-9A-Za-z._-]", "", (sha or "").strip())[:40],
+        bundle_bytes=blob,
+        notes=(notes or "").strip()[:4000],
+        mandatory=is_mandatory,
+        dmg_url=(dmg_url or "").strip()[:500],
+        exe_url=(exe_url or "").strip()[:500],
+        published_by=publisher.get("email") or publisher.get("name") or "owner",
+    )
+    log.info("ota_published version=%s sha=%s bytes=%d by=%s", saved["version"], saved["sha"], saved["size_bytes"], saved["published_by"])
+    return {"ok": True, "release": saved}
+
+
+@app.get("/admin/api/releases")
+def list_published_releases(
+    authorization: Optional[str] = Header(None),
+    x_admin_password: Optional[str] = Header(None),
+) -> JSONResponse:
+    _check_release_publisher(authorization, x_admin_password)
+    return JSONResponse({"releases": store().list_releases(limit=25)}, headers=NO_STORE)
