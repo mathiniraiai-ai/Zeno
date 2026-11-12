@@ -8,21 +8,21 @@
   "scroll text",
   "scrolling transcript"
  ],
- "description": "Top half: two characters side by side (split_h, still). Lower half: a white page where the dialogue scrolls up as spoken, a box on the spoken word, wrong phrases red, right phrases green. Progress line on top.",
+ "description": "Top half: the two characters' vertical clips stitched side by side (split_h, still, no line between). A blue line under them. Lower half: a plain white page where the dialogue scrolls up as spoken, with a box on the spoken word.",
  "when": "the script says 'scrolling text'",
  "geometry": {
   "canvas": "1080x1920",
-  "progress_strip_h": 88,
-  "picture_h": 872,
-  "page_h": 960,
-  "text_size": 56
+  "picture_h": 932,
+  "line_h": 20,
+  "line_colour": "#1F4DA1",
+  "page_h": 968,
+  "text_size": 44,
+  "text_left": 216
  },
  "plan": [
   "#page scroll",
-  "#page_wrong \"...\"",
-  "#page_right \"...\"",
   "segments: layout=split_h z=1"
  ],
  "confidence": "measured",
- "source": "two references measured 2026-11-12 (in-house 'return back' reel; competitor reel with progress strip, word box, red/green phrases)"
+ "source": "measured 2026-11-12 from the in-house reference 'Split screen = scrolling text - return back.mp4'; the word box is the only addition"
 }

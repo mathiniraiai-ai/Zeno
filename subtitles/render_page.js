@@ -36,7 +36,8 @@ const SCRIPT_FONTS = [
   const W = Number(job.width) || 1080;
   const size = Number(job.fontSize) || 56;
   const rowH = Math.round(size * (Number(job.lineHeight) || 1.72));
-  const padX = Number(job.padX) || 54;
+  const padX = Number(job.padLeft !== undefined ? job.padLeft : job.padX) || 54;
+  const padRight = Number(job.padRight !== undefined ? job.padRight : padX) || 54;
   const padTop = Number(job.padTop) || 48;
   const padBottom = Number(job.padBottom) || 120;
   const paraGap = Math.round(rowH * (job.paraGap !== undefined ? Number(job.paraGap) : 0.35));
@@ -44,7 +45,7 @@ const SCRIPT_FONTS = [
   const family = job.fontFamily || 'Noto Sans';
   const weight = job.fontWeight || 500;
   const boldWeight = job.boldWeight || 800;
-  const maxX = W - padX;
+  const maxX = W - padRight;
 
   const fontFor = (text, bold) => {
     let fam = `"${family}"`;

@@ -1,7 +1,7 @@
 {
   "name": "zeno-desktop",
   "productName": "Zeno",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "Zeno desktop app: watch every edit, step by step",
   "main": "main.js",
   "private": true,

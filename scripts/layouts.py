@@ -1303,6 +1303,7 @@ def build_segment_cache_key(
         "resolved_zoom": [round(rz0, 4), round(rz1, 4), rz_style, round(rz_at, 4), round(rz_dur, 4)],
         "baked_split": baked_sig,
         "split_lock": split_lock_sig,
+        "page": bool(isinstance((plan or {}).get("page"), dict)),
         "focus": seg.get("focus"),
         "focus_end": seg.get("focus_end"),
         "color_match": bool(seg.get("color_match") is True or (plan or {}).get("color_match") is True),
@@ -1836,6 +1837,8 @@ def build_segment_ffmpeg_args(
                 dw = max(2, round(W * float(dv.get("w_frac", 0.004))))
                 dx = round(W * float(dv.get("x_frac", 0.5)))
                 divider = f"drawbox=x={dx}:y=0:w={dw}:h={H}:color=0x{dv.get('color', 'FFFFFF')}@{dv.get('alpha', 1.0)}:t=fill,"
+            elif isinstance((plan or {}).get("page"), dict):
+                divider = ""   # scrolling-text page format: the two clips are stitched edge to edge, as in the reference
             else:
                 divider = f"drawbox=x={slot_w_left - 2}:y=0:w=4:h={H}:color=white@0.85:t=fill,"
             fc.append(f"{stack_order}hstack=inputs=2:shortest=1,{divider}format=yuv420p{v_curr}")

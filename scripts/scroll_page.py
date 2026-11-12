@@ -21,18 +21,22 @@ from common import FFMPEG
 SUB_DIR = Path(__file__).resolve().parent.parent / "subtitles"
 
 DEFAULTS: Dict[str, Any] = {
+    # Measured from the in-house reference ("Split screen = scrolling text - return back"): picture on top, a blue line under it,
+    # then a plain white page with black text, a blank line between turns. Zeno adds only the box on the word being spoken.
     "bg": "#FFFFFF",            # the page
-    "color": "#2B2B2B",         # ordinary words
-    "wrong": "#D0021B",         # wrong phrases (bold)
-    "right": "#16A34A",         # right phrases (bold)
-    "highlight": "#8C9BFF",     # the box behind the word being spoken
-    "accent": "#3B5BDB",        # progress line and dot
-    "size": 56,                 # text size on a 1080-wide picture
-    "bar": True,                # progress strip at the top
-    "dash": True,               # every speaker turn starts with a dash
+    "color": "#111111",         # the words
+    "wrong": "#D0021B",         # wrong phrases (bold), only when the plan names them
+    "right": "#16A34A",         # right phrases (bold), only when the plan names them
+    "highlight": "#A9C1FF",     # the box behind the word being spoken
+    "accent": "#1F4DA1",        # the line under the picture (and the optional progress line)
+    "size": 44,                 # text size on a 1080-wide picture
+    "bar": False,               # optional progress strip at the top (`bar=on`)
+    "dash": False,              # optional dash before every speaker turn (`dash=on`)
+    "fade": False,              # optional soft top and bottom edges of the page (`fade=on`)
 }
-BAR_FRAC = 0.046                # progress strip height / full height
-VIDEO_FRAC = 0.454              # picture (the two characters) height / full height
+BAR_FRAC = 0.046                # optional progress strip height / full height
+VIDEO_FRAC = 0.4854             # picture (the two characters) height / full height
+DIVIDER_FRAC = 0.0104           # the line under the picture / full height
 
 
 def even(v: float) -> int:
@@ -54,9 +58,12 @@ def page_config(plan: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 def geometry(width: int, height: int, cfg: Dict[str, Any]) -> Dict[str, int]:
     """Heights of the three stacked areas of the full picture: progress strip, picture, page."""
-    bar_h = even(height * BAR_FRAC) if cfg.get("bar", True) else 0
-    video_h = even(height * VIDEO_FRAC) + (0 if bar_h else even(height * BAR_FRAC))
-    return {"bar_h": bar_h, "video_h": video_h, "page_h": height - bar_h - video_h, "width": width, "height": height}
+    bar_h = even(height * BAR_FRAC) if cfg.get("bar") else 0
+    video_h = even(height * VIDEO_FRAC) - bar_h
+    divider_h = even(height * DIVIDER_FRAC)
+    page_h = height - bar_h - video_h - divider_h
+    return {"bar_h": bar_h, "video_h": video_h, "divider_h": divider_h, "page_h": page_h, "below_h": divider_h + page_h,
+            "width": width, "height": height}
 
 
 def _rgb(hexcol: str) -> Tuple[int, int, int]:
@@ -119,10 +126,14 @@ def render_page_image(paras: List[Dict[str, Any]], width: int, cfg: Dict[str, An
     scale = max(0.4, width / 1080.0)
     job = {
         "width": width,
-        "fontSize": int(round(float(cfg.get("size", 56)) * scale)),
-        "padX": int(round(54 * scale)),
-        "padTop": int(round(56 * scale)),
+        "fontSize": int(round(float(cfg.get("size", 44)) * scale)),
+        "lineHeight": 1.32,
+        "paraGap": 1.0,                           # a blank line between speaker turns
+        "padLeft": int(round(216 * scale)),       # the reference starts its text a fifth of the way in
+        "padRight": int(round(48 * scale)),
+        "padTop": int(round(34 * scale)),
         "padBottom": int(round(160 * scale)),
+        "fontWeight": 500,                        # one even weight for Latin and Indic words
         "color": cfg["color"],
         "dash": bool(cfg.get("dash", True)),
         "out": str(out_dir / "page.png"),
@@ -188,11 +199,12 @@ def build_page_video(
     out_dir: Path,
     draft: bool = False,
 ) -> Path:
-    """Write `page.mkv`: the progress strip (top `bar_h` rows) stacked on the scrolling page (`page_h` rows)."""
+    """Write `page.mkv`: the optional progress strip (top `bar_h` rows) stacked on the line under the picture and the scrolling page
+    (`below_h` rows together)."""
     import cv2
     import numpy as np
 
-    W, bar_h, page_h = geo["width"], geo["bar_h"], geo["page_h"]
+    W, bar_h, page_h, div_h = geo["width"], geo["bar_h"], geo["page_h"], geo.get("divider_h", 0)
     layout = render_page_image(paras, W, cfg, out_dir)
     png = cv2.imread(layout["png"], cv2.IMREAD_UNCHANGED)          # BGRA, text on transparent
     if png is None or png.shape[2] < 4:
@@ -210,14 +222,18 @@ def build_page_video(
 
     scrolls, active = scroll_positions(paras, layout, page_h, fps, total)
     flat_boxes = [b for b in sorted(layout["words"], key=lambda b: (b["p"], b["i"]))]
-    fade_top, fade_bot = int(page_h * 0.045), int(page_h * 0.13)
-    ramp = np.ones((page_h, 1, 1), dtype=np.float32)               # 1 = text fully visible, 0 = page colour
-    ramp[:fade_top, 0, 0] = np.linspace(0.0, 1.0, fade_top)
-    ramp[page_h - fade_bot:, 0, 0] = np.linspace(1.0, 0.0, fade_bot)
-    ramp16 = (ramp * 256).astype(np.uint16)
+    ramp16 = None
+    if cfg.get("fade"):
+        fade_top, fade_bot = int(page_h * 0.045), int(page_h * 0.13)
+        ramp = np.ones((page_h, 1, 1), dtype=np.float32)           # 1 = text fully visible, 0 = page colour
+        ramp[:fade_top, 0, 0] = np.linspace(0.0, 1.0, fade_top)
+        ramp[page_h - fade_bot:, 0, 0] = np.linspace(1.0, 0.0, fade_bot)
+        ramp16 = (ramp * 256).astype(np.uint16)
+    divider = np.empty((div_h, W, 3), dtype=np.uint8)
+    divider[:] = np.array(accent, dtype=np.uint8)
 
     out = out_dir / "page.mkv"
-    cmd = [str(FFMPEG), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{bar_h + page_h}", "-r", str(fps),
+    cmd = [str(FFMPEG), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{bar_h + div_h + page_h}", "-r", str(fps),
            "-i", "-", "-c:v", "libx264", "-preset", "ultrafast" if draft else "veryfast", "-crf", "20" if draft else "14",
            "-pix_fmt", "yuv420p", str(out)]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -233,11 +249,15 @@ def build_page_video(
             if k >= 0:
                 b = flat_boxes[k]
                 by = b["y"] - s
-                padx, pady = int(b["h"] * 0.10), int(b["h"] * 0.16)
+                padx, pady = int(b["h"] * 0.12), int(b["h"] * 0.06)
                 cv2.rectangle(page8, (b["x"] - padx, by + pady), (b["x"] + b["w"] + padx, by + b["h"] - pady), hi, -1, cv2.LINE_AA)
             page = page8.astype(np.uint16)
             page = (premult[s:s + page_h] + (page * inv[s:s + page_h]) // 255)        # the text over page and box
-            page = (bg + ((page.astype(np.int32) - bg) * ramp16) // 256).astype(np.uint8)   # soft top and bottom edges
+            if ramp16 is not None:                                                       # optional soft top and bottom edges
+                page = bg + ((page.astype(np.int32) - bg) * ramp16) // 256
+            page = page.astype(np.uint8)
+            if div_h:
+                page = np.vstack([divider, page])
             if bar_h:
                 bar = np.empty((bar_h, W, 3), dtype=np.uint8)
                 bar[:] = bg.astype(np.uint8)

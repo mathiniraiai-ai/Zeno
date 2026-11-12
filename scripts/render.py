@@ -1503,7 +1503,7 @@ def main() -> None:
             page_video = built[0] if built else None
         except Exception as exc:   # noqa: BLE001  (a page problem never stops the video)
             print(f"  [PAGE] could not build the scrolling page: {exc}")
-        bar_h, page_h = page_geo["bar_h"], page_geo["page_h"]
+        bar_h, page_h = page_geo["bar_h"], page_geo["below_h"]   # below the picture: its border line and the page
         if page_video:
             if bar_h:
                 page_fc = (f"[1:v]fps={fps},split[pa][pb];[pa]crop={W}:{bar_h}:0:0[pbar];[pb]crop={W}:{page_h}:0:{bar_h}[ppage];"

@@ -221,7 +221,7 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                     else:
                         page = page or {"mode": "scroll"}
                         for tok in toks:
-                            m_kv = re.match(r"^(size|bar|dash|bg|color|highlight|accent)=(.+)$", tok, re.I)
+                            m_kv = re.match(r"^(size|bar|dash|fade|bg|color|highlight|accent)=(.+)$", tok, re.I)
                             if not m_kv:
                                 continue
                             k, v = m_kv.group(1).lower(), _unquote(m_kv.group(2))
@@ -230,7 +230,7 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                                     page[k] = float(v)
                                 except ValueError:
                                     pass
-                            elif k in ("bar", "dash"):
+                            elif k in ("bar", "dash", "fade"):
                                 page[k] = v.lower() not in ("off", "false", "no", "0")
                             else:
                                 page[k] = v
@@ -767,9 +767,9 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
         p_line = "#page scroll"
         if page_val.get("size") is not None:
             p_line += f" size={_fmt_num(float(page_val['size']))}"
-        for k in ("bar", "dash"):
-            if page_val.get(k) is False:
-                p_line += f" {k}=off"
+        for k in ("bar", "dash", "fade"):
+            if page_val.get(k) is True:
+                p_line += f" {k}=on"
         for k in ("bg", "color", "highlight", "accent"):
             if page_val.get(k):
                 p_line += f" {k}={page_val[k]}"

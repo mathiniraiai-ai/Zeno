@@ -2405,12 +2405,12 @@ class TestScrollPageFormat(unittest.TestCase):
 
     def test_plan_header_round_trips(self):
         import edl_parser
-        txt = '#output out/x.mp4\n#page scroll size=60 bar=off\n#page_wrong "return back" "I like."\n#page_right "return on Monday"\n'
+        txt = '#output out/x.mp4\n#page scroll size=60 bar=on\n#page_wrong "return back" "I like."\n#page_right "return on Monday"\n'
         plan = edl_parser.parse_edl(txt)
         self.assertEqual(plan["page"]["wrong_phrases"], ["return back", "I like."])
         self.assertEqual(plan["page"]["right_phrases"], ["return on Monday"])
         self.assertEqual(plan["page"]["size"], 60.0)
-        self.assertIs(plan["page"]["bar"], False)
+        self.assertIs(plan["page"]["bar"], True)
         again = edl_parser.parse_edl(edl_parser.format_edl(plan))
         self.assertEqual(again["page"], plan["page"])
         self.assertIsNone(edl_parser.parse_edl("#output out/x.mp4\n").get("page"))
@@ -2419,10 +2419,12 @@ class TestScrollPageFormat(unittest.TestCase):
         import scroll_page
         cfg = scroll_page.page_config({"page": {"mode": "scroll"}})
         geo = scroll_page.geometry(1080, 1920, cfg)
-        self.assertEqual(geo["bar_h"] + geo["video_h"] + geo["page_h"], 1920)
-        self.assertEqual((geo["bar_h"], geo["video_h"], geo["page_h"]), (88, 872, 960))
-        nobar = scroll_page.geometry(1080, 1920, scroll_page.page_config({"page": {"bar": False}}))
-        self.assertEqual((nobar["bar_h"], nobar["video_h"] + nobar["page_h"]), (0, 1920))
+        # the in-house reference: picture on top, a blue line under it, the white page below; no progress strip, no dashes
+        self.assertEqual((geo["bar_h"], geo["video_h"], geo["divider_h"], geo["page_h"]), (0, 932, 20, 968))
+        self.assertEqual(geo["video_h"] + geo["below_h"], 1920)
+        self.assertFalse(cfg["dash"] or cfg["bar"] or cfg["fade"])
+        bar = scroll_page.geometry(1080, 1920, scroll_page.page_config({"page": {"bar": True}}))
+        self.assertEqual(bar["bar_h"] + bar["video_h"] + bar["below_h"], 1920)
         self.assertIsNone(scroll_page.page_config({}))
 
     def test_paragraphs_follow_turns_and_colour_phrases(self):
