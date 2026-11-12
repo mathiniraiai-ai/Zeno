@@ -10,7 +10,7 @@
   "side by side",
   "side-by-side"
  ],
- "description": "Two full-height panels side by side with a stationary divider. Active speaker panel zooms (1.0->1.06/1.07, sudden_in:1.08, max 1.12) + beat SFX while listener stays locked at 1.0.",
+ "description": "Two full-height panels side by side with a stationary divider. Active speaker panel zooms (1.0->1.06/1.07, sudden_in:1.08, max 1.08) + beat SFX while listener stays locked at 1.0.",
  "when": "two characters in a snappy back-and-forth (0.06-0.15s joins, >0.25s pauses cut with 1.08 zoom)",
  "geometry": {
   "canvas": "1080x1920",
@@ -18,7 +18,7 @@
   "divider_w": 4,
   "right_w": 540,
   "divider_colour": "#E1DBE1",
-  "active_zoom": "1.0->1.06/1.07 or sudden_in:1.08 (max 1.12); listener locked at 1.0",
+  "active_zoom": "1.0->1.06/1.07 or sudden_in:1.08 (max 1.08); listener locked at 1.0",
   "subs_y": 72
  },
  "confidence": "measured",

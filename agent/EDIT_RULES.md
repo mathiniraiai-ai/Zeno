@@ -32,7 +32,7 @@ A rapid zoom is a snap on a word; a slow zoom is a push or a pull over the whole
 
 | Emotion or beat | Zoom | Syntax |
 |---|---|---|
-| Surprise, shock, a big reveal (PEAK) | rapid in on the reaction or reveal word | `z=sudden_in:1.08@<t>`; the single biggest full-frame peak may use `z=flash_zoom:1.12@<t>` (keep splits `<= 1.12`) |
+| Surprise, shock, a big reveal (PEAK) | rapid in on the reaction or reveal word | `z=sudden_in:1.08@<t>`; the single biggest full-frame peak may use `z=flash_zoom:1.12@<t>` (keep splits `<= 1.08`) |
 | Anger, frustration, a strong claim | rapid in, then hold | `z=sudden_in:1.08@<t>` |
 | Joy, pride, success, a punchline | rapid in on the key word | `z=sudden_in:1.08@<t>` |
 | Letting go after a rapid zoom | rapid out on the next cut (1.5 s or longer) | `z=sudden_out:1.08@0.10` |
@@ -46,7 +46,7 @@ A rapid zoom is a snap on a word; a slow zoom is a push or a pull over the whole
 - A rapid zoom starts **0.05 s before the stressed word** so the snap lands on it: `@<word start - cut start - 0.05>`. Take the word from `emphasis` or from the script's key word. The snap takes about 0.18 s, then the picture holds.
 - A slow zoom runs over the whole cut (`>= 2.5 s`). A slow push into a rapid zoom on one cut is a strong build for a peak.
 - Starting limits: up to 16 rapid zooms a minute and avoid two rapid `sudden_in` snaps back-to-back without releasing (`sudden_out:1.08@0.10`, `1.06->1`, or a calm `1.0` cut); keep roughly a quarter of short setup cuts at `1.0` for contrast; open hooks with `sudden_in:1.08` on the first strong word; use `z=1.08` step zoom on the second half (`L4b`) of any pause-trim jump cut (`L4a` -> `L4b`) in **both** `single` and active `split_h`/`split_v` panels!
-- **Split-panel cap & exceptions:** Keep `split_h`, `split_v`, and baked-split (`slot=top|bottom|left|right` / `active=top|bottom|left|right`) active-panel zooms `<= 1.12` (typically `1.06` to `1.08`) so faces stay cleanly framed while the silent listener panel stays locked at `1.0`. Lock `z=1.0` **only** on 3D holograms, clips with deliberate camera pans/dollies (handheld selfie shake is fine to zoom), or shared single-camera two-shots where `facts.md` reports `none` for safe face-keeping zoom (otherwise safe live two-shots may zoom up to `1.10` using `focus=x,y` from `facts.md`).
+- **Split-panel cap & exceptions:** Keep `split_h`, `split_v`, and baked-split (`slot=top|bottom|left|right` / `active=top|bottom|left|right`) active-panel zooms `<= 1.08` (typically `1.06` to `1.08`) so faces stay cleanly framed while the silent listener panel stays locked at `1.0`. Lock `z=1.0` **only** on 3D holograms, clips with deliberate camera pans/dollies (handheld selfie shake is fine to zoom), or shared single-camera two-shots where `facts.md` reports `none` for safe face-keeping zoom (otherwise safe live two-shots may zoom up to `1.10` using `focus=x,y` from `facts.md`).
 - `focus=x,y` from `facts.md` keeps the eyes in place while zooming.
 
 ## Ad tempo for Meta ads (full-frame AND active split-screen engagement)
@@ -90,7 +90,7 @@ SFX assets are peak-normalized to `-1 dBFS` and mixed post-`loudnorm` so they st
 | Situation | Layout |
 |---|---|
 | One person talking: hook, teaching line, two people in one frame | `single` (default) |
-| Pre-stitched / baked split in one clip (Google Flow) | `single` with `slot=top\|bottom\|left\|right` (or `active=top\|bottom\|left\|right`) so active-panel zoom (`<= 1.12`) zooms only the speaker! |
+| Pre-stitched / baked split in one clip (Google Flow) | `single` with `slot=top\|bottom\|left\|right` (or `active=top\|bottom\|left\|right`) so active-panel zoom (`<= 1.08`) zooms only the speaker! |
 | 3D hologram in one frame | `single`, `z=1` |
 | An ordinary two-shot of live actors (`shot_type=two_shot`, both in one scene) | `single`, may zoom up to `1.10` when `facts.md` gives safe `focus=x,y` |
 | Two characters in separate clips | `split_h` (left/right) or `split_v` (top/bottom) |

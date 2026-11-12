@@ -97,12 +97,13 @@ L2 S2.mp4 0.12-4.10 layout=split_h slot=right sp=Student tr=smoothleft@0.28 peer
             3.0,
         )
         self.assertEqual((z0, z1, style), (1.0, 1.08, "sudden_in"))
-        # Split-screen segments support active-panel zoom clamped safely to <= 1.12
+        # Split-screen segments support active-panel zoom clamped safely to <= 1.08 (keeps the head inside the frame)
         sz0, sz1, sstyle, _, _ = layouts.resolve_segment_zoom_spec(
             {"src": "nonexistent.mp4", "layout": "split_h", "start": 0.0, "end": 3.0, "zoom": 1.08, "zoom_to": 1.20, "zoom_style": "sudden_in"},
             3.0,
         )
-        self.assertEqual((sz0, sz1, sstyle), (1.08, 1.12, "sudden_in"))
+        self.assertLessEqual(max(sz0, sz1), 1.08)
+        self.assertEqual(sstyle, "sudden_in")
         # Paired split-screen crop filter must enforce identical common headroom and symmetric framing
         c_live, c_peer = layouts.compute_paired_split_crop_filters(
             "nonexistent_a.mp4", "nonexistent_b.mp4",
@@ -110,6 +111,8 @@ L2 S2.mp4 0.12-4.10 layout=split_h slot=right sp=Student tr=smoothleft@0.28 peer
             live_focus=[0.51, 0.42], peer_focus=[0.55, 0.34],
         )
         self.assertEqual(c_live["common_headroom_pct"], c_peer["common_headroom_pct"])
+        # Fixed generous headroom (17%) on every cut, so the head sits at the same height in every cut
+        self.assertEqual(c_live["common_headroom_pct"], 17.0)
         c_peer_swap, c_live_swap = layouts.compute_paired_split_crop_filters(
             "nonexistent_b.mp4", "nonexistent_a.mp4",
             720, 1280, 720, 1280, 540, 1920, 540, 1920,

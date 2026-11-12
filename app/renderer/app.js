@@ -442,13 +442,13 @@ async function loadInfo(check) {
     const u = i.update;
     if (u && u.available) {
       const key = u.bundle_sha256 || u.latest_version || 'upd';
-      if (u.mandatory && !state.updating && !state.rendering) {
+      // Auto-update: every update installs by itself, no Yes/No. It waits only while an edit is measuring or rendering.
+      const busy = state.updating || state.rendering || (state.jobs || []).some((j) => j.status && j.status.phase === 'working');
+      if (!busy && state.autoTried !== key) {
+        state.autoTried = key;
         state.updateModalOpen = true;
         paintUpdateModal();
         triggerCloudUpdate();
-      } else if (state.dismissedUpdate !== key && !state.updating) {
-        state.updateModalOpen = true;
-        paintUpdateModal();
       }
     } else if (state.updateModalOpen && !state.updating) {
       state.updateModalOpen = false;
@@ -541,6 +541,7 @@ async function triggerCloudUpdate() {
   } else {
     state.updateError = (r && r.text) || 'Could not download update from Zeno Cloud. Please check your connection.';
     paintUpdateModal();
+    setTimeout(() => { state.autoTried = null; }, 300000);   // try again in 5 minutes
   }
 }
 

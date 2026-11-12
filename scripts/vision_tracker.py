@@ -5,6 +5,8 @@ fallback when `cv2` is unavailable so every pipeline stage works in any Python e
 """
 from __future__ import annotations
 
+import os
+
 import argparse
 import hashlib
 import json
@@ -636,7 +638,12 @@ def compute_paired_split_crop_filters(
     fx_b, y0_b, fh_b, ey_b, fw_b = _extract_geom(peer_src, peer_focus)
 
     # Dynamic common headroom (~12%-18%) shared identically by both characters
-    common_hr = round(max(0.12, min(0.18, min(y0_a, y0_b) * 1.35)), 4)
+    # One fixed, generous headroom for EVERY cut (editor feedback: heads cut, head height jumping between cuts).
+    # It no longer depends on how tall each clip's hair measured, so the crown sits at the same height in every cut.
+    try:
+        common_hr = round(max(0.12, min(0.24, float(os.environ.get("ZENO_SPLIT_HEADROOM", "0.17")))), 4)
+    except ValueError:
+        common_hr = 0.17
 
     s0_a = max(live_slot_w / float(src_w), live_slot_h / float(src_h))
     s0_b = max(peer_slot_w / float(peer_w), peer_slot_h / float(peer_h))
@@ -690,11 +697,20 @@ def compute_paired_split_crop_filters(
         sw = max(sw_slot, _even(w_in * s))
         sh = max(sh_slot, _even(h_in * s))
         crop_x = int(round(min(max(fx * sw - sw_slot / 2.0, 0), sw - sw_slot)))
-        crop_y = int(round(min(max(y0 * sh - common_hr * sh_slot, 0), sh - sh_slot)))
+        want_y = y0 * sh - common_hr * sh_slot
+        crop_y = int(round(min(max(want_y, 0), sh - sh_slot)))
+        # The source cannot give this much room above the head: extend the top edge instead of cutting the hair.
+        pad_top = int(round(-want_y)) if want_y < -2 else 0
+        pad_top = min(pad_top, int(sh_slot * 0.30))
         slot_fx = round(min(0.65, max(0.35, (fx * sw - crop_x) / float(sw_slot))), 4)
-        slot_fy = round(min(0.48, max(0.25, (ey * sh - crop_y) / float(sh_slot))), 4)
+        slot_fy = round(min(0.48, max(0.25, (ey * sh - crop_y + pad_top) / float(sh_slot))), 4)
+        flt = f"scale={sw}:{sh}:flags=lanczos,crop={sw_slot}:{sh_slot}:{crop_x}:{crop_y}"
+        if pad_top:
+            flt = (f"scale={sw}:{sh}:flags=lanczos,crop={sw_slot}:{sh_slot - pad_top}:{crop_x}:0,"
+                   f"pad={sw_slot}:{sh_slot}:0:{pad_top}:color=black,fillborders=top={pad_top}:mode=smear")
         return {
-            "filter": f"scale={sw}:{sh}:flags=lanczos,crop={sw_slot}:{sh_slot}:{crop_x}:{crop_y}",
+            "filter": flt,
+            "pad_top": pad_top,
             "scale": (sw, sh),
             "crop": (crop_x, crop_y),
             "slot_size": (sw_slot, sh_slot),

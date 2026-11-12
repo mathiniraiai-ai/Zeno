@@ -520,7 +520,7 @@ app.whenReady().then(() => {
       lastNotifiedVer = update.latest_version;
       try {
         if (Notification && Notification.isSupported()) {
-          new Notification({ title: `New Zeno Update Arrived (v${update.latest_version})`, body: update.notes || 'Click Update & Reload Now inside Zeno to apply.' }).show();
+          new Notification({ title: `New Zeno Update Arrived (v${update.latest_version})`, body: update.notes || 'Zeno is installing it now.' }).show();
         }
       } catch (e) { /* ignore notification errors */ }
     }

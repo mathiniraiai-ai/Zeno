@@ -99,14 +99,14 @@ Always check how the raw footage was generated before assigning layouts in `plan
    - Preserve scripted reaction/laughter beats while trimming every `! REPEAT / STUMBLE` false start or boundary repeat.
 2. **Second Half — AI Teacher Demo (`Scene 3` Split Screen or Hologram)**:
    - **Separate HeyGen clips (`split_h` / `split_v`)**: Composite with `peer=`, zooming the active speaking panel (`1.0->1.06`/`1.07` on turns `>= 2.5s`, `sudden_in:1.08@<beat>`, `1.08` step zoom on `> 0.25s` pause cuts; max `1.12`) + calibrated `-4 to 0 dB` beat SFX while the silent listener and divider stay locked at `1.0`.
-   - **Pre-stitched Google Flow split**: `layout=single` with `slot=top|bottom|left|right` (or `active=top|bottom|left|right`) for active-panel zoom (`<= 1.12`) with locked seam and steady listener.
+   - **Pre-stitched Google Flow split**: `layout=single` with `slot=top|bottom|left|right` (or `active=top|bottom|left|right`) for active-panel zoom (`<= 1.08`) with locked seam and steady listener.
    - **In-frame 3D hologram**: `layout=single`, `zoom=1.0`.
 3. **Where to Zoom vs. Where NOT to Zoom**:
    - **Lock `zoom=1.0` ONLY on**:
      - **3D hologram shots** or shared single-camera two-shots whose faces sit near the frame edges (`none` in `facts.md`).
      - Clips with deliberate camera movement (pan/dolly, detected by OpenCV `detect_static_camera_motion()`).
    - **Apply Dynamic Zoom on BOTH Full-Frame AND Active Split Panels**:
-     - Full-frame `single` shots, safe live two-shots (`<= 1.10` with `focus=x,y`), AND active speaking panels in `split_h`, `split_v`, and baked splits (`<= 1.12`):
+     - Full-frame `single` shots, safe live two-shots (`<= 1.10` with `focus=x,y`), AND active speaking panels in `split_h`, `split_v`, and baked splits (`<= 1.08`):
        - `zoom=1.08` step punch-in to mask internal `> 0.25s` pause cuts or mid-sentence stumble cuts (`L5a` + `L5b`).
        - Smooth sub-pixel push-in (`1.0->1.06` / `1.0->1.07`) on turns `>= 2.5s`, pull-out (`1.08->1.0` / `1.06->1.0`), or rapid `sudden_in:1.08@<beat>` / `flash_zoom:1.12@<beat>` on punchlines and emphasis words.
 4. **Premiere-Grade Auto-Captions (`#subs auto y=72`) & On-Screen Text (`21132` "Stop Saying" Hook)**:

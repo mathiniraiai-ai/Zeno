@@ -58,7 +58,7 @@ from vision_tracker import (
 )
 
 EDGE_FADE: float = 0.012  # 12ms audio fade at segment edges to prevent clicks
-SPLIT_MAX_ZOOM: float = 1.12  # Safe in-panel zoom ceiling for split_h, split_v, top_pip & baked splits
+SPLIT_MAX_ZOOM: float = 1.08  # Safe in-panel zoom ceiling for split_h, split_v, top_pip & baked splits
 
 
 def even(x: float) -> int:
