@@ -197,7 +197,7 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
 
         # 1. Check Header Directives
         if line.startswith("#"):
-            m_dir = re.match(r"^#\s*(output|script|style|subs|src_dir|canvas|speakers|audio|preset|mark_pack|sfx_pack|concept_brief|characters|scene_\d+)\b\s*:?\s*(.*)$", line, re.I)
+            m_dir = re.match(r"^#\s*(output|script|style|subs|page_wrong|page_right|page|src_dir|canvas|speakers|audio|preset|mark_pack|sfx_pack|concept_brief|characters|scene_\d+)\b\s*:?\s*(.*)$", line, re.I)
             if not m_dir:
                 continue
             directive = m_dir.group(1).lower()
@@ -209,6 +209,37 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                 plan["script"] = _unquote(rest.split("|")[0].strip())
             elif directive == "style":
                 plan["style"] = re.sub(r"[^a-z0-9_-]", "", _unquote(rest.split("|")[0].strip()).lower())
+            elif directive in ("page", "page_wrong", "page_right"):
+                # `#page scroll [size=56] [bar=on|off] [dash=on|off] [bg=#FFFFFF]`: the scrolling-text page format.
+                # `#page_wrong "I like."` / `#page_right "I do."`: phrases shown red / green on the page (several per line allowed).
+                body, _ = _split_line_and_note(rest)
+                toks = _tokenize_line(body.split("|")[0].strip())
+                page = plan.get("page") if isinstance(plan.get("page"), dict) else None
+                if directive == "page":
+                    if toks and _unquote(toks[0]).lower() in ("off", "none", "false", "no", "0"):
+                        plan["page"] = None
+                    else:
+                        page = page or {"mode": "scroll"}
+                        for tok in toks:
+                            m_kv = re.match(r"^(size|bar|dash|bg|color|highlight|accent)=(.+)$", tok, re.I)
+                            if not m_kv:
+                                continue
+                            k, v = m_kv.group(1).lower(), _unquote(m_kv.group(2))
+                            if k == "size":
+                                try:
+                                    page[k] = float(v)
+                                except ValueError:
+                                    pass
+                            elif k in ("bar", "dash"):
+                                page[k] = v.lower() not in ("off", "false", "no", "0")
+                            else:
+                                page[k] = v
+                        plan["page"] = page
+                else:
+                    page = page or {"mode": "scroll"}
+                    key = "wrong_phrases" if directive == "page_wrong" else "right_phrases"
+                    page.setdefault(key, []).extend(t for t in (_unquote(tok).strip() for tok in toks) if t)
+                    plan["page"] = page
             elif directive == "subs":
                 # `#subs [style id or name] [y=72] [adapt=on|off]`, `#subs`, `#subs on`, `#subs off`
                 subs_body, _ = _split_line_and_note(rest)
@@ -731,6 +762,21 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
         lines.append(f"#script {_quote_if_needed(str(plan_dict['script']))}")
     if plan_dict.get("style"):
         lines.append(f"#style {plan_dict['style']}")
+    page_val = plan_dict.get("page")
+    if isinstance(page_val, dict):
+        p_line = "#page scroll"
+        if page_val.get("size") is not None:
+            p_line += f" size={_fmt_num(float(page_val['size']))}"
+        for k in ("bar", "dash"):
+            if page_val.get(k) is False:
+                p_line += f" {k}=off"
+        for k in ("bg", "color", "highlight", "accent"):
+            if page_val.get(k):
+                p_line += f" {k}={page_val[k]}"
+        lines.append(p_line)
+        for key, name in (("wrong_phrases", "page_wrong"), ("right_phrases", "page_right")):
+            for phrase in page_val.get(key) or []:
+                lines.append(f'#{name} "{phrase}"')
     if "subs" in plan_dict:
         subs_val = plan_dict.get("subs")
         if subs_val is None or subs_val is False:

@@ -930,6 +930,20 @@ def main() -> None:
     W = even(canvas.get("width", first.get("width") or 720))
     H = even(canvas.get("height", first.get("height") or 1280))
     fps = int(canvas.get("fps", round(first.get("fps") or 24)))
+    # Scrolling-text page format (`#page scroll`): the edit is rendered into the picture area in the top half; the progress strip
+    # and the scrolling page are added around it in the last step. From here on H is the height of that picture area.
+    FULL_H = H
+    page_cfg, page_geo, scroll_page = None, None, None
+    try:
+        import scroll_page
+        page_cfg = scroll_page.page_config(plan)
+    except Exception as exc:   # noqa: BLE001
+        print(f"  [PAGE] the scrolling page module could not be loaded: {exc}")
+        page_cfg = None
+    if page_cfg:
+        page_geo = scroll_page.geometry(W, H, page_cfg)
+        H = page_geo["video_h"]
+        print(f"Scrolling-text page format: picture {W}x{H} on top, page {W}x{page_geo['page_h']} below.")
     out_path = resolve(plan.get("output") or (OUTPUT / f"{plan_path.parent.name}.mp4"))
     cache = WORK / "_segments"
     cache.mkdir(parents=True, exist_ok=True)
@@ -1410,6 +1424,8 @@ def main() -> None:
         and not (isinstance(subs_cfg, str) and subs_cfg.strip().lower() in ("off", "none", "false", "0"))
         and not (isinstance(subs_cfg, dict) and str(subs_cfg.get("mode", "")).strip().lower() in ("off", "none"))
     )
+    if page_cfg:
+        subs_enabled = False   # the scrolling page is the subtitles
     ffmpeg_encode(
         *inputs,
         "-filter_complex", ";".join(fc),
@@ -1426,7 +1442,7 @@ def main() -> None:
         mix,
         draft=bool(a.draft),
         # with subtitles this file is an intermediate (the captions are added, and the video encoded once more, in the last step)
-        bitrate_kbps=max(final_bitrate_kbps(total) * 3, 30000) if subs_enabled else final_bitrate_kbps(total),
+        bitrate_kbps=max(final_bitrate_kbps(total) * 3, 30000) if (subs_enabled or page_cfg) else final_bitrate_kbps(total),
     )
     _say("render", "Picture and sound mixed; measuring dialogue loudness")
     r = ffmpeg(
@@ -1479,7 +1495,37 @@ def main() -> None:
         except Exception as exc:   # noqa: BLE001  (a subtitle problem never stops the video)
             print(f"  [SUBS] could not build subtitles: {exc}")
             sub_list = None
-    if sub_list:
+    if page_cfg:
+        page_video = None
+        try:
+            built = scroll_page.build(plan, segs, starts, total, W, FULL_H, fps, WORK, report_dir=plan_path.parent,
+                                      srt_path=out_path.with_suffix(".srt"), draft=bool(a.draft))
+            page_video = built[0] if built else None
+        except Exception as exc:   # noqa: BLE001  (a page problem never stops the video)
+            print(f"  [PAGE] could not build the scrolling page: {exc}")
+        bar_h, page_h = page_geo["bar_h"], page_geo["page_h"]
+        if page_video:
+            if bar_h:
+                page_fc = (f"[1:v]fps={fps},split[pa][pb];[pa]crop={W}:{bar_h}:0:0[pbar];[pb]crop={W}:{page_h}:0:{bar_h}[ppage];"
+                           f"[pbar][0:v:0][ppage]vstack=inputs=3,format=yuv420p[vsub];")
+            else:
+                page_fc = f"[1:v]fps={fps}[ppage];[0:v:0][ppage]vstack=inputs=2,format=yuv420p[vsub];"
+            page_inputs = ["-i", mix, "-i", str(page_video)]
+        else:   # keep the full-size picture even without the page
+            page_fc = f"[0:v:0]pad={W}:{FULL_H}:0:{bar_h}:color=white,format=yuv420p[vsub];"
+            page_inputs = ["-i", mix]
+        ffmpeg_encode(
+            *page_inputs,
+            "-filter_complex", page_fc + master_audio_fc,
+            "-map", "[vsub]", "-map", "[aout]",
+            "-r", str(fps),
+            "-c:v", "libx264", "-preset", "ultrafast" if a.draft else "veryfast",
+            "-crf", "23" if a.draft else "18", "-profile:v", "high", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-ac", "2", "-b:a", "192k", "-movflags", "+faststart", out_path,
+            draft=bool(a.draft),
+            bitrate_kbps=final_bitrate_kbps(total),
+        )
+    elif sub_list:
         sub_fc = (
             f"[1:v]fps={fps}[vcap];"
             f"[0:v:0][vcap]overlay=0:{sub_band_y0}:format=auto:eof_action=pass,format=yuv420p[vsub];"
@@ -1507,7 +1553,7 @@ def main() -> None:
         )
 
     # 5) human-readable timeline (with mapped Concept Brief, Scene & Character Speakers)
-    lines = [f"{out_path.name}  {W}x{H} @ {fps} fps  length {tc(total)}"]
+    lines = [f"{out_path.name}  {W}x{FULL_H} @ {fps} fps  length {tc(total)}"]
     if plan.get("concept_brief"):
         lines.append(f"Concept Brief    : {plan['concept_brief']}")
     if plan.get("characters"):

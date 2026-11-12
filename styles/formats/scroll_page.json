@@ -1,0 +1,28 @@
+{
+ "id": "scroll_page",
+ "layout": "split_h",
+ "names": [
+  "scrolling text",
+  "scrolling subtitles",
+  "split screen + scrolling text",
+  "scroll text",
+  "scrolling transcript"
+ ],
+ "description": "Top half: two characters side by side (split_h, still). Lower half: a white page where the dialogue scrolls up as spoken, a box on the spoken word, wrong phrases red, right phrases green. Progress line on top.",
+ "when": "the script says 'scrolling text'",
+ "geometry": {
+  "canvas": "1080x1920",
+  "progress_strip_h": 88,
+  "picture_h": 872,
+  "page_h": 960,
+  "text_size": 56
+ },
+ "plan": [
+  "#page scroll",
+  "#page_wrong \"...\"",
+  "#page_right \"...\"",
+  "segments: layout=split_h z=1"
+ ],
+ "confidence": "measured",
+ "source": "two references measured 2026-11-12 (in-house 'return back' reel; competitor reel with progress strip, word box, red/green phrases)"
+}

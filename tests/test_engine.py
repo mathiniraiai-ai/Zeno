@@ -2400,6 +2400,57 @@ class TestSourceOrderSwap(unittest.TestCase):
         self.assertEqual(script_order.src_time_swaps(segs, self.LINES), [])
 
 
+class TestScrollPageFormat(unittest.TestCase):
+    """`#page scroll`: two characters on top, the dialogue scrolling on a white page below."""
+
+    def test_plan_header_round_trips(self):
+        import edl_parser
+        txt = '#output out/x.mp4\n#page scroll size=60 bar=off\n#page_wrong "return back" "I like."\n#page_right "return on Monday"\n'
+        plan = edl_parser.parse_edl(txt)
+        self.assertEqual(plan["page"]["wrong_phrases"], ["return back", "I like."])
+        self.assertEqual(plan["page"]["right_phrases"], ["return on Monday"])
+        self.assertEqual(plan["page"]["size"], 60.0)
+        self.assertIs(plan["page"]["bar"], False)
+        again = edl_parser.parse_edl(edl_parser.format_edl(plan))
+        self.assertEqual(again["page"], plan["page"])
+        self.assertIsNone(edl_parser.parse_edl("#output out/x.mp4\n").get("page"))
+
+    def test_geometry_fills_the_frame(self):
+        import scroll_page
+        cfg = scroll_page.page_config({"page": {"mode": "scroll"}})
+        geo = scroll_page.geometry(1080, 1920, cfg)
+        self.assertEqual(geo["bar_h"] + geo["video_h"] + geo["page_h"], 1920)
+        self.assertEqual((geo["bar_h"], geo["video_h"], geo["page_h"]), (88, 872, 960))
+        nobar = scroll_page.geometry(1080, 1920, scroll_page.page_config({"page": {"bar": False}}))
+        self.assertEqual((nobar["bar_h"], nobar["video_h"] + nobar["page_h"]), (0, 1920))
+        self.assertIsNone(scroll_page.page_config({}))
+
+    def test_paragraphs_follow_turns_and_colour_phrases(self):
+        import scroll_page
+        segs = [{"id": "L1a", "speaker": "A"}, {"id": "L1b", "speaker": "A"}, {"id": "L2", "speaker": "B"}]
+        def cue(i, text, t):
+            return {"segIndex": i, "words": [{"text": w, "startTime": t + 0.3 * k, "endTime": t + 0.3 * k + 0.25} for k, w in enumerate(text.split())]}
+        cues = [cue(0, "I will return", 0.0), cue(1, "back on Monday.", 1.0), cue(2, '"Return back" ಎಂದು ಹೇಳಬೇಡಿ.', 2.2)]
+        cfg = scroll_page.page_config({"page": {"wrong_phrases": ["return back"]}})
+        paras = scroll_page.build_paragraphs(cues, segs, cfg)
+        self.assertEqual(len(paras), 2)                                   # the two cuts of L1 are one turn
+        self.assertEqual([w["text"] for w in paras[0]["words"]], ["I", "will", "return", "back", "on", "Monday."])
+        red = [w["text"] for p in paras for w in p["words"] if w.get("bold")]
+        self.assertEqual(red, ["return", "back", '"Return', 'back"'])     # across the cut and through the quotes
+
+    def test_page_glides_and_highlights_the_spoken_word(self):
+        import scroll_page
+        paras = [{"words": [{"text": f"w{i}", "start": 0.5 * i, "end": 0.5 * i + 0.3} for i in range(40)]}]
+        layout = {"height": 4000, "words": [{"p": 0, "i": i, "x": 50, "y": 60 + 96 * i, "w": 80, "h": 96, "row": i} for i in range(40)]}
+        scrolls, active = scroll_page.scroll_positions(paras, layout, 960, 30, 21.0)
+        self.assertEqual(len(scrolls), 630)
+        self.assertEqual(scrolls[0], 0.0)
+        self.assertTrue(all(b >= a - 1e-6 for a, b in zip(scrolls, scrolls[1:])))          # it only ever moves up
+        self.assertLess(max(b - a for a, b in zip(scrolls, scrolls[1:])), 30.0)             # and never jumps
+        self.assertEqual(active[int(0.6 * 30)], 1)                                          # 0.6 s: the second word
+        self.assertEqual(active[-1], -1)                                                    # long after the last word: no box
+
+
 class TestSplitPanelLock(unittest.TestCase):
     def test_registered_crop_lands_on_the_reference_frame(self):
         import vision_tracker as vt

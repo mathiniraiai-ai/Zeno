@@ -961,6 +961,15 @@ def check_picture_timeline(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, 
         return True, [f"not checked ({exc})"], 0
     canvas = plan.get("canvas") or {}
     W, H, fps = int(canvas.get("width") or 1080), int(canvas.get("height") or 1920), int(canvas.get("fps") or 30)
+    page_top = None
+    try:   # scrolling-text page format: the segments were rendered into the picture area in the top half
+        import scroll_page
+        _pc = scroll_page.page_config(plan)
+        if _pc:
+            _geo = scroll_page.geometry(W, H, _pc)
+            H, page_top = _geo["video_h"], _geo["bar_h"]
+    except Exception:
+        pass
 
     def sig(frame: Any) -> Any:
         # the final video holds the same pixels as the cut's own render, so compare fine detail: only a re-encode separates them
@@ -981,6 +990,9 @@ def check_picture_timeline(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, 
         if f.is_file() and dur >= 0.4:
             ref_cap = cv2.VideoCapture(str(f))
             got = frame_at(out, t0 + dur / 2)
+            if got is not None and page_top is not None:      # compare only the picture area, not the progress strip and the page
+                k = got.shape[0] / float(page_top + H + (int(canvas.get("height") or 1920) - page_top - H))
+                got = got[int(round(page_top * k)):int(round((page_top + H) * k))]
             # handheld footage changes a lot between frames and a seek can be a frame off: take the closest of the frames around the middle
             refs = [fr for fr in (frame_at(ref_cap, dur / 2 + k / fps) for k in range(-4, 5)) if fr is not None]
             ref_cap.release()

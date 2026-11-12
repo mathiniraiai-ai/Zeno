@@ -1362,6 +1362,15 @@ def main() -> None:
         subs_style = subs_arg if (subs_arg and subs_arg.lower() not in ("on", "true", "yes", "1")) else "auto"
         subs_header = {"style": subs_style, "y": 68}
 
+    # A script that asks for scrolling text ("Split screen + scrolling text") gets the scrolling-text page format.
+    page_header: Optional[Dict[str, Any]] = None
+    try:
+        if re.search(r"scroll(?:ing)?[\s-]*(?:text|subtitle|caption|transcript)", script_path.read_text(encoding="utf-8", errors="ignore"), re.I):
+            page_header = {"mode": "scroll"}
+            print("  Script asks for scrolling text: the plan starts with `#page scroll` (two characters on top, the dialogue scrolling on a white page below).")
+    except OSError:
+        page_header = None
+
     plan: Dict[str, Any] = {
         "output": common_unique_output(args.name or project_name).as_posix(),
         "script": str(script_path.relative_to(ROOT)) if script_path.is_relative_to(ROOT) else str(script_path),
@@ -1370,6 +1379,7 @@ def main() -> None:
         "mark_pack": args.mark_pack,
         **({"style": re.sub(r"[^a-z0-9_-]", "", args.style.lower())} if getattr(args, "style", "") else {}),
         **({"subs": subs_header} if subs_header is not None else {}),
+        **({"page": page_header} if page_header is not None else {}),
         "segments": [],
         "marks": [],
         "audio": {"loudness": -11.5},
