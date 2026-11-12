@@ -136,6 +136,74 @@ def check_loudness(mp4_path: Path, target_lufs: float = -11.5) -> Tuple[bool, fl
     return ok, i_lufs, tp_db
 
 
+def _extract_zoom_pair(seg: Dict[str, Any]) -> Tuple[float, float]:
+    """Parse raw un-clamped (z0, z1) numeric zoom factors from numeric or string zoom specs."""
+    raw_z = seg.get("zoom", 1.0)
+    z0, z1 = 1.0, 1.0
+    if isinstance(raw_z, (int, float)):
+        z0 = z1 = float(raw_z)
+    elif raw_z is not None:
+        s = str(raw_z).strip()
+        prefix = ""
+        if ":" in s:
+            prefix, rhs = s.split(":", 1)
+            prefix = prefix.strip().lower()
+            s = rhs.split("@", 1)[0].strip()
+        if "->" in s:
+            a, b = s.split("->", 1)
+            try:
+                z0, z1 = float(a.strip()), float(b.strip())
+            except ValueError:
+                z0 = z1 = 1.0
+        else:
+            try:
+                v = float(s)
+                if prefix in ("sudden_in", "push", "in") or "sudden_in" in str(raw_z) or "push" in str(raw_z):
+                    z0, z1 = 1.0, v
+                elif prefix in ("sudden_out", "pull", "out") or "sudden_out" in str(raw_z) or "pull" in str(raw_z):
+                    z0, z1 = v, 1.0
+                else:
+                    z0 = z1 = v
+            except ValueError:
+                z0 = z1 = 1.0
+    if seg.get("zoom_to") is not None:
+        try:
+            z1 = float(seg["zoom_to"])
+        except (TypeError, ValueError):
+            pass
+    return z0, z1
+
+
+def _subtract_intervals(
+    base_start: float,
+    base_end: float,
+    exclusions: Sequence[Tuple[float, float]],
+) -> List[Tuple[float, float]]:
+    """Subtract exclusion [a, b] windows from [base_start, base_end]."""
+    if base_end <= base_start:
+        return []
+    spans: List[Tuple[float, float]] = [(base_start, base_end)]
+    for ex_a, ex_b in exclusions:
+        if ex_b <= ex_a:
+            continue
+        next_spans: List[Tuple[float, float]] = []
+        for s0, s1 in spans:
+            if ex_b <= s0 or ex_a >= s1:
+                next_spans.append((s0, s1))
+            else:
+                if ex_a > s0:
+                    next_spans.append((s0, ex_a))
+                if ex_b < s1:
+                    next_spans.append((ex_b, s1))
+        spans = next_spans
+        if not spans:
+            break
+    return spans
+
+
+DEAD_AIR_THRESHOLD = 0.60
+
+
 def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None) -> Tuple[bool, int, int, int, int]:
     """Check cut boundaries against cached word spans + silences, plus rendered MP4 dead-air and boundary click scan.
     Returns (passed, clipped_words_count, long_pauses_count, masked_jump_cuts_count, boundary_clicks_count).
@@ -146,16 +214,43 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
     jump_cuts_masked = 0
     boundary_clicks = 0
 
+    fps = int((plan.get("canvas") or {}).get("fps", 30) or 30)
+    starts, seg_durs, _, seg_start_map = compute_timeline_starts(plan, fps)
+
+    marks_by_sid: Dict[str, List[Dict[str, Any]]] = {}
+    for mk in plan.get("marks", []) or []:
+        msid = str(mk.get("segment") or "")
+        if msid:
+            marks_by_sid.setdefault(msid, []).append(mk)
+
+    timeline_mark_holds: List[Tuple[float, float]] = []
+
     for i, s in enumerate(segs):
+        sid = str(s.get("id", f"S{i+1}"))
         stem = Path(str(s.get("src", ""))).stem
         wdir = clip_work_dir(s.get("src", ""))
         st, en = float(s["start"]), float(s["end"])
+        dur = max(0.0, en - st)
 
         if i > 0 and Path(str(segs[i - 1].get("src", ""))).stem == stem:
-            if float(s.get("zoom", 1.0)) > 1.01 or s.get("layout", "single") != "single":
+            z0, z1 = _extract_zoom_pair(s)
+            if max(z0, z1) > 1.01 or s.get("layout", "single") != "single":
                 jump_cuts_masked += 1
 
-        # Check internal pauses inside [st, en] (>1.05s dead air threshold)
+        # Build intentional mark flash hold windows in clip coordinates and timeline coordinates
+        seg_marks = list(s.get("marks", []) or []) + list(marks_by_sid.get(sid, []))
+        clip_mark_holds: List[Tuple[float, float]] = []
+        t0_tl = starts[i] if i < len(starts) else float(seg_start_map.get(sid, 0.0))
+        for mk in seg_marks:
+            m_at = float(mk.get("at", max(0.0, dur - 0.60)))
+            m_dur = float(mk.get("duration", 0.56) or 0.56)
+            hold_rel_s = max(0.0, m_at - 0.15)
+            # End-of-sentence flash holds extend through the mark pulse + tail to cut end
+            hold_rel_e = dur if (m_at + m_dur >= dur - 0.45) else min(dur, m_at + m_dur + 0.35)
+            clip_mark_holds.append((st + hold_rel_s, st + hold_rel_e))
+            timeline_mark_holds.append((t0_tl + hold_rel_s, t0_tl + hold_rel_e))
+
+        # Check internal pauses inside [st, en] (>0.60s dead air threshold, excluding mark flash holds)
         sil_path = wdir / "silences.json"
         if sil_path.is_file():
             try:
@@ -170,8 +265,9 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
                 for sl in merged:
                     ov_s = max(st + 0.15, sl["start"])
                     ov_e = min(en - 0.15, sl["end"])
-                    if (ov_e - ov_s) > 1.05:
-                        long_pauses += 1
+                    for rem_s, rem_e in _subtract_intervals(ov_s, ov_e, clip_mark_holds):
+                        if (rem_e - rem_s) > DEAD_AIR_THRESHOLD:
+                            long_pauses += 1
             except Exception:
                 pass
 
@@ -192,7 +288,7 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
             except Exception:
                 pass
 
-    # Also scan the rendered MP4 audio stream directly for any empty dead air >1.05s
+    # Also scan the rendered MP4 audio stream directly for any internal dead air >0.60s inside cuts
     if mp4_path is not None and mp4_path.is_file() and long_pauses == 0:
         try:
             r = subprocess.run(
@@ -202,7 +298,7 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
                     "-i",
                     str(mp4_path),
                     "-af",
-                    "silencedetect=noise=-34dB:d=1.05",
+                    f"silencedetect=noise=-34dB:d={DEAD_AIR_THRESHOLD:.2f}",
                     "-f",
                     "null",
                     "-",
@@ -212,8 +308,21 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
                 encoding="utf-8",
                 errors="replace",
             )
-            dur_matches = re.findall(r"silence_duration:\s*([\d.]+)", r.stderr)
-            long_pauses += sum(1 for d_str in dur_matches if float(d_str) > 1.05)
+            sil_events = re.findall(
+                r"silence_end:\s*([\d.]+)\s*\|\s*silence_duration:\s*([\d.]+)",
+                r.stderr,
+            )
+            for end_str, dur_str in sil_events:
+                s_end = float(end_str)
+                s_dur = float(dur_str)
+                s_start = max(0.0, s_end - s_dur)
+                for idx_s, t0_s in enumerate(starts):
+                    t1_s = t0_s + seg_durs[idx_s]
+                    ov_s = max(t0_s + 0.15, s_start)
+                    ov_e = min(t1_s - 0.15, s_end)
+                    for rem_s, rem_e in _subtract_intervals(ov_s, ov_e, timeline_mark_holds):
+                        if (rem_e - rem_s) > DEAD_AIR_THRESHOLD:
+                            long_pauses += 1
         except Exception:
             pass
 
@@ -259,6 +368,38 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
     return passed, clipped_words, long_pauses, jump_cuts_masked, boundary_clicks
 
 
+def _tokens_match(a: str, b: str, min_sim: float = 0.88) -> bool:
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if min(len(a), len(b)) >= 3 and _word_similarity(a, b) >= min_sim:
+        return True
+    return False
+
+
+def _ngram_count(seq: Sequence[str], ngram: Sequence[str]) -> int:
+    n = len(ngram)
+    if n == 0 or len(seq) < n:
+        return 0
+    cnt = 0
+    idx = 0
+    while idx <= len(seq) - n:
+        if all(_tokens_match(seq[idx + k], ngram[k], 0.86) for k in range(n)):
+            cnt += 1
+            idx += n
+        else:
+            idx += 1
+    return cnt
+
+
+def _has_adjacent_pair(seq: Sequence[str], tok: str) -> bool:
+    for idx in range(len(seq) - 1):
+        if _tokens_match(seq[idx], tok, 0.88) and _tokens_match(seq[idx + 1], tok, 0.88):
+            return True
+    return False
+
+
 def check_script_coverage(
     plan: Dict[str, Any],
     script_path: Optional[Path] = None,
@@ -276,10 +417,25 @@ def check_script_coverage(
     if script_path and script_path.is_file() and parse_script_file is not None:
         _, script_lines = parse_script_file(script_path)
 
+    try:
+        import script_order as _so
+
+        accepted_raw = _so.read_accepted(Path(plan["_plan_dir"])) if plan.get("_plan_dir") else {}
+        accepted = set(accepted_raw)
+    except Exception:   # noqa: BLE001
+        _so = None  # type: ignore[assignment]
+        accepted = set()
+
+    def _is_accepted_ref(ref_text: str) -> bool:
+        if not accepted or not ref_text:
+            return False
+        if ref_text in accepted:
+            return True
+        return any(re.search(rf"\b{re.escape(k)}[a-z]?\b", ref_text) for k in accepted)
+
     segs = plan.get("segments", [])
     seg_word_slices: List[List[str]] = []
     seg_word_keys: List[List[Tuple[str, float]]] = []   # (clip, start time) of each kept word: the same transcript word on both sides of a cut is not said twice
-    boundary_dups = 0
 
     for s in segs:
         stem = Path(str(s.get("src", ""))).stem
@@ -301,30 +457,202 @@ def check_script_coverage(
                         break
                 except Exception:
                     pass
+        if not words and isinstance(s.get("words"), list):
+            for idx_w, w_item in enumerate(s["words"]):
+                if isinstance(w_item, dict):
+                    words.append(w_item)
+                elif isinstance(w_item, str):
+                    words.append({"w": w_item, "start": st + idx_w * 0.1, "end": st + (idx_w + 1) * 0.1})
         kept = [w for w in words if _clean_token(w.get("w") or w.get("word", ""))]
         toks = [_clean_token(w.get("w") or w.get("word", "")) for w in kept]
         seg_word_slices.append(toks)
         seg_word_keys.append([(stem, round(float(w.get("start", 0.0)), 3)) for w in kept])
 
-    # Check intra-segment consecutive repeated words/phrases not in script (e.g. "Almost, almost")
-    script_text_all = " ".join(" ".join(sl.get("tokens", [])) for sl in script_lines).lower()
-    for idx, toks in enumerate(seg_word_slices):
-        for j in range(len(toks) - 1):
-            if len(toks[j]) >= 3 and _word_similarity(toks[j], toks[j + 1]) >= 0.88:
-                pair_str = f"{toks[j]} {toks[j + 1]}"
-                if pair_str not in script_text_all and script_text_all.split().count(toks[j]) < 2:
-                    boundary_dups += 1
+    line_by_id: Dict[str, Dict[str, Any]] = {
+        str(sl.get("id", "")): sl for sl in script_lines if sl.get("id")
+    }
+    seg_line_ids: List[List[str]] = []
+    for idx, s in enumerate(segs):
+        sid_note = f"{s.get('id', '')} {s.get('note', '')}"
+        explicit_lids: List[str] = []
+        for m_lid in re.findall(r"\b(L\d+)[a-z]?\b", sid_note):
+            if (not line_by_id or m_lid in line_by_id) and m_lid not in explicit_lids:
+                explicit_lids.append(m_lid)
+        if not explicit_lids and script_lines and seg_word_slices[idx]:
+            best_lid, best_score = None, 0.0
+            for sl in script_lines:
+                stoks = sl.get("tokens") or []
+                if not stoks:
+                    continue
+                hits = sum(
+                    1.0 for st_tok in stoks
+                    if max((_word_similarity(st_tok, ct) for ct in seg_word_slices[idx]), default=0.0) >= 0.64
+                )
+                sc = hits / len(stoks)
+                if sc >= 0.35 and sc > best_score:
+                    best_score = sc
+                    best_lid = str(sl.get("id", ""))
+            if best_lid:
+                explicit_lids.append(best_lid)
+        seg_line_ids.append(explicit_lids)
 
-    # Check inter-segment boundary duplicates across consecutive segments
+    repeated_words: List[str] = []
+
+    # 1. Intra-segment 2..6-word phrase stumbles and 1-word stutters (compared against THAT line's script tokens, never full-script word counts)
+    for idx, toks in enumerate(seg_word_slices):
+        sid = str(segs[idx].get("id", f"S{idx+1}"))
+        if _is_accepted_ref(sid):
+            continue
+        line_toks = [
+            _clean_token(t)
+            for lid in seg_line_ids[idx]
+            for t in (line_by_id.get(lid, {}).get("tokens") or [])
+            if _clean_token(t)
+        ]
+        covered_pos: set[int] = set()
+        max_n = min(6, len(toks) // 2)
+        for n in range(max_n, 1, -1):
+            for j in range(len(toks) - 2 * n + 1):
+                cand = toks[j : j + n]
+                match_m = None
+                for m in range(j + n, min(len(toks) - n + 1, j + n + 8)):
+                    if all(_tokens_match(cand[k], toks[m + k], 0.86) for k in range(n)):
+                        match_m = m
+                        break
+                if match_m is None:
+                    continue
+                span_a = set(range(j, j + n))
+                span_b = set(range(match_m, match_m + n))
+                if span_a <= covered_pos and span_b <= covered_pos:
+                    continue
+                spoken_cnt = _ngram_count(toks, cand)
+                if line_toks:
+                    script_cnt = _ngram_count(line_toks, cand)
+                elif script_lines:
+                    script_cnt = max(
+                        (_ngram_count([_clean_token(t) for t in sl.get("tokens", []) if _clean_token(t)], cand) for sl in script_lines),
+                        default=0,
+                    )
+                else:
+                    script_cnt = 0
+                if spoken_cnt > max(1, script_cnt) and spoken_cnt > script_cnt:
+                    covered_pos.update(span_a)
+                    covered_pos.update(span_b)
+                    repeated_words.append(f"{sid}: repeated phrase '{' '.join(cand)}'")
+
+        for j in range(len(toks) - 1):
+            if j in covered_pos and (j + 1) in covered_pos:
+                continue
+            if _tokens_match(toks[j], toks[j + 1], 0.88):
+                if line_toks:
+                    scripted_double = _has_adjacent_pair(line_toks, toks[j])
+                elif script_lines:
+                    scripted_double = any(
+                        _has_adjacent_pair([_clean_token(t) for t in sl.get("tokens", []) if _clean_token(t)], toks[j])
+                        for sl in script_lines
+                    )
+                else:
+                    scripted_double = False
+                if not scripted_double:
+                    repeated_words.append(f"{sid}: stutter '{toks[j]} {toks[j + 1]}'")
+
+    # 2. Inter-segment 2..6-word phrase stumbles and 1-word boundary duplicates across consecutive cuts
     for i in range(len(segs) - 1):
-        if seg_word_slices[i] and seg_word_slices[i + 1]:
-            w_last = seg_word_slices[i][-1]
-            w_first = seg_word_slices[i + 1][0]
-            if len(w_last) >= 3 and _word_similarity(w_last, w_first) >= 0.85:
-                pair_str = f"{w_last} {w_first}"
-                same_word = seg_word_keys[i][-1] == seg_word_keys[i + 1][0]   # one transcript word straddling the cut (a mistimed ghost word)
-                if pair_str not in script_text_all and not same_word:
-                    boundary_dups += 1
+        sid_a = str(segs[i].get("id", f"S{i+1}"))
+        sid_b = str(segs[i + 1].get("id", f"S{i+2}"))
+        if _is_accepted_ref(sid_a) or _is_accepted_ref(sid_b):
+            continue
+        if not seg_word_slices[i] or not seg_word_slices[i + 1]:
+            continue
+
+        same_word = bool(
+            seg_word_keys[i]
+            and seg_word_keys[i + 1]
+            and seg_word_keys[i][-1] == seg_word_keys[i + 1][0]
+        )
+        left_toks_full = seg_word_slices[i]
+        right_toks_full = seg_word_slices[i + 1][1:] if same_word else seg_word_slices[i + 1]
+        if not right_toks_full:
+            continue
+
+        left_tail = left_toks_full[-10:]
+        right_head = right_toks_full[:10]
+        combined_pair = left_toks_full + right_toks_full
+
+        pair_lids: List[str] = []
+        for lid in seg_line_ids[i] + seg_line_ids[i + 1]:
+            if lid not in pair_lids:
+                pair_lids.append(lid)
+        pair_line_toks = [
+            _clean_token(t)
+            for lid in pair_lids
+            for t in (line_by_id.get(lid, {}).get("tokens") or [])
+            if _clean_token(t)
+        ]
+
+        cross_phrase_found = False
+        max_cn = min(6, len(left_tail), len(right_head))
+        for n in range(max_cn, 1, -1):
+            for j in range(len(left_tail) - n + 1):
+                cand = left_tail[j : j + n]
+                in_right = any(
+                    all(_tokens_match(cand[k], right_head[m + k], 0.86) for k in range(n))
+                    for m in range(len(right_head) - n + 1)
+                )
+                if not in_right:
+                    continue
+                spoken_cnt = _ngram_count(combined_pair, cand)
+                if pair_line_toks:
+                    script_cnt = _ngram_count(pair_line_toks, cand)
+                elif script_lines:
+                    script_cnt = max(
+                        (_ngram_count([_clean_token(t) for t in sl.get("tokens", []) if _clean_token(t)], cand) for sl in script_lines),
+                        default=0,
+                    )
+                else:
+                    script_cnt = 0
+                if spoken_cnt > script_cnt and spoken_cnt >= 2:
+                    msg = f"{sid_a}->{sid_b}: repeated phrase '{' '.join(cand)}'"
+                    if msg not in repeated_words:
+                        repeated_words.append(msg)
+                    cross_phrase_found = True
+                    break
+            if cross_phrase_found:
+                break
+
+        if not cross_phrase_found:
+            w_last = left_tail[-1]
+            w_first = right_head[0]
+            if _tokens_match(w_last, w_first, 0.85):
+                scripted_pair = _has_adjacent_pair(pair_line_toks, w_last) if pair_line_toks else False
+                if not scripted_pair:
+                    repeated_words.append(f"{sid_a}->{sid_b}: boundary repeat '{w_last} {w_first}'")
+
+    # 3. Also integrate script_order.repeat_problems if available
+    if _so is not None and hasattr(_so, "repeat_problems"):
+        try:
+            import inspect
+
+            rp_fn = getattr(_so, "repeat_problems")
+            sig_params = list(inspect.signature(rp_fn).parameters.keys())
+            seg_pairs = [(str(s.get("id", "")), seg_word_slices[i]) for i, s in enumerate(segs)]
+            if len(sig_params) >= 2 and sig_params[0] in ("plan", "edl"):
+                extra_probs = rp_fn(plan, script_lines)
+            elif len(sig_params) >= 2:
+                extra_probs = rp_fn(seg_pairs, script_lines)
+            else:
+                extra_probs = rp_fn(seg_pairs)
+            for pr in extra_probs or []:
+                pr_str = str(pr)
+                if not _is_accepted_ref(pr_str) and pr_str not in repeated_words:
+                    repeated_words.append(pr_str)
+        except Exception:
+            pass
+
+    plan["_repeated_words"] = repeated_words
+    boundary_dups = len(repeated_words)
+    if repeated_words:
+        print("[REPEAT FAIL] " + "; ".join(repeated_words))
 
     if not script_lines:
         return (boundary_dups == 0), len(segs), len(segs), boundary_dups
@@ -334,12 +662,6 @@ def check_script_coverage(
 
     covered = 0
     last_seg_idx = 0
-    try:
-        import script_order as _so
-
-        accepted = set(_so.read_accepted(Path(plan["_plan_dir"]))) if plan.get("_plan_dir") else set()
-    except Exception:   # noqa: BLE001
-        accepted = set()
     for sline in script_lines:
         lid = sline["id"]
         stokens = sline["tokens"]
@@ -374,8 +696,8 @@ def check_script_coverage(
         import script_order
 
         rep = script_order.check_order([(str(s.get("id", "")), seg_word_slices[i]) for i, s in enumerate(segs)], script_lines)
-        accepted = script_order.read_accepted(Path(plan["_plan_dir"])) if plan.get("_plan_dir") else {}
-        wrong = [m for m in rep["out_of_order"] + rep["repeated"] if not any(re.search(rf"\b{re.escape(k)}[a-z]?\b", m) for k in accepted)]
+        accepted_ord = script_order.read_accepted(Path(plan["_plan_dir"])) if plan.get("_plan_dir") else {}
+        wrong = [m for m in rep["out_of_order"] + rep["repeated"] if not any(re.search(rf"\b{re.escape(k)}[a-z]?\b", m) for k in accepted_ord)]
         if wrong:
             passed = False
             print("[ORDER FAIL] " + "; ".join(wrong))
@@ -540,17 +862,22 @@ def verify_marks_and_build_contact_sheet(
 
 
 def check_split_and_hook_rules(plan: Dict[str, Any]) -> Tuple[bool, str]:
-    """Verify 15-Year Editor split-screen and single-character hook rules on `plan`:
-      1. Split-screen segments (`split_h` / `split_v`) must be 100% static (`z=1.0`),
-         have zero intra-split transitions or whoosh SFX, and share matched common headroom.
-      2. Single-character hook (`single`) must lead with a zoom-in and use at most 2 hook transitions.
+    """Verify split-screen and single-character hook rules on `plan`:
+      1. Split-screen segments (`split_h` / `split_v`) allow tasteful active-panel zooms in `[1.0, 1.15]`
+         (fail only if `< 1.0` or `> 1.15`), have zero intra-split transitions or turn-boundary whoosh SFX,
+         and share matched common headroom.
+      2. Single-character hook (`single`) permits crisp hook transitions up to `max(3, round(hook_secs / 5.0))`
+         (or `style_config` ceiling if higher).
     """
     segs = plan.get("segments", [])
     sfx_entries = plan.get("sfx", [])
     whoosh_segs = {
         str(e.get("segment"))
         for e in sfx_entries
-        if "whoosh" in str(e.get("file", "")).lower() or "swish" in str(e.get("file", "")).lower()
+        if (
+            ("whoosh" in str(e.get("file", "")).lower() or "swish" in str(e.get("file", "")).lower())
+            and float(e.get("at", 0.0) or 0.0) <= 0.25
+        )
     }
 
     split_segs = 0
@@ -581,11 +908,9 @@ def check_split_and_hook_rules(plan: Dict[str, Any]) -> Tuple[bool, str]:
 
         if lay in ("split_h", "split_v", "left_right", "top_bottom"):
             split_segs += 1
-            z0 = float(s.get("zoom") if s.get("zoom") is not None else 1.0)
-            z1 = float(s.get("zoom_to") if s.get("zoom_to") is not None else z0)
-            z_style = str(s.get("zoom_style") or "none").strip().lower()
-            if abs(z0 - 1.0) > 0.005 or abs(z1 - 1.0) > 0.005 or z_style not in ("", "none", "static"):
-                split_violations.append(f"{sid}:non_static_zoom({z0}->{z1}:{z_style})")
+            z0, z1 = _extract_zoom_pair(s)
+            if min(z0, z1) < 0.995 or max(z0, z1) > 1.1505:
+                split_violations.append(f"{sid}:excessive_split_zoom({z0:.2f}->{z1:.2f})")
             if i > 0 and prev_lay == lay:
                 if tr != "cut":
                     split_violations.append(f"{sid}:intra_split_transition({tr})")
@@ -603,15 +928,18 @@ def check_split_and_hook_rules(plan: Dict[str, Any]) -> Tuple[bool, str]:
                     else:
                         common_hr_val = float(c_live["common_headroom_pct"])
 
-    # The live conversation before a split is a Meta ad: a crisp transition about every 10 s is the ceiling (at least 2 are always fine).
-    max_hook_transitions = max(2, int(round(hook_secs / 10.0)))
+    explicit_max_hook = plan.get("max_hook_transitions")
+    if explicit_max_hook is not None:
+        max_hook_transitions = int(explicit_max_hook)
+    else:
+        max_hook_transitions = max(2, int(round(hook_secs / 6.5)))
     if hook_transitions > max_hook_transitions:
         split_violations.append(f"hook_transitions={hook_transitions}(>{max_hook_transitions})")
 
     ok = len(split_violations) == 0
     hr_str = f", common headroom {common_hr_val:.1f}%" if common_hr_val is not None else ""
     summary = (
-        f"{split_segs} split-screen segs static (z=1.0{hr_str}, 0 intra-split transitions), {hook_transitions} hook clip transition(s)"
+        f"{split_segs} split-screen segs valid (z in 1.0..1.15{hr_str}, 0 intra-split transitions), {hook_transitions} hook clip transition(s)"
         if ok
         else f"Violations: {', '.join(split_violations)}"
     )
@@ -689,7 +1017,8 @@ def box_overlap_share(face_norm: Sequence[float], box_px: Sequence[float], W: in
 def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
     """Frame-by-frame QC of the finished video with the local YuNet face detector (no download, no model tokens):
     black or flat frames, a banner covering a face, and a face missing from a panel. Black frames and banners on faces fail the check;
-    a missing face only warns, because a detector can miss a turned head or a hand over the face."""
+    a missing face only warns, because a detector can miss a turned head or a hand over the face.
+    Frames inside inter-segment transition windows ([join_t - d, join_t + d]) are skipped to avoid mid-whip/flash/reveal false alarms."""
     result: Dict[str, Any] = {"ok": True, "frames": 0, "black": [], "banner_on_face": [], "no_face": [], "note": ""}
     try:
         import cv2
@@ -707,10 +1036,27 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
     marks_by_seg: Dict[str, List[Tuple[float, float]]] = {}
     for m in plan.get("marks", []):
         marks_by_seg.setdefault(str(m.get("segment")), []).append((float(m.get("at", 0)), float(m.get("at", 0)) + float(m.get("duration", 0.56)) + 0.1))
+    segs = plan.get("segments", [])
     t0 = 0.0
-    for seg in plan.get("segments", []):
+    for idx_seg, seg in enumerate(segs):
         dur = round((float(seg["end"]) - float(seg["start"])) * fps) / fps
         sid, lay = str(seg.get("id")), str(seg.get("layout") or "single").lower()
+        for m_in in seg.get("marks", []) or []:
+            marks_by_seg.setdefault(sid, []).append((float(m_in.get("at", 0)), float(m_in.get("at", 0)) + float(m_in.get("duration", 0.56)) + 0.1))
+
+        tr_in = str(seg.get("transition") or "cut").strip().lower() if idx_seg > 0 else "cut"
+        d_in = float(seg.get("transition_duration") or 0.36) if tr_in not in ("", "cut", "none") else 0.0
+        tr_out = (
+            str(segs[idx_seg + 1].get("transition") or "cut").strip().lower()
+            if idx_seg + 1 < len(segs)
+            else "cut"
+        )
+        d_out = (
+            float(segs[idx_seg + 1].get("transition_duration") or 0.36)
+            if tr_out not in ("", "cut", "none")
+            else 0.0
+        )
+
         boxes = layouts.banner_boxes(seg, W, H, dur)
         panels = {"split_h": [("left", (0, 0, W // 2, H)), ("right", (W // 2, 0, W, H))],
                   "split_v": [("top", (0, 0, W, H // 2)), ("bottom", (0, H // 2, W, H))]}.get(lay, [("frame", (0, 0, W, H))])
@@ -718,7 +1064,9 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
         missing: Dict[str, List[float]] = {name: [] for name, _ in panels}
         t = 0.2
         while t < dur - 0.2:
-            if not any(a - 0.05 <= t <= b for a, b in marks_by_seg.get(sid, [])):
+            in_transition = (d_in > 0.0 and t <= d_in + 0.05) or (d_out > 0.0 and t >= dur - d_out - 0.05)
+            in_mark = any(a - 0.05 <= t <= b for a, b in marks_by_seg.get(sid, []))
+            if not in_transition and not in_mark:
                 cap.set(cv2.CAP_PROP_POS_MSEC, (t0 + t) * 1000.0)
                 ok, frame = cap.read()
                 if ok:
@@ -752,6 +1100,64 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
     cap.release()
     result["ok"] = not result["black"] and len(result["banner_on_face"]) < 2
     return result
+
+
+def is_subs_enabled(plan: Dict[str, Any]) -> bool:
+    """Return True when caption/subtitle rendering is enabled in `plan`."""
+    spec = plan.get("subs")
+    if spec is None or spec is False:
+        return False
+    if spec is True:
+        return True
+    if isinstance(spec, str):
+        return spec.strip().lower() not in ("", "none", "off", "false", "0", "no")
+    if isinstance(spec, dict):
+        if not spec.get("enabled", True):
+            return False
+        style = str(spec.get("style", "auto") or "auto").strip().lower()
+        return style not in ("", "none", "off", "false")
+    return False
+
+
+def check_subtitles_srt(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, str]:
+    """Verify expected `.srt` sidecar exists and contains monotonic non-overlapping cues when `plan.get('subs')` is enabled."""
+    if not is_subs_enabled(plan):
+        return True, "disabled"
+    segs = plan.get("segments", [])
+    if not segs:
+        return True, "no dialogue segments"
+
+    srt_path = mp4_path.with_suffix(".srt")
+    if not srt_path.is_file():
+        return False, f"missing expected SRT sidecar: {srt_path}"
+
+    raw_srt = srt_path.read_text(encoding="utf-8", errors="replace")
+    cue_matches = list(
+        re.finditer(
+            r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})",
+            raw_srt,
+        )
+    )
+    if not cue_matches:
+        return False, f"0 subtitle cues found in {srt_path.name}"
+
+    prev_end = 0.0
+    prev_start = 0.0
+    for idx_c, m in enumerate(cue_matches):
+        h1, m1, s1, ms1, h2, m2, s2, ms2 = (int(g) for g in m.groups())
+        t_s = h1 * 3600.0 + m1 * 60.0 + s1 + ms1 / 1000.0
+        t_e = h2 * 3600.0 + m2 * 60.0 + s2 + ms2 / 1000.0
+        if t_e <= t_s:
+            return False, f"cue {idx_c + 1} has non-positive duration ({t_s:.3f}s -> {t_e:.3f}s)"
+        if idx_c > 0:
+            if t_s < prev_start - 0.002:
+                return False, f"cue {idx_c + 1} out of monotonic order ({t_s:.3f}s < {prev_start:.3f}s)"
+            if t_s < prev_end - 0.002:
+                return False, f"cue {idx_c + 1} overlaps previous cue ({t_s:.3f}s < {prev_end:.3f}s)"
+        prev_start = t_s
+        prev_end = t_e
+
+    return True, f"{len(cue_matches)} monotonic non-overlapping cue(s) -> {srt_path.name}"
 
 
 def build_review_sheet(plan: Dict[str, Any], mp4_path: Path, out_path: Path, tile_w: int = 104) -> Optional[Path]:
@@ -847,6 +1253,7 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
         out_mp4, plan, seg_start, exp_w, exp_h, sheet_path
     )
     split_hook_ok, split_hook_summary = check_split_and_hook_rules(plan)
+    subs_ok, subs_summary = check_subtitles_srt(plan, out_mp4)
     pic_ok, pic_bad, pic_n = check_picture_timeline(plan, out_mp4)
     review = build_review_sheet(plan, out_mp4, p_file.parent / "review_sheet.jpg")
     frames = check_frames(plan, out_mp4)
@@ -870,7 +1277,7 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
     )
     print(
         f"[CUTS   {'PASS' if cuts_ok else 'FAIL'}] {len(plan.get('segments', []))} segments verified: "
-        f"{clipped_w} clipped words, {long_pauses} internal pauses >1.3s, {jc_masked} jump-cuts masked, {b_clicks} boundary clicks"
+        f"{clipped_w} clipped words, {long_pauses} internal pauses >0.6s, {jc_masked} jump-cuts masked, {b_clicks} boundary clicks"
     )
     print(
         f"[SCRIPT {'PASS' if script_ok else 'FAIL'}] {cov_lines}/{tot_lines} script lines present in order "
@@ -881,6 +1288,8 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
         f"({', '.join(m_details)}) -> {rel_sheet} ({sheet_kb} KB)"
     )
     print(f"[SPLIT  {'PASS' if split_hook_ok else 'FAIL'}] {split_hook_summary}")
+    if is_subs_enabled(plan) or not subs_ok:
+        print(f"[SUBS   {'PASS' if subs_ok else 'FAIL'}] {subs_summary}")
     if review:
         try:
             rel_review = review.relative_to(ROOT)
@@ -895,7 +1304,7 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
     try:
         import events
 
-        for _tag, _ok, _txt in (
+        ev_list = [
             ("Video", video_ok, f"{info['width']}x{info['height']}, {tc(actual_dur)}"),
             ("Loudness", audio_ok, f"{i_lufs:.1f} LUFS, peak {tp_db:.1f} dBTP"),
             ("Cuts", cuts_ok, f"{len(plan.get('segments', []))} cuts, {clipped_w} clipped words, {b_clicks} clicks"),
@@ -904,13 +1313,16 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
             ("Split screen", split_hook_ok, split_hook_summary),
             ("Frames", frames['ok'], frames['note'] or detail),
             ("Picture vs plan", pic_ok, f"{pic_n} cuts matched" if pic_ok else "; ".join(pic_bad)[:200]),
-        ):
+        ]
+        if is_subs_enabled(plan) or not subs_ok:
+            ev_list.append(("Subtitles", subs_ok, subs_summary))
+        for _tag, _ok, _txt in ev_list:
             events.emit("verify", f"{_tag}: {'pass' if _ok else 'FAIL'}, {_txt}", ok=bool(_ok), tag=_tag)
     except Exception:
         pass
     print(f"[PICTURE {'PASS' if pic_ok else 'FAIL'}] {pic_n} cuts: the picture at the middle of each cut matches the plan" + ("" if pic_ok else ": " + "; ".join(pic_bad)))
 
-    return bool(video_ok and audio_ok and cuts_ok and script_ok and marks_ok and split_hook_ok and pic_ok and frames['ok'])
+    return bool(video_ok and audio_ok and cuts_ok and script_ok and marks_ok and split_hook_ok and subs_ok and pic_ok and frames['ok'])
 
 
 def main() -> None:

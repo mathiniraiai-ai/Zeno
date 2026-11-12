@@ -1,4 +1,4 @@
-// Zeno desktop app: the window, Figma-style Google sign-in, native Cloud OTA updater, and bridge to scripts/jobs.py.
+// Zeno desktop app: the window, Google Workspace sign-in, native Cloud OTA updater, and per-user bridge to scripts/jobs.py.
 const { app, BrowserWindow, Notification, ipcMain, shell, nativeTheme, dialog, clipboard } = require('electron');
 const { execFile, spawn } = require('child_process');
 const crypto = require('crypto');
@@ -373,12 +373,17 @@ async function applyCloudUpdateNative(auth, targetRoot) {
   saveRoot(dest);
   cachedCloudInfo = null;
 
-  // Refresh Python packages in the background if requirements.txt changed and .venv exists
+  // Refresh Python packages & ensure CUDA PyTorch + NVENC FFmpeg via gpu_install.py (never raw `pip -r` which overwrites CUDA torch!)
   try {
     const rq = path.join(dest, 'requirements.txt');
+    const gpuScript = path.join(dest, 'scripts', 'gpu_install.py');
     const newReqSha = fs.existsSync(rq) ? crypto.createHash('sha256').update(fs.readFileSync(rq)).digest('hex') : '';
-    if (oldReqSha && newReqSha && oldReqSha !== newReqSha && hasVenv(dest)) {
-      spawn(venvPythonPath(dest), ['-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '-r', rq], { cwd: dest, detached: true, stdio: 'ignore' }).unref();
+    if (hasVenv(dest) && fs.existsSync(gpuScript)) {
+      if (oldReqSha && newReqSha && oldReqSha !== newReqSha) {
+        spawn(venvPythonPath(dest), [gpuScript], { cwd: dest, detached: true, stdio: 'ignore' }).unref();
+      } else if (!IS_MAC) {
+        spawn(venvPythonPath(dest), [gpuScript, '--ensure-gpu'], { cwd: dest, detached: true, stdio: 'ignore' }).unref();
+      }
     }
   } catch (e) { /* ignore */ }
 
@@ -406,8 +411,10 @@ function claudePath() {
 }
 function claudeEnv() {
   const extra = process.env.ZENO_CLAUDE_CONFIG_DIR ? { CLAUDE_CONFIG_DIR: process.env.ZENO_CLAUDE_CONFIG_DIR } : {};
+  const auth = readAppAuth();
+  const userEnv = auth && auth.email ? { ZENO_USER_EMAIL: String(auth.email).trim().toLowerCase(), ZENO_CLOUD_TOKEN: String(auth.token || '').trim() } : {};
   const home = process.env.HOME || '';
-  return { ...process.env, ...extra, PATH: [path.join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH || ''].join(path.delimiter), ZENO_EVENTS: 'on' };
+  return { ...process.env, ...extra, ...userEnv, PATH: [path.join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH || ''].join(path.delimiter), ZENO_EVENTS: 'on' };
 }
 function runClaude(args, timeout = 30000) {
   return new Promise((resolve) => {
@@ -421,11 +428,18 @@ let chatProc = null;
 function createWindow() {
   nativeTheme.themeSource = 'dark';
   const size = (arg('size') || '1240x800').split('x').map(Number);
-  const win = new BrowserWindow({
+  const iconPath = path.join(__dirname, 'build', IS_WIN ? 'icon.ico' : 'icon.png');
+  const winOpts = {
     width: size[0], height: size[1], minWidth: 980, minHeight: 640, backgroundColor: '#000000', show: !arg('screenshot'),
     titleBarStyle: IS_MAC ? 'hiddenInset' : 'default', trafficLightPosition: { x: 16, y: 16 }, title: 'Zeno',
     webPreferences: { preload: preloadEntry(ROOT), contextIsolation: true, nodeIntegration: false, sandbox: false },
-  });
+  };
+  if (fs.existsSync(iconPath)) winOpts.icon = iconPath;
+  if (IS_MAC && app.dock && !app.isPackaged) {
+    const macPng = path.join(__dirname, 'build', 'icon.png');
+    if (fs.existsSync(macPng)) { try { app.dock.setIcon(macPng); } catch (e) { /* ignore */ } }
+  }
+  const win = new BrowserWindow(winOpts);
   win.loadFile(rendererEntry(ROOT), { query: { select: arg('select') || '' } });
   const shot = arg('screenshot');
   if (shot) {
@@ -446,18 +460,55 @@ app.whenReady().then(() => {
   ROOT = findRoot();
   if (ROOT) saveRoot(ROOT);
 
+  const activeEmail = () => {
+    if (arg('skip-auth') === '1') return 'preview@gosupernova.live';
+    const a = readAppAuth();
+    return a && a.email ? String(a.email).trim().toLowerCase() : '';
+  };
+  const jobOwnedBy = (jobDir, email) => {
+    if (!email) return false;
+    for (const [fn, key] of [['owner.json', 'owner_email'], ['progress.json', 'owner_email'], ['token_telemetry.json', 'user_email']]) {
+      try {
+        const p = path.join(jobDir, fn);
+        if (fs.existsSync(p)) {
+          const d = JSON.parse(fs.readFileSync(p, 'utf8'));
+          const em = String((d && d[key]) || '').trim().toLowerCase();
+          if (em) return em === email;
+        }
+      } catch (e) { /* continue */ }
+    }
+    return false;
+  };
+
   ipcMain.handle('zeno:root', () => ROOT);
-  ipcMain.handle('zeno:jobs', () => (ROOT && hasVenv(ROOT) ? runJobs(ROOT, ['list']) : []));
-  ipcMain.handle('zeno:detail', (_e, name, since) => (ROOT && hasVenv(ROOT) ? runJobs(ROOT, ['detail', String(name), '--since', String(since || 0)]) : { error: 'Engine not ready' }));
+  ipcMain.handle('zeno:jobs', () => {
+    const em = activeEmail();
+    if (!em || !ROOT || !hasVenv(ROOT)) return [];
+    return runJobs(ROOT, ['list', '--user', em]);
+  });
+  ipcMain.handle('zeno:detail', (_e, name, since) => {
+    const em = activeEmail();
+    if (!em) return { error: 'Not signed in' };
+    if (!ROOT || !hasVenv(ROOT)) return { error: 'Engine not ready' };
+    return runJobs(ROOT, ['detail', String(name), '--since', String(since || 0), '--user', em]);
+  });
 
   ipcMain.handle('zeno:info', async (_e, check) => {
     if (!ROOT) ROOT = findRoot();
     const auth = readAppAuth();
     const signedIn = arg('skip-auth') === '1'
-      ? 'preview@zeno.local'
+      ? 'preview@gosupernova.live'
       : (auth ? String(auth.email || auth.name || 'Signed in') : '');
-    if (auth && ROOT && !fs.existsSync(path.join(ROOT, '.zeno_session.json'))) {
-      syncAuthToRoot(ROOT, auth);
+    if (auth && ROOT) {
+      let needSync = true;
+      try {
+        const sp = path.join(ROOT, '.zeno_session.json');
+        if (fs.existsSync(sp)) {
+          const cur = JSON.parse(fs.readFileSync(sp, 'utf8'));
+          needSync = !cur || cur.token !== auth.token || String(cur.email || '').toLowerCase() !== String(auth.email || '').toLowerCase();
+        }
+      } catch (e) { needSync = true; }
+      if (needSync) syncAuthToRoot(ROOT, auth);
     }
     const ver = localVersion(ROOT);
     const st = readUpdateState(ROOT);
@@ -503,11 +554,14 @@ app.whenReady().then(() => {
   });
   // the editor's Yes: render the approved plan (reel and square) in the background; the app then follows it live
   ipcMain.handle('zeno:render', (_e, name, planFile) => {
-    if (!ROOT || !/^[\w.\-]+$/.test(String(name)) || !/^[\w.\-]+\.edl$/.test(String(planFile))) return { ok: false, text: 'Not a valid job.' };
-    const plan = path.join(ROOT, 'work', String(name), String(planFile));
+    const em = activeEmail();
+    if (!em || !ROOT || !/^[\w.\-]+$/.test(String(name)) || !/^[\w.\-]+\.edl$/.test(String(planFile))) return { ok: false, text: 'Not a valid job.' };
+    const jobDir = path.join(ROOT, 'work', String(name));
+    if (!jobOwnedBy(jobDir, em)) return { ok: false, text: 'This project belongs to another account.' };
+    const plan = path.join(jobDir, String(planFile));
     if (!fs.existsSync(plan)) return { ok: false, text: 'The plan file is missing.' };
-    const log = fs.openSync(path.join(ROOT, 'work', String(name), '_render.log'), 'a');
-    const child = spawn(pythonFor(ROOT), [path.join(ROOT, 'scripts', 'zeno.py'), '--execute', plan, '--square'], { cwd: ROOT, detached: true, stdio: ['ignore', log, log], env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
+    const log = fs.openSync(path.join(jobDir, '_render.log'), 'a');
+    const child = spawn(pythonFor(ROOT), [path.join(ROOT, 'scripts', 'zeno.py'), '--execute', plan, '--square'], { cwd: ROOT, detached: true, stdio: ['ignore', log, log], env: { ...process.env, ZENO_USER_EMAIL: em, PYTHONIOENCODING: 'utf-8' } });
     child.unref();
     return { ok: true };
   });
@@ -551,7 +605,7 @@ app.whenReady().then(() => {
     if (chatProc) return { ok: false, text: 'Claude is still working on the last message.' };
     const send = (evt) => { try { e.sender.send('zeno:chat', evt); } catch (er) { /* window closed */ } };
     const args = ['-p', String(message), '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits',
-      '--allowedTools', 'Bash(python3:*)', 'Bash(.venv/bin/python:*)', 'Bash(ls:*)', 'Bash(grep:*)', 'Bash(cat:*)', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'mcp__zeno'];
+      '--allowedTools', 'Bash(python3:*)', 'Bash(python:*)', 'Bash(.venv/bin/python:*)', 'Bash(.venv/Scripts/python.exe:*)', 'Bash(ls:*)', 'Bash(grep:*)', 'Bash(cat:*)', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'mcp__zeno'];
     args.push('--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: { [ZENO_MCP_NAME]: { command: pythonFor(ROOT), args: [path.join(ROOT, 'scripts', 'zeno_mcp.py')] } } }));
     const o = opts || {};
     if (/^[\w.\-]+$/.test(String(o.model || ''))) args.push('--model', String(o.model));
@@ -593,7 +647,7 @@ app.whenReady().then(() => {
     return true;
   });
 
-  // Figma-style Google Sign-In: opens the real Zeno server page in the browser, polls /api/auth/cli-poll,
+  // Browser-based Google Workspace Sign-In: opens the Zeno Cloud login page in the browser, polls /api/auth/cli-poll,
   // saves desktop session, Cloud-bootstraps ~/Documents/Zeno automatically on fresh client machines, and focuses Zeno.
   const CLOUD = (process.env.ZENO_CLOUD_URL || DEFAULT_CLOUD_URL).replace(/\/+$/, '');
   let signInBusy = false;

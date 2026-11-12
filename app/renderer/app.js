@@ -177,7 +177,7 @@ function mainHtml(d) {
     if (state.info && state.info.signed_in && !state.info.engine_ready) {
       const msg = !state.info.root
         ? '<b>Connected to Zeno Cloud.</b><br>Click below to download the Zeno editing engine to your Documents folder.<br><br><button class="primary" id="doCloudUpdate" style="width:auto;padding:8px 16px">Download Zeno Engine</button>'
-        : '<b>Zeno workspace downloaded!</b><br>Click once below to finish setting up local FFmpeg &amp; AI timing models on this computer.<br><br><button class="primary" id="runEngineSetup" style="width:auto;padding:8px 16px">Finish One-Time Engine Setup</button>';
+        : '<b>Setting up Zeno local Python 3.12 &amp; GPU engine…</b><br>Zeno opened the one-time setup window to install <code>.venv</code>, FFmpeg, and AI timing models in <code>Documents/Zeno</code>. Once that window finishes, this screen switches to Ready automatically.<br><br><button class="primary" id="runEngineSetup" style="width:auto;padding:8px 16px">Open / Retry One-Time Engine Setup</button>';
       return skeletonHtml('Welcome to Zeno', msg, true);
     }
     return skeletonHtml('No edit selected', state.jobs.length ? 'Pick an edit on the left, or start a new one in Claude with /zeno and it appears here live.' : 'Start an edit in Claude with /zeno. This window then shows every step live.', false);
@@ -386,12 +386,59 @@ async function loadDetail() {
     renderMain();
   } finally { state.busy = false; }
 }
+function resetWorkspaceState(who) {
+  state.jobs = [];
+  state.selected = null;
+  state.picked = false;
+  state.detail = null;
+  state.events = [];
+  state.scans = [];
+  state.scanIdx = 0;
+  state.last = 0;
+  state.askOpen = null;
+  state.doneOpen = null;
+  state.phases = {};
+  asked.clear();
+  sp.cache.clear();
+  sp.built = null;
+  sp.pin = null;
+  sp.sig = '';
+  lastMain = '';
+  try {
+    state.blank = who ? localStorage.getItem(`zenoBlank:${who}`) === '1' : false;
+  } catch (e) { state.blank = false; }
+}
+
+function maybeAutoStartEngineSetup() {
+  if (!state.info || !state.info.signed_in || !state.info.root || state.info.engine_ready) return;
+  const key = `zenoAutoSetup:${state.info.root}`;
+  try {
+    if (sessionStorage.getItem(key) === '1') return;
+    sessionStorage.setItem(key, '1');
+  } catch (e) {
+    if (state.autoSetupTriggered) return;
+    state.autoSetupTriggered = true;
+  }
+  window.zeno.runSetup();
+}
+
 async function loadInfo(check) {
+  const prevReady = !!(state.info && state.info.engine_ready);
   const i = await window.zeno.info(check);
   if (i && !i.error) {
+    const who = String(i.signed_in || '').trim().toLowerCase();
+    if (who !== (state.activeUser || '')) {
+      state.activeUser = who;
+      resetWorkspaceState(who);
+    }
     state.info = i;
     renderSide();
     paintSignIn();
+    maybeAutoStartEngineSetup();
+    if (prevReady !== !!i.engine_ready) {
+      lastMain = '';
+      renderMain();
+    }
     const u = i.update;
     if (u && u.available) {
       const key = u.bundle_sha256 || u.latest_version || 'upd';
@@ -422,10 +469,10 @@ function paintSignIn() {
   el.innerHTML = `<div class="si-drag"></div><div class="upd-card si-card">
     <div class="si-logo"><i></i><span>Zeno</span></div>
     <h3>Sign in to Zeno</h3>
-    <div class="upd-sub">Continue in your browser with your Google account to connect Zeno Cloud &amp; automatic updates.</div>
+    <div class="upd-sub">Sign in with your Google account to open your private Zeno workspace and automatic Cloud updates.</div>
     ${state.signInError ? `<div class="upd-err">${esc(state.signInError)}</div>` : ''}
     <div class="upd-acts"><button class="primary si-btn" id="doSignIn" ${state.signingIn ? 'disabled' : ''}>${gIcon}<span>${state.signingIn ? 'Waiting for Google in your browser…' : 'Continue with Google'}</span></button></div>
-    <div class="si-hint">${state.signingIn ? 'Complete Google sign-in in the browser tab that just opened. Zeno will connect automatically.' : 'Redirects securely to Zeno Cloud in your default browser — just like Figma.'}</div>
+    <div class="si-hint">${state.signingIn ? 'Complete Google sign-in with your <b class="si-dom">@gosupernova.live</b> account in the browser tab that opened.' : 'Only <b class="si-dom">@gosupernova.live</b> accounts can sign in.'}</div>
   </div>`;
 }
 async function doSignIn() {
@@ -515,7 +562,7 @@ document.addEventListener('click', async (e) => {
   const rs = e.target.closest('[data-rsrc]'); if (rs) { state.rsrc = rs.dataset.rsrc; lastMain = ''; renderMain(); return; }
   if (e.target.closest('[data-close]')) {
     state.blank = true; state.picked = false; state.selected = null; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; state.askOpen = null; state.doneOpen = null; state.rtab = 'result';
-    try { localStorage.setItem('zenoBlank', '1'); } catch (er) { /* not saved */ }
+    try { if (state.activeUser) localStorage.setItem(`zenoBlank:${state.activeUser}`, '1'); } catch (er) { /* not saved */ }
     lastMain = ''; paintAsk(); paintDone(); renderSide(); renderMain(); return;
   }
   if (e.target.closest('[data-ask]')) { state.askOpen = state.detail && state.detail.name; paintAsk(); return; }
@@ -528,7 +575,7 @@ document.addEventListener('click', async (e) => {
   }
   const chip = e.target.closest('.schips button'); if (chip) { sp.pin = sp.pin === chip.dataset.clip ? null : chip.dataset.clip; sp.idx = 0; sp.sig = ''; paintScan(); return; }
   const li = e.target.closest('#jobs li[data-name]');
-  if (li) { state.blank = false; try { localStorage.setItem('zenoBlank', '0'); } catch (e) { /* not saved */ } state.picked = true; state.selected = li.dataset.name; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; lastMain = ''; renderSide(); renderMain(); loadDetail(); return; }
+  if (li) { state.blank = false; try { if (state.activeUser) localStorage.setItem(`zenoBlank:${state.activeUser}`, '0'); } catch (e) { /* not saved */ } state.picked = true; state.selected = li.dataset.name; state.detail = null; state.events = []; state.scans = []; state.scanIdx = 0; state.last = 0; lastMain = ''; renderSide(); renderMain(); loadDetail(); return; }
   const rv = e.target.closest('[data-reveal]'); if (rv) { window.zeno.reveal(rv.dataset.reveal); return; }
   const op = e.target.closest('[data-open]'); if (op) { window.zeno.open(op.dataset.open); return; }
   if (e.target.closest('#newEdit')) { window.zeno.newEdit(); return; }
@@ -566,6 +613,7 @@ document.addEventListener('click', async (e) => {
   loadInfo(true);
   setInterval(loadJobs, 2500);
   setInterval(loadDetail, 1000);
+  setInterval(() => { if (state.info && state.info.signed_in && !state.info.engine_ready) loadInfo(false); }, 4000);
   setInterval(() => loadInfo('force'), 180000);
   window.addEventListener('resize', () => { restoreLayout(); fitList(); lastMain = ''; renderMain(); });
 })();

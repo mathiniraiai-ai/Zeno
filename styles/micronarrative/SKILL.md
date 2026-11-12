@@ -22,13 +22,13 @@ A short story skit (`60–130s`): a live-action problem scene, a friend's tip or
 
 ---
 
-## 2b. Emotion zooms and effect sounds (owner decision, 2026-11-04)
+## 2b. Emotion zooms, active-panel split engagement, and calibrated SFX
 
-The reference videos this style was learned from used **no digital zoom and no effect sounds** (`spec.json` -> `zoom`, `audio`). The owner asked for emotion-driven zooms and effects on top of that, so they are a deliberate addition, kept sparse:
+The reference videos this style was first measured from used no digital zoom (`spec.json` -> `zoom`). For high-retention Reels / Meta ads, Zeno pairs tight narrative storytelling with dynamic motion, active-panel split zooms, smooth eased transitions, Premiere-grade `#subs auto y=72` captions, and calibrated post-`loudnorm` SFX:
 
-- **The Director analyses the script first** and writes `work/<project>/script_analysis.md`: per spoken line the emotion (with intensity 1 to 3), the beat, the zoom kind and the effect sound, with at most 3 PEAK moments in the whole video. The full method, the emotion-to-zoom table (rapid and slow zooms, where on the word) and the effect-sound table with exact timing are in [`agent/EDIT_RULES.md`](../../agent/EDIT_RULES.md) -> "Emotion plan", "Zoom" and "Sound effects".
-- **Values for this style (starting points, tune from the owner's feedback):** rapid zoom `1.08` (one `flash_zoom 1.12` at most), slow push `1.04` to `1.06`, closing call to action `1.05`; at most 8 rapid zooms a minute and never two in a row; at least a quarter of the single-speaker cuts stand still.
-- **Splits and holograms stay still** (`z=1`); their energy comes from the cut and the effect. The full-frame live conversation, two-shots of live actors included, is for Meta ads and moves more: see "Ad tempo for Meta ads" in `EDIT_RULES.md`.
+- **The Director analyses the script first** and writes `work/<project>/script_analysis.md`: per spoken line the emotion (with intensity 1 to 3), the beat, the zoom kind (for both full-frame AND active split-screen panels), and the calibrated `-4 to 0 dB` SFX, scaling PEAK moments with video length (~1 PEAK every `12 to 18 s`). Full tables and exact timing rules live in [`agent/EDIT_RULES.md`](../../agent/EDIT_RULES.md).
+- **Values for this style:** rapid punch-in `sudden_in:1.08@<beat>` (one `flash_zoom:1.12` max on a full-frame climax), smooth push-in `1.0->1.06` / `1.0->1.07` on emotional or teaching turns `>= 2.5 s`, pause-trim / mid-stumble-trim step zoom `1.08`, closing CTA `1.0->1.06`; up to 16 rapid zooms per minute without two rapid `sudden_in` snaps back-to-back, keeping short calm reaction beats at `1.0` for contrast.
+- **Active-Panel Split Engagement (`split_h`, `split_v`, and baked splits):** Zoom the **active speaking character's panel** (`1.0->1.06` / `1.0->1.07` on turns `>= 2.5 s`, `sudden_in:1.08@<beat>` on punchlines/emphasis words, or `1.08` step zoom when cutting internal `> 0.25 s` pauses; max `1.12`) while the silent listening panel stays locked at `1.0` with a stationary divider seam! Pair key split punch-ins, reveals, and speaker-turn shifts with clean beat SFX (`pop.wav` at `-3 dB`, `whoosh.wav`/`sn_swish_1.wav` at `-3 to -2 dB`, `sn_punch_1.wav` at `-2 to -1 dB`, `sn_riser_1.wav` at `-3 to -2 dB`). Only 3D holograms, camera-panning clips, and edge-framed shared two-shots (`none` in `facts.md`) lock `z=1.0`.
 - The library has no laugh, gasp, heartbeat or sad sting. Use the footage's own sound or a short silence, or ask the owner for licensed files.
 
 ---
@@ -66,14 +66,14 @@ Always check how the raw footage was generated before assigning layouts in `plan
 - **How the raw clips look**: Each raw `.mp4` clip coming from **Google Flow** already has the vertical split screen (Character A + Character B side-by-side or stacked) **stitched inside a single video frame** (`720×1280` or `1080×1920`).
 - **How Zeno edits them**:
   - **DO NOT** use `split_h` or `split_v` with `peer=` (which would crop and double-stack an already-split frame).
-  - Match the clips **straight in sequence using `layout=single`** and lock **`zoom=1.0`**.
-  - Cut cleanly from clip to clip at each dialogue turn boundary (`0.10–0.20s` pre-roll before speech onset, `0.03–0.20s` post-roll after speech end).
+  - Match the clips in sequence using **`layout=single` with `slot=top|bottom|left|right` (or `active=top|bottom|left|right`)** so active-panel zooms (`1.0->1.06`/`1.07` on turns `>= 2.5s`, `sudden_in:1.08@<beat>` on punchlines, `1.08` step zoom on `> 0.25s` pause cuts; max `1.12`) zoom **only** the speaking half while the baked seam and silent listener stay locked at `1.0`!
+  - Tighten dialogue turn joins to **`0.06–0.15s`** (never `> 0.20s` dead air; keep **`0.02–0.05s` breath margin max** around already-padded `facts.md` word timestamps).
 
 ### Mode B — Separate Character Clips (HeyGen / Separate Renders)
 - **How the raw clips look**: Character A (e.g., Miss Nova) and Character B are generated as **two separate single-person video files**.
 - **How Zeno edits them**:
   - Composite them together using `layout=split_h` (left/right 50/50 vertical split) or `layout=split_v` (top/bottom 50/50 split) with `peer=<partner_clip>@<in>..<out>`.
-  - Swap panels cleanly at turn boundaries while keeping the full frame divider locked (`#E1DBE1` thin divider, both panels live).
+  - **Active-panel zoom + beat SFX**: Zoom the active speaking panel (`1.0->1.06`/`1.07`, `sudden_in:1.08@<beat>`, or `1.08` pause-cut step; max `1.12`) + crisp beat SFX (`pop.wav` at `-3 dB`, `whoosh.wav`/`sn_swish_1.wav` at `-3 to -2 dB` on key shifts) while the silent listener panel (`peer=`) and `#E1DBE1` divider stay locked at `1.0`. Cut internal pauses `> 0.25s` inside turns `> 5s` into `L4a`/`L4b` while advancing `peer=` continuously across the cut. Enter/exit splits smoothly via `tr=split_reveal@0.40` or `tr=warm_flash@0.38`.
 
 ### Mode C — In-Frame Two-Shot & 3D Hologram Skit (`1.1 Skit based micro narrative` + `2.1 Hologram`)
 - **How the raw clips look**: Portrait `9:16` (`720×1280`) clips where Scene 1 uses single/OTS shots, Scene 2 frames two characters side-by-side in a galley/room two-shot, and Scene 3 features Miss Nova's 3D hologram popping out of a phone in-frame with the learner.
@@ -88,35 +88,36 @@ Always check how the raw footage was generated before assigning layouts in `plan
   - **Voiceover Mux (`<stem>VO.mp4`)**: Mux `<stem>.mp4` video (`0:v:0`) with `<stem>VO.mp4` audio (`1:a:0`) so the listening actor's video carries the clean phone-partner voiceover and word timestamps.
   - **Strikethrough Cutaway (`3.mp4`)**: Stack 3 red strikethrough pill banners (`banner:"How are you?"@0.18`, `banner:"How was your weekend?"@1.01`, `banner:"How's the weather?"@2.38`) synchronized to each phrase onset + `mark:wrong`.
   - **Top Floating Window (`layout=top_pip`)**: Full-screen `1080×1920` background shows the human learner (`M1`, `M2`, or `M extra.mp4` looping live when listening), while a clean top-center rounded rectangle (`750×420` at `x=165, y=20, radius=36px`, no phone status-bar chrome) shows the AI Robot (`R1`..`r4`, or `R extra.mp4` looping live when listening).
-  - **Multi-Turn Interleaving & Head-Repeat Cuts**: Split multi-turn clips (`R1.mp4` -> `L12, L14, L16`; `M1.mp4` -> `L13, L15, L17`; `M2.mp4` -> `L19, L21`) at exact inter-turn silence midpoints, and trim head false-starts (e.g., `R2.mp4` first `"कोई बात नहीं!"` `0.00–1.02s` discarded).
+  - **Multi-Turn Interleaving & Zero Stumbles/Repeats**: Split multi-turn clips (`R1.mp4` -> `L12, L14, L16`; `M1.mp4` -> `L13, L15, L17`; `M2.mp4` -> `L19, L21`) at tight turn boundaries (`0.06–0.15s` joins), and check `! REPEAT / STUMBLE` flags in `facts.md` to trim every head, mid-sentence (`L5a` + `L5b` masked with `1.08` punch-in), and cross-boundary stumble or repeated phrase (e.g., `R2.mp4` first `"कोई बात नहीं!"` `0.00–1.02s` discarded).
 
 ---
 
 ## 4. Scene Structure & Editorial Rules
 
 1. **First Half — Live-Action Scenes (`Scene 1` Problem + `Scene 2` Tip/Continuation)**:
-   - `layout=single`, speaker-follow cuts across wide establishing shots, speaker close-ups, two-shots, and reaction beats.
-   - Preserve natural reaction/laughter beats where indicated in the script.
+   - `layout=single`, snappy speaker-follow cuts (`0.06–0.15s` turn joins, `> 0.25s` internal monologue pauses split into `L4a`/`L4b` with `1.08` punch-ins) across wide establishing shots, speaker close-ups, two-shots, and reaction beats.
+   - Preserve scripted reaction/laughter beats while trimming every `! REPEAT / STUMBLE` false start or boundary repeat.
 2. **Second Half — AI Teacher Demo (`Scene 3` Split Screen or Hologram)**:
-   - If pre-stitched in Google Flow or in-frame 3D hologram: `layout=single`, `zoom=1.0`.
-   - If separate HeyGen clips: `layout=split_h` / `split_v` with `peer=` compositing, `zoom=1.0`.
+   - **Separate HeyGen clips (`split_h` / `split_v`)**: Composite with `peer=`, zooming the active speaking panel (`1.0->1.06`/`1.07` on turns `>= 2.5s`, `sudden_in:1.08@<beat>`, `1.08` step zoom on `> 0.25s` pause cuts; max `1.12`) + calibrated `-4 to 0 dB` beat SFX while the silent listener and divider stay locked at `1.0`.
+   - **Pre-stitched Google Flow split**: `layout=single` with `slot=top|bottom|left|right` (or `active=top|bottom|left|right`) for active-panel zoom (`<= 1.12`) with locked seam and steady listener.
+   - **In-frame 3D hologram**: `layout=single`, `zoom=1.0`.
 3. **Where to Zoom vs. Where NOT to Zoom**:
-   - **NO Zoom / NO Zoom-Out (`zoom=1.0`)**:
-     - **Never** put zoom-ins or zoom-outs on **pre-stitched split-screen clips**, **3D hologram shots** or two-shots with faces at the frame edge.
-     - **Never** put zoom on clips that already have camera movement (detected automatically by OpenCV `detect_static_camera_motion()`).
-   - **Where to Apply Zoom**:
-     - Apply zoom **only** on static single-speaker close-ups/mid-shots in Scene 1 or single-speaker turns when needed:
-       - `zoom=1.08` punch-in to mask same-clip jump cuts.
-       - 3× supersampled sub-pixel `mild_in` (`1.0->1.06`), `mild_out` (`1.08->1.0`), or `flash_zoom` (`sudden_in` / `sudden_out`) on static single-speaker emphasis lines.
-4. **Where to Put On-Screen Text vs. Where NOT to (`21132` "Stop Saying" Stacked Strikethrough Hook)**:
-   - **Put on-screen text ONLY** where the script explicitly cues a "Stop saying..." hook list (e.g., `Stop saying: "What do you mean?", "I don't understand", "Repeat please"`).
-   - **Never** add unrequested decorative text where not specified in the script. When subtitles are requested, use `#subs` (see "Subtitles" in `EDIT_RULES.md`).
-5. **Where to Show Errors (`✗` / `✓`) vs. Where NOT to**:
-   - **Show `✗` (`wrong`) and `✓` (`right`) marks ONLY** when the script contains an explicit spoken-English learner mistake (`[WRONG]`) followed by the teacher's correction (`[RIGHT]`).
-   - **Exact End-of-Dialogue Placement (`~0.70–1.00s` Post-Dialogue Hold Before Next Cut)**: Trigger `mark:wrong` or `mark:right` right where the wrong or right dialogue is completed (`at = <last_word_end - cut_start>`), **just before the next dialogue starts**. Extend that segment's `end` by **`~0.70–1.00s`** after the last spoken word so the flashy green/red gradient (`green_flash.png` / `red_flash.png`, `mark_pack: flash`, `0.56s`) and SFX (`sn_wrong.wav` `+4 dB` or `correct_ding.wav` `+2.5 dB`) play out completely on that speaker before cutting to the next dialogue turn.
-6. **Where Transitions Are Added**:
-   - Placed **at scene boundaries** (e.g., `Scene 1 -> Scene 2` and `Scene 2 -> Scene 3`) using `tr=whip_left@0.28` / `whip_right@0.28` + `whoosh.wav` (or `tr=warm_flash@0.38`), while keeping all intra-scene cuts as clean hard cuts (`tr=cut`).
-   - All transitions use **Zero-Audio-Loss (`tpad` video tail cloning + `0.00s` audio concat)** so zero words or syllables are ever swallowed at cuts.
+   - **Lock `zoom=1.0` ONLY on**:
+     - **3D hologram shots** or shared single-camera two-shots whose faces sit near the frame edges (`none` in `facts.md`).
+     - Clips with deliberate camera movement (pan/dolly, detected by OpenCV `detect_static_camera_motion()`).
+   - **Apply Dynamic Zoom on BOTH Full-Frame AND Active Split Panels**:
+     - Full-frame `single` shots, safe live two-shots (`<= 1.10` with `focus=x,y`), AND active speaking panels in `split_h`, `split_v`, and baked splits (`<= 1.12`):
+       - `zoom=1.08` step punch-in to mask internal `> 0.25s` pause cuts or mid-sentence stumble cuts (`L5a` + `L5b`).
+       - Smooth sub-pixel push-in (`1.0->1.06` / `1.0->1.07`) on turns `>= 2.5s`, pull-out (`1.08->1.0` / `1.06->1.0`), or rapid `sudden_in:1.08@<beat>` / `flash_zoom:1.12@<beat>` on punchlines and emphasis words.
+4. **Premiere-Grade Auto-Captions (`#subs auto y=72`) & On-Screen Text (`21132` "Stop Saying" Hook)**:
+   - **Animated Auto-Captions ON by Default**: Include `#subs auto y=72` in `plan.edl` on every reel (`y=50` automatically on the `split_v` seam so faces are never covered; set `#subs off` **only** if the user explicitly asks for no subtitles).
+   - **Extra `banner:` Cards ONLY When Scripted**: Add stacked banners only where the script cues a `"Stop saying..."` list or strikethrough phrase (no unrequested decorative B-roll or spammy CTAs).
+5. **Where to Show Errors (`✗` / `✓`) & Snappy Hold Timing (`0.35–0.42s`)**:
+   - **Show `✗` (`wrong`) and `✓` (`right`) marks ONLY** when the script marks a learner mistake (`[WRONG]`) or correction (`[RIGHT]`).
+   - **Snappy End-of-Dialogue Placement (`0.35–0.42s` Hold Tail, `0.48s` 2-Pulse Flash)**: Trigger `mark:wrong` or `mark:right` right as the sentence finishes (`at = <last_word_end - cut_start - 0.06>`), set duration to **`0.48s`**, and extend the segment `end` by **only `0.35–0.42s`** after `last_word_end` (never `0.70–1.00s` frozen tails!), playing calibrated post-`loudnorm` SFX (`sn_wrong.wav` at `+1.0 dB` or `correct_ding.wav` + `sn_correct.wav` at `+0.5 dB`).
+6. **Smooth Eased Motion Transitions & Cadence (`every 7–9s`)**:
+   - Place smooth physical transitions **every `7–9s` (`4–6` transitions in a `35–45s` reel)** at scene shifts, hook-to-split entry (`tr=split_reveal@0.40` opposing panel slide-in or `tr=warm_flash@0.38`), split-to-teaching exit (`tr=split_reveal@0.40` or `tr=whip_right@0.34`), and topic turns (`tr=whip_left@0.34`, `tr=whip_right@0.34`, `tr=slide_up@0.36`, `tr=zoom_burst@0.36`, `tr=flash_zoom@0.36`), keeping fast back-and-forth turns inside a continuous split as crisp `tr=cut` swaps.
+   - All transitions use **Zero-Audio-Loss (`tpad` video tail cloning + `0.00s` audio concat)** so zero words or syllables are ever clipped.
 7. **4-Clip Split-Screen Workflow (2 Talking Clips + 2 Dedicated Listening Clips — Never Static Images)**:
    - When the user provides **4 clips** for a `split_h` or `split_v` dialogue scene (Character A Talking, Character B Talking, Character A Listening, Character B Listening), [`scripts/layouts.py`](../../scripts/layouts.py) uses the dedicated listening clip (a quiet stretch of it, `peer=`) so the listening character is **live moving video**; a still frame is used only when that character has no quiet stretch, and the brief says `[LISTENER_FALLBACK]`.
 8. **Notion Naming & Ratio Prefix Convention (`~/Downloads/Zeno Outputs/<Notion name>/`)**:

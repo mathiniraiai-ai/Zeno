@@ -58,6 +58,8 @@ BUNDLE_DIRS = (
     "assets",
     "tests",
     "app/renderer",
+    "app/build",
+    "app/scripts",
 )
 
 APP_TOP_FILES = (
@@ -73,6 +75,7 @@ SKIP_NAMES = {
     "__pycache__",
     ".env",
     ".zeno_session.json",
+    ".zeno_owner_session.json",
     ".zeno-dev",
     "zeno_telemetry.db",
     "zeno_keys.db",
@@ -184,11 +187,44 @@ def build_bundle_bytes() -> Tuple[bytes, int, str]:
     return blob, len(unique_entries), sha256
 
 
-def _auth_headers(admin_password: str = "") -> Tuple[str, Dict[str, str]]:
+OWNER_SESSION_FILE = ROOT / ".zeno_owner_session.json"
+
+
+def _load_owner_token() -> str:
+    if OWNER_SESSION_FILE.is_file():
+        try:
+            d = json.loads(OWNER_SESSION_FILE.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(d, dict):
+                t = str(d.get("token") or "").strip()
+                if t:
+                    return t
+        except Exception:
+            pass
+    return ""
+
+
+def _save_owner_session_from_active() -> None:
+    src = ROOT / ".zeno_session.json"
+    if not src.is_file():
+        return
+    try:
+        raw = src.read_bytes()
+        OWNER_SESSION_FILE.write_bytes(raw)
+        os.chmod(OWNER_SESSION_FILE, 0o600)
+    except Exception:
+        pass
+
+
+def _auth_headers(admin_password: str = "", prefer_owner: bool = True) -> Tuple[str, Dict[str, str]]:
     import auth_session
+    try:
+        import common as _common  # loads .env into os.environ safely without printing secrets
+        _ = _common.ROOT
+    except Exception:
+        pass
 
     base = auth_session.get_cloud_url().rstrip("/")
-    tok = auth_session.get_active_token()
+    tok = (_load_owner_token() if prefer_owner else "") or auth_session.get_active_token()
     headers: Dict[str, str] = {"X-Zeno-Admin": "1"}
     pw = (admin_password or os.environ.get("ZENO_ADMIN_PASSWORD", "")).strip()
     if pw:
@@ -234,8 +270,17 @@ def publish_to_cloud(
         "exe_url": exe_url,
     }
     resp = httpx.post(f"{base}/v1/admin/release", headers=headers, data=data, files=files, timeout=120.0)
+    if resp.status_code == 403 and os.environ.get("ZENO_RELEASE_LOGIN_ON_403") == "1":
+        import auth_session
+        print("  [Release] Current session is not the release owner; opening browser to sign in as owner...")
+        if auth_session.interactive_login(cloud_url=base, timeout_sec=180.0):
+            _save_owner_session_from_active()
+            base, headers = _auth_headers(admin_password, prefer_owner=True)
+            resp = httpx.post(f"{base}/v1/admin/release", headers=headers, data=data, files=files, timeout=120.0)
     if resp.status_code != 200:
         raise RuntimeError(f"Cloud server returned HTTP {resp.status_code}: {resp.text[:300]}")
+    if not OWNER_SESSION_FILE.is_file():
+        _save_owner_session_from_active()
     return resp.json()
 
 
@@ -284,16 +329,21 @@ def main() -> int:
         return 0
 
     notes = args.notes.strip() or f"Zeno v{target_ver} cloud update"
-    res = publish_to_cloud(
-        version=target_ver,
-        sha=short_sha,
-        blob=blob,
-        notes=notes,
-        mandatory=args.mandatory,
-        dmg_url=args.dmg_url,
-        exe_url=args.exe_url,
-        admin_password=args.admin_password,
-    )
+    try:
+        res = publish_to_cloud(
+            version=target_ver,
+            sha=short_sha,
+            blob=blob,
+            notes=notes,
+            mandatory=args.mandatory,
+            dmg_url=args.dmg_url,
+            exe_url=args.exe_url,
+            admin_password=args.admin_password,
+        )
+    except Exception:
+        if target_ver != cur_ver:
+            write_version(cur_ver)
+        raise
     rel = res.get("release") or {}
     print(f"  [Release] ✓ Published Zeno v{rel.get('version')} to Zeno Cloud! All client apps will receive it automatically.")
     return 0

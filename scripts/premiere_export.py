@@ -18,11 +18,14 @@ from __future__ import annotations
 import argparse
 import base64
 import gzip
+import json
 import math
 import os
 import pathlib
+import shutil
 import urllib.parse
 import uuid
+import wave
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
@@ -31,10 +34,65 @@ import common as _common
 REPO = getattr(_common, "ROOT", pathlib.Path(__file__).resolve().parent.parent)
 OUTPUT = getattr(_common, "OUTPUT", pathlib.Path.home() / "Downloads" / "Zeno Outputs")
 
+_AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac"}
+_SFX_ALIASES = {
+    "ui_pop.wav": "pop.wav",
+    "riser.wav": "sn_riser_1.wav",
+}
+
+
+def _resolve_sfx_path(sx_ref: str | pathlib.Path) -> pathlib.Path | None:
+    if not sx_ref:
+        return None
+    raw_p = pathlib.Path(sx_ref)
+    mapped_name = _SFX_ALIASES.get(raw_p.name.lower(), raw_p.name)
+    if mapped_name != raw_p.name:
+        cand_alias = (REPO / "assets" / "sfx" / mapped_name).resolve()
+        if cand_alias.is_file():
+            return cand_alias
+    if raw_p.is_absolute() and raw_p.is_file():
+        return raw_p.resolve()
+    cand_repo = (REPO / "assets" / "sfx" / mapped_name).resolve()
+    if cand_repo.is_file():
+        return cand_repo
+    if hasattr(_common, "resolve_sfx_asset"):
+        try:
+            resolved = _common.resolve_sfx_asset(mapped_name)
+            if resolved and pathlib.Path(resolved).is_file():
+                return pathlib.Path(resolved).resolve()
+        except Exception:
+            pass
+    if raw_p.is_file():
+        return raw_p.resolve()
+    return None
+
+
+def _split_seam_crop_pct(z_val: float) -> float:
+    """Clip-space symmetric crop % per side so a panel zoomed by `z_val` stays exact 50% canvas width/height."""
+    z_clamped = max(1.0, float(z_val))
+    return round(max(0.0, min(49.5, 50.0 * (1.0 - 0.5 / z_clamped))), 4)
+
 
 def probe_duration(p: pathlib.Path) -> float:
-    info = _common.probe(p)
-    return float(info.get("duration") or 60.0)
+    p = pathlib.Path(p)
+    is_audio = p.suffix.lower() in _AUDIO_EXTS
+    fallback = 1.5 if is_audio else 60.0
+    try:
+        info = _common.probe(p)
+        dur = float(info.get("duration") or 0.0)
+        if dur > 0.01:
+            return dur
+    except Exception:
+        pass
+    if p.suffix.lower() == ".wav" and p.is_file():
+        try:
+            with wave.open(str(p), "rb") as wf:
+                rate = wf.getframerate()
+                if rate > 0:
+                    return max(0.05, wf.getnframes() / float(rate))
+        except Exception:
+            pass
+    return fallback
 from edl_parser import load_edl
 import layouts
 
@@ -48,22 +106,34 @@ def load_plan(plan_path: pathlib.Path) -> dict:
 
 def parse_zoom_spec(spec) -> dict:
     if hasattr(layouts, "parse_zoom_spec"):
-        return layouts.parse_zoom_spec(spec)
+        try:
+            return layouts.parse_zoom_spec(spec)
+        except Exception:
+            pass
     if isinstance(spec, (int, float)):
         v = float(spec)
-        return {"z0": v, "z1": v}
+        return {"z0": v, "z1": v, "style": "smooth"}
     s = str(spec or "1.0").strip()
+    style = "smooth"
+    if ":" in s:
+        st_part, rhs = s.split(":", 1)
+        style = st_part.strip().lower() or "smooth"
+        s = rhs.split("@", 1)[0].strip()
     if "->" in s:
         a, b = s.split("->", 1)
         try:
-            return {"z0": float(a), "z1": float(b)}
+            return {"z0": float(a), "z1": float(b), "style": style}
         except Exception:
             pass
     try:
         v = float(s)
-        return {"z0": v, "z1": v}
+        if style in ("sudden_in", "push", "in"):
+            return {"z0": 1.0, "z1": v, "style": style}
+        if style in ("sudden_out", "pull", "out"):
+            return {"z0": v, "z1": 1.0, "style": style}
+        return {"z0": v, "z1": v, "style": style}
     except Exception:
-        return {"z0": 1.0, "z1": 1.0}
+        return {"z0": 1.0, "z1": 1.0, "style": "smooth"}
 
 PREMIERE_TICKS_PER_SEC = 254016000000
 AUDIO_SAMPLE_RATE = 48000
@@ -86,7 +156,7 @@ def _path_to_url(path: pathlib.Path | str) -> str:
 
 
 def _db_to_linear(db: float) -> float:
-    return round(10.0 ** (float(db) / 20.0), 4)
+    return round(max(0.0001, min(5.623413, 10.0 ** (float(db) / 20.0))), 6)
 
 
 def _resolve_clip_path(clip_ref: str, plan_path: pathlib.Path, clip_map: dict[str, str] | None = None) -> pathlib.Path | None:
@@ -238,7 +308,8 @@ def _collect_timeline_model(
     # V2 (index 1): Listening partner clips (for split_h / split_v / video_call / top_pip)
     # V3..V5 (index 2..4): Strikethrough "Stop Saying" banners (up to 3 stacked phrases)
     # V6 (index 5): ✓ / ✗ mark PNG overlays (2-pulse end-of-sentence flash)
-    v_tracks: list[list[dict]] = [[], [], [], [], [], []]
+    # V7 (index 6): Rendered subtitle / caption PNG frames (from _subs/subs_meta.json)
+    v_tracks: list[list[dict]] = [[], [], [], [], [], [], []]
     # Audio tracks:
     # A1 (index 0): Primary dialogue audio (Stereo)
     # A2 (index 1): Secondary audio if needed
@@ -254,13 +325,18 @@ def _collect_timeline_model(
             return 3600.0
         s = str(p)
         if s not in dur_cache:
+            is_aud = p.suffix.lower() in _AUDIO_EXTS
             try:
                 info = _common.probe(p)
-                dur_cache[s] = max(0.1, float(info.get("duration") or 60.0))
                 if info.get("width") and info.get("height"):
                     dims_cache[s] = (int(info["width"]), int(info["height"]))
+                probed = float(info.get("duration") or 0.0)
+                if probed > 0.01:
+                    dur_cache[s] = max(0.05, probed)
+                else:
+                    dur_cache[s] = probe_duration(p)
             except Exception:
-                dur_cache[s] = 60.0
+                dur_cache[s] = probe_duration(p) if is_aud else 60.0
         return dur_cache[s]
 
     def get_media_dims(p: pathlib.Path, is_still: bool = False) -> tuple[int, int]:
@@ -303,24 +379,25 @@ def _collect_timeline_model(
 
     ov_scale_pct = round((width / 1080.0) * 100.0, 2)
 
-    def place_sfx(sfx_path: pathlib.Path, start_sec: float, gain_db: float = 0.0, max_dur: float | None = None):
-        if not sfx_path or not sfx_path.exists():
+    def place_sfx(sfx_path: pathlib.Path | str, start_sec: float, gain_db: float = 0.0, max_dur: float | None = None):
+        resolved_sfx = _resolve_sfx_path(sfx_path)
+        if not resolved_sfx or not resolved_sfx.exists():
             return
-        raw_dur = get_media_dur(sfx_path, is_still=False)
+        raw_dur = get_media_dur(resolved_sfx, is_still=False)
         dur = min(raw_dur, max_dur) if max_dur else raw_dur
         if dur <= 0.02:
             return
         end_sec = start_sec + dur
         item = {
-            "name": sfx_path.name,
-            "path": sfx_path.resolve(),
+            "name": resolved_sfx.name,
+            "path": resolved_sfx,
             "media_type": "audio",
             "t_start": start_sec,
             "t_end": end_sec,
             "src_in": 0.0,
             "src_out": dur,
             "media_dur": raw_dur,
-            "gain_db": gain_db,
+            "gain_db": float(gain_db),
         }
         for ti in range(2, len(a_tracks)):
             track = a_tracks[ti]
@@ -352,15 +429,22 @@ def _collect_timeline_model(
         clip_w, clip_h = get_media_dims(clip_path, is_still=False)
         base_scale = (width / float(clip_w)) if clip_w else 1.0
         layout_mode = str(seg.get("layout", plan.get("preset", "single")) or "single")
-        zoom_style = "smooth"
+        zoom_style = str(seg.get("zoom_style") or "smooth")
         zoom_at = 0.0
         zoom_dur = dur
+        resolved_z = False
         if hasattr(layouts, "resolve_segment_zoom_spec"):
-            z0, z1, zoom_style, zoom_at, zoom_dur = layouts.resolve_segment_zoom_spec(seg, dur)
-        else:
+            try:
+                z0, z1, zoom_style, zoom_at, zoom_dur = layouts.resolve_segment_zoom_spec(seg, dur)
+                resolved_z = True
+            except Exception:
+                resolved_z = False
+        if not resolved_z:
             z_spec = parse_zoom_spec(seg.get("zoom", 1.0))
             z0 = float(z_spec.get("z0", 1.0))
-            z1 = float(seg.get("zoom_to") or z_spec.get("z1", z0))
+            z1 = float(seg.get("zoom_to") if seg.get("zoom_to") is not None else z_spec.get("z1", z0))
+            if not seg.get("zoom_style") and z_spec.get("style"):
+                zoom_style = str(z_spec["style"])
         vol_db = float(seg.get("gain_db", 0.0) or 0.0)
 
         # Motion & Crop parameters for V1 (with multi-keyframe eased Scale curves & focus Center offset)
@@ -393,6 +477,7 @@ def _collect_timeline_model(
         else:
             v1_center = (0.0, 0.0)
         v1_crop = None
+        v1_crop_kfs: dict[str, list[tuple[float, float]]] | None = None
 
         slot = str(seg.get("slot") or "").lower()
         speaker_name = str(seg.get("speaker", "") or "").lower()
@@ -401,16 +486,32 @@ def _collect_timeline_model(
             if slot
             else (("robot" in speaker_name) or ("nova" in speaker_name))
         )
-        if layout_mode == "split_h":
-            v1_scale_start = v1_scale_end = round(base_scale * 100.0, 2)
-            scale_kfs = []
-            v1_crop = {"left": 25.0, "right": 25.0, "top": 0.0, "bottom": 0.0}
-            v1_center = (-0.25 if active_first else 0.25, 0.0)
-        elif layout_mode == "split_v":
-            v1_scale_start = v1_scale_end = round(base_scale * 100.0, 2)
-            scale_kfs = []
-            v1_crop = {"left": 0.0, "right": 0.0, "top": 25.0, "bottom": 25.0}
-            v1_center = (0.0, -0.25 if active_first else 0.25)
+        if layout_mode in ("split_h", "split_v"):
+            z0_sp = max(1.0, float(z0))
+            z1_sp = max(1.0, float(z1))
+            v1_scale_start = round(z0_sp * base_scale * 100.0, 2)
+            v1_scale_end = round(z1_sp * base_scale * 100.0, 2)
+            if scale_kfs:
+                crop_kf_seq = [
+                    (rel_s, _split_seam_crop_pct(sc_val / max(0.01, base_scale * 100.0)))
+                    for rel_s, sc_val in scale_kfs
+                ]
+            elif abs(z1_sp - z0_sp) > 0.004:
+                crop_kf_seq = [
+                    (0.0, _split_seam_crop_pct(z0_sp)),
+                    (dur, _split_seam_crop_pct(z1_sp)),
+                ]
+            else:
+                crop_kf_seq = []
+            c_side = _split_seam_crop_pct(z0_sp)
+            if layout_mode == "split_h":
+                v1_crop = {"left": c_side, "right": c_side, "top": 0.0, "bottom": 0.0}
+                v1_crop_kfs = {"left": crop_kf_seq, "right": crop_kf_seq} if crop_kf_seq else None
+                v1_center = (-0.25 if active_first else 0.25, 0.0)
+            else:
+                v1_crop = {"left": 0.0, "right": 0.0, "top": c_side, "bottom": c_side}
+                v1_crop_kfs = {"top": crop_kf_seq, "bottom": crop_kf_seq} if crop_kf_seq else None
+                v1_center = (0.0, -0.25 if active_first else 0.25)
 
         tr_raw = seg.get("transition")
         tr_spec = None
@@ -445,6 +546,7 @@ def _collect_timeline_model(
                 "scale_keyframes": [],
                 "center": pip_center,
                 "crop": pip_crop,
+                "crop_keyframes": None,
                 "opacity_keyframes": None,
                 "transition": tr_spec,
                 "link_id": f"link_seg_{idx}",
@@ -468,6 +570,7 @@ def _collect_timeline_model(
                 "scale_keyframes": scale_kfs,
                 "center": v1_center,
                 "crop": v1_crop,
+                "crop_keyframes": v1_crop_kfs,
                 "opacity_keyframes": None,
                 "transition": tr_spec,
                 "link_id": f"link_seg_{idx}",
@@ -633,8 +736,8 @@ def _collect_timeline_model(
                         "opacity_keyframes": None,
                         "link_id": None,
                     })
-                place_sfx(REPO / "assets" / "sfx" / "ui_pop.wav", t_start + b_at, gain_db=-2.0, max_dur=0.35)
-                place_sfx(REPO / "assets" / "sfx" / "pen_strike.wav", t_start + strike_at, gain_db=-1.0, max_dur=0.45)
+                place_sfx(REPO / "assets" / "sfx" / "pop.wav", t_start + b_at, gain_db=-2.0)
+                place_sfx(REPO / "assets" / "sfx" / "pen_strike.wav", t_start + strike_at, gain_db=-1.0)
         elif idx in ov_assets["strikethrough"]:
             u_png, s_png = ov_assets["strikethrough"][idx]
             delay = float(seg.get("strikethrough_initial_delay", 0.0) or 0.0)
@@ -710,9 +813,9 @@ def _collect_timeline_model(
         for sx in seg_sfx_list:
             sx_file = str(sx.get("file") or "whoosh.wav")
             sx_at = float(sx.get("at") or 0.0)
-            sx_path = (REPO / "assets" / "sfx" / sx_file).resolve()
-            if sx_path.exists():
-                place_sfx(sx_path, max(0.0, t_start + sx_at), gain_db=float(sx.get("gain_db", -2.0)), max_dur=0.65)
+            sx_path = _resolve_sfx_path(sx_file)
+            if sx_path is not None:
+                place_sfx(sx_path, max(0.0, t_start + sx_at), gain_db=float(sx.get("gain_db", -2.0)))
 
         # V6 (index 5): ✓ / ✗ Marks + Buzzer / Ding SFX
         seg_marks = list(seg.get("marks", []) or []) + list(marks_by_seg.get(seg_id, []))
@@ -754,6 +857,8 @@ def _collect_timeline_model(
                     "scale_end": ov_scale_pct,
                     "center": (0.0, 0.0),
                     "crop": None,
+                    "is_mark": True,
+                    "opacity": 50.0,
                     "opacity_keyframes": [
                         (0.00, 0.0),
                         (0.03, 50.0),
@@ -768,10 +873,10 @@ def _collect_timeline_model(
                 })
 
             if kind == "wrong":
-                place_sfx(REPO / "assets" / "sfx" / "sn_wrong.wav", mk_start, gain_db=4.0, max_dur=0.65)
+                place_sfx(REPO / "assets" / "sfx" / "sn_wrong.wav", mk_start, gain_db=4.0)
             else:
-                place_sfx(REPO / "assets" / "sfx" / "correct_ding.wav", mk_start, gain_db=2.5, max_dur=0.65)
-                place_sfx(REPO / "assets" / "sfx" / "sn_correct.wav", mk_start, gain_db=2.0, max_dur=0.65)
+                place_sfx(REPO / "assets" / "sfx" / "correct_ding.wav", mk_start, gain_db=2.5)
+                place_sfx(REPO / "assets" / "sfx" / "sn_correct.wav", mk_start, gain_db=2.0)
 
             markers.append({
                 "t": mk_start,
@@ -781,10 +886,164 @@ def _collect_timeline_model(
 
         cursor = t_end
 
-    # Compact empty overlay video tracks while preserving V1 and V2
-    compacted_v = v_tracks[:2] + [vt for vt in v_tracks[2:] if vt]
-    while len(compacted_v) < 4:
-        compacted_v.append([])
+    # V7 (index 6): Rendered subtitle PNG frames from _subs/subs_meta.json (or _subs/subs.ffconcat fallback)
+    subs_meta_candidates: list[pathlib.Path] = [
+        work_dir / "_subs" / "subs_meta.json",
+        plan_path.parent / "_subs" / "subs_meta.json",
+    ]
+    if plan.get("subs"):
+        global_work = getattr(_common, "WORK", REPO / "work")
+        subs_meta_candidates.append(pathlib.Path(global_work) / "_subs" / "subs_meta.json")
+
+    subs_meta_file = next((c for c in subs_meta_candidates if c.is_file()), None)
+    sub_entries: list[dict] = []
+    meta_canvas_w = 1080.0
+    meta_canvas_h = 1920.0
+    default_band_y0: float | None = None
+
+    if subs_meta_file is not None:
+        try:
+            raw_meta = json.loads(subs_meta_file.read_text(encoding="utf-8"))
+            if isinstance(raw_meta, dict):
+                meta_canvas_w = float(raw_meta.get("canvas_w") or raw_meta.get("width") or raw_meta.get("render_w") or 1080.0)
+                meta_canvas_h = float(raw_meta.get("canvas_h") or raw_meta.get("height") or raw_meta.get("render_h") or 1920.0)
+                if raw_meta.get("band_y0") is not None:
+                    default_band_y0 = float(raw_meta["band_y0"])
+                elif raw_meta.get("y0") is not None:
+                    default_band_y0 = float(raw_meta["y0"])
+                for key_f in ("frames", "cues", "items", "pngs"):
+                    if isinstance(raw_meta.get(key_f), list):
+                        sub_entries = list(raw_meta[key_f])
+                        break
+            elif isinstance(raw_meta, list):
+                sub_entries = list(raw_meta)
+        except Exception:
+            sub_entries = []
+    elif plan.get("subs"):
+        ffconcat_candidates = [
+            work_dir / "_subs" / "subs.ffconcat",
+            plan_path.parent / "_subs" / "subs.ffconcat",
+        ]
+        ffconcat_file = next((c for c in ffconcat_candidates if c.is_file()), None)
+        if ffconcat_file is not None:
+            try:
+                t_acc = 0.0
+                pending_file: str | None = None
+                for ln in ffconcat_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    ln = ln.strip()
+                    if ln.startswith("file "):
+                        pending_file = ln[5:].strip().strip("'\"")
+                    elif ln.startswith("duration ") and pending_file is not None:
+                        d_sec = float(ln.split(None, 1)[1])
+                        if pathlib.Path(pending_file).name != "blank.png":
+                            sub_entries.append({"path": pending_file, "start": t_acc, "duration": d_sec})
+                        t_acc += d_sec
+                        pending_file = None
+            except Exception:
+                sub_entries = []
+
+    if sub_entries:
+        persist_sub_dir = work_dir / "overlays" / "subtitles"
+        persist_sub_dir.mkdir(parents=True, exist_ok=True)
+        subs_base_dir = subs_meta_file.parent if subs_meta_file is not None else (work_dir / "_subs")
+        for s_idx, fr in enumerate(sub_entries):
+            if not isinstance(fr, dict):
+                continue
+            raw_p_str = fr.get("path") or fr.get("png") or fr.get("file")
+            if not raw_p_str:
+                continue
+            png_cand = pathlib.Path(str(raw_p_str))
+            if not png_cand.is_absolute():
+                for b_dir in (subs_base_dir, work_dir, plan_path.parent, REPO):
+                    if (b_dir / png_cand).is_file():
+                        png_cand = (b_dir / png_cand).resolve()
+                        break
+            if not png_cand.is_file() or png_cand.name == "blank.png":
+                continue
+
+            if "start_sec" in fr:
+                sub_t0 = float(fr["start_sec"])
+            elif "t_start" in fr:
+                sub_t0 = float(fr["t_start"])
+            elif "start" in fr:
+                sub_t0 = float(fr["start"])
+            elif "startMs" in fr or "start_ms" in fr:
+                sub_t0 = float(fr.get("startMs") if "startMs" in fr else fr["start_ms"]) / 1000.0
+            else:
+                continue
+
+            if "end_sec" in fr:
+                sub_t1 = float(fr["end_sec"])
+            elif "t_end" in fr:
+                sub_t1 = float(fr["t_end"])
+            elif "end" in fr:
+                sub_t1 = float(fr["end"])
+            elif "endMs" in fr or "end_ms" in fr:
+                sub_t1 = float(fr.get("endMs") if "endMs" in fr else fr["end_ms"]) / 1000.0
+            elif "duration" in fr or "dur" in fr:
+                sub_t1 = sub_t0 + float(fr.get("duration") if "duration" in fr else fr["dur"])
+            elif "durationMs" in fr or "duration_ms" in fr:
+                sub_t1 = sub_t0 + float(fr.get("durationMs") if "durationMs" in fr else fr["duration_ms"]) / 1000.0
+            else:
+                continue
+
+            if cursor > 0.0:
+                sub_t1 = min(cursor, sub_t1)
+            sub_dur = sub_t1 - sub_t0
+            if sub_dur < 0.02:
+                continue
+
+            persisted_png = persist_sub_dir / f"sub_{s_idx:04d}_{png_cand.name}"
+            if png_cand.resolve() != persisted_png.resolve():
+                try:
+                    shutil.copy2(png_cand, persisted_png)
+                except Exception:
+                    persisted_png = png_cand.resolve()
+
+            sub_w, sub_h = get_media_dims(persisted_png, is_still=True)
+            eff_meta_w = meta_canvas_w if meta_canvas_w > 0 else float(max(1, sub_w))
+            eff_meta_h = meta_canvas_h if meta_canvas_h > 0 else float(max(1, sub_h))
+            sub_scale_pct = round((width / eff_meta_w) * 100.0, 2)
+
+            fr_band_y0 = fr.get("band_y0")
+            if fr_band_y0 is None and fr.get("y0") is not None:
+                fr_band_y0 = fr.get("y0")
+            if fr_band_y0 is None:
+                fr_band_y0 = default_band_y0
+
+            if fr_band_y0 is not None and (sub_h < eff_meta_h * 0.95 or float(fr_band_y0) > 0.5):
+                cy_norm = (float(fr_band_y0) + 0.5 * float(sub_h)) / eff_meta_h
+                sub_center = (0.0, round(cy_norm - 0.5, 6))
+            else:
+                sub_center = (0.0, 0.0)
+
+            v_tracks[6].append({
+                "seg_idx": -1,
+                "name": f"Sub_{s_idx+1:03d}_{persisted_png.stem}",
+                "path": persisted_png.resolve(),
+                "media_type": "still",
+                "t_start": round(sub_t0, 4),
+                "t_end": round(sub_t1, 4),
+                "src_in": 0.0,
+                "src_out": round(sub_dur, 4),
+                "media_dur": 3600.0,
+                "clip_w": sub_w,
+                "clip_h": sub_h,
+                "scale_start": sub_scale_pct,
+                "scale_end": sub_scale_pct,
+                "center": sub_center,
+                "crop": None,
+                "opacity_keyframes": None,
+                "link_id": None,
+            })
+
+    # Preserve exact V7 (index 6) slot when subtitle PNGs exist; otherwise compact empty overlay tracks
+    if v_tracks[6]:
+        compacted_v = v_tracks
+    else:
+        compacted_v = v_tracks[:2] + [vt for vt in v_tracks[2:6] if vt]
+        while len(compacted_v) < 4:
+            compacted_v.append([])
 
     return {
         "total_duration": cursor,
@@ -924,9 +1183,10 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
             info["a_track"] = 1
             info["a_index"] = ac_idx + 1
 
-    # Emit Video Tracks
+    # Emit Video Tracks (preserve empty V3..V6 tracks when V7 subtitles exist so subtitles stay on V7)
+    has_v7_subs = len(model["v_tracks"]) >= 7 and bool(model["v_tracks"][6])
     for t_idx, v_track in enumerate(model["v_tracks"]):
-        if not v_track and t_idx > 1:
+        if not v_track and t_idx > 1 and not (has_v7_subs and t_idx <= 6):
             continue
         lines.append("        <track>")
         for item in v_track:
@@ -937,19 +1197,6 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
             dur_f = end_f - start_f
             in_f = _sec_to_frames(item["src_in"], fps)
             out_f = in_f + dur_f
-            if t_idx == 0 and item.get("transition") and start_f >= 2:
-                lines.append(f"""          <transitionitem>
-            <rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>
-            <start>{max(0, start_f - 1)}</start>
-            <end>{start_f + 1}</end>
-            <alignment>center</alignment>
-            <effect>
-              <name>Crossfade (Constant Power)</name>
-              <effectid>KGAudioTransition</effectid>
-              <effecttype>transition</effecttype>
-              <mediatype>audio</mediatype>
-            </effect>
-          </transitionitem>""")
             file_xml = get_file_xml(
                 item["path"],
                 item["media_type"],
@@ -958,7 +1205,7 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
                 int(item.get("clip_h") or height),
             )
 
-            # Optional FCP7 / Premiere <transitionitem> on V1 before clipitem
+            # Optional FCP7 / Premiere <transitionitem> on V1 before clipitem (strictly video mediatype)
             if t_idx == 0 and item.get("transition"):
                 tr_info = item["transition"]
                 tr_t = str(tr_info.get("type") or "fade").lower()
@@ -1026,6 +1273,18 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
 
             if item.get("crop"):
                 c = item["crop"]
+                c_kfs = item.get("crop_keyframes") or {}
+                crop_params_xml = ""
+                for side_key in ("left", "right", "top", "bottom"):
+                    side_kfs = c_kfs.get(side_key) or []
+                    side_kf_str = "".join(
+                        f"<keyframe><when>{min(out_f, in_f + _sec_to_frames(rel_s, fps))}</when><value>{c_val}</value></keyframe>"
+                        for rel_s, c_val in side_kfs
+                    )
+                    crop_params_xml += (
+                        f"\n                  <parameter><parameterid>{side_key}</parameterid><name>{side_key}</name>"
+                        f"<valuemin>0</valuemin><valuemax>100</valuemax><value>{c[side_key]}</value>{side_kf_str}</parameter>"
+                    )
                 filters_xml += f"""
               <filter>
                 <effect>
@@ -1033,19 +1292,20 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
                   <effectid>crop</effectid>
                   <effectcategory>motion</effectcategory>
                   <effecttype>motion</effecttype>
-                  <mediatype>video</mediatype>
-                  <parameter><parameterid>left</parameterid><name>left</name><valuemin>0</valuemin><valuemax>100</valuemax><value>{c['left']}</value></parameter>
-                  <parameter><parameterid>right</parameterid><name>right</name><valuemin>0</valuemin><valuemax>100</valuemax><value>{c['right']}</value></parameter>
-                  <parameter><parameterid>top</parameterid><name>top</name><valuemin>0</valuemin><valuemax>100</valuemax><value>{c['top']}</value></parameter>
-                  <parameter><parameterid>bottom</parameterid><name>bottom</name><valuemin>0</valuemin><valuemax>100</valuemax><value>{c['bottom']}</value></parameter>
+                  <mediatype>video</mediatype>{crop_params_xml}
                 </effect>
               </filter>"""
 
-            if item.get("opacity_keyframes"):
+            op_kfs = item.get("opacity_keyframes") or []
+            op_static = item.get("opacity")
+            if item.get("is_mark") and not op_kfs and op_static is None:
+                op_static = 50.0
+            if op_kfs or (op_static is not None and abs(float(op_static) - 100.0) > 0.05):
                 kf_xml = ""
-                for rel_s, val in item["opacity_keyframes"]:
+                for rel_s, val in op_kfs:
                     kf_f = min(out_f, in_f + _sec_to_frames(rel_s, fps))
                     kf_xml += f"\n                  <keyframe><when>{kf_f}</when><value>{val}</value></keyframe>"
+                op_base_val = float(op_static) if op_static is not None else 50.0
                 filters_xml += f"""
               <filter>
                 <effect>
@@ -1059,7 +1319,7 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
                     <name>opacity</name>
                     <valuemin>0</valuemin>
                     <valuemax>100</valuemax>
-                    <value>50</value>{kf_xml}
+                    <value>{op_base_val}</value>{kf_xml}
                   </parameter>
                 </effect>
               </filter>"""
@@ -1115,6 +1375,21 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
             dur_f = end_f - start_f
             in_f = _sec_to_frames(item["src_in"], fps)
             out_f = in_f + dur_f
+            if t_idx == 0 and item.get("transition") and start_f >= 1:
+                a_tr_dur = float((item.get("transition") or {}).get("dur") or 0.045)
+                a_half_f = max(1, _sec_to_frames(a_tr_dur * 0.5, fps))
+                lines.append(f"""          <transitionitem>
+            <rate><timebase>{fps}</timebase><ntsc>FALSE</ntsc></rate>
+            <start>{max(0, start_f - a_half_f)}</start>
+            <end>{start_f + a_half_f}</end>
+            <alignment>center</alignment>
+            <effect>
+              <name>Crossfade (Constant Power)</name>
+              <effectid>KGAudioTransition</effectid>
+              <effecttype>transition</effecttype>
+              <mediatype>audio</mediatype>
+            </effect>
+          </transitionitem>""")
             file_xml = get_file_xml(
                 item["path"],
                 "video" if item["media_type"] == "audio_from_video" else "audio",
@@ -1166,7 +1441,7 @@ def _write_premiere_xml(model: dict, seq_name: str, out_xml: pathlib.Path) -> pa
                   <parameterid>level</parameterid>
                   <name>Level</name>
                   <valuemin>0</valuemin>
-                  <valuemax>3.98109</valuemax>
+                  <valuemax>5.623413</valuemax>
                   <value>{lvl}</value>
                 </parameter>
               </effect>
@@ -1585,6 +1860,12 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
         cx, cy = item.get("center") or (0.0, 0.0)
         scale_kfs = item.get("scale_keyframes") or []
         crop = item.get("crop")
+        crop_kfs = item.get("crop_keyframes") or {}
+        opacity_kfs = item.get("opacity_keyframes") or []
+        static_op = item.get("opacity")
+        if item.get("is_mark") and not opacity_kfs and static_op is None:
+            static_op = 50.0
+
         has_custom_motion = (
             abs(s0 - 100.0) > 0.05
             or abs(s1 - 100.0) > 0.05
@@ -1592,9 +1873,14 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
             or abs(cx) > 0.001
             or abs(cy) > 0.001
             or bool(crop)
+            or bool(crop_kfs)
         )
+        has_custom_opacity = bool(opacity_kfs) or (
+            static_op is not None and abs(float(static_op) - 100.0) > 0.05
+        )
+
         vcc_id = alloc_oid()
-        if not has_custom_motion:
+        if not has_custom_motion and not has_custom_opacity:
             new_elements.append(ET.fromstring(f"""
             <VideoComponentChain ObjectID="{vcc_id}" ClassID="0970e08a-f58f-4108-b29a-1a717b8e12e2" Version="3">
                 <DefaultMotion>true</DefaultMotion>
@@ -1610,143 +1896,287 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
             </VideoComponentChain>"""))
             return vcc_id
 
-        pos_x = round(0.5 + float(cx), 6)
-        pos_y = round(0.5 + float(cy), 6)
-        c_left = float(crop.get("left", 0.0)) if crop else 0.0
-        c_top = float(crop.get("top", 0.0)) if crop else 0.0
-        c_right = float(crop.get("right", 0.0)) if crop else 0.0
-        c_bottom = float(crop.get("bottom", 0.0)) if crop else 0.0
+        chain_comp_refs: list[str] = []
 
-        p_ids = [alloc_oid() for _ in range(11)]
-        # Param 0: Position
-        new_elements.append(ET.fromstring(f"""
-        <PointComponentParam ObjectID="{p_ids[0]}" ClassID="ca81d347-309b-44d2-acc7-1c572efb973c" Version="4">
-            <Name>Position</Name>
-            <ParameterID>1</ParameterID>
-            <StartKeyframe>-91445760000000000,{pos_x}:{pos_y},0,0,0,0,0,0,5,4,0,0,0,0</StartKeyframe>
-        </PointComponentParam>"""))
+        if has_custom_motion:
+            pos_x = round(0.5 + float(cx), 6)
+            pos_y = round(0.5 + float(cy), 6)
+            c_left = float(crop.get("left", 0.0)) if crop else 0.0
+            c_top = float(crop.get("top", 0.0)) if crop else 0.0
+            c_right = float(crop.get("right", 0.0)) if crop else 0.0
+            c_bottom = float(crop.get("bottom", 0.0)) if crop else 0.0
 
-        # Param 1: Scale
-        kf_tags = ""
-        if scale_kfs:
-            kf_entries = ";".join(
-                f"{min(out_ticks, in_ticks + _sec_to_ticks(rel_s))},{val},5,0,0,0.33333333333333331,0,0.33333333333333331"
-                for rel_s, val in scale_kfs
-            ) + ";"
-            kf_tags = f"<IsTimeVarying>true</IsTimeVarying><Keyframes>{kf_entries}</Keyframes>"
-        elif abs(s1 - s0) > 0.05:
-            kf_entries = (
-                f"{in_ticks},{s0},5,0,0,0.33333333333333331,0,0.33333333333333331;"
-                f"{out_ticks},{s1},5,0,0,0.33333333333333331,0,0.33333333333333331;"
-            )
-            kf_tags = f"<IsTimeVarying>true</IsTimeVarying><Keyframes>{kf_entries}</Keyframes>"
-
-        new_elements.append(ET.fromstring(f"""
-        <VideoComponentParam ObjectID="{p_ids[1]}" ClassID="fe47129e-6c94-4fc0-95d5-c056a517aaf3" Version="10">
-            <Name>Scale</Name>
-            <UpperUIBound>200</UpperUIBound>
-            <ParameterID>2</ParameterID>
-            {kf_tags}
-            <StartKeyframe>-91445760000000000,{s0},0,0,0,0,0,0</StartKeyframe>
-            <CurrentValue>{s0}</CurrentValue>
-            <LowerBound>0</LowerBound>
-            <UpperBound>10000</UpperBound>
-        </VideoComponentParam>"""))
-
-        # Param 2: Scale Width
-        new_elements.append(ET.fromstring(f"""
-        <VideoComponentParam ObjectID="{p_ids[2]}" ClassID="fe47129e-6c94-4fc0-95d5-c056a517aaf3" Version="10">
-            <Name>Scale Width</Name>
-            <UpperUIBound>200</UpperUIBound>
-            <ParameterID>3</ParameterID>
-            <StartKeyframe>-91445760000000000,{s0},0,0,0,0,0,0</StartKeyframe>
-            <LowerBound>0</LowerBound>
-            <UpperBound>10000</UpperBound>
-        </VideoComponentParam>"""))
-
-        # Param 3: Uniform Scale
-        new_elements.append(ET.fromstring(f"""
-        <VideoComponentParam ObjectID="{p_ids[3]}" ClassID="cc12343e-f113-4d3b-ae05-b287db77d461" Version="10">
-            <Name> </Name>
-            <ParameterID>4</ParameterID>
-            <StartKeyframe>-91445760000000000,true,0,0,0,0,0,0</StartKeyframe>
-        </VideoComponentParam>"""))
-
-        # Param 4: Rotation
-        new_elements.append(ET.fromstring(f"""
-        <VideoComponentParam ObjectID="{p_ids[4]}" ClassID="fe47129e-6c94-4fc0-95d5-c056a517aaf3" Version="10">
-            <Name>Rotation</Name>
-            <ParameterControlType>3</ParameterControlType>
-            <ParameterID>5</ParameterID>
-            <StartKeyframe>-91445760000000000,0.,0,0,0,0,0,0</StartKeyframe>
-            <LowerBound>-32768</LowerBound>
-            <UpperBound>32767</UpperBound>
-        </VideoComponentParam>"""))
-
-        # Param 5: Anchor Point
-        new_elements.append(ET.fromstring(f"""
-        <PointComponentParam ObjectID="{p_ids[5]}" ClassID="ca81d347-309b-44d2-acc7-1c572efb973c" Version="4">
-            <Name>Anchor Point</Name>
-            <ParameterID>6</ParameterID>
-            <StartKeyframe>-91445760000000000,0.5:0.5,0,0,0,0,0,0,5,4,0,0,0,0</StartKeyframe>
-        </PointComponentParam>"""))
-
-        # Param 6: Anti-flicker Filter
-        new_elements.append(ET.fromstring(f"""
-        <VideoComponentParam ObjectID="{p_ids[6]}" ClassID="a4ff2d6e-7ac2-44f8-9d52-17d9ca50e542" Version="10">
-            <Name>Anti-flicker Filter</Name>
-            <ParameterID>7</ParameterID>
-            <StartKeyframe>-91445760000000000,0.,0,0,0,0,0,0</StartKeyframe>
-            <LowerBound>0</LowerBound>
-            <UpperBound>1</UpperBound>
-        </VideoComponentParam>"""))
-
-        # Params 7..10: Built-in Motion Crop Left, Top, Right, Bottom
-        for idx_c, (c_name, c_pid, c_val) in enumerate([
-            ("Crop Left", 8, c_left),
-            ("Crop Top", 9, c_top),
-            ("Crop Right", 10, c_right),
-            ("Crop Bottom", 11, c_bottom),
-        ], start=7):
+            p_ids = [alloc_oid() for _ in range(11)]
+            # Param 0: Position
             new_elements.append(ET.fromstring(f"""
-            <VideoComponentParam ObjectID="{p_ids[idx_c]}" ClassID="fe47129e-6c94-4fc0-95d5-c056a517aaf3" Version="10">
-                <Name>{c_name}</Name>
-                <ParameterID>{c_pid}</ParameterID>
-                <StartKeyframe>-91445760000000000,{c_val},0,0,0,0,0,0</StartKeyframe>
+            <PointComponentParam ObjectID="{p_ids[0]}" ClassID="ca81d347-309b-44d2-acc7-1c572efb973c" Version="4">
+                <Name>Position</Name>
+                <ParameterID>1</ParameterID>
+                <StartKeyframe>-91445760000000000,{pos_x}:{pos_y},0,0,0,0,0,0,5,4,0,0,0,0</StartKeyframe>
+            </PointComponentParam>"""))
+
+            # Param 1: Scale
+            kf_tags = ""
+            if scale_kfs:
+                kf_entries = ";".join(
+                    f"{min(out_ticks, in_ticks + _sec_to_ticks(rel_s))},{val},5,0,0,0.33333333333333331,0,0.33333333333333331"
+                    for rel_s, val in scale_kfs
+                ) + ";"
+                kf_tags = f"<IsTimeVarying>true</IsTimeVarying><Keyframes>{kf_entries}</Keyframes>"
+            elif abs(s1 - s0) > 0.05:
+                kf_entries = (
+                    f"{in_ticks},{s0},5,0,0,0.33333333333333331,0,0.33333333333333331;"
+                    f"{out_ticks},{s1},5,0,0,0.33333333333333331,0,0.33333333333333331;"
+                )
+                kf_tags = f"<IsTimeVarying>true</IsTimeVarying><Keyframes>{kf_entries}</Keyframes>"
+
+            new_elements.append(ET.fromstring(f"""
+            <VideoComponentParam ObjectID="{p_ids[1]}" ClassID="fe47129e-6c94-4fc0-95d5-c056a517aaf3" Version="10">
+                <Name>Scale</Name>
+                <UpperUIBound>200</UpperUIBound>
+                <ParameterID>2</ParameterID>
+                {kf_tags}
+                <StartKeyframe>-91445760000000000,{s0},0,0,0,0,0,0</StartKeyframe>
+                <CurrentValue>{s0}</CurrentValue>
+                <LowerBound>0</LowerBound>
+                <UpperBound>10000</UpperBound>
+            </VideoComponentParam>"""))
+
+            # Param 2: Scale Width
+            new_elements.append(ET.fromstring(f"""
+            <VideoComponentParam ObjectID="{p_ids[2]}" ClassID="fe47129e-6c94-4fc0-95d5-c056a517aaf3" Version="10">
+                <Name>Scale Width</Name>
+                <UpperUIBound>200</UpperUIBound>
+                <ParameterID>3</ParameterID>
+                <StartKeyframe>-91445760000000000,{s0},0,0,0,0,0,0</StartKeyframe>
+                <LowerBound>0</LowerBound>
+                <UpperBound>10000</UpperBound>
+            </VideoComponentParam>"""))
+
+            # Param 3: Uniform Scale
+            new_elements.append(ET.fromstring(f"""
+            <VideoComponentParam ObjectID="{p_ids[3]}" ClassID="cc12343e-f113-4d3b-ae05-b287db77d461" Version="10">
+                <Name> </Name>
+                <ParameterID>4</ParameterID>
+                <StartKeyframe>-91445760000000000,true,0,0,0,0,0,0</StartKeyframe>
+            </VideoComponentParam>"""))
+
+            # Param 4: Rotation
+            new_elements.append(ET.fromstring(f"""
+            <VideoComponentParam ObjectID="{p_ids[4]}" ClassID="fe47129e-6c94-4fc0-95d5-c056a517aaf3" Version="10">
+                <Name>Rotation</Name>
+                <ParameterControlType>3</ParameterControlType>
+                <ParameterID>5</ParameterID>
+                <StartKeyframe>-91445760000000000,0.,0,0,0,0,0,0</StartKeyframe>
+                <LowerBound>-32768</LowerBound>
+                <UpperBound>32767</UpperBound>
+            </VideoComponentParam>"""))
+
+            # Param 5: Anchor Point
+            new_elements.append(ET.fromstring(f"""
+            <PointComponentParam ObjectID="{p_ids[5]}" ClassID="ca81d347-309b-44d2-acc7-1c572efb973c" Version="4">
+                <Name>Anchor Point</Name>
+                <ParameterID>6</ParameterID>
+                <StartKeyframe>-91445760000000000,0.5:0.5,0,0,0,0,0,0,5,4,0,0,0,0</StartKeyframe>
+            </PointComponentParam>"""))
+
+            # Param 6: Anti-flicker Filter
+            new_elements.append(ET.fromstring(f"""
+            <VideoComponentParam ObjectID="{p_ids[6]}" ClassID="a4ff2d6e-7ac2-44f8-9d52-17d9ca50e542" Version="10">
+                <Name>Anti-flicker Filter</Name>
+                <ParameterID>7</ParameterID>
+                <StartKeyframe>-91445760000000000,0.,0,0,0,0,0,0</StartKeyframe>
+                <LowerBound>0</LowerBound>
+                <UpperBound>1</UpperBound>
+            </VideoComponentParam>"""))
+
+            # Params 7..10: Built-in Motion Crop Left, Top, Right, Bottom (with optional seam-safe keyframes)
+            for idx_c, (c_name, c_pid, c_val, c_key) in enumerate([
+                ("Crop Left", 8, c_left, "left"),
+                ("Crop Top", 9, c_top, "top"),
+                ("Crop Right", 10, c_right, "right"),
+                ("Crop Bottom", 11, c_bottom, "bottom"),
+            ], start=7):
+                side_kfs = crop_kfs.get(c_key) or []
+                c_kf_tags = ""
+                if side_kfs:
+                    c_kf_entries = ";".join(
+                        f"{min(out_ticks, in_ticks + _sec_to_ticks(rel_s))},{cv_val},5,0,0,0.33333333333333331,0,0.33333333333333331"
+                        for rel_s, cv_val in side_kfs
+                    ) + ";"
+                    c_kf_tags = f"<IsTimeVarying>true</IsTimeVarying><Keyframes>{c_kf_entries}</Keyframes>"
+                new_elements.append(ET.fromstring(f"""
+                <VideoComponentParam ObjectID="{p_ids[idx_c]}" ClassID="fe47129e-6c94-4fc0-95d5-c056a517aaf3" Version="10">
+                    <Name>{c_name}</Name>
+                    <ParameterID>{c_pid}</ParameterID>
+                    {c_kf_tags}
+                    <StartKeyframe>-91445760000000000,{c_val},0,0,0,0,0,0</StartKeyframe>
+                    <CurrentValue>{c_val}</CurrentValue>
+                    <LowerBound>0</LowerBound>
+                    <UpperBound>100</UpperBound>
+                </VideoComponentParam>"""))
+
+            motion_comp_id = alloc_oid()
+            params_xml = "".join(f'<Param Index="{i}" ObjectRef="{p_ids[i]}" />' for i in range(11))
+            new_elements.append(ET.fromstring(f"""
+            <VideoFilterComponent ObjectID="{motion_comp_id}" ClassID="d10da199-beea-4dd1-b941-ed3a78766d50" Version="9">
+                <Component Version="7">
+                    <Params Version="1">{params_xml}</Params>
+                    <ID>1</ID>
+                    <DisplayName>Motion</DisplayName>
+                    <Intrinsic>true</Intrinsic>
+                </Component>
+                <PremiereFilterPrivateData Encoding="base64" BinaryHash="3805854c-243a-c4be-bd40-a8a40000000e">AQA=</PremiereFilterPrivateData>
+                <MatchName>AE.ADBE Motion</MatchName>
+                <VideoFilterType>2</VideoFilterType>
+            </VideoFilterComponent>"""))
+            chain_comp_refs.append(motion_comp_id)
+
+        if has_custom_opacity:
+            op_param_id = alloc_oid()
+            op0 = float(opacity_kfs[0][1]) if opacity_kfs else float(static_op if static_op is not None else 50.0)
+            op_kf_tags = ""
+            if opacity_kfs:
+                op_entries = ";".join(
+                    f"{min(out_ticks, in_ticks + _sec_to_ticks(rel_s))},{float(val)},5,0,0,0.33333333333333331,0,0.33333333333333331"
+                    for rel_s, val in opacity_kfs
+                ) + ";"
+                op_kf_tags = f"<IsTimeVarying>true</IsTimeVarying><Keyframes>{op_entries}</Keyframes>"
+            new_elements.append(ET.fromstring(f"""
+            <VideoComponentParam ObjectID="{op_param_id}" ClassID="fe47129e-6c94-4fc0-95d5-c056a517aaf3" Version="10">
+                <Name>Opacity</Name>
+                <UpperUIBound>100</UpperUIBound>
+                <ParameterID>1</ParameterID>
+                {op_kf_tags}
+                <StartKeyframe>-91445760000000000,{op0},0,0,0,0,0,0</StartKeyframe>
+                <CurrentValue>{op0}</CurrentValue>
                 <LowerBound>0</LowerBound>
                 <UpperBound>100</UpperBound>
             </VideoComponentParam>"""))
 
-        motion_comp_id = alloc_oid()
-        params_xml = "".join(f'<Param Index="{i}" ObjectRef="{p_ids[i]}" />' for i in range(11))
-        new_elements.append(ET.fromstring(f"""
-        <VideoFilterComponent ObjectID="{motion_comp_id}" ClassID="d10da199-beea-4dd1-b941-ed3a78766d50" Version="9">
-            <Component Version="7">
-                <Params Version="1">{params_xml}</Params>
-                <ID>1</ID>
-                <DisplayName>Motion</DisplayName>
-                <Intrinsic>true</Intrinsic>
-            </Component>
-            <PremiereFilterPrivateData Encoding="base64" BinaryHash="3805854c-243a-c4be-bd40-a8a40000000e">AQA=</PremiereFilterPrivateData>
-            <MatchName>AE.ADBE Motion</MatchName>
-            <VideoFilterType>2</VideoFilterType>
-        </VideoFilterComponent>"""))
+            opacity_comp_id = alloc_oid()
+            new_elements.append(ET.fromstring(f"""
+            <VideoFilterComponent ObjectID="{opacity_comp_id}" ClassID="d10da199-beea-4dd1-b941-ed3a78766d50" Version="9">
+                <Component Version="7">
+                    <Params Version="1">
+                        <Param Index="0" ObjectRef="{op_param_id}" />
+                    </Params>
+                    <ID>2</ID>
+                    <DisplayName>Opacity</DisplayName>
+                    <Intrinsic>true</Intrinsic>
+                </Component>
+                <MatchName>AE.ADBE Opacity</MatchName>
+                <VideoFilterType>2</VideoFilterType>
+            </VideoFilterComponent>"""))
+            chain_comp_refs.append(opacity_comp_id)
 
+        def_motion_tags = (
+            "<DefaultMotion>true</DefaultMotion><DefaultMotionComponentID>1</DefaultMotionComponentID>"
+            if not has_custom_motion
+            else ""
+        )
+        def_opacity_tags = (
+            "<DefaultOpacity>true</DefaultOpacity><DefaultOpacityComponentID>2</DefaultOpacityComponentID>"
+            if not has_custom_opacity
+            else ""
+        )
+        active_comp_id = "1" if has_custom_motion else "2"
+        comps_xml = "".join(
+            f'<Component Index="{ci}" ObjectRef="{cref}" />'
+            for ci, cref in enumerate(chain_comp_refs)
+        )
         new_elements.append(ET.fromstring(f"""
         <VideoComponentChain ObjectID="{vcc_id}" ClassID="0970e08a-f58f-4108-b29a-1a717b8e12e2" Version="3">
-            <DefaultOpacity>true</DefaultOpacity>
-            <DefaultOpacityComponentID>2</DefaultOpacityComponentID>
+            {def_motion_tags}
+            {def_opacity_tags}
+            <ComponentChain Version="3">
+                <Node Version="1"><Properties Version="1">
+                    <MZ.ComponentChain.ActiveComponentID>{active_comp_id}</MZ.ComponentChain.ActiveComponentID>
+                    <MZ.ComponentChain.ActiveComponentParamIndex>4294967295</MZ.ComponentChain.ActiveComponentParamIndex>
+                </Properties></Node>
+                <Components Version="1">
+                    {comps_xml}
+                </Components>
+            </ComponentChain>
+        </VideoComponentChain>"""))
+        return vcc_id
+
+    def _build_audio_component_chain(gain_db: float) -> str:
+        acc_id = alloc_oid()
+        gdb = float(gain_db or 0.0)
+        if abs(gdb) <= 0.01:
+            new_elements.append(ET.fromstring(f"""
+            <AudioComponentChain ObjectID="{acc_id}" ClassID="3cb131d1-d3c0-47ae-a19a-bdf75ea11674" Version="4">
+                <DefaultVol>true</DefaultVol>
+                <DefaultVolumeComponentID>1</DefaultVolumeComponentID>
+                <DefaultChannelVolumeComponentID>2</DefaultChannelVolumeComponentID>
+                <ComponentChain Version="3">
+                    <Node Version="1"><Properties Version="1">
+                        <MZ.ComponentChain.ActiveComponentID>1</MZ.ComponentChain.ActiveComponentID>
+                        <MZ.ComponentChain.ActiveComponentParamIndex>4294967295</MZ.ComponentChain.ActiveComponentParamIndex>
+                    </Properties></Node>
+                </ComponentChain>
+                <AudioChannelLayout>[{{"channellabel":100}},{{"channellabel":101}}]</AudioChannelLayout>
+                <ChannelType>1</ChannelType>
+                <FrameRate>{AUDIO_TICKS_PER_SAMPLE}</FrameRate>
+            </AudioComponentChain>"""))
+            return acc_id
+
+        lin_gain = round(max(0.0001, min(5.623413, 10.0 ** (gdb / 20.0))), 6)
+        vol_param_id = alloc_oid()
+        mute_param_id = alloc_oid()
+        fader_id = alloc_oid()
+
+        new_elements.append(ET.fromstring(f"""
+        <AudioComponentParam ObjectID="{vol_param_id}" ClassID="a714635e-a628-4b27-9d59-77eba47dbc1a" Version="10">
+            <StartKeyframe>-91445760000000000,{lin_gain},0,0,0,0,0,0</StartKeyframe>
+            <CurrentValue>{lin_gain}</CurrentValue>
+            <RangeLocked>false</RangeLocked>
+            <UnitsString>dB</UnitsString>
+            <UpperBound>5.6234130859375</UpperBound>
+            <Name>Volume</Name>
+        </AudioComponentParam>"""))
+
+        new_elements.append(ET.fromstring(f"""
+        <AudioComponentParam ObjectID="{mute_param_id}" ClassID="32657501-3aa4-445f-a49b-d09ecb9fa1ae" Version="10">
+            <RangeLocked>false</RangeLocked>
+            <Name>Mute</Name>
+        </AudioComponentParam>"""))
+
+        new_elements.append(ET.fromstring(f"""
+        <AudioFader ObjectID="{fader_id}" ClassID="1a38c583-ed5c-11d5-abc4-c1cbf61ec590" Version="3">
+            <AudioComponent Version="3">
+                <Component Version="7">
+                    <Params Version="1">
+                        <Param Index="0" ObjectRef="{vol_param_id}" />
+                        <Param Index="1" ObjectRef="{mute_param_id}" />
+                    </Params>
+                    <ID>1</ID>
+                </Component>
+                <AudioChannelLayout>[{{"channellabel":100}},{{"channellabel":101}}]</AudioChannelLayout>
+                <AudioComponentType>1</AudioComponentType>
+                <ChannelType>1</ChannelType>
+                <FrameRate>{AUDIO_TICKS_PER_SAMPLE}</FrameRate>
+            </AudioComponent>
+        </AudioFader>"""))
+
+        new_elements.append(ET.fromstring(f"""
+        <AudioComponentChain ObjectID="{acc_id}" ClassID="3cb131d1-d3c0-47ae-a19a-bdf75ea11674" Version="4">
+            <DefaultChannelVolumeComponentID>2</DefaultChannelVolumeComponentID>
             <ComponentChain Version="3">
                 <Node Version="1"><Properties Version="1">
                     <MZ.ComponentChain.ActiveComponentID>1</MZ.ComponentChain.ActiveComponentID>
                     <MZ.ComponentChain.ActiveComponentParamIndex>4294967295</MZ.ComponentChain.ActiveComponentParamIndex>
                 </Properties></Node>
                 <Components Version="1">
-                    <Component Index="0" ObjectRef="{motion_comp_id}" />
+                    <Component Index="0" ObjectRef="{fader_id}" />
                 </Components>
             </ComponentChain>
-        </VideoComponentChain>"""))
-        return vcc_id
+            <AudioChannelLayout>[{{"channellabel":100}},{{"channellabel":101}}]</AudioChannelLayout>
+            <ChannelType>1</ChannelType>
+            <FrameRate>{AUDIO_TICKS_PER_SAMPLE}</FrameRate>
+        </AudioComponentChain>"""))
+        return acc_id
 
     # Populate VideoClipTracks
     for t_idx, v_track in enumerate(model["v_tracks"]):
@@ -1860,22 +2290,7 @@ def _write_native_prproj(model: dict, seq_name: str, out_prproj: pathlib.Path) -
                 <Name>{escape(item['name'])}</Name>
             </SubClip>"""))
 
-            acc_id = alloc_oid()
-            new_elements.append(ET.fromstring(f"""
-            <AudioComponentChain ObjectID="{acc_id}" ClassID="3cb131d1-d3c0-47ae-a19a-bdf75ea11674" Version="4">
-                <DefaultVol>true</DefaultVol>
-                <DefaultVolumeComponentID>1</DefaultVolumeComponentID>
-                <DefaultChannelVolumeComponentID>2</DefaultChannelVolumeComponentID>
-                <ComponentChain Version="3">
-                    <Node Version="1"><Properties Version="1">
-                        <MZ.ComponentChain.ActiveComponentID>1</MZ.ComponentChain.ActiveComponentID>
-                        <MZ.ComponentChain.ActiveComponentParamIndex>4294967295</MZ.ComponentChain.ActiveComponentParamIndex>
-                    </Properties></Node>
-                </ComponentChain>
-                <AudioChannelLayout>[{{"channellabel":100}},{{"channellabel":101}}]</AudioChannelLayout>
-                <ChannelType>1</ChannelType>
-                <FrameRate>{AUDIO_TICKS_PER_SAMPLE}</FrameRate>
-            </AudioComponentChain>"""))
+            acc_id = _build_audio_component_chain(float(item.get("gain_db", 0.0) or 0.0))
 
             ati_id = alloc_oid()
             start_tag = f"<Start>{start_ticks}</Start>" if start_ticks > 0 else ""
@@ -1981,12 +2396,44 @@ def export_premiere_project(
     _write_premiere_xml(model, seq_name=stem, out_xml=out_xml)
     _write_native_prproj(model, seq_name=stem, out_prproj=out_prproj)
 
-    return {
+    # Copy expected .srt sidecar alongside <stem>.prproj when present
+    srt_candidates: list[pathlib.Path] = []
+    if plan.get("output"):
+        try:
+            out_mp4_res = pathlib.Path(_common.resolve(plan["output"]))
+            srt_candidates.append(out_mp4_res.with_suffix(".srt"))
+            srt_candidates.append(out_dir / f"{out_mp4_res.stem}.srt")
+        except Exception:
+            pass
+    srt_candidates.extend([
+        out_dir / f"reel_{stem}.srt",
+        out_dir / f"{raw_stem}.srt",
+        work_dir / f"reel_{stem}.srt",
+        work_dir / f"{stem}.srt",
+        plan_path.with_suffix(".srt"),
+    ])
+    out_srt: pathlib.Path | None = None
+    src_srt = next((c for c in srt_candidates if c.is_file()), None)
+    if src_srt is not None:
+        dst_srt = out_dir / f"{stem}.srt"
+        if src_srt.resolve() != dst_srt.resolve():
+            try:
+                shutil.copy2(src_srt, dst_srt)
+                out_srt = dst_srt
+            except Exception:
+                out_srt = src_srt
+        else:
+            out_srt = dst_srt
+
+    result: dict[str, pathlib.Path | list[int]] = {
         "prproj": out_prproj,
         "xml": out_xml,
         "v_counts": [len(t) for t in model["v_tracks"]],
         "a_counts": [len(t) for t in model["a_tracks"]],
     }
+    if out_srt is not None:
+        result["srt"] = out_srt
+    return result  # type: ignore[return-value]
 
 
 def main():

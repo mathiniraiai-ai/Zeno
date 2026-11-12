@@ -32,23 +32,30 @@ Write-Host " Videos : $(Join-Path $downloads 'Zeno Outputs')"
 Write-Host "=============================================="
 
 # 1. uv: installs Python 3.12 and the packages (user folder only)
-$env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
+$env:Path = "$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;$env:LOCALAPPDATA\uv;$env:Path"
 if (Get-Command uv -ErrorAction SilentlyContinue) {
     Write-Host "[1/5] uv already installed"
 } else {
     Write-Host "[1/5] Installing uv (Python manager)..."
     Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
-    $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
+    $env:Path = "$env:USERPROFILE\.local\bin;$env:USERPROFILE\.cargo\bin;$env:LOCALAPPDATA\uv;$env:Path"
 }
 
-# 2. FFmpeg: use one already on the machine, else download a static build into tools\ffmpeg\
+# 2. FFmpeg: require an NVENC-capable build; if system FFmpeg lacks h264_nvenc, download gyan.dev static build into tools\ffmpeg\
 $ff = "tools\ffmpeg\ffmpeg.exe"; $fp = "tools\ffmpeg\ffprobe.exe"
+$sysHasNvenc = $false
+if ((Get-Command ffmpeg -ErrorAction SilentlyContinue) -and (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+    try {
+        $encOut = & ffmpeg -hide_banner -encoders 2>$null | Out-String
+        if ($encOut -match "h264_nvenc") { $sysHasNvenc = $true }
+    } catch { $sysHasNvenc = $false }
+}
 if ((Test-Path $ff) -and (Test-Path $fp)) {
-    Write-Host "[2/5] FFmpeg already in tools\ffmpeg"
-} elseif ((Get-Command ffmpeg -ErrorAction SilentlyContinue) -and (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
-    Write-Host "[2/5] Using system FFmpeg"
+    Write-Host "[2/5] FFmpeg (NVENC) already in tools\ffmpeg"
+} elseif ($sysHasNvenc) {
+    Write-Host "[2/5] Using system FFmpeg (h264_nvenc verified)"
 } else {
-    Write-Host "[2/5] Downloading FFmpeg (about 100 MB)..."
+    Write-Host "[2/5] Downloading NVENC-enabled FFmpeg (about 100 MB)..."
     New-Item -ItemType Directory -Force -Path "tools\ffmpeg" | Out-Null
     $tmp = Join-Path $env:TEMP ("zeno_ffmpeg_" + [guid]::NewGuid())
     New-Item -ItemType Directory -Force -Path $tmp | Out-Null
@@ -84,7 +91,7 @@ if (Test-Path ".env") {
 Write-Host "[5/5] Downloading the alignment model (first time only) and checking everything..."
 $ErrorActionPreference = "Continue"
 & .venv\Scripts\python.exe scripts\setup.py --prewarm | Out-Null
-& .venv\Scripts\python.exe scripts\auto_updater.py --install-schedule | Out-Null
+& .venv\Scripts\python.exe scripts\auto_updater.py --remove-schedule | Out-Null
 & .venv\Scripts\python.exe scripts\setup.py --whoami | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[Auth] Opening your browser to sign in with Google (@gosupernova.live)..."
@@ -104,3 +111,4 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "   .venv\Scripts\python.exe scripts\setup.py --login"
 }
 Write-Host "=============================================="
+if (Test-Path ".venv\Scripts\python.exe") { exit 0 } else { exit 1 }

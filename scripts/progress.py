@@ -151,8 +151,16 @@ class ProgressTracker:
 
     def _snapshot_dict_unlocked(self) -> dict:
         elapsed = round(time.monotonic() - self._start_ts, 1)
+        owner_email = ""
+        try:
+            import common
+
+            owner_email = common.read_job_owner(self.work_dir) or common.active_user_email()
+        except Exception:
+            pass
         return {
             "project": self.project_name,
+            "owner_email": owner_email,
             "stage": self.stage,
             "total_stages": self.total_stages,
             "stage_name": self.stage_name,
@@ -168,6 +176,13 @@ class ProgressTracker:
 
     def _write_snapshot_unlocked(self) -> None:
         snap = self._snapshot_dict_unlocked()
+        try:
+            import common
+
+            if snap.get("owner_email"):
+                common.stamp_job_owner(self.work_dir, snap["owner_email"])
+        except Exception:
+            pass
         payload = json.dumps(snap, indent=2, ensure_ascii=False)
         for target_dir in (self.work_dir, self.work_root):
             try:

@@ -1,7 +1,7 @@
 {
   "name": "zeno-desktop",
   "productName": "Zeno",
-  "version": "1.0.0",
+  "version": "1.0.6",
   "description": "Zeno desktop app: watch every edit, step by step",
   "main": "main.js",
   "private": true,
@@ -9,15 +9,18 @@
   "scripts": {
     "start": "electron .",
     "dist:mac": "electron-builder --mac dmg",
-    "dist:win": "electron-builder --win nsis"
+    "dist:win": "electron-builder --win nsis --x64"
   },
   "build": {
     "appId": "live.gosupernova.zeno",
     "productName": "Zeno",
+    "afterSign": "scripts/afterSign.js",
     "files": [
       "main.js",
       "preload.js",
       "renderer/**",
+      "build/icon.png",
+      "build/icon.ico",
       "package.json"
     ],
     "mac": {
@@ -26,7 +29,7 @@
         "dmg"
       ],
       "icon": "build/icon.icns",
-      "identity": null
+      "identity": "-"
     },
     "win": {
       "target": [

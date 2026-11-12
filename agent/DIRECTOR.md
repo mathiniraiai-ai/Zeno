@@ -6,13 +6,15 @@
 
 ## The loop
 
+> **Python interpreter (`<PY>`):** Always run `.venv\Scripts\python.exe` on Windows or `.venv/bin/python` on macOS/Linux (never bare `python` or `python3`, which triggers `WindowsApps\python.exe` `Exit code 49` on Windows). If `.venv` is missing, run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install_windows.ps1` (Windows) or `bash install.command` (Mac) once first.
+
 0. **Pre-production (only if the user has a script but no clips yet)** — write the Veo shots and first-frame prompts. → `concepts/08_preproduction`
-0b. **Pre-job gate** — `zeno.py --preflight`, show the table, then ask the user for the script link (Google Doc tab), the footage folder, and the **Notion name** for the video (never invent a random folder name). Start nothing before they answer; `--inspect` checks them and blocks on any problem.
+0b. **Pre-job gate** — `<PY> scripts/zeno.py --preflight`, show the table, then ask the user for the script link (Google Doc tab), the footage folder, and the **Notion name** for the video (never invent a random folder name). Start nothing before they answer; `--inspect` checks them and blocks on any problem.
 1. **Script in** — get one script, one language, one tab. → `concepts/01_script_intake`
-2. **Footage in (`zeno.py --inspect`)** — run `python3 scripts/zeno.py --inspect <raw_dir> --script "<gdoc_or_path>" --name "<Notion name>"` (with 50s live heartbeat via `scripts/progress.py`). It only measures. It writes `line_map.md`, `facts.md`, `clip_sheet_<n>.jpg` and a `plan.edl` with a header (`#output ".../Zeno Outputs/<Notion name>/reel_<Notion name>.mp4"`) and no segments. → `concepts/02_footage_intake`
+2. **Footage in (`zeno.py --inspect`)** — run `<PY> scripts/zeno.py --inspect <raw_dir> --script "<gdoc_or_path>" --name "<Notion name>"` (with 50s live heartbeat via `scripts/progress.py`). It only measures. It writes `line_map.md`, `facts.md` (including `! REPEAT / STUMBLE` flags), `clip_sheet_<n>.jpg` and a `plan.edl` with a header (`#output ".../Zeno Outputs/<Notion name>/reel_<Notion name>.mp4"` and `#subs auto y=72`) and no segments. → `concepts/02_footage_intake`
 3. **Pick the style** — from the user's words, else from the script's header and format. Load `styles/<name>/SKILL.md`. Pass the chosen style to the engine with `--style <name>` so the job is counted for it. No match: ask the user, or learn it from a reference. → `concepts/03_style_library`, `concepts/04_reference_learning`
-4. **On-screen text** — only what the script document asks for (plus auto-extracted `"Stop Saying"` hook banner when opening with `"Stop saying ..."`). → `concepts/05_onscreen_text`
-5. **Analyse, then edit** — follow [`EDIT_RULES.md`](EDIT_RULES.md). **First analyse the script and write `work/<project>/script_analysis.md`** (emotion, beat, zoom and effect sound per line, at most 3 PEAK moments), then edit: read the line map, the facts and the clip sheets, then write every segment of `plan.edl`. Run `python3 scripts/zeno.py --check-plan work/<project>/plan.edl` until it passes (order, coverage, cuts, voices). Show the user the plan and **ask Yes/No once**. After Yes, `python3 scripts/zeno.py --execute work/<project>/plan.edl` renders, then verifies the video; fix and re-render if it fails.
+4. **Captions & on-screen text** — Premiere-grade animated `#subs auto y=72` karaoke captions are ON by default (`y=50` automatically on the `split_v` seam so faces are never covered; set `#subs off` only when the user explicitly requests a clean/unsubtitled export). For extra banners, include only what the script document asks for (plus auto-extracted `"Stop Saying"` hook banners when opening with `"Stop saying ..."`). → `concepts/05_onscreen_text`
+5. **Analyse, then edit** — follow [`EDIT_RULES.md`](EDIT_RULES.md). **First analyse the script and write `work/<project>/script_analysis.md`** (emotion, beat, active-panel or full-frame zoom, and calibrated `-4 to 0 dB` SFX per line, ~1 PEAK every `12–18s`), then edit: read the line map, the facts (trimming every `! REPEAT / STUMBLE` inside cuts and across adjacent joins, cutting `> 0.25s` internal pauses with `1.08` punch-ins, tightening turn joins to `0.06–0.15s` and mark tails to `0.35–0.42s`, and placing smooth eased transitions every `7–9s`) and the clip sheets, then write every segment of `plan.edl`. Run `<PY> scripts/zeno.py --check-plan work/<project>/plan.edl` until it passes cleanly (fixing blockers and `[TIGHT]`/`[STYLE]` warnings). Show the user the plan and **ask Yes/No once**. After Yes, `<PY> scripts/zeno.py --execute work/<project>/plan.edl` renders, then verifies the video; fix and re-render if it fails.
 6. **Report** — separated Agent vs. Gemini transcription token table + `TOKEN_LEDGER.md` & `README.md` rows. → `concepts/06_token_budget`
 6b. **Team knowledge** — recipes and references pulled from the server at the start of a job; what is learned from all users. → `concepts/09_team_learning`
 7. **Timing looks wrong?** → `concepts/07_alignment_accuracy`
@@ -24,7 +26,7 @@ Read only the concept file for the step you are on.
 - Read a whole Google Doc, or any language tab other than the one linked.
 - Read `work/*/words.json`, `silences.json`, `align.json`, or `scripts/*.py` in a normal job (`facts.md` has the words).
 - Analyze or copy burned-in subtitles in client footage (for now).
-- Add captions, graphics or B-roll the script or style did not ask for.
+- Add unrequested decorative B-roll, extra text banners, or spammy CTAs that the script or style did not ask for (note: `#subs auto y=72` Premiere-grade animated captions ARE enabled by default unless the user asks for `#subs off`).
 - Build an Engine feature from assumptions. Measure a reference first.
 
 ## Any agent can be the Director

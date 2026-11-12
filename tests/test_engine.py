@@ -97,12 +97,12 @@ L2 S2.mp4 0.12-4.10 layout=split_h slot=right sp=Student tr=smoothleft@0.28 peer
             3.0,
         )
         self.assertEqual((z0, z1, style), (1.0, 1.08, "sudden_in"))
-        # Split-screen segments must always lock zoom at 1.0 (100% static)
+        # Split-screen segments support active-panel zoom clamped safely to <= 1.12
         sz0, sz1, sstyle, _, _ = layouts.resolve_segment_zoom_spec(
-            {"src": "nonexistent.mp4", "layout": "split_h", "start": 0.0, "end": 3.0, "zoom": 1.08, "zoom_to": 1.12, "zoom_style": "sudden_in"},
+            {"src": "nonexistent.mp4", "layout": "split_h", "start": 0.0, "end": 3.0, "zoom": 1.08, "zoom_to": 1.20, "zoom_style": "sudden_in"},
             3.0,
         )
-        self.assertEqual((sz0, sz1, sstyle), (1.0, 1.0, "none"))
+        self.assertEqual((sz0, sz1, sstyle), (1.08, 1.12, "sudden_in"))
         # Paired split-screen crop filter must enforce identical common headroom and symmetric framing
         c_live, c_peer = layouts.compute_paired_split_crop_filters(
             "nonexistent_a.mp4", "nonexistent_b.mp4",
@@ -161,17 +161,26 @@ L2 S2.mp4 0.12-4.10 layout=split_h slot=right sp=Student tr=smoothleft@0.28 peer
             ok, summary = verify.check_split_and_hook_rules(plan)
             self.assertTrue(ok, f"Split/Hook QC failed: {summary}")
 
-        # Verify violation detection when split-screen has non-static zoom or intra-split transition
+        # Verify active-panel split zoom <= 1.15 passes, while excessive split zoom (> 1.15) or intra-split transition/whoosh fails
+        ok_split, ok_summary = verify.check_split_and_hook_rules({
+            "segments": [
+                {"id": "L2", "src": "a.mp4", "layout": "split_h", "zoom": 1.0, "zoom_to": 1.07, "transition": "split_reveal"},
+                {"id": "L3", "src": "b.mp4", "layout": "split_h", "zoom": 1.08, "transition": "cut"},
+            ],
+            "sfx": [{"file": "pop.wav", "segment": "L3", "at": 0.5}],
+        })
+        self.assertTrue(ok_split, ok_summary)
+
         bad_plan = {
             "segments": [
                 {"id": "L2", "src": "a.mp4", "layout": "split_h", "zoom": 1.0, "transition": "warm_flash"},
-                {"id": "L3", "src": "b.mp4", "layout": "split_h", "zoom": 1.08, "transition": "smoothleft"},
+                {"id": "L3", "src": "b.mp4", "layout": "split_h", "zoom": 1.25, "transition": "smoothleft"},
             ],
             "sfx": [{"file": "whoosh.wav", "segment": "L3", "at": 0.0}],
         }
         bad_ok, bad_summary = verify.check_split_and_hook_rules(bad_plan)
         self.assertFalse(bad_ok)
-        self.assertIn("non_static_zoom", bad_summary)
+        self.assertIn("excessive_split_zoom", bad_summary)
         self.assertIn("intra_split_transition", bad_summary)
         self.assertIn("intra_split_whoosh", bad_summary)
 
@@ -1027,10 +1036,66 @@ class TestGpu(unittest.TestCase):
         import gpu_install
 
         self.assertEqual(gpu_install.cuda_tag("| NVIDIA-SMI 560 Driver Version: 560.94 CUDA Version: 12.6 |"), "cu126")
-        self.assertEqual(gpu_install.cuda_tag("CUDA Version: 12.9"), "cu126")
+        self.assertEqual(gpu_install.cuda_tag("CUDA Version: 12.8"), "cu128")
+        self.assertEqual(gpu_install.cuda_tag("CUDA Version: 12.9"), "cu128")
         self.assertEqual(gpu_install.cuda_tag("CUDA Version: 13.0"), "cu130")
+        self.assertEqual(gpu_install.cuda_tag("| NVIDIA-SMI 610.12 Driver Version: 610.12 CUDA UMD Version: 13.3 |"), "cu130")
         self.assertIsNone(gpu_install.cuda_tag("CUDA Version: 11.8"))
         self.assertIsNone(gpu_install.cuda_tag(""))
+
+    def test_nvenc_high_bitrate_intermediate_avoids_level40_vbv_overflow(self):
+        import common
+
+        # Final reel (12 Mbps): stays strictly below H.264 Level 4.0 High Profile ceiling (25000k maxrate / 31250k bufsize)
+        final_args = common.hw_video_args("h264_nvenc", crf=18, draft=False, bitrate_kbps=12000)
+        self.assertIn("-maxrate", final_args)
+        mr = int(final_args[final_args.index("-maxrate") + 1].rstrip("k"))
+        bs = int(final_args[final_args.index("-bufsize") + 1].rstrip("k"))
+        self.assertLessEqual(mr, 20000)
+        self.assertLessEqual(bs, 28000)
+
+        # Subtitle intermediate (36 Mbps in render.py): omits VBV caps and uses CQ<=15 so NVENC never fails with invalid param (8)
+        inter_args = common.hw_video_args("h264_nvenc", crf=18, draft=False, bitrate_kbps=36000)
+        self.assertNotIn("-maxrate", inter_args)
+        self.assertNotIn("-bufsize", inter_args)
+        self.assertEqual(inter_args[inter_args.index("-cq") + 1], "15")
+
+    def test_hwaccel_decode_injected_only_for_bounded_video_inputs(self):
+        from unittest import mock
+        import common
+
+        with mock.patch.object(common, "hardware_encoder", return_value="h264_nvenc"):
+            seg_args = [
+                "-ss", "1.0", "-t", "3.0", "-i", "clip.mp4",
+                "-loop", "1", "-t", "3.0", "-i", "overlay.png",
+                "-c:v", "libx264", "-crf", "12", "seg.mkv",
+            ]
+            hw = common.with_hardware_encoder(seg_args, hwaccel_decode=True)
+            self.assertEqual(hw.count("-hwaccel"), 1)
+            clip_i = hw.index("clip.mp4") - 1
+            self.assertEqual(hw[clip_i - 2 : clip_i], ["-hwaccel", "auto"])
+            png_i = hw.index("overlay.png") - 1
+            self.assertNotEqual(hw[png_i - 2 : png_i], ["-hwaccel", "auto"])
+
+            # >4 inputs (multi-segment mix.mkv): do not open dozens of simultaneous NVDEC contexts
+            many = []
+            for idx in range(6):
+                many += ["-i", f"s{idx}.mkv"]
+            many += ["-c:v", "libx264", "-crf", "18", "mix.mkv"]
+            hw_many = common.with_hardware_encoder(many, hwaccel_decode=True)
+            self.assertNotIn("-hwaccel", hw_many)
+
+    def test_ffmpeg_omits_output_threads_on_hardware_encoders(self):
+        from unittest import mock
+        import common
+
+        seen = []
+        with mock.patch.object(common, "run", side_effect=lambda cmd, **kw: seen.append(cmd)):
+            common.ffmpeg("-i", "in.mp4", "-c:v", "h264_nvenc", "out.mp4")
+            common.ffmpeg("-i", "in.mp4", "-c:v", "libx264", "out.mp4")
+        hw_cmd, sw_cmd = seen[0], seen[1]
+        self.assertNotEqual(hw_cmd[-3:-1][0], "-threads")
+        self.assertEqual(sw_cmd[-3], "-threads")
 
     def test_requirements_refresh_keeps_cuda_torch(self):
         import gpu_install
@@ -1458,7 +1523,7 @@ class TestScriptIsTheTimeline(unittest.TestCase):
 
         plan = {"canvas": {"fps": 30},
                 "segments": [seg(1, "sudden_in"), seg(2, "sudden_in"), seg(3, "sudden_in"), seg(4, "sudden_in"), seg(5, "flash_zoom"),
-                             seg(6, layout="split_h", zoom_to=1.06)],
+                             seg(6, layout="split_h", zoom_to=1.06), seg(7, layout="split_v", zoom_to=1.22)],
                 "sfx": [{"file": "no_such_sound.wav", "segment": "L1", "at": 0.2, "gain_db": -6}, {"file": "pop.wav", "segment": "L1", "at": 0.1, "gain_db": 3}]}
         with tempfile.TemporaryDirectory() as tmp:
             text = " | ".join(script_order.style_report(plan, Path(tmp)))
@@ -1466,7 +1531,8 @@ class TestScriptIsTheTimeline(unittest.TestCase):
         self.assertIn("rapid zoom straight after another", text)
         self.assertIn("rapid zooms in", text)                       # too many a minute
         self.assertIn("stand still", text)                          # no stillness at all
-        self.assertIn("zoom on a split_h cut is ignored", text)
+        self.assertNotIn("L6: split zoom", text)                    # 1.06 active-panel split zoom is valid
+        self.assertIn("L7: split zoom 1.22 exceeds 1.15", text)     # > 1.15 split zoom is flagged
         self.assertIn("'no_such_sound.wav'", text)
         self.assertIn("above 0 dB", text)
         calm = {"canvas": {"fps": 30}, "segments": [seg(1, "sudden_in", dur=3), seg(2), seg(3, zoom=1.08), seg(4, "smooth", dur=3), seg(5)], "sfx": [{"file": "pop.wav", "segment": "L1", "at": 0.1, "gain_db": -6}]}
@@ -1722,7 +1788,7 @@ class TestSubtitles(unittest.TestCase):
         words = [{"w": f"w{i}", "start": 1.0 + i * 0.3, "end": 1.0 + i * 0.3 + 0.25} for i in range(9)]
         with patch.object(subtitles, "_words_of_clip", return_value=words), patch.object(subtitles, "_speech_spans", return_value=[]):
             cues = subtitles.build_cues([{"id": "L1", "src": "a.mp4", "start": 0.0, "end": 5.0}], [0.0], [])
-        self.assertEqual([len(c["words"]) for c in cues], [4, 4, 1])
+        self.assertEqual([len(c["words"]) for c in cues], [3, 3, 3])   # rebalanced so 1-word orphan tails never appear
 
     def test_concat_list_covers_the_whole_video_with_gaps_transparent(self):
         import tempfile
@@ -2047,6 +2113,284 @@ class TestVisionScan(unittest.TestCase):
         self.assertTrue(Path(e["thumb"]).is_file())
         import cv2
         self.assertEqual(cv2.imread(e["thumb"]).shape[1], 90)          # the picture is the size the viewer asked for
+
+
+class TestEditorSheetBugFixes(unittest.TestCase):
+    def test_1_missing_subtitles_multiline_contractions_and_script_fallback(self):
+        import tempfile
+        from unittest.mock import patch
+        import edl_parser, subtitles
+
+        # Unquoted multi-word #subs, bare #subs, and #subs off
+        self.assertEqual(edl_parser.parse_edl("#output x.mp4\n#subs Docu Split-Bar y=68\n")["subs"], {"style": "Docu Split-Bar", "y": 68.0})
+        self.assertEqual(edl_parser.parse_edl("#output x.mp4\n#subs\n")["subs"], {"style": "auto", "y": None})
+        self.assertIsNone(edl_parser.parse_edl("#output x.mp4\n#subs off\n")["subs"])
+
+        # Multi-line ID (L1_L2) + English contraction ("I'm" vs "I am") must keep ALL spoken words
+        words = [
+            {"w": "I'm", "start": 0.20, "end": 0.45},
+            {"w": "hungry", "start": 0.46, "end": 0.85},
+            {"w": "ನನಗೆ", "start": 1.00, "end": 1.35},
+            {"w": "ಹಸಿವಾಗಿದೆ", "start": 1.36, "end": 1.95},
+        ]
+        lines = [
+            {"id": "L1", "text": "I am hungry", "tokens": ["i", "am", "hungry"]},
+            {"id": "L2", "text": "ನನಗೆ ಹಸಿವಾಗಿದೆ", "tokens": ["ನನಗೆ", "ಹಸಿವಾಗಿದೆ"]},
+        ]
+        seg = {"id": "L1_L2", "src": "S1.mp4", "start": 0.15, "end": 2.05}
+        with patch.object(subtitles, "_words_of_clip", return_value=words), patch.object(subtitles, "_speech_spans", return_value=[(0.15, 2.00)]):
+            cues = subtitles.build_cues([seg], [0.0], lines)
+        spoken = " ".join(c["text"] for c in cues)
+        self.assertIn("I'm", spoken)
+        self.assertIn("ನನಗೆ", spoken)
+        self.assertIn("ಹಸಿವಾಗಿದೆ", spoken)
+
+        # Script-line + speech-span fallback when words.json is empty on an active speech turn
+        seg_missing = {"id": "L2", "src": "V1.mp4", "start": 1.0, "end": 3.0}
+        with patch.object(subtitles, "_words_of_clip", return_value=[]), patch.object(subtitles, "_speech_spans", return_value=[(1.1, 2.8)]):
+            fb_cues = subtitles.build_cues([seg_missing], [5.0], lines)
+        self.assertGreaterEqual(len(fb_cues), 1)
+        self.assertIn("ನನಗೆ", " ".join(c["text"] for c in fb_cues))
+
+        # split_v auto-places captions at y=50% on the seam so faces are never covered
+        self.assertAlmostEqual(
+            subtitles.resolve_safe_y_percent({"style": "auto", "y": None}, [{"layout": "split_v", "start": 0.0, "end": 4.0}], [0.0], 4.0, 1080, 1920),
+            50.0,
+            places=1,
+        )
+
+    def test_2_premiere_grade_caption_styles_and_karaoke_pop(self):
+        import tempfile, json
+        from PIL import Image
+        import subtitles
+
+        all_styles = subtitles.styles()
+        self.assertEqual(len(all_styles), 8)
+        for st in all_styles:
+            self.assertGreaterEqual(int(st.get("fontSize", 0)), 64, f"Style {st['name']} fontSize too small")
+            self.assertGreaterEqual(int(st.get("strokeWidth", 0)), 5, f"Style {st['name']} missing crisp stroke")
+            has_distinct_active = (
+                str(st.get("activeColor", "")).upper() != str(st.get("color", "")).upper()
+                or st.get("wordBox")
+                or st.get("activePill")
+                or st.get("wordBoxColor")
+            )
+            self.assertTrue(has_distinct_active, f"Style {st['name']} lacks active-word karaoke highlight")
+        self.assertIsNotNone(subtitles.resolve_style("Hormozi Punch"))
+
+        if subtitles.available():
+            with tempfile.TemporaryDirectory() as tmp:
+                out_d = Path(tmp)
+                cues = [{
+                    "startTime": 0.2,
+                    "endTime": 1.1,
+                    "text": "Learn English ನನಗೆ",
+                    "words": [
+                        {"word": "Learn", "startTime": 0.2, "endTime": 0.5},
+                        {"word": "English", "startTime": 0.5, "endTime": 0.8},
+                        {"word": "ನನಗೆ", "startTime": 0.8, "endTime": 1.1},
+                    ],
+                }]
+                frames = subtitles.render_frames(cues, subtitles.resolve_style(4), 1080, 1920, out_d, 72.0)
+                # 3 words >= 0.14s -> 3 subframes per word (9 karaoke pop frames)
+                self.assertGreaterEqual(len(frames), 6)
+                with Image.open(frames[0]["path"]) as im:
+                    self.assertEqual(im.width, 1080)
+                    self.assertLess(im.height, 1920)  # fast cropped horizontal band
+
+    def test_3_unscripted_repeats_stumbles_and_guardian_word_dicts(self):
+        import tempfile, json
+        from unittest.mock import patch
+        import script_order
+        from align_engine.guardian import TranscriptionGuardian
+
+        # Guardian must extract 'text' / 'w' / 'word' without stringifying dicts
+        audit = TranscriptionGuardian().audit(
+            [{"text": "ಮೊದಲು", "start": 0.1, "end": 0.4}, {"w": "ನೋಡಿ", "start": 0.5, "end": 0.9}],
+            "ಮೊದಲು ನೋಡಿ",
+            "kn",
+        )
+        self.assertNotIn("{'text':", repr(audit.__dict__))
+
+        # Intra-clip Kannada phrase restart & English 1-word stutter detection
+        kn_words = [
+            {"w": "ಖಂಡಿತವಾಗ್ಲೂ", "start": 1.0, "end": 1.5},
+            {"w": "ಹಾಗೇ", "start": 1.5, "end": 1.8},
+            {"w": "ಖಂಡಿತವಾಗ್ಲೂ", "start": 2.1, "end": 2.6},
+            {"w": "ಹಾಗೆ", "start": 2.6, "end": 2.9},
+            {"w": "ಮಾಡ್ತೀನಿ", "start": 2.9, "end": 3.4},
+        ]
+        reps = script_order.find_unscripted_repeats(kn_words, "ಖಂಡಿತವಾಗ್ಲೂ ಹಾಗೆ ಮಾಡ್ತೀನಿ")
+        self.assertGreaterEqual(len(reps), 1)
+        self.assertTrue(1.90 <= reps[0]["clean_trim_start"] <= 2.10)
+
+        # Cross-segment boundary repeat blocked by full_gate
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            sp = td / "script.txt"
+            sp.write_text("L1 Speaker: ಖಂಡಿತವಾಗ್ಲೂ ಹಾಗೆ\nL2 Speaker: ಮಾಡ್ತೀನಿ ಬನ್ನಿ\n", encoding="utf-8")
+            plan = {
+                "segments": [
+                    {"id": "L1", "src": "v17.mp4", "start": 0.9, "end": 1.9, "speaker": "Speaker"},
+                    {"id": "L2", "src": "v17.mp4", "start": 2.0, "end": 3.5, "speaker": "Speaker"},
+                ]
+            }
+            all_v17 = kn_words + [{"w": "ಬನ್ನಿ", "start": 3.4, "end": 3.48}]
+            with patch.object(script_order, "_words_of", side_effect=lambda s: [w for w in all_v17 if w["end"] > s["start"] and w["start"] < s["end"]]), \
+                 patch.object(script_order, "voice_problems", return_value=([], "")), \
+                 patch.object(script_order, "cut_problems", return_value=[]):
+                g = script_order.full_gate(plan, sp, td)
+            self.assertTrue(g["blocked"])
+            self.assertIn("REPEATED WORDS IN CUT", g["problems"])
+
+    def test_4_riser_redirect_sfx_calibration_and_auto_split_sfx(self):
+        import common, render, layouts
+
+        riser_p = common.resolve_sfx_asset("riser.wav")
+        self.assertTrue(riser_p.is_file())
+        self.assertEqual(riser_p.name, "sn_riser_1.wav")
+        # Unknown SFX must still resolve to a non-existent path so style_report catches it
+        self.assertFalse(common.resolve_sfx_asset("no_such_sound.wav").is_file())
+
+        # Split sudden_in auto-attaches subtle pop.wav when no explicit SFX sits at the beat
+        plan = {
+            "segments": [
+                {"id": "L1", "src": "a.mp4", "start": 0.0, "end": 3.0, "layout": "split_v", "zoom": 1.0, "zoom_to": 1.08, "zoom_style": "sudden_in", "zoom_at": 1.2}
+            ],
+            "sfx": [],
+            "marks": [],
+        }
+        auto_sfx = layouts.collect_layout_auto_sfx(plan, [0.0])
+        self.assertTrue(any(f == "pop.wav" and abs(t - 1.2) < 0.05 and -4.0 <= g <= -2.0 for f, t, g in auto_sfx), auto_sfx)
+        stats = render._sfx_audio_stats(common.resolve_sfx_asset("whoosh.wav"))
+        self.assertGreater(stats["duration"], 0.15)
+        self.assertGreaterEqual(stats["peak_sec"], 0.0)
+
+    def test_5_premiere_export_gain_opacity_split_crop_and_v7_subs(self):
+        import tempfile, gzip, json, subprocess
+        import premiere_export, common
+
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            clip_a = td / "a.mp4"
+            clip_b = td / "b.mp4"
+            for cp, col in ((clip_a, "navy"), (clip_b, "darkgreen")):
+                subprocess.run([
+                    str(common.resolve_ffmpeg()), "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", f"color=c={col}:s=360x640:d=2:r=25",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=2:sample_rate=48000",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(cp),
+                ], check=True)
+            subs_dir = td / "_subs"
+            subs_dir.mkdir()
+            from PIL import Image
+            cap_png = subs_dir / "c0.png"
+            Image.new("RGBA", (1080, 260), (255, 255, 255, 255)).save(cap_png)
+            (subs_dir / "subs_meta.json").write_text(json.dumps({
+                "band_y0": 1240, "band_h": 260, "width": 1080, "height": 1920, "fps": 25,
+                "frames": [{"path": str(cap_png), "startMs": 200, "durationMs": 800}],
+            }), encoding="utf-8")
+            out_dir = td / "out"
+            out_dir.mkdir()
+            (out_dir / "reel_Demo.srt").write_text("1\n00:00:00,200 --> 00:00:01,000\nHello\n\n", encoding="utf-8")
+            plan = {
+                "output": str(out_dir / "reel_Demo.mp4"),
+                "canvas": {"width": 1080, "height": 1920, "fps": 25},
+                "mark_pack": "flash",
+                "subs": {"style": "auto", "y": 72},
+                "segments": [
+                    {"id": "L1", "src": str(clip_a), "start": 0.0, "end": 1.5, "layout": "single", "zoom": 1.0, "transition": "cut"},
+                    {"id": "L2", "src": str(clip_b), "start": 0.0, "end": 1.5, "layout": "split_v", "peer": {"slot": "top", "src": str(clip_a), "at": 0.0}, "zoom": 1.08, "transition": "split_reveal", "transition_dur": 0.40},
+                ],
+                "marks": [{"type": "wrong", "segment": "L2", "at": 0.5, "duration": 0.48, "sfx": "sn_wrong.wav", "gain_db": 1.0}],
+                "sfx": [{"file": "pop.wav", "segment": "L1", "at": 0.3, "gain_db": -2.5}],
+            }
+            plan_path = td / "plan.edl"
+            plan_path.write_text("#output out/reel_Demo.mp4\n", encoding="utf-8")
+            res = premiere_export.export_premiere_project(plan, plan_path, out_dir=out_dir, work_dir=td, fps=25, width=1080, height=1920)
+            xml_root = ET.parse(res["xml"]).getroot()
+            # Zero <mediatype>audio</mediatype> inside <video> tracks
+            self.assertEqual(len(xml_root.findall(".//video//transitionitem/effect/mediatype[.='audio']")), 0)
+            # V7 subtitle track populated
+            v_tracks = xml_root.findall(".//sequence/media/video/track")
+            self.assertGreaterEqual(len(v_tracks), 7)
+            self.assertGreaterEqual(len(v_tracks[6].findall("clipitem")), 1)
+            # .prproj decompresses and parses cleanly as XML
+            pr_xml = gzip.decompress(Path(res["prproj"]).read_bytes()).decode("utf-8")
+            ET.fromstring(pr_xml)
+            self.assertIn("AE.ADBE Opacity", pr_xml)
+            self.assertTrue((out_dir / "Demo.srt").is_file())
+
+    def test_6_end_to_end_render_transitions_sfx_split_zoom_and_square_subs(self):
+        import tempfile, json, subprocess, sys
+        import common, edl_parser, verify
+
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            clip_a, clip_b = td / "speaker_a.mp4", td / "speaker_b.mp4"
+            for cp, col, freq in ((clip_a, "darkslateblue", 220), (clip_b, "darkslategray", 330)):
+                subprocess.run([
+                    str(common.resolve_ffmpeg()), "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", f"color=c={col}:s=360x640:d=2.2:r=25",
+                    "-f", "lavfi", "-i", f"sine=frequency={freq}:duration=2.2:sample_rate=48000",
+                    "-af", "volume=-16dB",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(cp),
+                ], check=True)
+            script_txt = td / "script.txt"
+            script_txt.write_text("L1 A: Hello my friend\nL2 B: Let us learn English\nL3 A: Super easy today\n", encoding="utf-8")
+            out_mp4 = td / "out" / "reel_E2ESmoke.mp4"
+            plan_obj = {
+                "output": str(out_mp4),
+                "canvas": {"width": 360, "height": 640, "fps": 25},
+                "script": str(script_txt),
+                "mark_pack": "flash",
+                "loudness": -11.5,
+                "subs": {"style": "Blue Highlight", "y": 72.0},
+                "segments": [
+                    {"id": "L1", "src": str(clip_a), "start": 0.10, "end": 1.60, "layout": "single", "zoom": 1.0, "zoom_to": 1.08, "zoom_style": "sudden_in", "zoom_at": 0.5, "transition": "cut", "speaker": "A", "note": "Hello my friend"},
+                    {"id": "L2", "src": str(clip_b), "start": 0.10, "end": 1.70, "layout": "split_v", "peer": {"slot": "top", "src": str(clip_a), "at": 0.20}, "zoom": 1.0, "zoom_to": 1.07, "transition": "split_reveal", "transition_dur": 0.36, "speaker": "B", "note": "Let us learn English"},
+                    {"id": "L3", "src": str(clip_a), "start": 0.20, "end": 1.80, "layout": "single", "zoom": 1.06, "transition": "whip_left", "transition_dur": 0.34, "speaker": "A", "note": "Super easy today"},
+                ],
+                "marks": [{"type": "right", "segment": "L2", "at": 1.00, "duration": 0.48, "pos": "top-right", "size": 0.22, "sfx": "correct_ding.wav", "gain_db": 0.5}],
+                "sfx": [{"file": "riser.wav", "segment": "L1", "at": 0.20, "gain_db": -2.5}],
+            }
+            plan_edl = td / "plan.edl"
+            plan_edl.write_text(edl_parser.format_edl(plan_obj), encoding="utf-8")
+            import os
+            proc = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "render.py"), str(plan_edl), "--draft", "--square", "--no-premiere"],
+                capture_output=True, text=True, check=False, env={**os.environ, "ZENO_SKIP_TELEMETRY": "1"},
+            )
+            self.assertEqual(proc.returncode, 0, f"render.py failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
+            self.assertTrue(out_mp4.is_file())
+            sq_mp4 = out_mp4.parent / "SQ_E2ESmoke.mp4"
+            self.assertTrue(sq_mp4.is_file())
+            srt_file = out_mp4.with_suffix(".srt")
+            self.assertTrue(srt_file.is_file())
+            srt_body = srt_file.read_text(encoding="utf-8")
+            self.assertIn("Hello", srt_body)
+            self.assertIn("English", srt_body)
+            loud_ok, lufs, tp = verify.check_loudness(out_mp4, -11.5)
+            self.assertTrue(loud_ok, f"Loudness failed: I={lufs}, TP={tp}")
+
+
+class TestSourceOrderSwap(unittest.TestCase):
+    """Flow clips: a later script line cut from earlier in the same clip means swapped dialogues."""
+
+    LINES = [{"id": "L1"}, {"id": "L2"}, {"id": "L3"}]
+
+    def test_swapped_lines_in_one_clip_are_flagged(self):
+        import script_order
+        segs = [{"id": "L1", "src": "F", "start": 0.0}, {"id": "L2", "src": "F", "start": 9.0}, {"id": "L3", "src": "F", "start": 4.0}]
+        out = script_order.src_time_swaps(segs, self.LINES)
+        self.assertEqual(len(out), 1)
+        self.assertIn("L3", out[0])
+
+    def test_clip_order_and_split_cuts_pass(self):
+        import script_order
+        segs = [{"id": "L1a", "src": "F", "start": 0.0}, {"id": "L1b", "src": "F", "start": 3.0},
+                {"id": "L2", "src": "F", "start": 5.0}, {"id": "L3", "src": "G", "start": 1.0}]
+        self.assertEqual(script_order.src_time_swaps(segs, self.LINES), [])
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ Zeno turns raw clips and a script into a finished vertical video. An AI agent (C
    - installs Git if it is missing (Windows) and connects the folder to GitHub, so it can update itself,
    - creates `.env` from the template,
    - downloads the alignment model (Meta wav2vec2, about 360 MB, into `models/torch`),
-   - sets up a daily background update (11:00 AM) that also frees disk space when it is nearly full,
+   - updates arrive as a popup in the Zeno app ("Update & Reload Now"); there is no daily background task,
    - runs real checks, and
    - **opens your browser for Google sign-in.** Sign in with your `@gosupernova.live` account. Your personal key is saved on your computer automatically; there is nothing to copy or paste.
 4. Every line should end in `[OK]`. If the browser did not open, run `python scripts/setup.py --login`; to see who you are signed in as, run `python scripts/setup.py --whoami`.

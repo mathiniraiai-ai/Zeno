@@ -670,6 +670,10 @@ def ensure_clip_transcribed(
     if not wav_path.is_file() and resolved_src.is_file() and info.get("has_audio", True):
         ffmpeg("-i", resolved_src, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav_path)
 
+    # Measure VAD speech spans up front so an empty cached transcript on a clip with real speech (>= 0.8s) is never trusted.
+    spoken_spans = _speech_spans_of({"work_dir": work_dir}) if wav_path.is_file() else []
+    active_speech_sec = sum(max(0.0, float(b) - float(a)) for a, b in spoken_spans)
+
     # Check if alignment/transcription already exists
     hq_words: List[Dict[str, Any]] = []
     base_words: List[Dict[str, Any]] = []
@@ -690,30 +694,53 @@ def ensure_clip_transcribed(
         except Exception:
             pass
 
+    # Guard against stale/poisoned empty word caches when VAD hears >= 0.8s of active speech
+    gem_cache_path = work_dir / "gemini_transcript.json"
+    if not hq_words and not base_words and active_speech_sec >= 0.8:
+        for stale_empty in (align_path, hq_path, words_path, gem_cache_path):
+            if stale_empty.is_file():
+                try:
+                    stale_empty.unlink()
+                except OSError:
+                    pass
+
     # A clip with no sound at all has nothing to transcribe: Gemini would only invent words from the script reference.
-    no_sound = not hq_words and not base_words and wav_path.is_file() and clip_has_no_sound(wav_path)
+    no_sound = not hq_words and not base_words and wav_path.is_file() and active_speech_sec < 0.8 and clip_has_no_sound(wav_path)
     if no_sound:
         print(f"  [{clip_stem}] no sound in this clip: not sent for transcription")
 
     # If neither hq_words nor base_words is cached, invoke align_engine or transcribe scripts
     if not hq_words and not base_words and wav_path.is_file() and not no_sound:
-        if align_engine is not None and hasattr(align_engine, "transcribe_and_align_clip"):
-            try:
-                res = align_engine.transcribe_and_align_clip(
-                    wav_path,
-                    work_dir=work_dir,
-                    lang=lang,
-                    script_path=script_path,
+        max_tries = 2 if active_speech_sec >= 0.8 else 1
+        for attempt in range(max_tries):
+            if align_engine is not None and hasattr(align_engine, "transcribe_and_align_clip"):
+                try:
+                    if attempt > 0 and gem_cache_path.is_file():
+                        try:
+                            gem_cache_path.unlink()
+                        except OSError:
+                            pass
+                    res = align_engine.transcribe_and_align_clip(
+                        wav_path,
+                        work_dir=work_dir,
+                        lang=lang,
+                        script_path=script_path,
+                    )
+                    if isinstance(res, list):
+                        hq_words = res
+                    elif isinstance(res, dict) and "words" in res:
+                        hq_words = res["words"]
+                    if hq_words:
+                        write_json(hq_path, hq_words)
+                        write_json(words_path, hq_words)
+                        break
+                except Exception as exc:
+                    print(f"  [WARN] align_engine fallback on {clip_stem}: {exc}")
+
+            if attempt == 0 and active_speech_sec >= 0.8 and not hq_words:
+                print(
+                    f"  [WARN] {clip_stem}: empty words returned despite {active_speech_sec:.2f}s of active speech; retrying transcription..."
                 )
-                if isinstance(res, list):
-                    hq_words = res
-                elif isinstance(res, dict) and "words" in res:
-                    hq_words = res["words"]
-                if hq_words:
-                    write_json(hq_path, hq_words)
-                    write_json(words_path, hq_words)
-            except Exception as exc:
-                print(f"  [WARN] align_engine fallback on {clip_stem}: {exc}")
 
         if not hq_words and not base_words:
             # Fallback to transcribe.py
@@ -727,6 +754,27 @@ def ensure_clip_transcribed(
                     base_words = read_json(words_path)
             except Exception:
                 pass
+
+        # Never persist an empty `words: []` cache as valid when >= 0.8s of speech was measured
+        if not hq_words and not base_words and active_speech_sec >= 0.8:
+            print(
+                f"  [WARN] {clip_stem}: 0 words transcribed despite {active_speech_sec:.2f}s of active speech; "
+                "marking transcript cache incomplete so next run retries without --fresh"
+            )
+            for empty_f in (align_path, hq_path, words_path, gem_cache_path):
+                if empty_f.is_file():
+                    try:
+                        empty_f.unlink()
+                    except OSError:
+                        pass
+            marker = work_dir / "engine_version.json"
+            try:
+                ev = read_json(marker) if marker.is_file() else {}
+            except Exception:
+                ev = {}
+            if isinstance(ev, dict):
+                ev["transcript"] = "incomplete"
+                write_json(marker, ev)
 
     if not hq_words:
         hq_words = base_words
@@ -743,11 +791,15 @@ def ensure_clip_transcribed(
     def _norm_w(wlist: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out = []
         for item in wlist:
-            txt = str(item.get("w") if "w" in item else item.get("word", "")).strip()
+            if isinstance(item, dict):
+                txt = str(item.get("w") or item.get("word") or item.get("text") or "").strip()
+                st = float(item.get("start") or 0.0)
+                en = float(item.get("end") or st)
+            else:
+                txt = str(item or "").strip()
+                st, en = 0.0, 0.0
             if not txt:
                 continue
-            st = float(item.get("start") or 0.0)
-            en = float(item.get("end") or st)
             out.append({"w": txt, "start": round(st, 3), "end": round(en, 3)})
         return out
 
@@ -1006,8 +1058,10 @@ def _start_background_scan() -> None:
         pass
 
 
-def format_facts(clips_data: List[Dict[str, Any]]) -> str:
+def format_facts(clips_data: List[Dict[str, Any]], script_lines: Optional[List[Dict[str, Any]]] = None) -> str:
     """Everything measured about each clip, as text for the Director: `start word` for every word, a line break at each gap."""
+    import script_order
+
     out = ["# FACTS: measured by Zeno. Times are seconds in the clip. `1.20 word` = the word starts at 1.20; `|2.31` = speech stops at 2.31.", ""]
     for c in clips_data:
         info = c.get("info") or {}
@@ -1075,7 +1129,37 @@ def format_facts(clips_data: List[Dict[str, Any]]) -> str:
             out.append("  emphasis (louder than this speaker's usual; put a rapid zoom or an effect on these words): " + " ".join(f"'{x['w']}'@{x['start']:.2f}(+{x['delta_db']}dB)" for x in stress))
         if env:
             out.append("  voiced (real sound, measured from the audio): " + " ".join(f"{a:.2f}-{b:.2f}" for a, b in voiced_spans(env)))
-            out.extend(silent_word_runs(ws, words_in_silence(ws, env)))
+            silent_flagged = words_in_silence(ws, env)
+            out.extend(silent_word_runs(ws, silent_flagged))
+        else:
+            silent_flagged = []
+        bad_ids = {id(w) for w in silent_flagged}
+        if spoken:
+            for w in ws:
+                mid_w = (float(w["start"]) + float(w["end"])) / 2.0
+                if not any(a - 0.08 <= mid_w <= b + 0.08 for a, b in spoken):
+                    bad_ids.add(id(w))
+        live_ws = [w for w in ws if id(w) not in bad_ids and not w.get("no_sound")]
+        if len(live_ws) >= 2:
+            allowed_script_text = ""
+            if script_lines:
+                clip_toks = [_clean_token(w.get("w", "")) for w in live_ws if _clean_token(w.get("w", ""))]
+                matched_texts = [
+                    str(l.get("text") or "")
+                    for l in script_lines
+                    if (l.get("tokens") or [])
+                    and (
+                        script_order.recall(clip_toks, l.get("tokens") or []) >= 0.45
+                        or script_order.part_fit(clip_toks, l.get("tokens") or []) >= 0.45
+                    )
+                ]
+                allowed_script_text = " ".join(matched_texts)
+            for rep in script_order.find_unscripted_repeats(live_ws, allowed_script_text):
+                out.append(
+                    f"  ! REPEAT / STUMBLE ({rep['kind']}): '{rep['phrase']}' spoken twice "
+                    f"({rep['first_start']:.2f}-{rep['first_end']:.2f} and {rep['second_start']:.2f}-{rep['second_end']:.2f}) "
+                    f"— clean trim start: {rep['clean_trim_start']:.2f} (cut out {rep['first_start']:.2f}-{rep['clean_trim_start']:.2f} or split around one copy)"
+                )
         for a in c.get("anomalies") or []:
             out.append(f"  ! {a}")
         out.append("")
@@ -1157,6 +1241,8 @@ def main() -> None:
     ap.add_argument("--mark-pack", default="flash", help="Swappable ✓/✗ mark overlay pack (flash, vignette, default, glossy)")
     ap.add_argument("--name", default="", help="Notion name for this video; its outputs go to Zeno Outputs/<name>/ (reel_<name>.mp4 and SQ_<name>.mp4)")
     ap.add_argument("--style", default="", help="Style this job follows (a folder under styles/, for example micronarrative). Written into the plan as '#style <name>' so the job counts toward that style's readiness and the team's learning")
+    ap.add_argument("--subs", default=None, help="Burn-in subtitle style (default: 'auto' at y=72; pass 'off' to disable)")
+    ap.add_argument("--no-subs", action="store_true", help="Do not write default '#subs auto y=72' into initial plan.edl")
     ap.add_argument(
         "--fresh",
         action="store_true",
@@ -1199,7 +1285,8 @@ def main() -> None:
         script_path = converted
 
     meta, script_lines = parse_script_file(script_path)
-    project_name = args.project or meta.get("project_name") or script_path.stem
+    from common import resolve_user_project_name, stamp_job_owner
+    project_name = args.project or resolve_user_project_name(meta.get("project_name") or script_path.stem)
     lang = args.lang if args.lang != "auto" else meta.get("language", "auto")
 
     clip_entries = discover_clips(args.clips)
@@ -1238,6 +1325,7 @@ def main() -> None:
             base_up = st_up[:-2].rstrip("_- ")
             base_c = by_stem_upper.get(base_up)
             if base_c is not None and len(c.get("hq_words") or []) > len(base_c.get("hq_words") or []):
+                base_had_speech = bool(base_c.get("hq_words")) and not clip_is_silent(base_c)
                 base_c["hq_words"] = c["hq_words"]
                 base_c["base_words"] = c["base_words"]
                 base_c["rms_env"] = c["rms_env"]
@@ -1245,6 +1333,15 @@ def main() -> None:
                 base_c["micro_dips"] = c["micro_dips"]
                 c["dropped_take"] = True
                 c["anomalies"].append(f"[VO_PAIRED] paired voiceover audio/words into {base_c['stem']}")
+                base_wdir = Path(base_c["work_dir"])
+                if base_wdir.is_dir() and not base_had_speech:
+                    write_json(base_wdir / "hq_words.json", c["hq_words"])
+                    write_json(base_wdir / "words.json", c["hq_words"])
+                    vo_spans = _speech_spans_of(c)
+                    if vo_spans:
+                        base_wav = base_wdir / "audio16k.wav"
+                        sig = [base_wav.stat().st_size, int(base_wav.stat().st_mtime)] if base_wav.is_file() else [0, 0]
+                        write_json(base_wdir / "speech_spans.json", {"sig": sig, "spans": [list(sp) for sp in vo_spans]})
 
     # Zeno stops here: it has measured. Every editing decision is the Director's (see agent/EDIT_RULES.md).
     for c in clips_data:
@@ -1257,6 +1354,14 @@ def main() -> None:
         "height": int(first_info.get("height") or 1280),
         "fps": int(round(float(first_info.get("fps") or 24))),
     }
+    no_subs_env = os.environ.get("ZENO_NO_SUBS", "").strip().lower() in ("1", "true", "yes", "on")
+    subs_arg = (str(args.subs).strip() if getattr(args, "subs", None) is not None else "")
+    subs_disabled = bool(getattr(args, "no_subs", False)) or no_subs_env or subs_arg.lower() in ("off", "none", "false", "no", "0")
+    subs_header: Optional[Dict[str, Any]] = None
+    if not subs_disabled:
+        subs_style = subs_arg if (subs_arg and subs_arg.lower() not in ("on", "true", "yes", "1")) else "auto"
+        subs_header = {"style": subs_style, "y": 72}
+
     plan: Dict[str, Any] = {
         "output": common_unique_output(args.name or project_name).as_posix(),
         "script": str(script_path.relative_to(ROOT)) if script_path.is_relative_to(ROOT) else str(script_path),
@@ -1264,12 +1369,30 @@ def main() -> None:
         "preset": args.preset if args.preset != "auto" else "hybrid",
         "mark_pack": args.mark_pack,
         **({"style": re.sub(r"[^a-z0-9_-]", "", args.style.lower())} if getattr(args, "style", "") else {}),
+        **({"subs": subs_header} if subs_header is not None else {}),
         "segments": [],
         "marks": [],
         "audio": {"loudness": -11.5},
     }
     proj_dir = WORK / project_name
     proj_dir.mkdir(parents=True, exist_ok=True)
+    stamp_job_owner(proj_dir)
+
+    # Persist per-clip cache directory mapping so subtitles.py, script_order.py, and verify.py
+    # resolve exact caches even when generic filenames (S1.mp4, v1.mp4) are later moved offline.
+    clip_cache_map: Dict[str, str] = {}
+    for c in clips_data:
+        c_path = Path(str(c["src"]))
+        c_wdir = Path(c["work_dir"])
+        cache_name = c_wdir.name
+        if c_path.name:
+            clip_cache_map[c_path.name] = cache_name
+        if c_path.stem and c_path.stem not in clip_cache_map:
+            clip_cache_map[c_path.stem] = cache_name
+        if c.get("stem") and str(c["stem"]) not in clip_cache_map:
+            clip_cache_map[str(c["stem"])] = cache_name
+    write_json(proj_dir / "clip_caches.json", clip_cache_map)
+
     skeleton = edl_parser.format_edl(plan)
     folders = {str(Path(str(c["src"])).parent) for c in clips_data}
     if len(folders) == 1 and "#src_dir" not in skeleton:
@@ -1283,7 +1406,7 @@ def main() -> None:
     import clip_sheet
     import script_order
 
-    facts = format_facts(clips_data)
+    facts = format_facts(clips_data, script_lines)
     (proj_dir / "facts.md").write_text(facts, encoding="utf-8")
     (proj_dir / "line_map.md").write_text(script_order.build_line_map(script_lines, clips_data, style=args.style or "micronarrative"), encoding="utf-8")
     try:

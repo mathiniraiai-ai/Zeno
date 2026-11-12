@@ -190,12 +190,13 @@ def build_transcribe_prompt(target_script_lines: Optional[List[str]] = None, lan
 Transcribe ONLY the intelligible words actually spoken aloud in this audio clip 100% verbatim.
 {lang_note}{script_context}
 Rules:
-1. Include ALL spoken words verbatim, including retakes, repeated words (e.g. "Almost... Almost"), false starts, and fumbles.
-2. NEVER auto-complete a sentence from the Target Script Reference if the speaker stops mid-sentence or does not speak it in this clip!
-3. If the clip ends with unintelligible AI gibberish/babble after the real sentence concludes, DO NOT transcribe the unintelligible gibberish.
-4. STRICT BILINGUAL CODE-SWITCHING LAW: Decide language word by word. A spoken English word stays English, in the Latin alphabet (A-Z), even inside a native sentence. A native word stays native, in its own script. Never transliterate English into native script or native words into Latin.
-5. Attach punctuation (.,?!) to the end of the spoken word.
-6. Return ONLY valid JSON with this exact structure:
+1. Include ALL spoken words verbatim in exact chronological order, including retakes, repeated words, stutters, false starts, and restarted phrases (e.g. "Almost... Almost", "I want... I want to go", "ನಾನು ನಾನು"). NEVER deduplicate, clean up, or collapse repeated words, stutters, false starts, or restarted phrases even when Target Script Reference shows the phrase only once — output EVERY spoken attempt verbatim in chronological order (if a word or phrase is spoken twice, it MUST appear twice in `words`).
+2. NEVER auto-complete a sentence or copy lines from the Target Script Reference if the speaker stops mid-sentence or does not speak it in this clip! Target Script Reference is ONLY a spelling/vocabulary reference for words actually heard in the audio.
+3. ZERO-SPEECH GUARD: If the audio contains zero intelligible human speech (only silence, room tone, SFX, background noise, or music), return `"full_transcript": ""`, `"words": []`, and `"cues": []` — NEVER hallucinate or copy Target Script Reference lines onto silent or non-speech audio!
+4. If the clip ends with unintelligible AI gibberish/babble after the real sentence concludes, DO NOT transcribe the unintelligible gibberish.
+5. STRICT BILINGUAL CODE-SWITCHING LAW: Decide language word by word. A spoken English word stays English, in the Latin alphabet (A-Z), even inside a native sentence. A native word stays native, in its own script. Never transliterate English into native script or native words into Latin.
+6. Attach punctuation (.,?!) to the end of the spoken word.
+7. Return ONLY valid JSON with this exact structure:
 {{
   "detected_language_code": "kn",
   "detected_language_name": "Kannada",
@@ -339,7 +340,12 @@ class GeminiTranscriber:
             ]
             if valid_cues and len(valid_cues) < len(raw_cues):
                 raw_cues = valid_cues
-                cue_words = [w for c in valid_cues for w in (c.get("words") or str(c.get("text") or "").split()) if str(w).strip()]
+                cue_words = []
+                for c in valid_cues:
+                    for w in (c.get("words") or str(c.get("text") or "").split()):
+                        w_str = str(w.get("word") or w.get("w") or w.get("text") or "").strip() if isinstance(w, dict) else str(w).strip()
+                        if w_str:
+                            cue_words.append(w_str)
                 if cue_words:
                     data = dict(data)
                     data["cues"] = valid_cues
@@ -355,7 +361,13 @@ class GeminiTranscriber:
             words=raw_words,
             target_language=lang_code,
         )
-        healed_words = [w["word"] for w in (audit.healed_words or [])] or [str(w) for w in raw_words]
+        fallback_words = [
+            w_str
+            for w in raw_words
+            for w_str in [str(w.get("word") or w.get("w") or w.get("text") or "").strip() if isinstance(w, dict) else str(w).strip()]
+            if w_str
+        ]
+        healed_words = [w["word"] for w in (audit.healed_words or [])] or fallback_words
         usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
         return {
             "status": "success",
@@ -456,7 +468,8 @@ class GeminiTranscriber:
         if self.cloud_url and not self.api_keys:
             try:
                 res = self._transcribe_via_cloud(str(wav_p), language_hint, target_script_lines)
-                self._save_cache(cache_file, wav_p, res)
+                if res.get("words"):
+                    self._save_cache(cache_file, wav_p, res)
                 return res
             except Exception as e:
                 logger.warning("Cloud transcription failed, falling back to offline: %s", e)
@@ -598,7 +611,7 @@ def transcribe_offline_fallback(
                     max_end = 0.0
                     for item in items:
                         if isinstance(item, dict):
-                            w_txt = str(item.get("w") if "w" in item else item.get("word", "")).strip()
+                            w_txt = str(item.get("word") or item.get("w") or item.get("text") or "").strip()
                             e_val = float(item.get("end") or 0.0)
                             if w_txt:
                                 raw_words.append(w_txt)

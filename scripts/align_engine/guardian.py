@@ -72,9 +72,12 @@ class TranscriptionGuardian:
         normalized_word_list: List[str] = []
         for w in words:
             if isinstance(w, dict):
-                normalized_word_list.append(str(w.get("word", "")).strip())
+                w_txt = str(w.get("word") or w.get("w") or w.get("text") or "").strip()
+                if w_txt:
+                    normalized_word_list.append(w_txt)
             elif isinstance(w, str):
-                normalized_word_list.append(w.strip())
+                if w.strip():
+                    normalized_word_list.append(w.strip())
 
         raw_text = full_transcript or " ".join(normalized_word_list)
 
@@ -178,7 +181,7 @@ class TranscriptionGuardian:
 
         for item in words:
             if isinstance(item, dict):
-                raw_w = str(item.get("word", "")).strip()
+                raw_w = str(item.get("word") or item.get("w") or item.get("text") or "").strip()
                 s_time = item.get("start", 0.0)
                 e_time = item.get("end", 0.0)
             elif isinstance(item, str):

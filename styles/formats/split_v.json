@@ -9,12 +9,13 @@
   "bottom screen",
   "one above the other"
  ],
- "description": "Two panels stacked top and bottom with a divider. The AI teacher is on top, the learner below; both stay on screen.",
- "when": "an AI teacher and a learner in a lesson, with right and wrong marks",
+ "description": "Two panels stacked top and bottom with a stationary divider. Active speaker panel zooms (1.0->1.06/1.07, sudden_in:1.08, max 1.12) + beat SFX while listener stays locked at 1.0.",
+ "when": "an AI teacher and a learner in a snappy lesson (0.06-0.15s joins, 0.35-0.42s mark tails, subs y=50 seam)",
  "geometry": {
   "canvas": "1080x1920",
   "panel": "1080x960",
-  "zoom": "locked at 1.0",
+  "active_zoom": "1.0->1.06/1.07 or sudden_in:1.08 (max 1.12); listener locked at 1.0",
+  "subs_y": 50,
   "headroom_pct": 25.8
  },
  "confidence": "measured",

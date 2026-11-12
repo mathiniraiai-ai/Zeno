@@ -1,7 +1,37 @@
 {
   "style": "micronarrative",
-  "updated_at": "2026-11-07",
+  "updated_at": "2026-11-11",
   "rules": [
+    {
+      "id": "SPLIT_ACTIVE_PANEL_ZOOM_AND_SFX",
+      "category": "split_screen",
+      "rule": "In split_h, split_v & baked splits, zoom active speaker (1->1.06/1.07, sudden_in:1.08, max 1.12) while the silent listener panel and divider seam stay locked at 1.0, paired with clean beat SFX (pop.wav at -3 dB, whoosh.wav/sn_swish_1.wav at -3 to -2 dB on key shifts)."
+    },
+    {
+      "id": "SNAPPY_PACING_AND_PAUSE_CUTS",
+      "category": "cutting",
+      "rule": "Cut >0.25s pauses in monologues & >5s split turns (L4a/L4b masked w/ z=1.08 punch-in); keep dialogue joins 0.06-0.15s, breath pad 0.02-0.05s max (never double-pad facts.md), and wrong/right mark tails 0.35-0.42s (0.48s 2-pulse flash)."
+    },
+    {
+      "id": "ZERO_UNSCRIPTED_REPEATS_STUMBLES",
+      "category": "cutting",
+      "rule": "Check ! REPEAT / STUMBLE in facts.md: trim every false start, stutter & cross-cut repeat inside cuts and across adjacent cut joins (split mid-sentence stumbles into L5a+L5b masked with z=1.08 punch-in)."
+    },
+    {
+      "id": "DEFAULT_AUTO_CAPTIONS_Y72",
+      "category": "subtitles",
+      "rule": "Include #subs auto y=72 by default in plan.edl (auto y=50 on split_v seam; #subs off ONLY if explicitly requested by the user) for Premiere-grade animated word-pop karaoke captions."
+    },
+    {
+      "id": "SMOOTH_TRANSITIONS_EVERY_7_TO_9S",
+      "category": "transitions",
+      "rule": "Place smooth transitions every 7-9s (4-6 in a 35-45s reel) at scene shifts, split entry/exit & topic turns: split_reveal@0.40 (opposing panel slide-in/out), warm_flash@0.38, whip_left@0.34, whip_right@0.34, slide_up@0.36, zoom_burst@0.36, flash_zoom@0.36; keep rapid intra-split swaps tr=cut."
+    },
+    {
+      "id": "CALIBRATED_POST_LOUDNORM_SFX",
+      "category": "color_audio",
+      "rule": "Keep # SFX: gains in -4 to 0 dB (pop.wav -3, whoosh.wav/sn_swish_1.wav -3 to -2, sn_riser_1.wav -3 to -2, sn_punch_1.wav -2 to -1; <= 0 dB) since SFX are peak-normalized to -1 dBFS post-loudnorm; # MARKS: defaults are +1.0 dB wrong and +0.5 dB right."
+    },
     {
       "id": "HOOK_FIRST_ZOOM_IN",
       "category": "zoom",
@@ -10,27 +40,17 @@
     {
       "id": "SUPERNOVA_AND_KEYPOINT_ZOOM_IN",
       "category": "zoom",
-      "rule": "In full-frame live shots (layout=single, in-frame two-shots included), trigger a sudden zoom-in (sudden_in:1.08@<word_t>) on Supernova callouts or strong value points ([STRESS] vocal peak words), aimed at the speaker, and let go with sudden_out:1.08 or a smooth 1.0->1.06 on the next cut."
-    },
-    {
-      "id": "HOOK_CLIP_TRANSITIONS_1_TO_2",
-      "category": "transitions",
-      "rule": "Place 1 to 2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside a single-character hook or at Scene N boundaries. In a full-frame live conversation made for Meta ads, use a crisp transition about every 14 s (whip, slide_up, zoom_burst on a reveal); inside a split keep clean cuts (tr=cut, no whoosh between turns)."
-    },
-    {
-      "id": "SPLIT_SCREEN_100_STATIC",
-      "category": "split_screen",
-      "rule": "Two-character split screens (split_h / split_v) MUST stay 100% static (z=1.0 locked) with zero intra-split transitions (tr=cut) and zero whoosh.wav SFX between speaker turns."
+      "rule": "In both full-frame live shots (single, safe two-shots <=1.10) and active split panels (split_h/split_v <=1.12), trigger sudden_in:1.08@<word_t> on Supernova callouts or [STRESS] emphasis words, releasing with sudden_out:1.08 or smooth 1.0->1.06."
     },
     {
       "id": "SPLIT_SCREEN_COMMON_HEADROOM",
       "category": "split_screen",
-      "rule": "In split_h (Left/Right) and split_v (Top/Bottom), both characters MUST share an identical common headroom (14%-20% matched head-crown gap) and matched face zoom scale, alternating active speaker and silent listening character (left <-> right or top <-> bottom)."
+      "rule": "In split_h (Left/Right) and split_v (Top/Bottom), both characters MUST share matched baseline headroom (14%-20% head-crown gap) and baseline face scale, alternating the active zoomed speaker and the steady 1.0 silent listener."
     },
     {
       "id": "ACTOR_READINESS_ANTI_FREEZE",
       "category": "cutting",
-      "rule": "Respect [FACE_READY] bounds to trim pre-speech 'actor getting ready' stares and post-speech 'end-of-take freeze' frames."
+      "rule": "Respect [FACE_READY] and speech spans in facts.md to trim pre-speech stares and end-of-take freezes: use at most 0.02-0.05 s breath margin around already-padded word timestamps."
     },
     {
       "id": "TOP_PIP_FLOATING_RECTANGLE_WINDOW",
@@ -40,7 +60,7 @@
     {
       "id": "INTERLEAVED_MULTITURN_AND_HEAD_REPEAT_CUTS",
       "category": "cutting",
-      "rule": "When single-character clips (e.g. R1.mp4, M1.mp4, M2.mp4) contain multiple alternating dialogue turns separated by silent listening gaps, split them at each inter-turn silence midpoint to interleave with the partner's turns, and trim false-start head repeats (e.g. R2.mp4 0.00-1.02s)."
+      "rule": "When single-character clips (e.g. R1.mp4, M1.mp4, M2.mp4) contain multiple alternating dialogue turns separated by silent listening gaps, split them at tight 0.06-0.15s turn joins to interleave with the partner's turns, and trim every head, mid, or boundary stumble."
     },
     {
       "id": "rule_304cc075ab3a1135",
@@ -48,9 +68,9 @@
       "rule": "When a folder contains both <stem>.mp4 (listening actor video) and <stem>VO.mp4 (phone-partner voiceover audio), mux <stem>.mp4 video (0:v:0) with <stem>VO.mp4 audio (1:a:0) and transfer <stem>VO's word timestamps so the phone reaction shot plays with clean voiceover audio."
     },
     {
-      "id": "TWO_SHOT_AND_HOLOGRAM_ZOOM_LOCK",
+      "id": "HOLOGRAM_AND_EDGE_TWOSHOT_ZOOM_GUARD",
       "category": "zoom",
-      "rule": "Lock zoom=1.0 (no sudden_in:1.08, sudden_out, or PACING_PASS 1.0->1.06) on all multi-speaker (len(spk_list) >= 2) and two-shot / galley / hologram scenes (Scene 2 & Scene 3) so characters framed near the left/right edges are never cropped."
+      "rule": "Lock zoom=1.0 ONLY on 3D hologram shots, deliberate camera pans/dollies, and shared single-camera two-shots whose faces sit near frame edges ('none' in facts.md); safe live two-shots zoom up to 1.10 (focus=x,y) and split_h/split_v active panels zoom up to 1.12."
     },
     {
       "id": "MULTI_SPEAKER_SINGLE_CLIP_TURN_PRESERVATION",
@@ -66,26 +86,6 @@
       "id": "RAW_COLORS_AND_SYNC_LOCK",
       "category": "color_audio",
       "rule": "Keep color_match OFF (false) by default so raw clip colours are never altered, and never apply J/L audio-video offsets unless explicitly requested."
-    },
-    {
-      "id": "rule_60aba46b87d5aac9",
-      "category": "transitions",
-      "rule": "Place 1 to 2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside a single-character hook; keep intra-clip splits as clean jump cuts (tr=cut, zero whoosh spam)."
-    },
-    {
-      "id": "rule_02ae8145b64c5159",
-      "category": "cutting",
-      "rule": "Trim the actor's getting-ready stare before the first word and the freeze after the last: start 0.06-0.10 s before the first kept word and end 0.08-0.12 s after the last; the `speech` spans in facts.md show where speech really starts and stops."
-    },
-    {
-      "id": "rule_ae9d980cf5bc569d",
-      "category": "transitions",
-      "rule": "Place 1 to 2 crisp transitions (whip_left / whip_right) across raw clip boundaries inside a single-character hook or at Scene N boundaries; keep intra-clip and intra-scene splits as clean jump cuts (tr=cut, zero whoosh spam)."
-    },
-    {
-      "id": "rule_b2c2f96eae9b8371",
-      "category": "zoom",
-      "rule": "In single-character live shots (layout=single), trigger a sudden zoom-in (sudden_in:1.08@<word_t>) on Supernova callouts or strong value points ([STRESS] vocal peak words), and pair follow-up beats with sudden_out:1.08 or smooth 1.0->1.06."
     }
   ]
 }

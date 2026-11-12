@@ -460,8 +460,9 @@ def run_inspect(
         raise FileNotFoundError(f"No .mp4/.mov clips found in: {raw_inputs}")
 
     script_path = resolve_script_input(script_arg)
-    project_name = script_path.stem
+    project_name = common.resolve_user_project_name(script_path.stem)
     work_dir = WORK / project_name
+    common.stamp_job_owner(work_dir)
 
     tracker = ProgressTracker(work_dir=work_dir, project_name=project_name, heartbeat_sec=48.0)
     tracker.start_heartbeat()
@@ -489,6 +490,8 @@ def run_inspect(
             preset,
             "--mark-pack",
             mark_pack,
+            "--project",
+            project_name,
             *(["--style", style] if style else []),
             *(["--name", name] if name else []),
         ]
@@ -879,7 +882,7 @@ def main() -> None:
     ap.add_argument("--login", action="store_true", help="Open browser for Google Sign-In and auto-save Zeno Cloud session token")
     ap.add_argument("--whoami", action="store_true", help="Display current logged-in Zeno Cloud editor session")
     ap.add_argument("--update", action="store_true", help="Run git pull + Zeno Cloud brain memory sync immediately")
-    ap.add_argument("--install-schedule", action="store_true", help="Install daily 11:00 AM background auto-update schedule")
+    ap.add_argument("--install-schedule", action="store_true", help="(Legacy) removes the old daily background update task; updates now come from the Zeno app popup")
     ap.add_argument("--preflight", action="store_true", help="Run the live pre-job checks (FFmpeg, OpenCV, wav2vec2, Zeno server) and, with --script and inputs, check them too")
     ap.add_argument("--name", default="", help="Notion name for this video; all its files go to Zeno Outputs/<name>/ (reel_<name>.mp4 and SQ_<name>.mp4)")
     ap.add_argument("--style", default="", help="Style this job follows (a folder under styles/, for example micronarrative); written into the plan so the job counts toward that style")
@@ -892,8 +895,8 @@ def main() -> None:
 
     if args.install_schedule:
         import auto_updater
-        res = auto_updater.install_daily_scheduler(hour=11, minute=0)
-        print(f"  [Auto-Update] ✓ Daily 11:00 AM auto-updater configured ({res.get('schedule', 'active')})")
+        res = auto_updater.remove_daily_scheduler()
+        print("  [Auto-Update] Daily schedule removed. Updates now come from the Zeno app popup.")
         if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.inputs:
             sys.exit(0)
 

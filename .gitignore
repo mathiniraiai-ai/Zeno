@@ -9,6 +9,7 @@ output/*
 .env.*
 !.env.example
 .zeno_session.json
+.zeno_owner_session.json
 
 # Virtual environments
 .venv/

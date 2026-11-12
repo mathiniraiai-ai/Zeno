@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from common import read_json, resolve, write_json
 
+DEFAULT_MARK_DURATION = 0.48
+
 
 def _quote_if_needed(val: str) -> str:
     s = str(val or "")
@@ -208,20 +210,43 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
             elif directive == "style":
                 plan["style"] = re.sub(r"[^a-z0-9_-]", "", _unquote(rest.split("|")[0].strip()).lower())
             elif directive == "subs":
-                # `#subs <style id or name> [y=70]`: burn-in subtitles in that style, caption centre at y percent of the frame height
-                toks = _tokenize_line(rest)
-                subs: Dict[str, Any] = {"style": "", "y": 70.0}
-                for tok in toks:
-                    m_y = re.match(r"^y=([0-9.]+)$", tok)
-                    m_a = re.match(r"^adapt=(on|off)$", tok, re.I)
-                    if m_y:
-                        subs["y"] = float(m_y.group(1))
-                    elif m_a:
-                        subs["adapt"] = m_a.group(1).lower() == "on"
-                    elif not subs["style"]:
-                        subs["style"] = _unquote(tok)
-                if subs["style"]:
-                    plan["subs"] = subs
+                # `#subs [style id or name] [y=72] [adapt=on|off]`, `#subs`, `#subs on`, `#subs off`
+                subs_body, _ = _split_line_and_note(rest)
+                subs_body = subs_body.split("|")[0].strip()
+                toks = _tokenize_line(subs_body)
+                if not toks:
+                    plan["subs"] = {"style": "auto", "y": None}
+                else:
+                    style_parts: List[str] = []
+                    y_val: Optional[float] = None
+                    adapt_val: Optional[bool] = None
+                    for tok in toks:
+                        m_y = re.match(r"^y=([0-9.]+)%?$", tok, re.I)
+                        m_a = re.match(r"^adapt=(on|off|true|false|1|0)$", tok, re.I)
+                        m_st = re.match(r"^style=(.+)$", tok, re.I)
+                        if m_y:
+                            y_val = float(m_y.group(1))
+                        elif m_a:
+                            adapt_val = m_a.group(1).lower() in ("on", "true", "1")
+                        elif m_st:
+                            st_u = _unquote(m_st.group(1).strip())
+                            if st_u:
+                                style_parts.append(st_u)
+                        else:
+                            st_u = _unquote(tok)
+                            if st_u:
+                                style_parts.append(st_u)
+                    style_str = " ".join(style_parts).strip()
+                    low_st = style_str.lower()
+                    if low_st in ("off", "none", "false", "no", "0", "disable", "disabled"):
+                        plan["subs"] = None
+                    else:
+                        if not style_str or low_st in ("on", "true", "yes", "1"):
+                            style_str = "auto"
+                        subs_obj: Dict[str, Any] = {"style": style_str, "y": y_val}
+                        if adapt_val is not None:
+                            subs_obj["adapt"] = adapt_val
+                        plan["subs"] = subs_obj
             elif directive == "src_dir":
                 src_dir = _unquote(rest.split("|")[0].strip())
             elif directive in ("concept_brief", "characters") or directive.startswith("scene_"):
@@ -284,7 +309,7 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                             speakers[k.strip()] = _unquote(v.strip())
             continue
 
-        # 1b. Standalone SFX line: `sfx whoosh.wav seg=L5 at=0.0 gain=-8` or `whoosh.wav | L5 | 0.0 | -8`
+        # 1b. Standalone SFX / Mark lines (space or pipe-delimited `# MARKS:` / `# SFX:` tables)
         if line.lower().startswith("sfx ") and "|" not in line:
             stoks = _tokenize_line(line)
             if len(stoks) >= 2:
@@ -304,10 +329,80 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                     sfx_list.append(s_entry)
             continue
 
-        # 2. Segment Line
+        if line.lower().startswith("mark ") and "|" not in line:
+            mtoks = _tokenize_line(line)
+            if len(mtoks) >= 2:
+                m_entry_s: Dict[str, Any] = {
+                    "type": _unquote(mtoks[1]) or "wrong",
+                    "segment": "",
+                    "at": 0.0,
+                    "duration": DEFAULT_MARK_DURATION,
+                }
+                for mt in mtoks[2:]:
+                    if "=" in mt:
+                        mk, mv = mt.split("=", 1)
+                        mk, mv = mk.strip().lower(), _unquote(mv.strip())
+                        if mk in ("seg", "segment"):
+                            m_entry_s["segment"] = mv
+                        elif mk == "at":
+                            m_entry_s["at"] = round(float(mv), 4)
+                        elif mk in ("dur", "duration"):
+                            m_entry_s["duration"] = round(float(mv), 4)
+                        elif mk in ("pos", "position"):
+                            m_entry_s["position"] = mv
+                        elif mk == "size":
+                            m_entry_s["size"] = round(float(mv), 4)
+                        elif mk == "sfx":
+                            m_entry_s["sfx"] = None if mv.lower() == "none" else mv
+                        elif mk in ("gain", "gain_db", "sfx_gain_db"):
+                            gv = float(mv.lower().rstrip("db").strip())
+                            m_entry_s["sfx_gain_db"] = int(gv) if gv.is_integer() else gv
+                        elif mk == "style":
+                            m_entry_s["style"] = mv
+                if m_entry_s["segment"]:
+                    marks.append(m_entry_s)
+            continue
+
+        # 2. Segment Line (or pipe-delimited `# MARKS:` / `# SFX:` table row)
         body, note = _split_line_and_note(line)
         if not body:
             continue
+        if "|" in body:
+            pcols = [c.strip() for c in body.split("|")]
+            head_low = _unquote(pcols[0]).lower() if pcols else ""
+            if len(pcols) >= 3 and head_low in ("wrong", "right", "x", "check", "tick", "cross") and re.match(r"^-?[\d.]+$", pcols[2]):
+                m_type_p = "wrong" if head_low in ("wrong", "x", "cross") else "right"
+                dur_p = round(float(pcols[3]), 4) if (len(pcols) >= 4 and pcols[3] and re.match(r"^[\d.]+$", pcols[3])) else DEFAULT_MARK_DURATION
+                m_row: Dict[str, Any] = {
+                    "type": m_type_p,
+                    "segment": _unquote(pcols[1]),
+                    "at": round(float(pcols[2]), 4),
+                    "duration": dur_p,
+                }
+                if len(pcols) >= 5 and pcols[4]:
+                    m_row["position"] = _unquote(pcols[4])
+                if len(pcols) >= 6 and pcols[5]:
+                    m_row["size"] = round(float(pcols[5]), 4)
+                if len(pcols) >= 7 and pcols[6]:
+                    sv_sfx = _unquote(pcols[6])
+                    if sv_sfx.lower() != "default":
+                        m_row["sfx"] = None if sv_sfx.lower() == "none" else sv_sfx
+                if len(pcols) >= 8 and pcols[7]:
+                    gv_m = float(_unquote(pcols[7]).lower().rstrip("db").strip())
+                    m_row["sfx_gain_db"] = int(gv_m) if gv_m.is_integer() else gv_m
+                marks.append(m_row)
+                continue
+            if len(pcols) >= 3 and head_low.endswith((".wav", ".mp3", ".ogg", ".m4a", ".aac")) and re.match(r"^-?[\d.]+$", pcols[2]):
+                s_row: Dict[str, Any] = {
+                    "file": _unquote(pcols[0]),
+                    "segment": _unquote(pcols[1]),
+                    "at": round(float(pcols[2]), 4),
+                }
+                if len(pcols) >= 4 and pcols[3]:
+                    gv_s = float(_unquote(pcols[3]).lower().rstrip("db").strip())
+                    s_row["gain_db"] = int(gv_s) if gv_s.is_integer() else gv_s
+                sfx_list.append(s_row)
+                continue
         toks = _tokenize_line(body)
         if len(toks) < 3:
             continue
@@ -498,13 +593,19 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                 rest_m = tok[5:]
                 m_parts = _split_top_level(rest_m, "@")
                 m_type = _unquote(m_parts[0]) or "wrong"
-                m_entry: Dict[str, Any] = {"type": m_type, "segment": seg_id, "at": 0.0}
+                m_entry: Dict[str, Any] = {"type": m_type, "segment": seg_id, "at": 0.0, "duration": DEFAULT_MARK_DURATION}
                 if len(m_parts) >= 2 and m_parts[1]:
                     at_dur = m_parts[1]
                     if "/" in at_dur:
                         at_s, dur_s = at_dur.split("/", 1)
                         m_entry["at"] = round(float(at_s), 4)
-                        m_entry["duration"] = round(float(dur_s), 4)
+                        if dur_s.strip():
+                            m_entry["duration"] = round(float(dur_s), 4)
+                    elif "*" in at_dur:
+                        at_s, dur_s = at_dur.split("*", 1)
+                        m_entry["at"] = round(float(at_s), 4)
+                        if dur_s.strip():
+                            m_entry["duration"] = round(float(dur_s), 4)
                     else:
                         m_entry["at"] = round(float(at_dur), 4)
                 for mp in m_parts[2:]:
@@ -620,9 +721,19 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
         lines.append(f"#script {_quote_if_needed(str(plan_dict['script']))}")
     if plan_dict.get("style"):
         lines.append(f"#style {plan_dict['style']}")
-    if isinstance(plan_dict.get("subs"), dict) and plan_dict["subs"].get("style"):
-        lines.append(f"#subs {_quote_if_needed(str(plan_dict['subs']['style']))} y={_fmt_num(float(plan_dict['subs'].get('y', 70.0)))}"
-                     + (" adapt=off" if plan_dict["subs"].get("adapt") is False else ""))
+    if "subs" in plan_dict:
+        subs_val = plan_dict.get("subs")
+        if subs_val is None or subs_val is False:
+            lines.append("#subs off")
+        elif isinstance(subs_val, dict) and subs_val.get("style"):
+            s_line = f"#subs {_quote_if_needed(str(subs_val['style']))}"
+            if subs_val.get("y") is not None:
+                s_line += f" y={_fmt_num(float(subs_val['y']))}"
+            if subs_val.get("adapt") is False:
+                s_line += " adapt=off"
+            elif subs_val.get("adapt") is True:
+                s_line += " adapt=on"
+            lines.append(s_line)
 
     segs = plan_dict.get("segments") or []
     src_dir = str(plan_dict.get("src_dir") or _detect_common_src_dir(segs))
@@ -794,7 +905,7 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
         for m in marks_by_seg.get(sid, []):
             m_type = m.get("type", "wrong")
             m_at = _fmt_num(float(m.get("at", 0.0)))
-            if m.get("duration") is not None:
+            if m.get("duration") is not None and abs(float(m["duration"]) - DEFAULT_MARK_DURATION) > 1e-6:
                 m_at += f"/{_fmt_num(float(m['duration']))}"
             m_tok = f"mark:{m_type}@{m_at}"
             if m.get("position"):

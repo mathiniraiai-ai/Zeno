@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import re
 import sys
+from difflib import SequenceMatcher
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -28,15 +29,71 @@ FIT_MIN = 0.40        # below this a segment is not proven to say a line
 TIE = 0.08            # lines this close to the best fit are treated as equally likely (repeated wording in a script)
 HEARD_MIN = 0.50      # share of a line's words that must be heard for the line to count as present
 STRONG = 0.55         # evidence needed to call a segment out of order from its words alone
-TIGHT_JOIN_SEC = 0.25     # silence across a join (end of one cut + start of the next) above this is reported
-TIGHT_PAUSE_SEC = 0.30    # a pause between two words inside one cut above this is reported
+TIGHT_JOIN_SEC = 0.18     # silence across a join (end of one cut + start of the next) above this is reported
+TIGHT_PAUSE_SEC = 0.25    # a pause between two words inside one cut above this is reported
+MARK_TAIL_MAX_SEC = 0.48  # tail after a mark onset above this is reported
 RAPID_ZOOM_STYLES = ('sudden_in', 'flash_zoom')
-MAX_RAPID_PER_MIN = 16       # rapid zooms a minute of full-frame live conversation (Meta-ad tempo, owner decision 2026-11-06); splits never zoom
+MAX_RAPID_PER_MIN = 16       # rapid zooms a minute of full-frame live conversation (Meta-ad tempo, owner decision 2026-11-06)
 AD_MIN_MOVING_SHARE = 0.60   # of the live conversation's cuts, at least this share should move (a zoom, or a transition into the cut)
-AD_SECONDS_PER_TRANSITION = 14.0  # aim for a crisp transition about this often in the live conversation
+AD_SECONDS_PER_TRANSITION = 8.5   # aim for a crisp transition about this often in the live conversation
 MIN_STILL_SHARE = 0.25       # at least this share of single-speaker cuts should not move, so a zoom means something
 SNAP_REACH_SEC = 0.12   # a cut may move at most this far to reach a quiet point
 REPEAT_RECALL = 0.8   # two separate segments that each hold this much of a line say it twice
+
+STUTTER_SIM_MIN = 0.82
+STUTTER_GAP_MAX_SEC = 1.5
+RESTART_AVG_SIM_MIN = 0.80
+RESTART_MIN_WORD_SIM = 0.68
+RESTART_GAP_MAX_SEC = 6.0
+RESTART_GAP_MAX_TOKENS = 10
+MAX_REPEAT_NGRAM = 6
+
+# Common natural 2x reduplications across English, Kannada, Hindi, Tamil, Telugu, and Malayalam
+NATURAL_REDUPLICATIONS = {
+    # English
+    "very", "had", "that", "bye", "no", "yes", "ha", "haha", "ok", "okay",
+    "so", "really", "many", "long", "far", "step", "day", "little", "slowly",
+    "wait", "blah", "knock", "ring", "tick",
+    # Kannada
+    "ಬೇಗ", "ಮತ್ತೆ", "ಪದೇ", "ನಿಧಾನ", "ನಿಧಾನವಾಗಿ", "ಸ್ವಲ್ಪ", "ಚಿಕ್ಕ", "ದೊಡ್ಡ",
+    "ಹೊಸ", "ಬೇರೆ", "ಸಣ್ಣ", "ಜೋರಾಗಿ", "ಒಂದೊಂದೇ", "ಆಗಾಗ", "ಹೌದು", "ಬನ್ನಿ", "ಹೋಗಿ",
+    # Hindi
+    "धीरे", "बार", "जल्दी", "थोड़ा", "थोड़ी", "छोटे", "बड़े", "अलग", "साथ",
+    "कभी", "आगे", "पीछे", "हाँ", "नहीं", "चलो", "रुको", "सच",
+    # Tamil
+    "மெல்ல", "வேகமாக", "கொஞ்சம்", "சின்ன", "பெரிய", "தனி", "அடிக்கடி", "திரும்ப", "சரி",
+    # Telugu
+    "మెల్లగా", "త్వరగా", "కొంచెం", "చిన్న", "పెద్ద", "మళ్ళీ", "వేరు", "సరే",
+    # Malayalam
+    "പതുക്കെ", "വേഗം", "കുറച്ച്", "ചെറിയ", "വലിയ", "വീണ്ടും", "വേറെ", "ശരി",
+}
+
+_EN_STOP_BIGRAM_WORDS = {
+    "in", "on", "at", "to", "of", "for", "by", "the", "a", "an", "and", "or",
+}
+
+_INDIC_LONG_TO_SHORT_MATRAS = str.maketrans({
+    # Devanagari ी->ि, ू->ु
+    "\u0940": "\u093F", "\u0942": "\u0941",
+    # Bengali
+    "\u09C0": "\u09BF", "\u09C2": "\u09C1",
+    # Gujarati
+    "\u0AC0": "\u0ABF", "\u0AC2": "\u0AC1",
+    # Oriya
+    "\u0B40": "\u0B3F", "\u0B42": "\u0B41",
+    # Tamil ீ->ி, ூ->ு, ே->ெ, ோ->ொ
+    "\u0BC0": "\u0BBF", "\u0BC2": "\u0BC1", "\u0BC7": "\u0BC6", "\u0BCB": "\u0BCA",
+    # Telugu ీ->ి, ూ->ు, ే->ె, ో->ొ
+    "\u0C40": "\u0C3F", "\u0C42": "\u0C41", "\u0C47": "\u0C46", "\u0C4B": "\u0C4A",
+    # Kannada ೀ->ಿ, ೂ->ು, ೇ->ೆ, ೋ->ೊ
+    "\u0CC0": "\u0CBF", "\u0CC2": "\u0CC1", "\u0CC7": "\u0CC6", "\u0CCB": "\u0CCA",
+    # Malayalam ീ->ി, ൂ->ു, േ->െ, ോ->ൊ
+    "\u0D40": "\u0D3F", "\u0D42": "\u0D41", "\u0D47": "\u0D46", "\u0D4B": "\u0D4A",
+})
+
+_INDIC_VOWEL_SIGN_RE = re.compile(
+    r"^.(?:[\u093E-\u094C\u09BE-\u09CC\u0ABE-\u0ACC\u0B3E-\u0B4C\u0BBE-\u0BCC\u0C3E-\u0C4C\u0CBE-\u0CCC\u0D3E-\u0D4C])?"
+)
 
 
 @lru_cache(maxsize=200000)
@@ -50,6 +107,192 @@ def clean(words: List[str]) -> List[str]:
     from prepare import _clean_token
 
     return [t for t in (_clean_token(w) for w in words) if t]
+
+
+def _norm_indic_len(s: str) -> str:
+    s2 = s.translate(_INDIC_LONG_TO_SHORT_MATRAS)
+    return re.sub(r"[\u0955\u09D7\u0B56\u0B57\u0BD7\u0C55\u0C56\u0CD5\u0CD6\u0D57]", "", s2)
+
+
+def _first_akshar(s: str) -> str:
+    if not s:
+        return ""
+    m = _INDIC_VOWEL_SIGN_RE.match(s)
+    return m.group(0) if m else s[0]
+
+
+@lru_cache(maxsize=200000)
+def _repeat_tok_sim(a: str, b: str) -> float:
+    """High-precision token similarity for repeat/stutter detection (avoids minimal-pair false positives like want/went or ನನ್ನ/ನಿನ್ನ)."""
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if a.isascii() and b.isascii():
+        if max(len(a), len(b)) <= 4:
+            return 0.0
+        if a[:3] != b[:3]:
+            return 0.0
+        return SequenceMatcher(None, a, b).ratio()
+    na, nb = _norm_indic_len(a), _norm_indic_len(b)
+    if na == nb:
+        return 1.0
+    if _first_akshar(na) != _first_akshar(nb):
+        return 0.0
+    seq_r = SequenceMatcher(None, na, nb).ratio()
+    if max(len(na), len(nb)) <= 4:
+        return seq_r
+    return max(seq_r, _sim(a, b) if na[:2] == nb[:2] else 0.0)
+
+
+def _ngram_occurrences(gram: List[str], toks: List[str]) -> int:
+    """Count non-overlapping occurrences of `gram` inside `toks` using repeat-grade similarity."""
+    k, n = len(gram), len(toks)
+    if k == 0 or n < k:
+        return 0
+    cnt, idx = 0, 0
+    while idx <= n - k:
+        sims = [_repeat_tok_sim(gram[m], toks[idx + m]) for m in range(k)]
+        ok = (sims[0] >= STUTTER_SIM_MIN) if k == 1 else (min(sims) >= RESTART_MIN_WORD_SIM and (sum(sims) / k) >= RESTART_AVG_SIM_MIN)
+        if ok:
+            cnt += 1
+            idx += k
+        else:
+            idx += 1
+    return cnt
+
+
+def find_unscripted_repeats(
+    words: List[Dict[str, Any]],
+    script_line_text: Union[str, List[str], None] = "",
+) -> List[Dict[str, Any]]:
+    """Detect unscripted 1-word stutters and 2-6 word restarted/repeated n-grams in `words`.
+
+    Returns structured dicts:
+        {
+            "kind": "stutter" | "restart",
+            "phrase": str,
+            "size": int,
+            "first_start": float,
+            "first_end": float,
+            "second_start": float,
+            "second_end": float,
+            "clean_trim_start": float,
+            "first_idx": int,
+            "second_idx": int,
+        }
+    """
+    items: List[Tuple[str, Dict[str, Any]]] = []
+    for w in words or []:
+        if not isinstance(w, dict):
+            continue
+        raw_txt = str(w.get("w") or w.get("word") or w.get("text") or "").strip()
+        for t in clean(raw_txt.split()):
+            items.append((t, w))
+    n = len(items)
+    if n < 2:
+        return []
+
+    if isinstance(script_line_text, (list, tuple)):
+        ref_toks = clean([str(x) for x in script_line_text])
+    else:
+        ref_toks = clean(str(script_line_text or "").split())
+
+    toks = [t for t, _ in items]
+    found: List[Dict[str, Any]] = []
+    covered_pairs: List[Tuple[int, int, int, int]] = []
+
+    # 1) 2..6-word restarted/repeated n-grams (longest first so sub-grams inside a 4-word restart aren't emitted multiple times)
+    for k in range(min(MAX_REPEAT_NGRAM, n // 2), 1, -1):
+        i = 0
+        while i <= n - 2 * k:
+            gram = toks[i : i + k]
+            p_max = min(n - k, i + k + RESTART_GAP_MAX_TOKENS)
+            matched_p: Optional[int] = None
+            for p in range(i + k, p_max + 1):
+                if k == 2 and (p - (i + k)) >= 2 and all(t in _EN_STOP_BIGRAM_WORDS for t in gram):
+                    continue
+                sims = [_repeat_tok_sim(gram[m], toks[p + m]) for m in range(k)]
+                if min(sims) >= RESTART_MIN_WORD_SIM and (sum(sims) / k) >= RESTART_AVG_SIM_MIN:
+                    gap_sec = float(items[p][1].get("start", 0.0)) - float(items[i + k - 1][1].get("end", 0.0))
+                    if gap_sec <= RESTART_GAP_MAX_SEC:
+                        matched_p = p
+                        break
+            if matched_p is not None:
+                already = any(
+                    a1 <= i and i + k <= b1 and a2 <= matched_p and matched_p + k <= b2
+                    for a1, b1, a2, b2 in covered_pairs
+                )
+                if not already:
+                    spoken_cnt = _ngram_occurrences(gram, toks)
+                    script_cnt = _ngram_occurrences(gram, ref_toks) if ref_toks else 0
+                    if spoken_cnt > script_cnt:
+                        covered_pairs.append((i, i + k, matched_p, matched_p + k))
+                        f_start = round(float(items[i][1].get("start", 0.0)), 3)
+                        f_end = round(float(items[i + k - 1][1].get("end", 0.0)), 3)
+                        s_start = round(float(items[matched_p][1].get("start", 0.0)), 3)
+                        s_end = round(float(items[matched_p + k - 1][1].get("end", 0.0)), 3)
+                        prev_end = float(items[matched_p - 1][1].get("end", f_end))
+                        trim_start = round(min(s_start, max(prev_end, s_start - 0.04)), 3)
+                        found.append({
+                            "kind": "restart",
+                            "phrase": " ".join(gram),
+                            "size": k,
+                            "first_start": f_start,
+                            "first_end": f_end,
+                            "second_start": s_start,
+                            "second_end": s_end,
+                            "clean_trim_start": trim_start,
+                            "first_idx": i,
+                            "second_idx": matched_p,
+                        })
+                        i = matched_p
+                        continue
+            i += 1
+
+    # 2) Immediate 1-word stutters (sim >= 0.82, gap < 1.5s, excluding scripted doubles & natural reduplications)
+    for i in range(n - 1):
+        if any((a1 <= i and i + 1 <= b1) or (a2 <= i and i + 1 <= b2) for a1, b1, a2, b2 in covered_pairs):
+            continue
+        t1, w1 = items[i]
+        t2, w2 = items[i + 1]
+        if w1 is w2:
+            continue
+        gap_sec = float(w2.get("start", 0.0)) - float(w1.get("end", 0.0))
+        if gap_sec >= STUTTER_GAP_MAX_SEC:
+            continue
+        if _repeat_tok_sim(t1, t2) < STUTTER_SIM_MIN:
+            continue
+        spoken_pairs = sum(
+            1 for z in range(n - 1)
+            if _repeat_tok_sim(toks[z], t1) >= STUTTER_SIM_MIN and _repeat_tok_sim(toks[z + 1], t1) >= STUTTER_SIM_MIN
+        )
+        script_pairs = sum(
+            1 for z in range(max(0, len(ref_toks) - 1))
+            if _repeat_tok_sim(ref_toks[z], t1) >= STUTTER_SIM_MIN and _repeat_tok_sim(ref_toks[z + 1], t1) >= STUTTER_SIM_MIN
+        )
+        extra_allowed = 1 if (t1 in NATURAL_REDUPLICATIONS or t2 in NATURAL_REDUPLICATIONS) else 0
+        if spoken_pairs > script_pairs + extra_allowed:
+            f_start = round(float(w1.get("start", 0.0)), 3)
+            f_end = round(float(w1.get("end", 0.0)), 3)
+            s_start = round(float(w2.get("start", 0.0)), 3)
+            s_end = round(float(w2.get("end", 0.0)), 3)
+            trim_start = round(min(s_start, max(f_end, s_start - 0.04)), 3)
+            found.append({
+                "kind": "stutter",
+                "phrase": t1,
+                "size": 1,
+                "first_start": f_start,
+                "first_end": f_end,
+                "second_start": s_start,
+                "second_end": s_end,
+                "clean_trim_start": trim_start,
+                "first_idx": i,
+                "second_idx": i + 1,
+            })
+
+    found.sort(key=lambda d: (d["first_start"], d["second_start"]))
+    return found
 
 
 def _hits(need: List[str], have: List[str]) -> float:
@@ -195,10 +438,39 @@ def check_order(seg_rows: List[Tuple[str, List[str]]], lines: List[Dict[str, Any
     return {"assigned": assigned, "out_of_order": out_of_order, "repeated": repeated, "missing": missing, "unproven": unproven, "unknown": unknown}
 
 
-def seg_tokens(seg: Dict[str, Any]) -> List[str]:
-    from common import clip_work_dir, read_json
+_ACTIVE_WORK_DIR: Optional[Path] = None
 
-    wdir = clip_work_dir(seg.get("src", ""))
+
+def _resolve_clip_cache_dir(src: Any, work_dir: Optional[Path] = None) -> Path:
+    """Resolve a clip's cache folder: try `clip_work_dir(src)` first, then fall back to `clip_caches.json` if raw clips moved."""
+    from common import CLIP_CACHE, WORK, clip_work_dir, read_json
+
+    wdir = clip_work_dir(src)
+    if (wdir / "hq_words.json").is_file() or (wdir / "words.json").is_file() or (wdir / "audio16k.wav").is_file():
+        return wdir
+    proj = Path(work_dir) if work_dir is not None else _ACTIVE_WORK_DIR
+    if proj is not None:
+        cmap_file = proj / "clip_caches.json"
+        if cmap_file.is_file():
+            try:
+                cmap = read_json(cmap_file)
+                if isinstance(cmap, dict):
+                    p = Path(str(src or ""))
+                    for key in (str(src or ""), p.name, p.stem):
+                        mapped = cmap.get(key)
+                        if mapped:
+                            for cand in (CLIP_CACHE / str(mapped), WORK / str(mapped)):
+                                if cand.is_dir():
+                                    return cand
+            except Exception:
+                pass
+    return wdir
+
+
+def seg_tokens(seg: Dict[str, Any]) -> List[str]:
+    from common import read_json
+
+    wdir = _resolve_clip_cache_dir(seg.get("src", ""))
     st, en = float(seg["start"]), float(seg["end"])
     for name in ("hq_words.json", "words.json"):
         f = wdir / name
@@ -222,12 +494,47 @@ def read_accepted(work_dir: Path) -> Dict[str, str]:
     return out
 
 
+SRC_SWAP_MIN_SEC = 1.0    # a later script line cut from this much earlier in the same clip counts as swapped
+
+
+def src_time_swaps(segs: List[Dict[str, Any]], lines: List[Dict[str, Any]]) -> List[str]:
+    """Flow clips hold a whole conversation in script order. If a later script line is cut from EARLIER in the same clip than a
+    previous line, the dialogues are swapped. check_order trusts the plan's own L-labels, so it cannot see this; the clip times can.
+    Cleared by fixing the cut, or by `accept <id> <reason>` when the clip really has the lines in another order (retakes)."""
+    pos = {l["id"]: i for i, l in enumerate(lines)}
+    out: List[str] = []
+    last: Dict[str, Tuple[int, float, str]] = {}      # src -> (script position, source start, segment id)
+    for s in segs:
+        sid = str(s.get("id", ""))
+        ids = [pos[i] for i in _line_ids_of(sid) if i in pos]
+        try:
+            start = float(s.get("start"))
+        except (TypeError, ValueError):
+            continue
+        if not ids:
+            continue
+        key, p = str(s.get("src", "")), min(ids)
+        prev = last.get(key)
+        if prev and p > prev[0] and start < prev[1] - SRC_SWAP_MIN_SEC:
+            out.append(f"{sid} is later in the script than {prev[2]} but is cut from earlier in {key} ({start:.1f}s vs {prev[1]:.1f}s): "
+                       f"the dialogues look swapped; re-cut in clip order, or accept {sid} <reason> if the clip really has them this way")
+        if prev is None or p >= prev[0]:
+            last[key] = (max(ids), start, sid)
+    return out
+
+
 def gate(plan: Dict[str, Any], script_path: Any, work_dir: Path) -> Dict[str, Any]:
     """Every open problem in a plan. `blocked` is what stops a render. An item is cleared by fixing the plan, or by `accept <id> <reason>`."""
+    global _ACTIVE_WORK_DIR
     from prepare import parse_script_file
 
-    _, lines = parse_script_file(Path(script_path))
-    rows = [(str(s.get("id", "")), seg_tokens(s)) for s in plan.get("segments", [])]
+    prev_wd = _ACTIVE_WORK_DIR
+    _ACTIVE_WORK_DIR = Path(work_dir) if work_dir is not None else prev_wd
+    try:
+        _, lines = parse_script_file(Path(script_path)) if not isinstance(script_path, list) else ({}, script_path)
+        rows = [(str(s.get("id", "")), seg_tokens(s)) for s in plan.get("segments", [])]
+    finally:
+        _ACTIVE_WORK_DIR = prev_wd
     rep = check_order(rows, lines)
     ok = read_accepted(work_dir)
 
@@ -236,6 +543,7 @@ def gate(plan: Dict[str, Any], script_path: Any, work_dir: Path) -> Dict[str, An
 
     problems = {
         "OUT OF ORDER": open_items(rep["out_of_order"]),
+        "SOURCE ORDER (a later script line is cut from earlier in the same clip)": open_items(src_time_swaps(plan.get("segments", []), lines)),
         "MISSING": open_items(rep["missing"]),
         "SAID TWICE": open_items(rep["repeated"]),
         "NOT PROVEN (the words in the cut do not match this line)": open_items(rep["unproven"]),
@@ -258,46 +566,309 @@ def unread_plan_lines(plan: Dict[str, Any], plan_path: Path) -> List[str]:
         raw = line.strip()
         if not raw or raw.startswith("#"):
             continue
+        low = raw.lower()
+        if (low.startswith("sfx ") or low.startswith("mark ")) and "|" not in raw:
+            continue
+        if "|" in raw:
+            phead = raw.split("|", 1)[0].strip().strip('"').strip("'").lower()
+            if phead in ("wrong", "right", "x", "check", "tick", "cross") or phead.endswith((".wav", ".mp3", ".ogg", ".m4a", ".aac")):
+                continue
         first = raw.split()[0].strip('"')
         if first not in ids:
             out.append(f"line {n} ('{raw[:46]}...') was not read: put clip names that contain spaces in quotes, e.g. \"MISS NOVA FV.mp4\"")
     return out
 
 
+def _is_seg_accepted(sid: str, ok: Dict[str, str]) -> bool:
+    if not ok:
+        return False
+    if sid in ok or sid.rstrip("abcdefgh") in ok:
+        return True
+    return any(lid in ok for lid in _line_ids_of(sid))
+
+
+def _live_words_in_cut(seg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Non-ghost aligned words spoken inside `seg[start..end]`."""
+    from prepare import words_in_silence
+
+    st, en = float(seg.get("start", 0.0)), float(seg.get("end", 0.0))
+    ws = _words_of(seg)
+    if not ws:
+        return []
+    spoken = _speech_spans_for(seg)
+    env = _env_of(seg)
+    bad_ids = {id(w) for w in words_in_silence(ws, env)} if env else set()
+    kept: List[Dict[str, Any]] = []
+    for w in ws:
+        if id(w) in bad_ids or w.get("no_sound"):
+            continue
+        ws0, ws1 = float(w.get("start", 0.0)), float(w.get("end", 0.0))
+        if spoken and not any(min(ws1, b + 0.08) > max(ws0, a - 0.06) for a, b in spoken):
+            continue
+        mid = 0.5 * (ws0 + ws1)
+        ov = min(ws1, en) - max(ws0, st)
+        dur_w = max(0.04, ws1 - ws0)
+        if (st - 0.02 <= mid <= en + 0.02) or (ws1 > st + 0.08 and ws0 < en - 0.08 and ov >= max(0.06, min(0.12, 0.45 * dur_w))):
+            kept.append(w)
+    return kept
+
+
+def _script_tokens_for_segs(
+    segs: List[Dict[str, Any]],
+    words_slice: List[Dict[str, Any]],
+    by_id: Dict[str, Dict[str, Any]],
+    lines: List[Dict[str, Any]],
+) -> List[str]:
+    """Concatenate tokens of unique script lines mapped to `segs` (preserving multi-line drills while deduplicating sub-cuts like L23a+L23b)."""
+    seen_lids: List[str] = []
+    for seg in segs:
+        sid = str(seg.get("id", ""))
+        nums = [int(x) for x in re.findall(r"(?<![A-Za-z0-9])L(\d+)", sid.replace("_", " "))]
+        lids = [f"L{n}" for n in nums if f"L{n}" in by_id]
+        if len(nums) == 2 and "_" in sid and 0 < nums[1] - nums[0] <= 6:
+            lids = [f"L{n}" for n in range(nums[0], nums[1] + 1) if f"L{n}" in by_id]
+        if not lids and lines and words_slice:
+            ctoks = clean([str(w.get("w") or w.get("word") or "") for w in words_slice])
+            idx_no, _, sc = place_in_script(ctoks, lines)
+            if idx_no is not None and sc >= FIT_MIN:
+                for l in lines:
+                    if int(l.get("index", -1)) == idx_no and l.get("id") in by_id:
+                        lids = [l["id"]]
+                        break
+        for lid in lids:
+            if lid not in seen_lids:
+                seen_lids.append(lid)
+    out: List[str] = []
+    for lid in seen_lids:
+        l_obj = by_id[lid]
+        if l_obj.get("text"):
+            out.extend(clean(str(l_obj["text"]).split()))
+        else:
+            out.extend(l_obj.get("tokens") or [])
+    return out
+
+
+def repeat_problems(
+    plan: Dict[str, Any],
+    script_path: Any = None,
+    work_dir: Any = None,
+    accepted: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    """Find unscripted repeated words/phrases (a) inside each segment and (b) across adjacent segment boundaries.
+
+    Returns structured dicts (each with `message`, `segment`, `kind`, `phrase`, `clean_trim_start`, etc.).
+    """
+    global _ACTIVE_WORK_DIR
+    from common import resolve
+    from prepare import parse_script_file
+
+    lines: List[Dict[str, Any]] = []
+    if isinstance(script_path, list):
+        lines = script_path
+    else:
+        sp = script_path or plan.get("script")
+        if sp:
+            try:
+                sp_p = Path(sp) if Path(str(sp)).is_file() else resolve(str(sp))
+                if sp_p.is_file():
+                    _, lines = parse_script_file(sp_p)
+            except Exception:
+                lines = []
+
+    ok: Dict[str, str] = dict(accepted or {})
+    wdir_path: Optional[Path] = None
+    if isinstance(work_dir, dict):
+        ok.update(work_dir)
+    elif work_dir is not None:
+        wdir_path = Path(work_dir)
+        ok.update(read_accepted(wdir_path))
+    if wdir_path is None and plan.get("_plan_dir"):
+        wdir_path = Path(str(plan["_plan_dir"]))
+        ok.update(read_accepted(wdir_path))
+
+    prev_wd = _ACTIVE_WORK_DIR
+    if wdir_path is not None:
+        _ACTIVE_WORK_DIR = wdir_path
+    try:
+        segs = plan.get("segments") or []
+        by_id = {str(l["id"]): l for l in lines if l.get("id")}
+        seg_words = [_live_words_in_cut(s) for s in segs]
+        problems: List[Dict[str, Any]] = []
+
+        # (a) Intra-segment repeats
+        for s, cw in zip(segs, seg_words):
+            sid = str(s.get("id", "?"))
+            if _is_seg_accepted(sid, ok) or len(cw) < 2:
+                continue
+            allowed = _script_tokens_for_segs([s], cw, by_id, lines)
+            for rep in find_unscripted_repeats(cw, allowed):
+                msg = (
+                    f"{sid} ({s.get('src')} {float(s.get('start', 0)):.2f}-{float(s.get('end', 0)):.2f}): "
+                    f"repeats '{rep['phrase']}' at {rep['first_start']:.2f}-{rep['first_end']:.2f} and "
+                    f"{rep['second_start']:.2f}-{rep['second_end']:.2f} — trim out stumble (clean start {rep['clean_trim_start']:.2f})"
+                )
+                problems.append({
+                    **rep,
+                    "scope": "intra",
+                    "segment": sid,
+                    "segments": [sid],
+                    "message": msg,
+                })
+
+        # (b) Cross-segment boundary repeats (last 1..5 words of segment i repeated in first 1..5 words of segment i+1)
+        boundary_window = 5
+        for i in range(len(segs) - 1):
+            s_a, s_b = segs[i], segs[i + 1]
+            sid_a, sid_b = str(s_a.get("id", "?")), str(s_b.get("id", "?"))
+            if _is_seg_accepted(sid_a, ok) or _is_seg_accepted(sid_b, ok):
+                continue
+            wa, wb = list(seg_words[i]), list(seg_words[i + 1])
+            if not wa or not wb:
+                continue
+            # Ignore a single physical word straddling a non-overlapping cut on the same source clip
+            if (
+                s_a.get("src") == s_b.get("src")
+                and float(s_b.get("start", 0.0)) >= float(s_a.get("end", 0.0)) - 0.08
+                and abs(float(wa[-1].get("start", 0.0)) - float(wb[0].get("start", 0.0))) < 0.04
+                and abs(float(wa[-1].get("end", 0.0)) - float(wb[0].get("end", 0.0))) < 0.04
+            ):
+                wb = wb[1:]
+            if not wb:
+                continue
+            tail_a = wa[-boundary_window:]
+            head_b = wb[:boundary_window]
+            combined: List[Dict[str, Any]] = []
+            tail_tok_count = 0
+            t_cursor = 0.0
+            for w in tail_a:
+                w_dur = max(0.05, float(w.get("end", 0.0)) - float(w.get("start", 0.0)))
+                nt = len(clean(str(w.get("w") or w.get("word") or "").split()))
+                if nt == 0:
+                    continue
+                tail_tok_count += nt
+                combined.append({
+                    "w": w.get("w") or w.get("word") or "",
+                    "start": round(t_cursor, 3),
+                    "end": round(t_cursor + w_dur, 3),
+                    "_orig_start": float(w.get("start", 0.0)),
+                    "_orig_end": float(w.get("end", 0.0)),
+                })
+                t_cursor += w_dur + 0.05
+            t_cursor += 0.10
+            for w in head_b:
+                w_dur = max(0.05, float(w.get("end", 0.0)) - float(w.get("start", 0.0)))
+                nt = len(clean(str(w.get("w") or w.get("word") or "").split()))
+                if nt == 0:
+                    continue
+                combined.append({
+                    "w": w.get("w") or w.get("word") or "",
+                    "start": round(t_cursor, 3),
+                    "end": round(t_cursor + w_dur, 3),
+                    "_orig_start": float(w.get("start", 0.0)),
+                    "_orig_end": float(w.get("end", 0.0)),
+                })
+                t_cursor += w_dur + 0.05
+            if tail_tok_count == 0 or len(combined) <= len(tail_a):
+                continue
+            # Map token index back to `combined` word entry for exact clip-local timestamps
+            tok_to_comb: List[Dict[str, Any]] = []
+            for cw_item in combined:
+                for _ in clean(str(cw_item.get("w") or "").split()):
+                    tok_to_comb.append(cw_item)
+
+            allowed_pair = _script_tokens_for_segs([s_a, s_b], tail_a + head_b, by_id, lines)
+            for rep in find_unscripted_repeats(combined, allowed_pair):
+                if rep["first_idx"] < tail_tok_count <= rep["second_idx"]:
+                    f_w0 = tok_to_comb[rep["first_idx"]]
+                    f_w1 = tok_to_comb[min(len(tok_to_comb) - 1, rep["first_idx"] + rep["size"] - 1)]
+                    s_w0 = tok_to_comb[rep["second_idx"]]
+                    s_w1 = tok_to_comb[min(len(tok_to_comb) - 1, rep["second_idx"] + rep["size"] - 1)]
+                    fs_orig = round(float(f_w0["_orig_start"]), 3)
+                    fe_orig = round(float(f_w1["_orig_end"]), 3)
+                    ss_orig = round(float(s_w0["_orig_start"]), 3)
+                    se_orig = round(float(s_w1["_orig_end"]), 3)
+                    msg = (
+                        f"{sid_a} -> {sid_b}: '{rep['phrase']}' spoken at end of {sid_a} "
+                        f"({fs_orig:.2f}-{fe_orig:.2f}) and repeated at start of {sid_b} "
+                        f"({ss_orig:.2f}-{se_orig:.2f}) — trim one copy"
+                    )
+                    problems.append({
+                        "kind": rep["kind"],
+                        "scope": "boundary",
+                        "segment": f"{sid_a} -> {sid_b}",
+                        "segments": [sid_a, sid_b],
+                        "phrase": rep["phrase"],
+                        "size": rep["size"],
+                        "first_start": fs_orig,
+                        "first_end": fe_orig,
+                        "second_start": ss_orig,
+                        "second_end": se_orig,
+                        "clean_trim_start": round(se_orig, 3),
+                        "message": msg,
+                    })
+        return problems
+    finally:
+        _ACTIVE_WORK_DIR = prev_wd
+
+
 def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path, plan_path: Optional[Path] = None) -> Dict[str, Any]:
-    """Order, coverage, cuts and voices. Used by `--check-plan` and before every render."""
-    g = gate(plan, script_path, work_dir)
-    ok = g["accepted"]
+    """Order, coverage, cuts, repeats and voices. Used by `--check-plan` and before every render."""
+    global _ACTIVE_WORK_DIR
+    prev_wd = _ACTIVE_WORK_DIR
+    _ACTIVE_WORK_DIR = Path(work_dir) if work_dir is not None else prev_wd
+    try:
+        g = gate(plan, script_path, work_dir)
+        ok = g["accepted"]
 
-    def still_open(items: List[str]) -> List[str]:
-        return [i for i in items if i.split()[0].rstrip("abcdefgh") not in ok and i.split()[0] not in ok]
+        def still_open(items: List[str]) -> List[str]:
+            kept = []
+            for i in items:
+                parts = i.split()
+                head = parts[0] if parts else ""
+                if _is_seg_accepted(head, ok):
+                    continue
+                if len(parts) >= 3 and parts[1] == "->" and _is_seg_accepted(parts[2].rstrip(":"), ok):
+                    continue
+                kept.append(i)
+            return kept
 
-    if not plan.get("segments"):
-        g["problems"] = {"EMPTY PLAN": ["no segments yet"]}
-    unread = unread_plan_lines(plan, plan_path) if plan_path else []
-    if unread:
-        g["problems"] = {"PLAN LINES NOT READ (fix these first; the other messages may be a result of them)": unread, **g["problems"]}
-    cuts = still_open(cut_problems(plan))
-    if cuts:
-        g["problems"]["CUT INSIDE A WORD"] = cuts
-    try:
-        voices, note = voice_problems(plan)
-    except Exception as exc:   # noqa: BLE001
-        voices, note = [], f"voices not checked: {exc}"
-    voices = still_open(voices)
-    if voices:
-        g["problems"]["WRONG VOICE"] = voices
-    g["voice_note"] = note
-    try:
-        g["tighten"] = tight_report(plan)
-    except Exception:       # advice only
-        g["tighten"] = []
-    try:
-        g["style"] = style_report(plan, work_dir)
-    except Exception:
-        g["style"] = []
-    g["blocked"] = bool(g["problems"])
-    return g
+        if not plan.get("segments"):
+            g["problems"] = {"EMPTY PLAN": ["no segments yet"]}
+        unread = unread_plan_lines(plan, plan_path) if plan_path else []
+        if unread:
+            g["problems"] = {"PLAN LINES NOT READ (fix these first; the other messages may be a result of them)": unread, **g["problems"]}
+        cuts = still_open(cut_problems(plan))
+        if cuts:
+            g["problems"]["CUT INSIDE A WORD"] = cuts
+        rep_items = repeat_problems(plan, script_path, work_dir, accepted=ok)
+        rep_msgs = still_open([r["message"] for r in rep_items])
+        if rep_msgs:
+            g["problems"]["REPEATED WORDS IN CUT"] = rep_msgs
+        g["repeats"] = rep_items
+        try:
+            voices, note = voice_problems(plan)
+        except Exception as exc:   # noqa: BLE001
+            voices, note = [], f"voices not checked: {exc}"
+        voices = still_open(voices)
+        if voices:
+            g["problems"]["WRONG VOICE"] = voices
+        g["voice_note"] = note
+        try:
+            g["tighten"] = tight_report(plan)
+        except Exception:       # advice only
+            g["tighten"] = []
+        try:
+            g["style"] = style_report(plan, work_dir)
+        except Exception:
+            g["style"] = []
+        try:
+            g["style"] = list(g["style"]) + variety_report(plan)
+        except Exception:
+            pass
+        g["blocked"] = bool(g["problems"])
+        return g
+    finally:
+        _ACTIVE_WORK_DIR = prev_wd
 
 
 def format_gate(g: Dict[str, Any]) -> str:
@@ -309,24 +880,168 @@ def format_gate(g: Dict[str, Any]) -> str:
     return "\n".join(out)
 
 
+def _word_matches_line(wtoks_item: List[str], lt_pool: set) -> bool:
+    if not wtoks_item or not lt_pool:
+        return False
+    for t in wtoks_item:
+        if t in lt_pool or max((_sim(t, p) for p in lt_pool), default=0.0) >= WORD_MATCH:
+            return True
+    return False
+
+
+def _trim_edge_stumbles(
+    words: List[Dict[str, Any]],
+    wtoks: List[List[str]],
+    i: int,
+    j: int,
+    lt: List[str],
+    ref_text: Union[str, List[str]],
+) -> Tuple[float, int, int, List[Dict[str, Any]]]:
+    """Trim leading false starts (`clean_trim_start`) and trailing restarted repeats from `words[i..j]` when line recall holds."""
+    cur_i, cur_j = i, j
+    base_toks = [t for k in range(cur_i, cur_j + 1) for t in wtoks[k]]
+    cur_r = recall(base_toks, lt)
+    for _ in range(3):
+        sub_ws = words[cur_i : cur_j + 1]
+        reps = find_unscripted_repeats(sub_ws, ref_text)
+        if not reps:
+            return cur_r, cur_i, cur_j, []
+        # Map flat token index inside sub_ws back to word offset
+        tok_to_off: List[int] = []
+        for off in range(len(sub_ws)):
+            for _ in wtoks[cur_i + off]:
+                tok_to_off.append(off)
+        if not tok_to_off:
+            return cur_r, cur_i, cur_j, reps
+        changed = False
+        first_rep = reps[0]
+        if first_rep["first_idx"] == 0 and first_rep["second_idx"] < len(tok_to_off):
+            cand_i = cur_i + tok_to_off[first_rep["second_idx"]]
+            if cand_i <= cur_j:
+                cand_r = recall([t for k in range(cand_i, cur_j + 1) for t in wtoks[k]], lt)
+                if cand_r >= cur_r - 0.05 and cand_r >= 0.5:
+                    cur_i, cur_r, changed = cand_i, cand_r, True
+        if not changed:
+            last_rep = reps[-1]
+            end_tok = last_rep["second_idx"] + last_rep["size"]
+            if end_tok >= len(tok_to_off) and last_rep["second_idx"] > 0:
+                cand_j = cur_i + tok_to_off[last_rep["second_idx"] - 1]
+                if cur_i <= cand_j < cur_j:
+                    cand_r = recall([t for k in range(cur_i, cand_j + 1) for t in wtoks[k]], lt)
+                    if cand_r >= cur_r - 0.05 and cand_r >= 0.5:
+                        cur_j, cur_r, changed = cand_j, cand_r, True
+        if not changed:
+            return cur_r, cur_i, cur_j, reps
+    sub_ws = words[cur_i : cur_j + 1]
+    return cur_r, cur_i, cur_j, find_unscripted_repeats(sub_ws, ref_text)
+
+
+def _candidate_windows(
+    words: List[Dict[str, Any]],
+    lt: List[str],
+    ref_text: Union[str, List[str], None] = None,
+    fallback_toks: Optional[List[str]] = None,
+) -> List[Tuple[float, int, int, List[Dict[str, Any]]]]:
+    """Return non-overlapping tight candidate windows `(recall, i, j, internal_repeats)` ranked cleanest & latest first."""
+    n = len(words)
+    if not n or not lt:
+        return []
+    wtoks: List[List[str]] = []
+    for idx, w in enumerate(words):
+        wt = clean(str(w.get("w") or w.get("word") or w.get("text") or "").split()) if isinstance(w, dict) else []
+        if not wt and fallback_toks and len(fallback_toks) == n:
+            wt = [fallback_toks[idx]] if fallback_toks[idx] else []
+        wtoks.append(wt)
+    lt_pool = set(lt)
+    flat_match = [_word_matches_line(wt, lt_pool) for wt in wtoks]
+    ref_arg: Union[str, List[str]] = ref_text if ref_text else lt
+    max_span = max(4, int(len(lt) * 2.0) + 3)
+
+    scored: List[Tuple[Tuple[float, bool, float, int, int], float, int, int, List[Dict[str, Any]]]] = []
+    seen_spans: set = set()
+    for i in range(n):
+        if not flat_match[i]:
+            continue
+        acc: List[str] = []
+        j_lim = min(n, i + max_span)
+        for j in range(i, j_lim):
+            acc.extend(wtoks[j])
+            if not flat_match[j]:
+                continue
+            r = recall(acc, lt)
+            if r < 0.5:
+                continue
+            tr_r, tr_i, tr_j, reps = _trim_edge_stumbles(words, wtoks, i, j, lt, ref_arg)
+            if (tr_i, tr_j) in seen_spans:
+                continue
+            seen_spans.add((tr_i, tr_j))
+            tok_cnt = sum(len(wtoks[k]) for k in range(tr_i, tr_j + 1))
+            excess = max(0, tok_cnt - len(lt))
+            rep_pen = (0.06 + 0.02 * (len(reps) - 1)) if reps else 0.0
+            eff_r = tr_r - rep_pen
+            key = (round(eff_r, 2), len(reps) == 0, round(tr_r, 2), -excess, tr_i)
+            scored.append((key, tr_r, tr_i, tr_j, reps))
+
+    if not scored:
+        return []
+    scored.sort(key=lambda x: x[0], reverse=True)
+    chosen: List[Tuple[float, int, int, List[Dict[str, Any]]]] = []
+    for _key, r, i, j, reps in scored:
+        if any(not (j < ci or i > cj) for _, ci, cj, _ in chosen):
+            continue
+        chosen.append((r, i, j, reps))
+        if len(chosen) >= 3:
+            break
+    return chosen
+
+
 def _best_window(words: List[Dict[str, Any]], toks: List[str], lt: List[str]) -> Tuple[float, int, int]:
-    """(recall, i, j): the stretch of a clip that says this line best."""
+    """(recall, i, j): the tight, cleanest stretch of a clip that says this line best (preferring later clean retakes on tie)."""
+    if words and lt:
+        cands = _candidate_windows(words, lt, ref_text=lt, fallback_toks=toks)
+        if cands:
+            r, i, j, _ = cands[0]
+            return r, i, j
     n = len(toks)
-    size = min(n, max(1, int(len(lt) * 1.4) + 1))
+    if n == 0 or not lt:
+        return (0.0, 0, 0)
+    size = min(n, max(1, len(lt) + 1))
     best = (0.0, 0, max(0, size - 1))
     for i in range(0, max(1, n - size + 1)):
-        r = recall(toks[i:i + size], lt)
-        if r > best[0] + 1e-9:
+        r = recall(toks[i : i + size], lt)
+        if r >= best[0] - 1e-9 and (r > best[0] + 1e-9 or r > 0.0):
             best = (r, i, i + size - 1)
     return best
+
+
+def _filter_live_clip_words(c: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Filter out zero-energy / silent ghost words before candidate windowing."""
+    from prepare import _speech_spans_of, words_in_silence
+
+    raw_ws = [w for w in (c.get("hq_words") or []) if isinstance(w, dict) and clean([str(w.get("w") or w.get("word") or "")])]
+    if not raw_ws:
+        return []
+    env = c.get("rms_env") or []
+    bad_ids = {id(w) for w in words_in_silence(raw_ws, env)} if env else set()
+    spoken = _speech_spans_of(c) if c.get("work_dir") else []
+    kept: List[Dict[str, Any]] = []
+    for w in raw_ws:
+        if id(w) in bad_ids or w.get("no_sound"):
+            continue
+        if spoken:
+            ws0, ws1 = float(w.get("start", 0.0)), float(w.get("end", 0.0))
+            if not any(min(ws1, b + 0.08) > max(ws0, a - 0.06) for a, b in spoken):
+                continue
+        kept.append(w)
+    return kept
 
 
 def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], limit: int = 4, style: str = "") -> str:
     """The script in full, and under each line every clip stretch that says it. A measurement, not a choice."""
     prep = []
     for c in clips:
-        ws = [w for w in (c.get("hq_words") or []) if clean([w.get("w", "")])]
-        prep.append((c, ws, clean([w.get("w", "") for w in ws])))
+        ws = _filter_live_clip_words(c)
+        prep.append((c, ws, [t for w in ws for t in clean(str(w.get("w") or w.get("word") or "").split())]))
     named: set = set()
     out = ["# LINE MAP: the script is the timeline. CAND = a clip stretch that says this line; `heard` = share of the line's words found there.",
            "# Zeno chose nothing. Pick from these, check the words in facts.md, and write plan.edl."]
@@ -348,16 +1063,37 @@ def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], lim
             out.append("  silent beat: choose a silent clip from the clip sheet")
             continue
         cands = []
-        for c, ws, toks in prep:
-            if toks:
-                r, i, j = _best_window(ws, toks, lt)
+        ref_line = l.get("text") or lt
+        for idx_c, (c, ws, toks) in enumerate(prep):
+            if not ws:
+                continue
+            win_list = _candidate_windows(ws, lt, ref_text=ref_line, fallback_toks=toks)
+            for r, i, j, reps in win_list:
                 if r >= 0.5:
-                    cands.append((r, Path(str(c["src"])).name, ws[i]["start"], ws[min(j, len(ws) - 1)]["end"], c))
-        cands.sort(key=lambda x: -x[0])
-        for r, name, a, b, c in cands:
+                    w_start = float(ws[i]["start"])
+                    w_end = float(ws[min(j, len(ws) - 1)]["end"])
+                    rep_pen = (0.06 + 0.02 * (len(reps) - 1)) if reps else 0.0
+                    cands.append((
+                        (round(r - rep_pen, 2), len(reps) == 0, round(r, 2), idx_c, w_start),
+                        r,
+                        Path(str(c["src"])).name,
+                        w_start,
+                        w_end,
+                        reps,
+                        c,
+                    ))
+        cands.sort(key=lambda x: (-x[0][0], not x[0][1], -x[0][2], x[0][3], -x[0][4]))
+        for _sk, r, name, a, b, _reps, c in cands:
             named.add(id(c))
-        for r, name, a, b, _ in cands[:limit]:
-            out.append(f"  CAND {name} {float(a):.2f}-{float(b):.2f} heard={r:.2f}")
+        for _sk, r, name, a, b, reps, _ in cands[:limit]:
+            rep_note = ""
+            if reps:
+                rp0 = reps[0]
+                rep_note = (
+                    f"  [REPEAT @ {rp0['first_start']:.2f}s — split cut around stumble "
+                    f"('{rp0['phrase']}' {rp0['first_start']:.2f}-{rp0['first_end']:.2f} & {rp0['second_start']:.2f}-{rp0['second_end']:.2f})]"
+                )
+            out.append(f"  CAND {name} {float(a):.2f}-{float(b):.2f} heard={r:.2f}{rep_note}")
         if len(cands) > limit:
             out.append(f"  +{len(cands) - limit} weaker")
         if not cands:
@@ -374,13 +1110,13 @@ def voice_problems(plan: Dict[str, Any]) -> Tuple[List[str], str]:
     """Claude cannot hear, so voices are measured here: does the voice in each cut match the speaker the plan names?
     Returns (problems, note). The note says when voices could not be told apart."""
     import speaker_check
-    from common import clip_work_dir, read_json
+    from common import read_json
     from prepare import compute_10ms_rms_envelope
 
     items, ids = [], {}
     for n, s in enumerate(plan.get("segments", [])):
         who = str(s.get("speaker") or "")
-        wdir = clip_work_dir(s.get("src", ""))
+        wdir = _resolve_clip_cache_dir(s.get("src", ""))
         f = _word_file(s.get("src", ""))
         wav = wdir / "audio16k.wav"
         if not who or " / " in who or f is None or not wav.is_file():
@@ -416,9 +1152,7 @@ def voice_problems(plan: Dict[str, Any]) -> Tuple[List[str], str]:
 
 def _word_file(src: Any) -> Optional[Path]:
     """The cached aligned words of a clip. The cache stores them as words.json (hq_words.json in older caches)."""
-    from common import clip_work_dir
-
-    wdir = clip_work_dir(src)
+    wdir = _resolve_clip_cache_dir(src)
     for name in ("hq_words.json", "words.json"):
         if (wdir / name).is_file():
             return wdir / name
@@ -433,17 +1167,16 @@ def _words_of(seg: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _env_of(seg: Dict[str, Any]) -> List[Tuple[float, float]]:
-    from common import clip_work_dir
     from prepare import compute_10ms_rms_envelope
 
-    wav = clip_work_dir(seg.get("src", "")) / "audio16k.wav"
+    wav = _resolve_clip_cache_dir(seg.get("src", "")) / "audio16k.wav"
     return compute_10ms_rms_envelope(wav) if wav.is_file() else []
 
 
 def _speech_spans_for(seg: Dict[str, Any]) -> List[Tuple[float, float]]:
-    from common import clip_work_dir, read_json
+    from common import read_json
 
-    f = clip_work_dir(seg.get("src", "")) / "speech_spans.json"
+    f = _resolve_clip_cache_dir(seg.get("src", "")) / "speech_spans.json"
     try:
         return [tuple(x) for x in read_json(f).get("spans", [])] if f.is_file() else []
     except Exception:
@@ -472,37 +1205,75 @@ def cut_problems(plan: Dict[str, Any]) -> List[str]:
 
 
 def tight_report(plan: Dict[str, Any]) -> List[str]:
-    """Where the edit drags: silence at joins and pauses inside cuts, from the aligned words. Advice only; it never blocks a render."""
+    """Where the edit drags: silence at joins, pauses inside cuts, and excessive mark tails. Advice only; it never blocks a render."""
     out: List[str] = []
     segs = plan.get("segments", [])
     mark_end: Dict[str, float] = {}
+    marks_by_seg: Dict[str, List[Dict[str, Any]]] = {}
     for m in plan.get("marks", []):
-        mark_end[str(m.get("segment"))] = max(mark_end.get(str(m.get("segment")), 0.0), float(m.get("at", 0)) + float(m.get("duration", 0.56)))
+        msid = str(m.get("segment"))
+        m_at = float(m.get("at", 0.0))
+        m_dur = float(m["duration"]) if m.get("duration") is not None else MARK_TAIL_MAX_SEC
+        mark_end[msid] = max(mark_end.get(msid, 0.0), m_at + m_dur)
+        marks_by_seg.setdefault(msid, []).append(m)
     rows = []
     for s in segs:
         st, en = float(s["start"]), float(s["end"])
         ws = [w for w in _words_of(s) if float(w["end"]) > st + 0.05 and float(w["start"]) < en - 0.05]
         rows.append((s, st, en, ws))
     for k, (s, st, en, ws) in enumerate(rows):
+        sid = str(s.get("id"))
+        seg_dur = max(0.0, en - st)
+        for m in marks_by_seg.get(sid, []):
+            m_at = float(m.get("at", 0.0))
+            post_mark = seg_dur - m_at
+            if post_mark > MARK_TAIL_MAX_SEC + 0.02:
+                out.append(
+                    f"{sid}: {post_mark:.2f}s tail after mark onset at {m_at:.2f}s "
+                    f"(keep <= {MARK_TAIL_MAX_SEC:.2f}s; end {sid} near {st + m_at + MARK_TAIL_MAX_SEC:.2f})"
+                )
         if not ws:
             continue
-        sid = str(s.get("id"))
         lead = max(0.0, float(ws[0]["start"]) - st)
         tail = max(0.0, en - float(ws[-1]["end"]))
-        # When a segment has a wrong/right mark at the end of the sentence, allow up to ~1.0s post-word tail for the flashy red/green gradient + SFX before the next cut
         tail_free = max(0.0, en - max(float(ws[-1]["end"]), st + mark_end.get(sid, 0.0))) if sid in mark_end else tail
         nxt = rows[k + 1] if k + 1 < len(rows) else None
         if nxt and nxt[3]:
             nxt_lead = max(0.0, float(nxt[3][0]["start"]) - nxt[1])
             if tail_free + nxt_lead > TIGHT_JOIN_SEC:
                 out.append(f"{sid} -> {nxt[0].get('id')}: {tail_free + nxt_lead:.2f}s of silence at the join (tail {tail_free:.2f}s + lead {nxt_lead:.2f}s): "
-                           f"end {sid} at {en - max(0.0, tail_free - 0.08):.2f} or start {nxt[0].get('id')} later")
+                           f"end {sid} at {en - max(0.0, tail_free - 0.06):.2f} or start {nxt[0].get('id')} later")
         for w0, w1 in zip(ws, ws[1:]):
             gap = float(w1["start"]) - float(w0["end"])
             if gap > TIGHT_PAUSE_SEC:
                 out.append(f"{sid}: {gap:.2f}s pause between '{w0.get('w')}' and '{w1.get('w')}' at {float(w0['end']):.2f}-{float(w1['start']):.2f}: cut it (split the cut) or accept it as a breath")
-        if k == 0 and lead > 0.25:
+        if k == 0 and lead > 0.20:
             out.append(f"{sid}: starts {lead:.2f}s before the first word")
+    return out
+
+
+VARIETY_MAX_SHARE = 0.40   # one sound effect or transition above this share of the plan sounds repetitive
+VARIETY_MIN_USES = 4
+
+
+def variety_report(plan: Dict[str, Any]) -> List[str]:
+    """Advice only: editors said every video sounds and moves the same. Flags one SFX file or one transition used too often."""
+    from collections import Counter
+
+    def share(names: List[str], what: str, hint: str) -> List[str]:
+        if len(names) < VARIETY_MIN_USES:
+            return []
+        name, n = Counter(names).most_common(1)[0]
+        if n / len(names) > VARIETY_MAX_SHARE and n >= VARIETY_MIN_USES:
+            return [f"{name} is {round(100 * n / len(names))}% of the {what} ({n} of {len(names)}); vary it: {hint}"]
+        return []
+
+    sfx = [str(e.get("file", "")).lower() for e in plan.get("sfx", []) or [] if e.get("file")]
+    trs = [str(s.get("transition")).lower() for s in plan.get("segments", []) if s.get("transition") and s.get("transition") != "cut"]
+    out = share(sfx, "sound effects", "pop, click, sn_punch_1/2, sn_swish_1, w42_swoosh, w42_transition, kn20228_*")
+    out += share(trs, "transitions", "whip_left/right, slide_up/down, zoom_burst, flash_zoom, split_reveal, warm_flash, dip_to_black")
+    if len(set(trs)) < 3 and len(trs) >= 4:
+        out.append("only %d kind(s) of transition in %d; use at least 3 different ones in a reel of this length" % (len(set(trs)), len(trs)))
     return out
 
 
@@ -514,26 +1285,32 @@ def style_report(plan: Dict[str, Any], work_dir: Optional[Path] = None) -> List[
         out.append("no script_analysis.md: analyse the script first (emotion, beat, zoom and effect per line) and save it in the work folder; it is how the zooms and effects are planned")
     from common import resolve_sfx_asset
 
-    fps = float((plan.get("canvas") or {}).get("fps") or 30)
-    total = sum(float(s["end"]) - float(s["start"]) for s in segs) or 1.0
     rapid, flash, singles, still = [], 0, 0, 0
     prev_rapid = False
     live_total, live_cuts, live_moving, live_trans = 0.0, 0, 0, 0
+    live_srcs: set = set()
     for s in segs:
         lay = str(s.get("layout") or "single").lower()
         style = str(s.get("zoom_style") or "")
         z0, z1 = float(s.get("zoom") or 1.0), float(s.get("zoom_to") or s.get("zoom") or 1.0)
+        max_z = max(z0, z1)
         moves = style in RAPID_ZOOM_STYLES or style == "sudden_out" or abs(z1 - z0) > 1e-6          # animated zoom; a fixed crop stands still
+        has_punch_crop = abs(max_z - 1.0) > 0.015
         dur = float(s["end"]) - float(s["start"])
-        if lay in ("split_h", "split_v", "top_pip") and moves:
-            out.append(f"{s.get('id')}: zoom on a {lay} cut is ignored (splits stay still)")
+        if lay in ("split_h", "split_v", "top_pip"):
+            if max_z > 1.15:
+                out.append(f"{s.get('id')}: split zoom {max_z:.2f} exceeds 1.15 (keep active-panel split zoom <= 1.12)")
+            elif lay in ("split_h", "split_v") and dur > 4.5 and not moves and not has_punch_crop:
+                out.append(f"{s.get('id')}: {lay} cut is {dur:.1f}s static; add an active-panel zoom (<= 1.12) or punch-in cut")
         if lay == "single":
+            if s.get("src"):
+                live_srcs.add(str(s.get("src")))
             live_total += dur
             has_tr = bool(s.get("transition")) and str(s.get("transition")) != "cut"
             live_trans += 1 if has_tr else 0
             if dur >= 1.0:
                 live_cuts += 1
-                live_moving += 1 if (moves or has_tr) else 0
+                live_moving += 1 if (moves or has_punch_crop or has_tr) else 0
             if dur >= 1.5:
                 singles += 1
                 still += 0 if moves else 1
@@ -552,12 +1329,13 @@ def style_report(plan: Dict[str, Any], work_dir: Optional[Path] = None) -> List[
     per_min = len(rapid) / (max(live_total, 1.0) / 60.0)
     if per_min > MAX_RAPID_PER_MIN:
         out.append(f"{len(rapid)} rapid zooms in {live_total:.0f}s of live conversation ({per_min:.1f} a minute; starting limit {MAX_RAPID_PER_MIN}): thin them out so the peaks still stand out")
-    if live_total >= 25.0 and live_cuts >= 5:
+    if live_total >= 10.0 and live_cuts >= 3:
         if live_moving / live_cuts < AD_MIN_MOVING_SHARE:
             out.append(f"only {live_moving} of {live_cuts} live cuts move (a zoom or a transition): this is for a Meta ad, so aim for at least {int(AD_MIN_MOVING_SHARE * 100)}% (rapid zoom in on a stressed word, slow push or pull on longer cuts, a zoom out on release)")
-        want = int(live_total // AD_SECONDS_PER_TRANSITION)
-        if live_trans < want:
-            out.append(f"{live_trans} transition(s) in {live_total:.0f}s of live conversation: for a Meta ad aim for about {want} (whip_left/whip_right across clip changes, slide_up, zoom_burst on a reveal)")
+        if live_total >= 25.0 or len(live_srcs) >= 2:
+            want = max(1, int((live_total - 6.5) // AD_SECONDS_PER_TRANSITION))
+            if live_trans < want:
+                out.append(f"{live_trans} transition(s) in {live_total:.0f}s of live conversation: for a Meta ad aim for about {want} (whip_left/whip_right across clip changes, slide_up, zoom_burst on a reveal)")
     if singles >= 4 and still / singles < MIN_STILL_SHARE:
         out.append(f"only {still} of {singles} single-speaker cuts stand still (aim for at least {int(MIN_STILL_SHARE * 100)}%): stillness is what gives a zoom its weight")
     sp = plan.get("subs")
@@ -588,13 +1366,12 @@ def style_report(plan: Dict[str, Any], work_dir: Optional[Path] = None) -> List[
 
 def snap_cuts(plan: Dict[str, Any]) -> int:
     """Mechanical: a cut in the gap between two words moves to the quietest 10 ms of that gap, so it cannot click. Keeps the Director's words."""
-    from common import clip_work_dir
     from prepare import compute_10ms_rms_envelope, find_rms_minimum
 
     moved = 0
     for s in plan.get("segments", []):
         ws = _words_of(s)
-        wav = clip_work_dir(s.get("src", "")) / "audio16k.wav"
+        wav = _resolve_clip_cache_dir(s.get("src", "")) / "audio16k.wav"
         if len(ws) < 2 or not wav.is_file():
             continue
         env = compute_10ms_rms_envelope(wav)

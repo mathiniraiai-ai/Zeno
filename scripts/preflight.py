@@ -183,8 +183,34 @@ def check_server() -> List[Check]:
         return [(False, "Zeno server", f"cannot reach {base}: {type(exc).__name__}")]
 
 
+def check_gpu_acceleration() -> Check:
+    """Ensure NVIDIA Windows/Linux PCs use CUDA PyTorch + NVENC FFmpeg, and report active GPU aligner + video encoder."""
+    if not common.IS_MAC and os.environ.get("ZENO_DEVICE", "auto").strip().lower() != "cpu":
+        try:
+            import gpu_install
+
+            if gpu_install.detect_tag():
+                py = str(common.find_venv_python())
+                if not gpu_install.is_cuda_ready(py):
+                    print("  [GPU] NVIDIA GPU detected with CPU PyTorch — auto-installing CUDA PyTorch...", flush=True)
+                    print("  [GPU] " + gpu_install.ensure_cuda_torch(), flush=True)
+                msg_ff = gpu_install.ensure_nvenc_ffmpeg()
+                if msg_ff and "Installed" in msg_ff:
+                    print("  [GPU] " + msg_ff, flush=True)
+        except Exception:
+            pass
+    rep = common.gpu_report()
+    dev = str(rep.get("device") or "cpu").upper()
+    enc = str(rep.get("encoder") or "libx264")
+    gpu_name = f" ({rep['name']})" if rep.get("name") else ""
+    detail = f"aligner={dev}{gpu_name}, encoder={enc}"
+    if rep.get("hint"):
+        detail += f" — {rep['hint']}"
+    return True, "GPU acceleration", detail
+
+
 def run_system_checks() -> List[Check]:
-    checks: List[Check] = [check_ffmpeg(), check_opencv(), check_aligner()]
+    checks: List[Check] = [check_ffmpeg(), check_gpu_acceleration(), check_opencv(), check_aligner()]
     checks.extend(check_server())
     return checks
 

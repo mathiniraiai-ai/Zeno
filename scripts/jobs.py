@@ -164,20 +164,40 @@ def _status(d: Path, prog: Optional[Dict[str, Any]], plan: Optional[Dict[str, An
     return {"phase": "new", "label": "New", "detail": ""}
 
 
+def _job_owner(d: Path) -> str:
+    try:
+        import common
+
+        return common.read_job_owner(d)
+    except Exception:   # noqa: BLE001
+        return ""
+
+
+def _allowed_for_user(d: Path, user_email: Optional[str]) -> bool:
+    if user_email is None:
+        return True
+    want = user_email.strip().lower()
+    if not want:
+        return False
+    return _job_owner(d) == want
+
+
 def summary(d: Path) -> Dict[str, Any]:
     prog = _read(d / "progress.json")
     plan = _plan_summary(d)
     outs = _outputs(plan["output"]) if plan else []
     st = _status(d, prog, plan, outs)
-    return {"name": d.name, "title": _title(d, plan), "status": st, "stage": (prog or {}).get("stage"), "stage_name": (prog or {}).get("stage_name"),
+    return {"name": d.name, "title": _title(d, plan), "owner_email": _job_owner(d), "status": st, "stage": (prog or {}).get("stage"), "stage_name": (prog or {}).get("stage_name"),
             "pct": (prog or {}).get("pct", 0), "completed": (prog or {}).get("completed"), "total": (prog or {}).get("total"), "elapsed": (prog or {}).get("elapsed_mmss"), "updated": max((p.stat().st_mtime for p in d.iterdir() if p.is_file()), default=0)}
 
 
-def list_jobs(limit: int = 40) -> List[Dict[str, Any]]:
+def list_jobs(limit: int = 40, user_email: Optional[str] = None) -> List[Dict[str, Any]]:
     rows = []
     if WORK.is_dir():
         for d in WORK.iterdir():
             if d.is_dir() and not d.name.startswith("_") and ((d / "line_map.md").is_file() or (d / "progress.json").is_file()):
+                if not _allowed_for_user(d, user_email):
+                    continue
                 try:
                     rows.append(summary(d))
                 except Exception:   # noqa: BLE001
@@ -186,10 +206,12 @@ def list_jobs(limit: int = 40) -> List[Dict[str, Any]]:
     return rows[:limit]
 
 
-def detail(name: str, since: int = 0) -> Dict[str, Any]:
+def detail(name: str, since: int = 0, user_email: Optional[str] = None) -> Dict[str, Any]:
     d = WORK / name
     if not d.is_dir():
         return {"error": f"No job named {name}"}
+    if not _allowed_for_user(d, user_email):
+        return {"error": "This project belongs to another account."}
     base = summary(d)
     plan = _plan_summary(d)
     prog = _read(d / "progress.json") or {}
@@ -284,11 +306,12 @@ def zeno_info(check_updates: bool = True, force_check: bool = False) -> Dict[str
 
 def main(argv: List[str]) -> int:
     cmd = argv[1] if len(argv) > 1 else "list"
+    user_arg: Optional[str] = argv[argv.index("--user") + 1] if ("--user" in argv and argv.index("--user") + 1 < len(argv)) else None
     if cmd == "list":
-        out: Any = list_jobs()
+        out: Any = list_jobs(user_email=user_arg)
     elif cmd == "detail" and len(argv) > 2:
         since = int(argv[argv.index("--since") + 1]) if "--since" in argv else 0
-        out = detail(argv[2], since)
+        out = detail(argv[2], since, user_email=user_arg)
     elif cmd == "info":
         out = zeno_info("--no-update-check" not in argv, "--force-update-check" in argv)
     else:

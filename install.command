@@ -21,6 +21,9 @@ if [ ! -f .zeno-dev ] && [ "$HERE" != "$(cd "$TARGET" 2>/dev/null && pwd -P)" ];
   exec bash "$TARGET/install.command"
 fi
 mkdir -p "$HOME/Downloads/Zeno Outputs"
+if [ -d "/Applications/Zeno.app" ]; then
+  xattr -cr "/Applications/Zeno.app" 2>/dev/null || true
+fi
 
 echo "=============================================="
 echo " Zeno installer (macOS)"
@@ -79,7 +82,7 @@ fi
 # 5. Alignment model (Meta wav2vec2, about 360 MB, into models/torch) + automatic Google login + daily 11 AM auto-updater
 echo "[5/5] Downloading the alignment model (first time only) and checking everything..."
 .venv/bin/python scripts/setup.py --prewarm >/dev/null || true
-.venv/bin/python scripts/auto_updater.py --install-schedule || true
+.venv/bin/python scripts/auto_updater.py --remove-schedule || true
 
 if ! .venv/bin/python scripts/setup.py --whoami >/dev/null 2>&1; then
   echo "[Auth] Opening your browser to sign in with Google (@gosupernova.live)..."

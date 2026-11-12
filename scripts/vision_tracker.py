@@ -347,33 +347,120 @@ def prominent_faces(faces: List[Dict[str, Any]], min_area_ratio: float = 0.4) ->
     return [f for f in faces if biggest > 0 and area(f) >= min_area_ratio * biggest]
 
 
-def detect_baked_split_seam(frame: "np.ndarray") -> Optional[str]:
-    """Check if `frame` already has a baked-in horizontal (`split_v_baked`) or
-    vertical (`split_h_baked`) split-screen seam along its center line.
+def _detect_axis_baked_seam(arr: "np.ndarray", kind_label: str) -> Tuple[float, Optional[Dict[str, Any]]]:
+    """Detect a full-span seam along axis 0 of `arr` within `[0.35, 0.65]`, weighting raw step
+    sharpness by cross-seam neighborhood contrast so internal panel stripes/grids never outrank
+    the true inter-panel boundary.
     """
+    length, span = arr.shape[:2]
+    d_map = np.mean(np.abs(np.diff(arr, axis=0)), axis=2) if arr.ndim == 3 else np.abs(np.diff(arr, axis=0))
+    line_diffs = np.mean(d_map, axis=1)
+    bg_diff = float(np.median(line_diffs) + 1e-4)
+    lo = max(1, int(round(length * 0.35)))
+    hi = min(length - 1, int(round(length * 0.65)))
+    sub_diffs = line_diffs[lo:hi]
+    if sub_diffs.size == 0:
+        return 0.0, None
+
+    step = max(1, span // 240)
+    sub_arr = arr[:, ::step, :] if arr.ndim == 3 else arr[:, ::step]
+    win_in = max(2, min(8, length // 24))
+    win_out = max(win_in + 4, min(28, length // 5))
+    ks = np.arange(lo, hi, dtype=np.int32)
+    a0 = np.maximum(0, ks - win_out)
+    a1 = np.maximum(a0 + 1, ks - win_in)
+    b0 = np.minimum(length - 1, ks + 1 + win_in)
+    b1 = np.minimum(length, np.maximum(b0 + 1, ks + 1 + win_out))
+
+    pad_zero = np.zeros((1,) + sub_arr.shape[1:], dtype=np.float32)
+    cs = np.concatenate([pad_zero, np.cumsum(sub_arr, axis=0, dtype=np.float32)], axis=0)
+    if sub_arr.ndim == 3:
+        mean_before = (cs[a1] - cs[a0]) / (a1 - a0)[:, None, None]
+        mean_after = (cs[b1] - cs[b0]) / (b1 - b0)[:, None, None]
+        cross_diff = np.mean(np.abs(mean_before - mean_after), axis=(1, 2))
+    else:
+        mean_before = (cs[a1] - cs[a0]) / (a1 - a0)[:, None]
+        mean_after = (cs[b1] - cs[b0]) / (b1 - b0)[:, None]
+        cross_diff = np.mean(np.abs(mean_before - mean_after), axis=1)
+
+    cand_scores = sub_diffs * (1.0 + 0.05 * cross_diff)
+    best_rel = int(np.argmax(cand_scores))
+    best_k = lo + best_rel
+    peak = float(sub_diffs[best_rel])
+    if peak <= max(26.0, bg_diff * 5.0):
+        return 0.0, None
+
+    w0 = max(0, best_k - 3)
+    w1 = min(length - 1, best_k + 4)
+    half = max(1, span // 2)
+    peak_a = float(np.max(np.mean(d_map[w0:w1, :half], axis=1)))
+    peak_b = float(np.max(np.mean(d_map[w0:w1, half:], axis=1)))
+    if peak_a <= max(16.0, bg_diff * 3.0) or peak_b <= max(16.0, bg_diff * 3.0):
+        return 0.0, None
+
+    band_lo_idx = max(lo, best_k - 6)
+    band_hi_idx = min(hi, best_k + 7)
+    edge_thr = max(20.0, bg_diff * 3.8, peak * 0.35)
+    strong_k = [
+        k + 1
+        for k in range(band_lo_idx, band_hi_idx)
+        if float(line_diffs[k]) >= edge_thr
+    ]
+    if strong_k and (strong_k[-1] - strong_k[0]) <= 12:
+        b_lo, b_hi = strong_k[0], strong_k[-1]
+    else:
+        b_lo = b_hi = best_k + 1
+
+    seam_frac = round(min(0.65, max(0.35, 0.5 * (b_lo + b_hi) / float(length))), 4)
+    norm_score = float(cand_scores[best_rel]) / max(1.0, bg_diff)
+    return norm_score, {
+        "kind": kind_label,
+        "seam_frac": seam_frac,
+        "band_lo_frac": round(min(0.65, max(0.35, b_lo / float(length))), 4),
+        "band_hi_frac": round(min(0.65, max(0.35, b_hi / float(length))), 4),
+    }
+
+
+def _measure_baked_split_seam_detail(frame: "np.ndarray") -> Dict[str, Any]:
+    """Measure baked-in horizontal (`split_v_baked`) or vertical (`split_h_baked`) split-screen
+    seam across `[0.35..0.65]` of frame height/width, returning kind, normalized `seam_frac`
+    (`0.35..0.65`, default `0.50`), and `[band_lo_frac, band_hi_frac]` around any divider bar.
+    """
+    default_res: Dict[str, Any] = {
+        "kind": None,
+        "seam_frac": 0.50,
+        "band_lo_frac": 0.50,
+        "band_hi_frac": 0.50,
+    }
     if np is None or frame is None or frame.size == 0:
-        return None
+        return default_res
     h, w = frame.shape[:2]
     if h < 64 or w < 64:
-        return None
+        return default_res
 
-    gray = frame.mean(axis=2).astype(np.float32) if frame.ndim == 3 else frame.astype(np.float32)
+    arr = frame.astype(np.float32)
+    score_v, det_v = _detect_axis_baked_seam(arr, "split_v_baked")
+    score_h, det_h = _detect_axis_baked_seam(np.swapaxes(arr, 0, 1), "split_h_baked")
 
-    # Check horizontal seam near y = h // 2
-    mid_y = h // 2
-    row_diffs = np.mean(np.abs(np.diff(gray[max(0, mid_y - 6): min(h, mid_y + 6), :], axis=0)), axis=1)
-    bg_row_diff = float(np.median(np.mean(np.abs(np.diff(gray, axis=0)), axis=1)) + 1e-4)
-    if row_diffs.size > 0 and float(np.max(row_diffs)) > max(28.0, bg_row_diff * 5.2):
-        return "split_v_baked"
+    if det_v is not None and (det_h is None or score_v >= score_h):
+        return det_v
+    if det_h is not None:
+        return det_h
+    return default_res
 
-    # Check vertical seam near x = w // 2
-    mid_x = w // 2
-    col_diffs = np.mean(np.abs(np.diff(gray[:, max(0, mid_x - 6): min(w, mid_x + 6)], axis=1)), axis=0)
-    bg_col_diff = float(np.median(np.mean(np.abs(np.diff(gray, axis=1)), axis=0)) + 1e-4)
-    if col_diffs.size > 0 and float(np.max(col_diffs)) > max(28.0, bg_col_diff * 5.2):
-        return "split_h_baked"
 
-    return None
+def detect_baked_split_seam(
+    frame: "np.ndarray",
+    return_frac: bool = False,
+) -> Union[Optional[str], Tuple[Optional[str], float]]:
+    """Check if `frame` already has a baked-in horizontal (`split_v_baked`) or
+    vertical (`split_h_baked`) split-screen seam. When `return_frac=True`, returns
+    `(seam_kind, seam_frac)` with `seam_frac` in `[0.35..0.65]` (default `0.50`).
+    """
+    det = _measure_baked_split_seam_detail(frame)
+    if return_frac:
+        return det["kind"], float(det["seam_frac"])
+    return det["kind"]
 
 
 def compute_slot_crop_filter(
@@ -426,11 +513,19 @@ def compute_slot_crop_filter(
     sh = max(slot_h, _even(src_h * s))
 
     cx_norm = float(focus[0]) if (focus and len(focus) >= 2) else 0.5 * (x0 + x1)
+    ey_norm = (
+        float(focus[1])
+        if (focus and len(focus) >= 2)
+        else (y0 + 0.42 * max(0.08, y1 - y0))
+    )
     cx_px = cx_norm * sw
     crop_x = int(round(min(max(cx_px - slot_w / 2.0, 0), sw - slot_w)))
 
     head_top_px = y0 * sh
     crop_y = int(round(min(max(head_top_px - (headroom_pct / 100.0) * slot_h, 0), sh - slot_h)))
+
+    slot_fx = round(min(0.65, max(0.35, (cx_norm * sw - crop_x) / float(slot_w))), 4)
+    slot_fy = round(min(0.48, max(0.25, (ey_norm * sh - crop_y) / float(slot_h))), 4)
 
     return {
         "filter": f"scale={sw}:{sh}:flags=lanczos,crop={slot_w}:{slot_h}:{crop_x}:{crop_y}",
@@ -438,6 +533,7 @@ def compute_slot_crop_filter(
         "crop": (crop_x, crop_y),
         "slot_size": (slot_w, slot_h),
         "extra_zoom": round(k * max(1.0, float(extra_zoom or 1.0)), 3),
+        "slot_focus": [slot_fx, slot_fy],
     }
 
 
@@ -454,7 +550,11 @@ def compute_paired_split_crop_filters(
     peer_slot_h: int,
     live_focus: Optional[Sequence[float]] = None,
     peer_focus: Optional[Sequence[float]] = None,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    return_focus: bool = False,
+) -> Union[
+    Tuple[Dict[str, Any], Dict[str, Any]],
+    Tuple[Dict[str, Any], Dict[str, Any], List[float], List[float]],
+]:
     """Compute matched FFmpeg `scale=sw:sh:flags=lanczos,crop=slot_w:slot_h:cx:cy` filters
     for a two-character split screen (`split_h` or `split_v`) so that BOTH characters share:
       1. The exact same common headroom (`common_hr` fraction from top of slot to head crown),
@@ -583,6 +683,7 @@ def compute_paired_split_crop_filters(
         s0: float,
         fx: float,
         y0: float,
+        ey: float,
         k: float,
     ) -> Dict[str, Any]:
         s = s0 * k
@@ -590,6 +691,8 @@ def compute_paired_split_crop_filters(
         sh = max(sh_slot, _even(h_in * s))
         crop_x = int(round(min(max(fx * sw - sw_slot / 2.0, 0), sw - sw_slot)))
         crop_y = int(round(min(max(y0 * sh - common_hr * sh_slot, 0), sh - sh_slot)))
+        slot_fx = round(min(0.65, max(0.35, (fx * sw - crop_x) / float(sw_slot))), 4)
+        slot_fy = round(min(0.48, max(0.25, (ey * sh - crop_y) / float(sh_slot))), 4)
         return {
             "filter": f"scale={sw}:{sh}:flags=lanczos,crop={sw_slot}:{sh_slot}:{crop_x}:{crop_y}",
             "scale": (sw, sh),
@@ -597,10 +700,13 @@ def compute_paired_split_crop_filters(
             "slot_size": (sw_slot, sh_slot),
             "common_headroom_pct": round(common_hr * 100.0, 2),
             "extra_zoom": round(k, 3),
+            "slot_focus": [slot_fx, slot_fy],
         }
 
-    live_crop = _build_one(src_w, src_h, live_slot_w, live_slot_h, s0_a, fx_a, y0_a, k_a)
-    peer_crop = _build_one(peer_w, peer_h, peer_slot_w, peer_slot_h, s0_b, fx_b, y0_b, k_b)
+    live_crop = _build_one(src_w, src_h, live_slot_w, live_slot_h, s0_a, fx_a, y0_a, ey_a, k_a)
+    peer_crop = _build_one(peer_w, peer_h, peer_slot_w, peer_slot_h, s0_b, fx_b, y0_b, ey_b, k_b)
+    if return_focus:
+        return live_crop, peer_crop, list(live_crop["slot_focus"]), list(peer_crop["slot_focus"])
     return live_crop, peer_crop
 
 
@@ -880,7 +986,12 @@ def analyze_clip_vision(
         if disk_cache_file.is_file():
             try:
                 cached = read_json(disk_cache_file)
-                if isinstance(cached, dict) and cached.get("bbox_norm"):
+                if (
+                    isinstance(cached, dict)
+                    and cached.get("bbox_norm")
+                    and "baked_split" in cached
+                    and "seam_frac" in cached
+                ):
                     _VISION_CACHE[cache_key] = cached
                     return dict(cached)
             except Exception:
@@ -897,6 +1008,8 @@ def analyze_clip_vision(
 
     sampled_faces: List[List[Dict[str, Any]]] = []
     baked_seams: List[str] = []
+    baked_seam_details: List[Dict[str, Any]] = []
+    frames_sampled = 0
 
     if cv2 is not None and np is not None and resolved.is_file():
         cap = cv2.VideoCapture(str(resolved))
@@ -913,9 +1026,11 @@ def analyze_clip_vision(
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     continue
-                seam = detect_baked_split_seam(frame)
-                if seam:
-                    baked_seams.append(seam)
+                frames_sampled += 1
+                seam_det = _measure_baked_split_seam_detail(frame)
+                if seam_det["kind"]:
+                    baked_seams.append(str(seam_det["kind"]))
+                    baked_seam_details.append(seam_det)
                 _t_scan = time.perf_counter()
                 faces = prominent_faces(detect_faces_in_frame(frame, is_bgr=True))
                 try:
@@ -993,8 +1108,10 @@ def analyze_clip_vision(
         face_count = 1
 
     # Determine shot_type: baked split vs in-frame two_shot vs single
-    if baked_seams and len(baked_seams) >= max(1, len(sampled_faces) // 2):
-        shot_type = baked_seams[0]
+    seam_majority = max(1, (frames_sampled or len(sampled_faces)) // 2)
+    if baked_seams and len(baked_seams) >= seam_majority:
+        seam_counts = {k: baked_seams.count(k) for k in set(baked_seams)}
+        shot_type = max(seam_counts, key=seam_counts.get)
     elif face_count >= 2:
         f0, f1 = rep_faces[0], rep_faces[1]
         dx = abs(f0["eye_center_norm"][0] - f1["eye_center_norm"][0])
@@ -1007,6 +1124,28 @@ def analyze_clip_vision(
             shot_type = "single"
     else:
         shot_type = "single"
+
+    baked_split: Optional[str] = None
+    seam_frac: float = 0.50
+    seam_band_frac: List[float] = [0.50, 0.50]
+    if shot_type in ("split_v_baked", "split_h_baked"):
+        baked_split = "split_v" if shot_type == "split_v_baked" else "split_h"
+        matching_dets = [d for d in baked_seam_details if d.get("kind") == shot_type]
+        if matching_dets:
+            s_fracs = sorted(float(d["seam_frac"]) for d in matching_dets)
+            lo_fracs = sorted(float(d["band_lo_frac"]) for d in matching_dets)
+            hi_fracs = sorted(float(d["band_hi_frac"]) for d in matching_dets)
+            mid_i = len(s_fracs) // 2
+            seam_frac = round(min(0.65, max(0.35, s_fracs[mid_i])), 4)
+            seam_band_frac = [
+                round(min(0.65, max(0.35, lo_fracs[mid_i])), 4),
+                round(min(0.65, max(0.35, hi_fracs[mid_i])), 4),
+            ]
+        elif shot_type == "split_v_baked" and face_count >= 2:
+            ys = sorted([float(rep_faces[0]["bbox_norm"][3]), float(rep_faces[1]["bbox_norm"][1])])
+            if ys[1] > ys[0]:
+                seam_frac = round(min(0.65, max(0.35, 0.5 * (ys[0] + ys[1]))), 4)
+                seam_band_frac = [seam_frac, seam_frac]
 
     primary_face = rep_faces[0]
     idle_info = find_listening_idle_window(resolved, speech_spans=speech_spans, duration=dur)
@@ -1021,6 +1160,9 @@ def analyze_clip_vision(
         "orientation": orientation,
         "face_count": face_count,
         "shot_type": shot_type,
+        "baked_split": baked_split,
+        "seam_frac": seam_frac,
+        "seam_band_frac": seam_band_frac,
         "focus": primary_face["focus"],
         "focus_end": primary_face.get("focus_end", primary_face["focus"]),
         "bbox_norm": primary_face["bbox_norm"],
@@ -1037,6 +1179,7 @@ def analyze_clip_vision(
         if disk_cache_file is not None:
             try:
                 write_json(disk_cache_file, result)
+                write_json(disk_cache_file.parent / "vision.json", result)
             except Exception:
                 pass
     return dict(result)

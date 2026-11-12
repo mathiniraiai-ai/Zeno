@@ -341,7 +341,19 @@ def apply_bundle_bytes(blob: bytes, expected_sha256: str = "", version: str = ""
                 [_find_python(), str(ROOT / "scripts" / "gpu_install.py")],
                 cwd=str(ROOT),
                 capture_output=True,
-                timeout=600.0,
+                timeout=900.0,
+                check=False,
+            )
+        except Exception:
+            pass
+    elif not sys.platform.startswith("darwin"):
+        # Ensure Windows/Linux PCs with NVIDIA GPUs automatically switch to CUDA PyTorch + NVENC FFmpeg on OTA updates
+        try:
+            subprocess.run(
+                [_find_python(), str(ROOT / "scripts" / "gpu_install.py"), "--ensure-gpu"],
+                cwd=str(ROOT),
+                capture_output=True,
+                timeout=900.0,
                 check=False,
             )
         except Exception:
@@ -490,8 +502,40 @@ def connect_to_git(root: Path = None, remote: str = "", branch: str = "main") ->
     }
 
 
+def remove_daily_scheduler() -> Dict[str, Any]:
+    """Remove the old daily 11:00 AM background task (macOS LaunchAgent / Windows Scheduled Task).
+
+    Updates are now applied from the Zeno desktop app popup ("Update & Reload Now") instead of a daily schedule.
+    Safe to call when no task exists.
+    """
+    removed = []
+    if sys.platform == "darwin":
+        plist_path = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+        if plist_path.exists():
+            try:
+                subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True, check=False)
+            except Exception:
+                pass
+            try:
+                plist_path.unlink()
+                removed.append(str(plist_path))
+            except Exception:
+                pass
+    elif sys.platform.startswith("win") or os.name == "nt":
+        try:
+            r = subprocess.run(["schtasks", "/Delete", "/F", "/TN", "ZenoDailyAutoUpdate"], capture_output=True, text=True, check=False)
+            if r.returncode == 0:
+                removed.append("ZenoDailyAutoUpdate")
+        except Exception:
+            pass
+    return {"ok": True, "removed": removed}
+
+
 def install_daily_scheduler(hour: int = 11, minute: int = 0) -> Dict[str, Any]:
-    """Install a daily 11:00 AM OS background task (macOS LaunchAgent / Windows Scheduled Task)."""
+    """Install a daily 11:00 AM OS background task (macOS LaunchAgent / Windows Scheduled Task).
+
+    No longer used by the installers: updates now come from the desktop app popup. Kept for manual use.
+    """
     py_bin = _find_python()
     script_path = str(Path(__file__).resolve())
     WORK.mkdir(parents=True, exist_ok=True)
@@ -555,7 +599,8 @@ def main() -> None:
     ap.add_argument("--check", action="store_true", help="Check Zeno Cloud for a newer release and output JSON")
     ap.add_argument("--json", action="store_true", help="Output result as JSON (used by Zeno Desktop App)")
     ap.add_argument("--connect-git", action="store_true", help="Legacy no-op (updates come from Zeno Cloud)")
-    ap.add_argument("--install-schedule", action="store_true", help="Install daily 11:00 AM background auto-update schedule")
+    ap.add_argument("--install-schedule", action="store_true", help="(Legacy) install a daily 11:00 AM background auto-update schedule")
+    ap.add_argument("--remove-schedule", action="store_true", help="Remove the old daily background auto-update schedule (updates now come from the app popup)")
     ap.add_argument("--hour", type=int, default=11, help="Daily schedule hour in 24h format (default: 11 for 11:00 AM)")
     ap.add_argument("--status", action="store_true", help="Print last auto-update status")
     args = ap.parse_args()
@@ -568,6 +613,11 @@ def main() -> None:
     if args.check:
         res = check_cloud_update(force=True)
         print(json.dumps(res, ensure_ascii=False))
+        return
+
+    if args.remove_schedule:
+        res = remove_daily_scheduler()
+        print(f"  [Auto-Update] Daily schedule removed ({', '.join(res['removed']) or 'none was installed'}). Updates now come from the Zeno app popup.")
         return
 
     if args.install_schedule:
@@ -602,6 +652,11 @@ def main() -> None:
             if cres.get("ran"):
                 with LOG_FILE.open("a", encoding="utf-8") as fp:
                     fp.write(f"[auto-clean] freed {cres['freed_mb']} MB (free disk was {cres['free_gb_before']} GB)\n")
+        except Exception:
+            pass
+        # One last run on PCs that still have the old daily task: remove it, updates now come from the app popup.
+        try:
+            remove_daily_scheduler()
         except Exception:
             pass
 

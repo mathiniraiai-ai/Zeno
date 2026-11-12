@@ -304,9 +304,10 @@ SFX_PACKS = {
         "wrong": "sn_wrong.wav",
         "transition": "whoosh.wav",
         "swoosh": "whoosh.wav",
+        "swish": "sn_swish_1.wav",
         "pop": "pop.wav",
         "click": "click.wav",
-        "riser": "riser.wav",
+        "riser": "sn_riser_1.wav",
         "ding": "ding.wav",
     },
     "supernova": {
@@ -314,6 +315,7 @@ SFX_PACKS = {
         "wrong": "sn_wrong.wav",
         "transition": "sn_swish_1.wav",
         "swoosh": "sn_swish_1.wav",
+        "swish": "sn_swish_1.wav",
         "pop": "sn_punch_1.wav",
         "punch": "sn_punch_2.wav",
         "click": "sn_click.mp3",
@@ -324,16 +326,20 @@ SFX_PACKS = {
         "wrong": "sn_wrong.wav",
         "transition": "kn20228_swoosh.wav",
         "swoosh": "kn20228_swoosh.wav",
+        "swish": "kn20228_swoosh.wav",
         "click": "kn20228_click.wav",
         "pop": "pop.wav",
+        "riser": "sn_riser_1.wav",
     },
     "w42": {
         "right": "w42_right.wav",
         "wrong": "sn_wrong.wav",
         "transition": "w42_transition.wav",
         "swoosh": "w42_swoosh.wav",
+        "swish": "w42_swoosh.wav",
         "click": "click.wav",
         "pop": "pop.wav",
+        "riser": "sn_riser_1.wav",
     },
 }
 
@@ -409,6 +415,11 @@ def resolve_sfx_asset(sfx_key_or_file: str, pack: str = None) -> Path:
     pack_key = (pack or os.environ.get("CLAUDE_EDITOR_SFX_PACK") or "default").strip().lower()
     key = str(sfx_key_or_file or "right").strip()
     key_lower = key.lower()
+    base_lower = Path(key.replace("\\", "/")).name.lower()
+
+    # Redirect broken riser.wav (0.70s digital silence + 40ms tick) -> studio sn_riser_1.wav
+    if base_lower in ("riser", "riser.wav") and (SFX_DIR / "sn_riser_1.wav").is_file():
+        return SFX_DIR / "sn_riser_1.wav"
 
     # If the caller passed a pack name as the sfx value, resolve from that pack
     if key_lower in ("right", "wrong", "correct", "error", "check", "cross", "tick"):
@@ -422,6 +433,18 @@ def resolve_sfx_asset(sfx_key_or_file: str, pack: str = None) -> Path:
     for cand in (Path(key), ROOT / key, SFX_DIR / key, SFX_DIR / f"{key}.wav", SFX_DIR / f"{key}.mp3"):
         if cand.is_file():
             return cand
+
+    # Clean studio aliases for transition swishes/whooshes when literal alias filename is absent
+    alias_map = {
+        "swish": "sn_swish_1.wav",
+        "swish.wav": "sn_swish_1.wav",
+        "sn_whoosh_soft": "sn_swish_1.wav",
+        "sn_whoosh_soft.wav": "sn_swish_1.wav",
+        "w42_flash_whoosh": "w42_transition.wav",
+        "w42_flash_whoosh.wav": "w42_transition.wav",
+    }
+    if base_lower in alias_map and (SFX_DIR / alias_map[base_lower]).is_file():
+        return SFX_DIR / alias_map[base_lower]
 
     return SFX_DIR / key
 
@@ -625,9 +648,24 @@ def run(cmd, quiet=True, low_priority=False, timeout=None):
     return r
 
 
+_HW_VIDEO_ENCODERS = ("h264_nvenc", "h264_videotoolbox", "h264_qsv", "h264_amf")
+_VIDEO_INPUT_EXTS = (".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".ts")
+
+
+def _uses_hw_or_copy_encoder(str_args: list[str]) -> bool:
+    if any(enc in str_args for enc in _HW_VIDEO_ENCODERS):
+        return True
+    for idx in range(len(str_args) - 1):
+        if str_args[idx] in ("-c:v", "-vcodec") and str_args[idx + 1] == "copy":
+            return True
+    return False
+
+
 def ffmpeg(*args, timeout=180):
     str_args = [str(a) for a in args]
-    t_cap = str(min(int(ZENO_MAX_THREADS), 2))
+    hw_or_copy = _uses_hw_or_copy_encoder(str_args)
+    # Keep Macs quiet at <=2 filter threads; on Windows/Linux with a GPU encoder, allow ZENO_MAX_THREADS (4) so filter/decode never starves NVENC
+    t_cap = str(min(int(ZENO_MAX_THREADS), 2)) if (IS_MAC or not hw_or_copy) else str(int(ZENO_MAX_THREADS))
     base = [
         FFMPEG,
         "-hide_banner",
@@ -636,7 +674,10 @@ def ffmpeg(*args, timeout=180):
         "-filter_complex_threads", t_cap,
     ]
     if "-threads" not in str_args and len(args) >= 2:
-        # Place -threads before input AND before the output file so libx264/encoders are also capped
+        if hw_or_copy:
+            # Never inject output `-threads` onto hardware encoders (h264_nvenc / qsv / amf / videotoolbox) or stream copy
+            return run([*base, "-threads", t_cap, *args], low_priority=True, timeout=timeout)
+        # Software libx264: cap both input decode threads and output x264 encoder threads
         return run([*base, "-threads", t_cap, *args[:-1], "-threads", t_cap, args[-1]], low_priority=True, timeout=timeout)
     return run([*base, *args], low_priority=True, timeout=timeout)
 
@@ -719,6 +760,85 @@ def square_job_output(src_mp4: Path) -> Path:
     return p.with_name(f"SQ_{strip_ratio_prefix(p.stem)}.mp4")
 
 
+def active_user_email() -> str:
+    """Return the currently signed-in @gosupernova.live email (lowercased), or empty string if none."""
+    env_em = os.environ.get("ZENO_USER_EMAIL", "").strip().lower()
+    if env_em:
+        return env_em
+    try:
+        sess_file = ROOT / ".zeno_session.json"
+        if sess_file.is_file():
+            d = json.loads(sess_file.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(d, dict):
+                em = str(d.get("email") or "").strip().lower()
+                if em:
+                    return em
+    except Exception:
+        pass
+    return ""
+
+
+def read_job_owner(work_dir: Path) -> str:
+    """Read the owner email of a `work/<project>` directory from owner.json, progress.json, or token_telemetry.json."""
+    d = Path(work_dir)
+    for fn, key in (("owner.json", "owner_email"), ("progress.json", "owner_email"), ("token_telemetry.json", "user_email")):
+        p = d / fn
+        if p.is_file():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8", errors="replace"))
+                if isinstance(data, dict):
+                    em = str(data.get(key) or "").strip().lower()
+                    if em:
+                        return em
+            except Exception:
+                continue
+    return ""
+
+
+def stamp_job_owner(work_dir: Path, email: str | None = None) -> str:
+    """Persist `owner.json` inside `work/<project>` once so projects stay strictly isolated per Google login."""
+    d = Path(work_dir)
+    existing = read_job_owner(d)
+    if existing:
+        owner_file = d / "owner.json"
+        if not owner_file.is_file():
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+                owner_file.write_text(json.dumps({"owner_email": existing}, indent=2) + "\n", encoding="utf-8")
+            except OSError:
+                pass
+        return existing
+    em = (email if email is not None else active_user_email()).strip().lower()
+    if not em:
+        return ""
+    try:
+        import datetime as _dt
+
+        d.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "owner_email": em,
+            "created_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        (d / "owner.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+    return em
+
+
+def resolve_user_project_name(base_name: str, work_root: Path | None = None, email: str | None = None) -> str:
+    """Ensure two different @gosupernova.live logins on the same computer never collide on `work/<project>`."""
+    wroot = Path(work_root) if work_root is not None else WORK
+    em = (email if email is not None else active_user_email()).strip().lower()
+    cand = wroot / base_name
+    if not em or not cand.is_dir():
+        return base_name
+    existing_owner = read_job_owner(cand)
+    if not existing_owner or existing_owner == em:
+        return base_name
+    slug = re.sub(r"[^a-z0-9]+", "_", em.split("@", 1)[0]).strip("_")[:24] or "user"
+    return f"{base_name}__{slug}"
+
+
 JOB_MARKER = WORK / "_job_marker.json"
 
 
@@ -789,6 +909,22 @@ def compute_device() -> str:
     return "cuda" if cuda else ("mps" if mps else "cpu")
 
 
+def _has_nvidia_smi() -> bool:
+    if shutil.which("nvidia-smi"):
+        return True
+    if IS_WIN:
+        sys_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        prog_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        return any(
+            p.is_file()
+            for p in (
+                sys_root / "System32" / "nvidia-smi.exe",
+                prog_files / "NVIDIA Corporation" / "NVSMI" / "nvidia-smi.exe",
+            )
+        )
+    return Path("/usr/bin/nvidia-smi").is_file()
+
+
 def gpu_report() -> dict:
     """What the GPU situation is, for the pre-job check: the device in use, its name, and a hint when a GPU exists but is not used."""
     device = compute_device()
@@ -805,8 +941,8 @@ def gpu_report() -> dict:
                     name = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True, timeout=3).stdout.strip() or name
                 except Exception:
                     pass
-        elif IS_WIN and shutil.which("nvidia-smi") and "+cu" not in torch.__version__:
-            hint = "an NVIDIA GPU was found but PyTorch is the CPU build: run install.bat again (it installs the GPU build)"
+        elif IS_WIN and _has_nvidia_smi() and "+cu" not in torch.__version__:
+            hint = "an NVIDIA GPU was found but PyTorch is the CPU build: run `python scripts/gpu_install.py` (or install.bat) to activate CUDA GPU"
         elif os.environ.get("ZENO_DEVICE", "auto").lower() == "cpu":
             hint = "ZENO_DEVICE=cpu forces the CPU"
     except Exception:
@@ -818,9 +954,36 @@ _HW_ENCODER: dict = {}
 _HW_CANDIDATES = {"darwin": ["h264_videotoolbox"], "win": ["h264_nvenc", "h264_qsv", "h264_amf"], "linux": ["h264_nvenc", "h264_qsv"]}
 
 
+def _probe_hw_encoder(cand: str, nvenc_presets: tuple[str, str] = ("p5", "p3")) -> bool:
+    """Run a real two-frame 1080x1920@30fps encode with the exact production flags `hw_video_args` emits."""
+    v_args = hw_video_args(cand, crf=18, draft=False, bitrate_kbps=12000, nvenc_presets=nvenc_presets)
+    cmd = [
+        str(FFMPEG),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=1080x1920:d=0.1:r=30",
+        "-frames:v",
+        "2",
+        *v_args,
+        "-profile:v",
+        "high",
+        "-pix_fmt",
+        "yuv420p",
+        "-f",
+        "null",
+        "-",
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    return r.returncode == 0
+
+
 def hardware_encoder() -> str:
     """The first H.264 hardware encoder that really works on this machine ('' = none): VideoToolbox on a Mac, NVENC / Intel QSV / AMD AMF
-    on Windows. A listed encoder can still be unusable without the GPU, so each one is tried with a real two-frame encode.
+    on Windows. Each candidate is tested at 1080x1920@30fps with our exact production flags so preset or level mismatches are caught upfront.
     `ZENO_ENCODER=cpu` turns it off; `ZENO_ENCODER=h264_nvenc` (or another name) forces one."""
     if "name" in _HW_ENCODER:
         return _HW_ENCODER["name"]
@@ -828,14 +991,24 @@ def hardware_encoder() -> str:
     name = ""
     if forced not in ("cpu", "libx264", "x264", "off", "0"):
         key = "darwin" if IS_MAC else ("win" if IS_WIN else "linux")
+        try:
+            listed = subprocess.run([str(FFMPEG), "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=10).stdout or ""
+        except Exception:
+            listed = ""
         for cand in ([forced] if forced.startswith("h264_") else _HW_CANDIDATES.get(key, [])):
+            if cand not in listed:
+                continue
             try:
-                listed = subprocess.run([str(FFMPEG), "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=10).stdout
-                if cand not in listed:
-                    continue
-                test = subprocess.run([str(FFMPEG), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.3:r=10",
-                                       "-frames:v", "2", "-c:v", cand, "-pix_fmt", "yuv420p", "-f", "null", "-"], capture_output=True, text=True, timeout=30)
-                if test.returncode == 0:
+                if cand == "h264_nvenc":
+                    # Try modern NVENC p5/p3 presets first; fall back to legacy fast/fast for older FFmpeg builds
+                    for presets in (("p5", "p3"), ("fast", "fast")):
+                        if _probe_hw_encoder(cand, nvenc_presets=presets):
+                            _HW_ENCODER["nvenc_presets"] = presets
+                            name = cand
+                            break
+                    if name:
+                        break
+                elif _probe_hw_encoder(cand):
                     name = cand
                     break
             except Exception:
@@ -856,14 +1029,33 @@ def final_bitrate_kbps(duration_sec: float, scale: float = 1.0, target_mb: float
     return int(kbps * scale)
 
 
-def hw_video_args(name: str, crf: int = 18, draft: bool = False, bitrate_kbps: int = None) -> list:
+def hw_video_args(
+    name: str,
+    crf: int = 18,
+    draft: bool = False,
+    bitrate_kbps: int = None,
+    nvenc_presets: tuple[str, str] | None = None,
+) -> list:
     """The ffmpeg arguments for one hardware encoder at roughly the quality of x264 `-crf <crf>` (12 = near-lossless intermediate, 18 = final)."""
     q = 28 if draft else (14 if crf <= 14 else 19)
-    cap = [] if not bitrate_kbps or draft else ["-maxrate", f"{int(bitrate_kbps * 1.25)}k", "-bufsize", f"{int(bitrate_kbps * 2)}k"]
     if name == "h264_videotoolbox":
         return ["-c:v", name, "-b:v", "8M" if draft else (f"{bitrate_kbps}k" if bitrate_kbps else "16M"), "-allow_sw", "1"]
     if name == "h264_nvenc":
-        return ["-c:v", name, "-preset", "p3" if draft else "p5", "-rc", "vbr", "-cq", str(q), "-b:v", "0"] + cap
+        p_main, p_draft = nvenc_presets or _HW_ENCODER.get("nvenc_presets", ("p5", "p3"))
+        # At 1080x1920@24-30fps (8,160 macroblocks <= 8,192), NVENC auto-selects H.264 Level 4.0 (High Profile MaxBR=25000k, MaxCPB=31250k).
+        # For high-bitrate intermediates (>20000k, e.g. mix.mkv before subtitle burn-in), omit VBV caps and use pure CQ=15 so Level 4.0 never overflows!
+        if bitrate_kbps and not draft and bitrate_kbps > 20000:
+            q_eff = min(q, 15)
+            nv_cap: list = []
+        elif bitrate_kbps and not draft:
+            q_eff = q
+            maxrate_k = min(int(bitrate_kbps * 1.25), 20000)
+            bufsize_k = min(int(bitrate_kbps * 2), 28000)
+            nv_cap = ["-maxrate", f"{maxrate_k}k", "-bufsize", f"{bufsize_k}k"]
+        else:
+            q_eff = q
+            nv_cap = []
+        return ["-c:v", name, "-preset", p_draft if draft else p_main, "-rc", "vbr", "-cq", str(q_eff), "-b:v", "0"] + nv_cap
     if name == "h264_qsv":
         return ["-c:v", name, "-global_quality", str(q + 2), "-preset", "veryfast" if draft else "medium"]
     if name == "h264_amf":
@@ -871,7 +1063,31 @@ def hw_video_args(name: str, crf: int = 18, draft: bool = False, bitrate_kbps: i
     return ["-c:v", name]
 
 
-def with_hardware_encoder(args, draft: bool = False, bitrate_kbps: int = None):
+def _inject_hwaccel_inputs(a: list[str]) -> list[str]:
+    """Insert `-hwaccel auto` before up to 4 standalone video file `-i <clip>` inputs so NVDEC/VideoToolbox/QSV decode on GPU."""
+    input_positions: list[int] = []
+    prev_i_end = 0
+    for idx in range(len(a) - 1):
+        if a[idx] == "-i":
+            target = a[idx + 1].lower()
+            between = a[prev_i_end:idx]
+            prev_i_end = idx + 2
+            if any(tok in ("-f", "-loop", "-hwaccel") for tok in between):
+                continue
+            if target.endswith(_VIDEO_INPUT_EXTS):
+                input_positions.append(idx)
+    if not (1 <= len(input_positions) <= 4):
+        return a
+    pos_set = set(input_positions)
+    out: list[str] = []
+    for idx, tok in enumerate(a):
+        if idx in pos_set:
+            out.extend(["-hwaccel", "auto"])
+        out.append(tok)
+    return out
+
+
+def with_hardware_encoder(args, draft: bool = False, bitrate_kbps: int = None, hwaccel_decode: bool = False):
     """A copy of an ffmpeg argument list with libx264 (and its -preset / -crf / -tune) replaced by the hardware encoder; None when there is
     no hardware encoder or the arguments do not use libx264."""
     name = hardware_encoder()
@@ -888,7 +1104,8 @@ def with_hardware_encoder(args, draft: bool = False, bitrate_kbps: int = None):
             crf = int(float(a[a.index("-crf") + 1]))
         except (ValueError, IndexError):
             pass
-    out, k = a[:i] + hw_video_args(name, crf, draft, bitrate_kbps), i + 2
+    head = _inject_hwaccel_inputs(a[:i]) if hwaccel_decode else a[:i]
+    out, k = head + hw_video_args(name, crf, draft, bitrate_kbps), i + 2
     while k < len(a):
         if a[k] in ("-preset", "-crf", "-tune") and k + 1 < len(a):
             k += 2
@@ -899,15 +1116,23 @@ def with_hardware_encoder(args, draft: bool = False, bitrate_kbps: int = None):
 
 
 def ffmpeg_encode(*args, timeout=180, draft: bool = False, hardware: bool = True, bitrate_kbps: int = None):
-    """Run an ffmpeg command that encodes H.264 on the GPU encoder when the machine has one, and on the CPU (libx264) otherwise or if the
-    GPU encode fails."""
+    """Run an ffmpeg command that decodes and encodes H.264 on the GPU when available, falling back cleanly if needed."""
     if hardware:
-        hw = with_hardware_encoder(args, draft, bitrate_kbps)
-        if hw is not None:
+        hw_dec = with_hardware_encoder(args, draft, bitrate_kbps, hwaccel_decode=True)
+        hw_enc = with_hardware_encoder(args, draft, bitrate_kbps, hwaccel_decode=False)
+        if hw_dec is not None:
             try:
-                return ffmpeg(*hw, timeout=timeout)
-            except Exception:
-                pass
+                return ffmpeg(*hw_dec, timeout=timeout)
+            except Exception as exc:
+                # If `-hwaccel auto` disliked an exotic input stream, retry GPU encoding with standard software decode
+                if hw_enc is not None and hw_enc != hw_dec:
+                    try:
+                        return ffmpeg(*hw_enc, timeout=timeout)
+                    except Exception as exc2:
+                        exc = exc2
+                enc_name = hardware_encoder() or "gpu"
+                last_line = (str(exc).strip().splitlines() or ["encode error"])[-1][:180]
+                print(f"  [GPU Encoder] {enc_name} failed ({last_line}); falling back to CPU libx264.", flush=True)
     if bitrate_kbps and not draft and len(args) > 1:   # CPU encoder: keep its constant quality, but cap the peak so the file size stays near the target
         args = [("16" if args[i - 1] == "-crf" and str(x) == "18" else x) for i, x in enumerate(args[:-1])] + ["-maxrate", f"{int(bitrate_kbps * 1.25)}k", "-bufsize", f"{int(bitrate_kbps * 2)}k", args[-1]]
     return ffmpeg(*args, timeout=timeout)

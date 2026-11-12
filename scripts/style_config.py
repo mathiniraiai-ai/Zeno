@@ -22,7 +22,9 @@ DEFAULT_TUNING: Dict[str, Any] = {
     "breath_onset_db": -32.0,
     "breath_lead_pad_sec": 0.14,
     "breath_tail_pad_sec": 0.08,
-    # Pause tightening & pacing pass (prepare.py / verify.py)
+    # Pause tightening & pacing pass (prepare.py / verify.py / script_order.py)
+    "tight_join_sec": 0.18,
+    "tight_pause_sec": 0.25,
     "pause_split_monologue_sec": 1.35,
     "pause_split_dialogue_sec": 1.45,
     "pause_beat_gap_sec": 0.28,
@@ -36,7 +38,7 @@ DEFAULT_TUNING: Dict[str, Any] = {
     "closing_cta_zoom": 1.05,
     "focus_pan_deadband": 0.04,
     "static_camera_motion_max": 2.8,
-    # Marks & SFX (prepare.py / render.py)
+    # Marks & SFX (prepare.py / render.py — calibrated for post-loudnorm -1.0 dBFS float stem)
     "mark_duration_sec": 0.56,
     "mark_alpha": 0.50,
     "wrong_sfx_primary": "sn_wrong.wav",
@@ -44,10 +46,11 @@ DEFAULT_TUNING: Dict[str, Any] = {
     "right_sfx_primary": "correct_ding.wav",
     "right_sfx_layer": "sn_correct.wav",
     "whoosh_sfx": "whoosh.wav",
-    "wrong_sfx_gain_db": 4.0,
-    "right_sfx_gain_db": 2.5,
-    "whoosh_sfx_gain_db": -2.0,
-    "max_hook_transitions": 2,
+    "riser_sfx": "sn_riser_1.wav",
+    "wrong_sfx_gain_db": 1.0,
+    "right_sfx_gain_db": 0.5,
+    "whoosh_sfx_gain_db": -0.5,
+    "max_hook_transitions": 5,
     "use_hw_accel": True,
     # Audio crossfades, room tone & loudness mastering (layouts.py / render.py / verify.py)
     "edge_fade_sec": 0.012,
@@ -89,10 +92,23 @@ def get_tuning(style_name: Optional[str] = "micronarrative", plan: Optional[Dict
         spec_tuning = spec.get("tuning")
         if isinstance(spec_tuning, dict):
             merged.update(spec_tuning)
+            if str(merged.get("riser_sfx", "")).strip().lower() in ("riser", "riser.wav"):
+                merged["riser_sfx"] = "sn_riser_1.wav"
+            # Migrate uncalibrated pre-loudnorm legacy gain values from older spec.json files
+            if spec_tuning.get("wrong_sfx_gain_db") == 4.0:
+                merged["wrong_sfx_gain_db"] = DEFAULT_TUNING["wrong_sfx_gain_db"]
+            if spec_tuning.get("right_sfx_gain_db") == 2.5:
+                merged["right_sfx_gain_db"] = DEFAULT_TUNING["right_sfx_gain_db"]
+            if spec_tuning.get("whoosh_sfx_gain_db") == -2.0:
+                merged["whoosh_sfx_gain_db"] = DEFAULT_TUNING["whoosh_sfx_gain_db"]
+            if isinstance(spec_tuning.get("max_hook_transitions"), (int, float)) and spec_tuning["max_hook_transitions"] < 5:
+                merged["max_hook_transitions"] = DEFAULT_TUNING["max_hook_transitions"]
         _TUNING_CACHE[eff_style] = merged
 
     out = dict(_TUNING_CACHE[eff_style])
     plan_tuning = (plan or {}).get("tuning")
     if isinstance(plan_tuning, dict):
         out.update(plan_tuning)
+        if str(out.get("riser_sfx", "")).strip().lower() in ("riser", "riser.wav"):
+            out["riser_sfx"] = "sn_riser_1.wav"
     return out
