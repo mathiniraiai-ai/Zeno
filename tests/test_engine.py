@@ -2400,6 +2400,50 @@ class TestSourceOrderSwap(unittest.TestCase):
         self.assertEqual(script_order.src_time_swaps(segs, self.LINES), [])
 
 
+class TestJobArchive(unittest.TestCase):
+    """Every edit is stored end to end; nothing is lost when the server cannot be reached."""
+
+    def test_plan_history_record_and_outbox(self):
+        import tempfile, json
+        from unittest.mock import patch
+        import job_archive
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = Path(tmp) / "gdoc_demo"
+            proj.mkdir()
+            plan_path = proj / "plan.edl"
+            (proj / "script.txt").write_text("L1 A: Hello", encoding="utf-8")
+            (proj / "script_analysis.md").write_text("L1 [A] emotion=neutral", encoding="utf-8")
+            plan_path.write_text("#output out/reel_Demo.mp4\n", encoding="utf-8")
+            job_archive.snapshot_plan(plan_path, "check", "L1 MISSING")
+            job_archive.snapshot_plan(plan_path, "check", "L1 MISSING")                 # unchanged plan: no second copy
+            plan_path.write_text("#output out/reel_Demo.mp4\nL1 a.mp4 0-1\n", encoding="utf-8")
+            job_archive.snapshot_plan(plan_path, "check", "PLAN PASS")
+            job_archive.snapshot_plan(plan_path, "render")
+            self.assertEqual(sorted(f.name for f in (proj / "_history").glob("plan_*.edl")), ["plan_01.edl", "plan_02.edl"])
+            self.assertTrue(job_archive.add_feedback(proj, "the head is cut in L1"))
+            plan = {"output": "out/reel_Demo.mp4", "script": str(proj / "script.txt"), "segments": [{"id": "L1", "layout": "split_h"}]}
+            rec = job_archive.build_record(plan_path, plan, 12.5)
+            self.assertEqual(rec["summary"]["plan_versions"], 2)
+            self.assertEqual((rec["summary"]["plan_checks"], rec["summary"]["renders"]), (3, 1))
+            self.assertEqual(rec["plan_versions"][0]["text"], "#output out/reel_Demo.mp4\n")
+            self.assertEqual(rec["plan_history"][0]["note"], "L1 MISSING")
+            self.assertEqual(rec["script"], "L1 A: Hello")
+            self.assertEqual(rec["feedback"][0]["text"], "the head is cut in L1")
+            self.assertEqual(rec["summary"]["layouts"], {"split_h": 1})
+            self.assertEqual(rec["job_uid"], job_archive.job_uid(proj, plan))            # a re-render updates the same record
+            outbox = Path(tmp) / "outbox"
+            with patch.object(job_archive, "OUTBOX", outbox), patch.object(job_archive, "_post", return_value=False):
+                self.assertFalse(job_archive.send(rec))                                   # server unreachable: kept, not lost
+            self.assertEqual(len(list(outbox.glob("*.json"))), 1)
+            sent = []
+            with patch.object(job_archive, "OUTBOX", outbox), patch.object(job_archive, "_post", side_effect=lambda r, **k: sent.append(r["job_uid"]) or True):
+                self.assertEqual(job_archive.flush_outbox(), 1)
+            self.assertEqual(sent, [rec["job_uid"]])
+            self.assertEqual(list(outbox.glob("*.json")), [])
+            with patch.dict("os.environ", {"ZENO_ARCHIVE": "0"}):
+                self.assertIsNone(job_archive.archive_job(plan_path, plan))
+
+
 class TestScrollPageFormat(unittest.TestCase):
     """`#page scroll`: two characters on top, the dialogue scrolling on a white page below."""
 

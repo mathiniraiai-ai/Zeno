@@ -834,6 +834,9 @@ def main() -> None:
         default=None,
         help="Stages 4–5: Render MP4, 1:1 Square, Premiere .prproj/.xml & run Deep QC on plan.edl",
     )
+    ap.add_argument("--feedback", default=None, metavar="TEXT", help="Record what the editor said about an edit (what was wrong, what changed, what they liked) in the team's job archive")
+    ap.add_argument("--plan", default=None, metavar="PLAN_EDL", help="With --feedback: which job (default: the most recent one)")
+    ap.add_argument("--feedback-from", default="", help="With --feedback: who said it (default: editor)")
     ap.add_argument("--check-plan", default=None, metavar="PLAN_EDL", help="Check the Director's plan: script order, every line once, cuts outside words, voices. Exit 2 if it would be blocked")
     ap.add_argument("--script", default=None, help="Path to local script .txt or Google Docs URL")
     ap.add_argument("--lang", default="auto", help="Language code or name (e.g. kn, ta, te, ml, hi, en, auto)")
@@ -984,10 +987,34 @@ def main() -> None:
         ok, _ = check_system_readiness(quiet=False)
         sys.exit(0 if ok else 1)
 
+    if getattr(args, "feedback", None):
+        # What the editor said about an edit (what was wrong, what they changed, what they liked) goes into its archive record.
+        import job_archive
+        if getattr(args, "plan", None):
+            fb_plan = common.resolve(args.plan)
+        else:
+            plans = sorted((common.ROOT / "work").glob("*/plan.edl"), key=lambda q: q.stat().st_mtime)
+            fb_plan = plans[-1] if plans else None
+        if fb_plan is None or not Path(fb_plan).is_file():
+            print("[FEEDBACK] no job found; pass --plan work/<project>/plan.edl")
+            sys.exit(2)
+        job_archive.add_feedback(Path(fb_plan).parent, args.feedback, source=getattr(args, "feedback_from", "") or "editor")
+        try:
+            stored = job_archive.archive_job(Path(fb_plan), load_edl(Path(fb_plan)), kind="feedback")
+        except Exception:
+            stored = False
+        print(f"[FEEDBACK] noted for {Path(fb_plan).parent.name}" + ("" if stored else " (kept on this computer; it goes to the server with the next job)"))
+        sys.exit(0)
+
     if args.check_plan:
         p_path = common.resolve(args.check_plan)
         msg = order_gate(load_edl(p_path), p_path)
         print(msg or "[PLAN PASS] Every line present, once, in script order; no cut inside a word; voices match.")
+        try:   # the job archive keeps every version of the plan and what the check said about it
+            import job_archive
+            job_archive.snapshot_plan(p_path, "check", msg or "PLAN PASS")
+        except Exception:
+            pass
         sys.exit(2 if msg else 0)
 
     if args.pitch:
@@ -999,6 +1026,11 @@ def main() -> None:
     if args.execute:
         p_path = common.resolve(args.execute)
         apply_stage3_tweaks(p_path, swap_layout=args.swap_layout, swap_takes=args.swap_take, error_sfx=args.error_sfx)
+        try:
+            import job_archive
+            job_archive.snapshot_plan(p_path, "render")
+        except Exception:
+            pass
         rc = run_execute(
             args.execute,
             square=args.square,
@@ -1010,6 +1042,11 @@ def main() -> None:
             try:
                 import job_report
                 job_report.record_failure(common.resolve(args.execute).parent, "render", f"render or verify stopped with code {rc}")
+            except Exception:
+                pass
+            try:   # a failed render is the most useful record of all
+                import job_archive
+                job_archive.archive_job(p_path, load_edl(p_path), kind="render_failed", extra={"exit_code": rc})
             except Exception:
                 pass
         if rc == 0:

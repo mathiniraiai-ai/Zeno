@@ -359,5 +359,23 @@ _dl = client.get("/v1/update-bundle", headers=_auth)
 check("client downloads exact OTA zip bundle", _dl.status_code == 200 and _dl.content == _zbytes and _dl.headers.get("X-Zeno-Version") == "1.0.5")
 check("If-None-Match returns 304 Not Modified", client.get("/v1/update-bundle", headers={**_auth, "If-None-Match": _ver["bundle_sha256"]}).status_code == 304)
 
+# Job archive: one edit stored end to end
+_job = {"job_uid": "job_test_1", "kind": "render", "project": "gdoc_x", "video_name": "W46 Kannada test", "zeno_version": "1.0.12",
+        "script": "L1 A: ನಮಸ್ಕಾರ", "plan_final": "#output x.mp4", "plan_versions": [{"file": "plan_01.edl", "text": "v1"}], "feedback": []}
+check("job record needs a key -> 401", client.post("/v1/jobs", json=_job).status_code == 401)
+check("job record without job_uid -> 400", client.post("/v1/jobs", headers=_auth, json={"project": "x"}).status_code == 400)
+_jr = client.post("/v1/jobs", headers=_auth, json=_job)
+check("job record is stored -> 200", _jr.status_code == 200 and _jr.json().get("job_id", 0) > 0, _jr.text[:120])
+_jr2 = client.post("/v1/jobs", headers=_auth, json={**_job, "kind": "feedback", "feedback": [{"text": "head cut in L4"}]})
+check("a resend replaces the same record", _jr2.status_code == 200 and _jr2.json()["job_id"] == _jr.json()["job_id"])
+check("regular user cannot read the archive", client.get("/admin/api/jobs", headers=_auth).status_code in (401, 403))
+_jl = client.get("/admin/api/jobs", headers=_adm)
+check("admin lists the archive (no payloads)", _jl.status_code == 200 and len(_jl.json()["jobs"]) == 1 and "payload" not in str(_jl.json())
+      and _jl.json()["jobs"][0]["kind"] == "feedback", _jl.text[:160])
+_jg = client.get(f"/admin/api/jobs/{_jr.json()['job_id']}", headers=_adm)
+check("admin reads one full record", _jg.status_code == 200 and _jg.json()["payload"]["script"] == "L1 A: ನಮಸ್ಕಾರ"
+      and _jg.json()["payload"]["feedback"][0]["text"] == "head cut in L4")
+check("oversized job record -> 413", client.post("/v1/jobs", headers=_auth, json={**_job, "facts": "x" * (4 * 1024 * 1024 + 10)}).status_code == 413)
+
 print(f"\n{sum(results)}/{len(results)} checks passed")
 sys.exit(0 if all(results) else 1)

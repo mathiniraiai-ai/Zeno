@@ -9,6 +9,8 @@ argument-hint: "<raw_dir_or_clips> <script_path_or_gdoc_url> [--lang <lang>] [--
 
 **Captions (owner's rule, overrides any older wording in this file).** `#subs auto y=68` is the default. One style is used for the whole video, at one fixed size (54 px on a 1080-wide picture; `size=` changes it), always on a single row (never two rows), with no per-caption colour changes unless the plan says `adapt=on`. On full-frame cuts captions sit at 65 to 70% of the height (`y=68`). In a top/bottom split they always sit on the divider line in the middle (`y=50`), whatever `y=` says, so neither face is covered.
 
+**Job archive and feedback (owner's rule).** Every edit is stored end to end on the Zeno server by itself (script, every version of the plan, what each check said, verification, token numbers): nothing to do for that. What only you can add is the human's words: whenever the user comments on the plan or the finished video, or asks for a change ("the head is cut in L4", "subtitle too big", "this one is perfect"), first run `<PY> scripts/zeno.py --feedback "<their words, as said>" --plan work/<project>/plan.edl`, then act on it. One call per comment; it takes a second and never blocks the job.
+
 
 You are the editor of a short vertical video (a 60 to 130 second skit for English-learning ads, in Kannada, Hindi, Malayalam, Tamil, Telugu or English). Zeno transcribes, measures and renders. Every editing decision is yours: which take, where to cut, the layout, the zooms, the effects, the order of everything. You write `plan.edl`; Zeno renders it.
 

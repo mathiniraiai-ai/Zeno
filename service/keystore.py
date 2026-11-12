@@ -223,6 +223,22 @@ class KeyStore:
             published_by TEXT NOT NULL DEFAULT '',
             created_at {real} NOT NULL,
             bundle_zip {blob_type})""")
+        # The whole story of one edit, end to end (script, every version of the plan, checks, verification, editor feedback),
+        # kept so the team can later study where Zeno's editing fell short. One row per job; a resend replaces its own row.
+        self._run(f"""CREATE TABLE IF NOT EXISTS zeno_job_archive (
+            id {rule_pk},
+            job_uid TEXT NOT NULL UNIQUE,
+            key_id INTEGER,
+            editor_name TEXT NOT NULL DEFAULT '',
+            user_email TEXT NOT NULL DEFAULT '',
+            project TEXT NOT NULL DEFAULT '',
+            video_name TEXT NOT NULL DEFAULT '',
+            zeno_version TEXT NOT NULL DEFAULT '',
+            kind TEXT NOT NULL DEFAULT 'render',
+            size_bytes INTEGER NOT NULL DEFAULT 0,
+            created_at {real} NOT NULL,
+            updated_at {real} NOT NULL,
+            payload_json TEXT NOT NULL)""")
 
     # -- operations --------------------------------------------------------------------------
     def create(self, name: str, email: str) -> str:
@@ -392,6 +408,55 @@ class KeyStore:
                 pass
 
         return run_id
+
+    # -- job archive: the whole edit, end to end -----------------------------------------------
+    def record_job(self, key_id: Optional[int], editor_name: str, payload: Dict[str, Any]) -> int:
+        """Store (or replace) one job's full record. `payload["job_uid"]` identifies the job, so a resend never duplicates."""
+        payload = payload or {}
+        uid = str(payload.get("job_uid") or "").strip()[:120]
+        if not uid:
+            raise ValueError("job_uid is required")
+        email = ""
+        if key_id is not None:
+            row = self._run("SELECT name, email FROM zeno_keys WHERE id = %s", (key_id,), "one")
+            if row:
+                editor_name = editor_name or str(row[0] or "")
+                email = str(row[1] or "").lower()
+        body = json.dumps(payload, ensure_ascii=False)
+        now = time.time()
+        self._run(
+            """INSERT INTO zeno_job_archive (job_uid, key_id, editor_name, user_email, project, video_name, zeno_version, kind,
+                                             size_bytes, created_at, updated_at, payload_json)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (job_uid) DO UPDATE SET
+                   payload_json = EXCLUDED.payload_json, size_bytes = EXCLUDED.size_bytes, updated_at = EXCLUDED.updated_at,
+                   video_name = EXCLUDED.video_name, zeno_version = EXCLUDED.zeno_version, kind = EXCLUDED.kind""",
+            (uid, key_id, str(editor_name or "")[:120], email[:160], str(payload.get("project") or "")[:200],
+             str(payload.get("video_name") or "")[:300], str(payload.get("zeno_version") or "")[:40],
+             str(payload.get("kind") or "render")[:30], len(body.encode("utf-8")), now, now, body),
+        )
+        row = self._run("SELECT id FROM zeno_job_archive WHERE job_uid = %s", (uid,), "one")
+        return int(row[0]) if row else 0
+
+    def list_jobs(self, limit: int = 200, since: float = 0.0) -> List[Dict[str, Any]]:
+        """The archive's index, newest first (no payloads)."""
+        rows = self._run(
+            """SELECT id, job_uid, editor_name, user_email, project, video_name, zeno_version, kind, size_bytes, created_at, updated_at
+               FROM zeno_job_archive WHERE updated_at >= %s ORDER BY updated_at DESC LIMIT %s""",
+            (float(since), int(limit)), "all",
+        )
+        cols = ("id", "job_uid", "editor_name", "user_email", "project", "video_name", "zeno_version", "kind", "size_bytes", "created_at", "updated_at")
+        return [dict(zip(cols, r)) for r in rows or []]
+
+    def get_job(self, job_id: int) -> Optional[Dict[str, Any]]:
+        row = self._run("SELECT payload_json, editor_name, user_email, created_at, updated_at FROM zeno_job_archive WHERE id = %s", (int(job_id),), "one")
+        if not row:
+            return None
+        try:
+            payload = json.loads(row[0])
+        except Exception:
+            payload = {}
+        return {"id": int(job_id), "editor_name": row[1], "user_email": row[2], "created_at": row[3], "updated_at": row[4], "payload": payload}
 
     def record_run(self, key_id: Optional[int], editor_name: str, payload: Dict[str, Any]) -> int:
         return self.log_run(key_id, payload, editor_name=editor_name)

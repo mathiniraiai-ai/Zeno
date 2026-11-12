@@ -962,6 +962,10 @@ def main() -> None:
         except Exception:
             lock_lines = []
         if lock_lines:
+            try:
+                (plan_path.parent / "render_notes.json").write_text(json.dumps({"split_panels": lock_lines}, ensure_ascii=False), encoding="utf-8")
+            except Exception:
+                pass
             print("Split panels (one fixed frame per panel, no zoom):")
             for ln in lock_lines:
                 print("  " + ln)
@@ -1686,7 +1690,22 @@ def main() -> None:
     # 6) optional post-render verification
     if a.verify and verify is not None and hasattr(verify, "run_verification"):
         print()
-        ok = verify.run_verification(plan_path)
+        import contextlib
+        import io
+
+        class _Tee(io.StringIO):
+            def write(self, text: str) -> int:   # show the checks as before and keep a copy for the job archive
+                sys.__stdout__.write(text)
+                return super().write(text)
+
+        _buf = _Tee()
+        with contextlib.redirect_stdout(_buf):
+            ok = verify.run_verification(plan_path)
+        try:
+            (plan_path.parent / "verify_report.json").write_text(
+                json.dumps({"ok": bool(ok), "text": _buf.getvalue()[-60000:]}, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
         if not ok:
             sys.exit(1)
 
@@ -1705,6 +1724,16 @@ def main() -> None:
             import token_tracker
             rec = token_tracker.finalize_job_telemetry(plan_path, plan, total, out_path)
             token_tracker.print_console_summary(rec)
+        except Exception:
+            pass
+
+        # 7b) the whole job, end to end, into the team's archive on the Zeno server (text only; waits in an outbox when offline)
+        try:
+            import job_archive
+            stored = job_archive.archive_job(plan_path, plan, total, out_path)
+            if stored is not None:
+                print("[ARCHIVE] this edit is stored in the team archive." if stored
+                      else "[ARCHIVE] the server could not be reached; this edit's record waits on this computer and goes with the next job.")
         except Exception:
             pass
 

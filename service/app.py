@@ -700,6 +700,55 @@ async def record_telemetry(request: Request, authorization: Optional[str] = Head
     return {"ok": True, "run_id": run_id}
 
 
+JOB_RECORD_MAX_BYTES = 4 * 1024 * 1024   # a job record is text (script, plans, reports); 4 MB is far more than one needs
+
+
+@app.post("/v1/jobs")
+async def record_job(request: Request, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """Store one edit end to end (script, every version of the plan, check and verification results, editor feedback), so the team
+    can later study the patterns. Text only: never footage or video. A resend with the same `job_uid` replaces the earlier record."""
+    name, key_id = authenticate(authorization)
+    check_rate(name)
+    raw = await request.body()
+    if len(raw) > JOB_RECORD_MAX_BYTES:
+        raise HTTPException(413, "Job record is too large")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict) or not str(payload.get("job_uid") or "").strip():
+            raise ValueError("job_uid missing")
+    except Exception:
+        raise HTTPException(400, "Invalid job record JSON (an object with job_uid is expected)")
+    try:
+        job_id = store().record_job(key_id, name, payload)
+    except Exception:
+        log.exception("could not store job record")
+        raise HTTPException(503, "Could not store the job record")
+    log.info("job record id=%d user=%s project=%s kind=%s bytes=%d", job_id, name, payload.get("project"), payload.get("kind"), len(raw))
+    return {"ok": True, "job_id": job_id}
+
+
+@app.get("/admin/api/jobs")
+def admin_list_jobs(
+    limit: int = 200, since: float = 0.0,
+    authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None),
+) -> JSONResponse:
+    """Index of the job archive, newest first (admins only: the records hold scripts and plans)."""
+    _check_admin(authorization, x_admin_password)
+    return JSONResponse({"jobs": store().list_jobs(limit=min(max(1, limit), 2000), since=since)}, headers=NO_STORE)
+
+
+@app.get("/admin/api/jobs/{job_id}")
+def admin_get_job(
+    job_id: int, authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None),
+) -> JSONResponse:
+    """One job's full record (admins only)."""
+    _check_admin(authorization, x_admin_password)
+    rec = store().get_job(job_id)
+    if rec is None:
+        raise HTTPException(404, "No such job record")
+    return JSONResponse(rec, headers=NO_STORE)
+
+
 class LearnedRuleBody(BaseModel):
     rule: str = ""
     rule_text: str = ""
