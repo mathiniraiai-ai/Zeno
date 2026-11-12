@@ -1,8 +1,13 @@
 # AGENTS.md — Zeno (Antigravity Gemini 4 Argon & Dual-Agent Instructions)
 
+**Split screens never zoom (owner's rule, overrides any older wording in this file).** Every `split_h`, `split_v` and baked-split segment is `z=1`: no push-in, punch-in, step zoom or pull-out. The renderer ignores a zoom written on a split and holds each panel in one fixed frame (14% headroom, the speaking and the silent clip of a character lined up by their background), so switching between them never jumps.
+
+**Captions (owner's rule, overrides any older wording in this file).** `#subs auto y=68` is the default. One style is used for the whole video, at one fixed size (54 px on a 1080-wide picture; `size=` changes it), always on a single row (never two rows), with no per-caption colour changes unless the plan says `adapt=on`. On full-frame cuts captions sit at 65 to 70% of the height (`y=68`). In a top/bottom split they always sit on the divider line in the middle (`y=50`), whatever `y=` says, so neither face is covered.
+
+
 Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Code (Opus 5.5 / Sonnet 5.5)** inside this Zeno folder (team PCs: `~/Documents/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`).
 
-**Agent entry point** (Antigravity, OpenAI and any other agent, not only Claude): read `agent/DIRECTOR.md` first. It sets the decision loop and points to one concept file per topic in `agent/concepts/`. Learned styles live in `styles/<name>/`. Premiere-grade animated `#subs auto y=72` karaoke captions are ON by default (`y=50` automatically on the `split_v` seam; `#subs off` only if the user explicitly asks for no subtitles); extra text banners or graphics appear only when the script or style `SKILL.md` asks for them.
+**Agent entry point** (Antigravity, OpenAI and any other agent, not only Claude): read `agent/DIRECTOR.md` first. It sets the decision loop and points to one concept file per topic in `agent/concepts/`. Learned styles live in `styles/<name>/`. Premiere-grade animated `#subs auto y=68` karaoke captions are ON by default (`y=50` automatically on the `split_v` seam; `#subs off` only if the user explicitly asks for no subtitles); extra text banners or graphics appear only when the script or style `SKILL.md` asks for them.
 
 ---
 
@@ -16,7 +21,7 @@ Always-on operational rules for **Antigravity (Gemini 4 Argon)** and **Claude Co
    - **Never** read `work/*/words.json`, `work/*/silences.json`, or `work/*/align.json` unless isolating a single word boundary defect.
    - **Never** read `scripts/*.py` during normal editing jobs. Use the 3-step CLI workflow and `plan.edl` schema below.
 6. **Fresh Context Per Video**: Start each new video edit in a fresh conversation with unused MCP connectors turned off.
-7. **Clean Editorial Style & Default Auto-Captions**: Premiere-grade animated `#subs auto y=72` karaoke captions (`y=50` automatically on `split_v` seam so faces are never covered) are **ON by default** (use `#subs off` only if the user explicitly asks for a clean/unsubtitled export). No unrequested decorative B-roll, no spammy CTAs, no decorative clutter, and zero untrimmed stumbles or repeated phrases (`! REPEAT / STUMBLE` in `facts.md`). Only best takes, snappy pause-trimmed cuts (`> 0.25s` pauses cut with `1.08` punch-ins, `0.06–0.15s` turn joins, `0.02–0.05s` breath margins), dynamic full-frame + active-panel split engagement, smooth eased transitions every `7–9s`, and script-driven `✓` / `✗` marks + calibrated `-4 to 0 dB` SFX.
+7. **Clean Editorial Style & Default Auto-Captions**: Premiere-grade animated `#subs auto y=68` karaoke captions (`y=50` automatically on `split_v` seam so faces are never covered) are **ON by default** (use `#subs off` only if the user explicitly asks for a clean/unsubtitled export). No unrequested decorative B-roll, no spammy CTAs, no decorative clutter, and zero untrimmed stumbles or repeated phrases (`! REPEAT / STUMBLE` in `facts.md`). Only best takes, snappy pause-trimmed cuts (`> 0.25s` pauses cut with `1.08` punch-ins, `0.06–0.15s` turn joins, `0.02–0.05s` breath margins), dynamic full-frame + active-panel split engagement, smooth eased transitions every `7–9s`, and script-driven `✓` / `✗` marks + calibrated `-4 to 0 dB` SFX.
 
 ---
 
@@ -59,7 +64,7 @@ Zeno operates like a **Senior Human Video Editor** in 5 transparent stages with 
    ```
    - `--style <name>`: the style folder this job follows (for example `micronarrative`). Always pass it when the style is known: it writes `# style: <name>` into the plan so the job counts toward the style's readiness level and the team's learning.
    - `<lang>`: `en`, `kn`/`kannada`, `ta`/`tamil`, `hi`/`hindi`, `te`/`telugu`, `ml`/`malayalam`, or `auto`.
-   - Writes `work/<project>/line_map.md`, `facts.md`, `clip_sheet_<n>.jpg`, and `plan.edl` with a header (including `#subs auto y=72`) and **no segments**. Progress every ~48s (`work/<project>/progress.json` / `<PY> scripts/progress.py`).
+   - Writes `work/<project>/line_map.md`, `facts.md`, `clip_sheet_<n>.jpg`, and `plan.edl` with a header (including `#subs auto y=68`) and **no segments**. Progress every ~48s (`work/<project>/progress.json` / `<PY> scripts/progress.py`).
 2. **Edit (the agent decides everything)**: follow `agent/EDIT_RULES.md`: read the line map, facts (checking `! REPEAT / STUMBLE` flags to trim every false start, stutter, and boundary repeat) and clip sheets, write every segment of `plan.edl`, then run `<PY> scripts/zeno.py --check-plan work/<project>/plan.edl` until it passes cleanly. It blocks lines out of script order, missing or said twice, unscripted repeated words/phrases, stretched pauses, cuts inside a word, and a voice that does not match `sp=`. A deliberate scripted exception goes in `work/<project>/decisions.txt` (`accept L2 <reason>`).
 3. **Stop and ask**: show the user the plan and ask Yes/No once before rendering.
 4. **Render, Premiere `.prproj` Export & Verify (`1 command` after Yes)**:
@@ -107,7 +112,7 @@ The agent makes all decisions in one pass, in the order given by `agent/EDIT_RUL
 # preset: hybrid
 # mark_pack: flash
 # loudness: -11.5
-#subs auto y=72
+#subs auto y=68
 
 # SEGMENTS: id | src | start-end | layout | zoom | transition | extras | note
 L1 | S1 | 1.12-5.40 | single | sudden_in:1.08 | cut | focus=0.5,0.45 | Hook question

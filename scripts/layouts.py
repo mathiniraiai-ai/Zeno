@@ -54,11 +54,13 @@ from vision_tracker import (
     analyze_clip_vision,
     compute_paired_split_crop_filters,
     compute_slot_crop_filter,
+    derive_registered_crop,
+    register_background,
     find_listening_idle_window,
 )
 
 EDGE_FADE: float = 0.012  # 12ms audio fade at segment edges to prevent clicks
-SPLIT_MAX_ZOOM: float = 1.08  # Safe in-panel zoom ceiling for split_h, split_v, top_pip & baked splits
+SPLIT_MAX_ZOOM: float = 1.0  # Split panels (split_h, split_v, top_pip, baked splits) never zoom
 
 
 def even(x: float) -> int:
@@ -672,28 +674,11 @@ def _clamp_split_zoom_spec(
     exact_dur: float,
     max_zoom: float = SPLIT_MAX_ZOOM,
 ) -> Tuple[float, float, str, float, float]:
-    """Clamp split-panel zoom magnitude to `[1.0, max_zoom]` (`1.12`) so active panels punch in
-    cleanly without clipping ears or chins.
+    """Split panels never zoom (owner's rule): a zoom on one turn makes the same character jump
+    in size when the panel switches between the speaking clip and the silent clip. Whatever the
+    plan asks for, a split panel is rendered still at 1.0.
     """
-    c0 = round(min(max_zoom, max(1.0, float(z0))), 4)
-    c1 = round(min(max_zoom, max(1.0, float(z1))), 4)
-    if style in ("sudden_in", "flash_zoom"):
-        if abs(c1 - c0) < 0.005:
-            if c1 <= 1.005:
-                return 1.0, 1.0, "none", 0.0, exact_dur
-            c0 = 1.0
-        return c0, c1, style, zoom_at, zoom_dur
-    if style == "sudden_out":
-        if abs(c0 - c1) < 0.005:
-            if c0 <= 1.005:
-                return 1.0, 1.0, "none", 0.0, exact_dur
-            c1 = 1.0
-        return c0, c1, style, zoom_at, zoom_dur
-    if abs(c1 - c0) < 0.005:
-        if c0 > 1.005:
-            return c0, c0, "static", 0.0, exact_dur
-        return 1.0, 1.0, "none", 0.0, exact_dur
-    return c0, c1, style, zoom_at, zoom_dur
+    return 1.0, 1.0, "none", 0.0, exact_dur
 
 
 def resolve_segment_zoom_spec(
@@ -960,6 +945,299 @@ def banner_boxes(seg: Dict[str, Any], W: int, H: int, exact: float) -> List[Dict
     return boxes
 
 
+# ---------------------------------------------------------------------------
+# Split panel lock: each panel keeps ONE frame for the whole split
+# ---------------------------------------------------------------------------
+_SPLIT_LOCK_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _split_peer_time(peer: Dict[str, Any]) -> float:
+    span = peer.get("idle_span")
+    if isinstance(span, (list, tuple)) and len(span) >= 2:
+        return max(0.0, float(span[0]))
+    if peer.get("mode") == "still" and peer.get("still_at") is not None:
+        return max(0.0, float(peer["still_at"]))
+    return max(0.0, float(peer.get("start") or 0.0))
+
+
+def _split_seg_sig(seg: Dict[str, Any]) -> str:
+    peer = seg.get("peer") if isinstance(seg.get("peer"), dict) else {}
+    return json.dumps([
+        normalize_layout_name(seg.get("layout")), str(seg.get("src")),
+        round(float(seg.get("start") or 0.0), 3), round(float(seg.get("end") or 0.0), 3),
+        str(peer.get("src")), _split_peer_time(peer), _resolve_active_slot(seg),
+    ], default=str)
+
+
+def _split_slots(lay: str, seg: Dict[str, Any], W: int, H: int) -> Tuple[str, str, Tuple[int, int], Tuple[int, int]]:
+    """(live slot, peer slot, live slot size, peer slot size) of a split segment."""
+    if lay == "split_v":
+        top_h = even(H // 2)
+        sizes = {"top": (W, top_h), "bottom": (W, H - top_h)}
+        live = "top" if _resolve_active_slot(seg, default="top") in ("top", "slot_a", "a", "0") else "bottom"
+        other = "bottom" if live == "top" else "top"
+    else:
+        left_w = even(W // 2)
+        sizes = {"left": (left_w, H), "right": (W - left_w, H)}
+        live = "left" if _resolve_active_slot(seg, default="left") in ("left", "slot_a", "a", "0") else "right"
+        other = "right" if live == "left" else "left"
+    return live, other, sizes[live], sizes[other]
+
+
+def _panel_colour_stats(path: Path, crop: Dict[str, Any], t0: float, top_skip: int) -> Optional[Tuple[List[float], List[float]]]:
+    """Mean and spread of R, G, B of what a clip shows inside its locked panel crop (three frames)."""
+    try:
+        import cv2
+        import numpy as np
+        g = crop["geom"]
+        slot_w, slot_h = crop["slot_size"]
+        k = 0.25
+        mat = np.float32([[g["s"] * k, 0, -g["ox"] * k], [0, g["s"] * k, -g["oy"] * k]])
+        size = (max(8, int(slot_w * k)), max(8, int(slot_h * k)))
+        cap = cv2.VideoCapture(str(path))
+        if not cap.isOpened():
+            return None
+        dur = (cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0) / max(1.0, cap.get(cv2.CAP_PROP_FPS) or 30.0)
+        px: List[Any] = []
+        for dt in (0.0, 0.6, 1.2):
+            t = min(max(0.0, t0 + dt), max(0.0, dur - 0.1))
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            view = cv2.warpAffine(frame, mat, size, flags=cv2.INTER_AREA)[int(top_skip * k):]
+            px.append(view.reshape(-1, 3).astype(np.float32))
+        cap.release()
+        if not px:
+            return None
+        allpx = np.concatenate(px, axis=0)[:, ::-1]                      # BGR -> RGB
+        return [float(v) for v in allpx.mean(axis=0)], [float(max(1.0, v)) for v in allpx.std(axis=0)]
+    except Exception:
+        return None
+
+
+def _panel_colour_filter(ref: Tuple[List[float], List[float]], clip: Tuple[List[float], List[float]]) -> Tuple[str, str]:
+    """(FFmpeg filter, note) that brings `clip`'s colour to `ref`'s. Empty filter when they already match."""
+    gains, offs, capped = [], [], False
+    for c in range(3):
+        a = ref[1][c] / clip[1][c]
+        a_c = min(1.15, max(0.87, a))
+        b = ref[0][c] - a_c * clip[0][c]
+        b_c = min(20.0, max(-20.0, b))
+        capped = capped or abs(a_c - a) > 0.005 or abs(b_c - b) > 0.5
+        gains.append(a_c)
+        offs.append(b_c)
+    shift = max(abs(ref[0][c] - clip[0][c]) for c in range(3))
+    if shift < 1.2 and all(abs(a - 1.0) < 0.015 for a in gains):
+        return "", ""
+    parts = [f"{ch}='clip(val*{gains[i]:.4f}+{offs[i]:.2f},0,255)'" for i, ch in enumerate("rgb")]
+    note = f"colour matched to the talking clip (was off by {shift:.0f} of 255)"
+    if capped:
+        note += "; [SPLIT_COLOUR] the difference is larger than the safe limit, matched as far as allowed: regenerate the clip if it still shows"
+    return "format=gbrp,lutrgb=" + ":".join(parts) + ",format=yuv420p", note
+
+
+def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]:
+    """Work out, for every split segment of the plan, the crop of both panels so that a panel's
+    background never moves: one reference clip per panel (the silent clip when there is one) fixes
+    the frame, and every other clip of that panel is lined up to it by its background.
+    """
+    segs = [s for s in (plan.get("segments") or []) if isinstance(s, dict)
+            and normalize_layout_name(s.get("layout")) in ("split_h", "split_v") and s.get("src")]
+    out: Dict[str, Any] = {"segs": {}, "report": []}
+    if not segs:
+        return out
+
+    uses: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}   # (layout, slot) -> appearances in order
+    rows: List[Dict[str, Any]] = []
+    for seg in segs:
+        lay = normalize_layout_name(seg.get("layout"))
+        peer = seg.get("peer") if isinstance(seg.get("peer"), dict) else {}
+        live_src = resolve(seg["src"])
+        peer_src = resolve(peer.get("src") or seg["src"])
+        if not live_src.is_file() or not peer_src.is_file():
+            continue
+        live_slot, peer_slot, live_size, peer_size = _split_slots(lay, seg, W, H)
+        row = {
+            "sig": _split_seg_sig(seg), "lay": lay,
+            "live": {"slot": live_slot, "src": live_src, "t": float(seg.get("start") or 0.0), "size": live_size, "role": "live"},
+            "peer": {"slot": peer_slot, "src": peer_src, "t": _split_peer_time(peer), "size": peer_size, "role": "peer"},
+        }
+        rows.append(row)
+        for part in (row["live"], row["peer"]):
+            uses.setdefault((lay, part["slot"]), []).append(part)
+
+    def _bbox(path: Path) -> Optional[List[float]]:
+        try:
+            return (analyze_clip_vision(path) or {}).get("bbox_norm")
+        except Exception:
+            return None
+
+    def _dims(path: Path) -> Tuple[int, int]:
+        info = probe(path)
+        return int(info.get("width") or W), int(info.get("height") or H)
+
+    clusters: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    member: Dict[Tuple[str, str, str], Tuple[Dict[str, Any], Optional[Dict[str, float]], str]] = {}
+    for key, parts in uses.items():
+        first_t: Dict[str, float] = {}
+        peer_n: Dict[str, int] = {}
+        live_n: Dict[str, int] = {}
+        order: List[Path] = []
+        for part in parts:
+            k = str(part["src"])
+            if k not in first_t:
+                first_t[k] = part["t"]
+                order.append(part["src"])
+            peer_n[k] = peer_n.get(k, 0) + (1 if part["role"] == "peer" else 0)
+            live_n[k] = live_n.get(k, 0) + (1 if part["role"] == "live" else 0)
+        order.sort(key=lambda q: -peer_n.get(str(q), 0))          # the silent clip fixes the frame
+        clusters[key] = []
+        for path in order:
+            k = str(path)
+            bb, dims = _bbox(path), _dims(path)
+            placed = False
+            for cl in clusters[key]:
+                reg = register_background(cl["ref"], cl["ref_t"], path, first_t[k], cl["bbox"], bb)
+                how = "background"
+                if reg is None and dims == cl["dims"] and bb and cl["bbox"]:
+                    # Same size and the head in the same place: the same picture, nothing to move.
+                    dx = abs(0.5 * (bb[0] + bb[2]) - 0.5 * (cl["bbox"][0] + cl["bbox"][2]))
+                    dy = abs(bb[1] - cl["bbox"][1])
+                    if dx <= 0.06 and dy <= 0.06:
+                        reg, how = {"a": 1.0, "tx": 0.0, "ty": 0.0}, "assumed"
+                if reg is not None:
+                    member[(key[0], key[1], k)] = (cl, reg, how)
+                    cl["clips"][k] = {"path": path, "t": first_t[k], "live_n": live_n.get(k, 0)}
+                    placed = True
+                    break
+            if not placed:
+                cl = {"ref": path, "ref_t": first_t[k], "bbox": bb, "dims": dims, "geom": None, "slot": key[1],
+                      "clips": {k: {"path": path, "t": first_t[k], "live_n": live_n.get(k, 0)}}, "colour": None}
+                clusters[key].append(cl)
+                member[(key[0], key[1], k)] = (cl, {"a": 1.0, "tx": 0.0, "ty": 0.0}, "reference")
+
+    def _colour_for(lay: str, slot: str, cl: Dict[str, Any], k: str) -> Tuple[str, str]:
+        """The same character must not change colour when the panel switches between the talking
+        and the silent clip: the talking clip keeps its colour, the other clips are matched to it."""
+        if len(cl["clips"]) < 2:
+            return "", ""
+        if cl.get("colour") is None:
+            geo = {kk: _geom_crop(lay, {"slot": slot, "src": c["path"]}) for kk, c in cl["clips"].items()}
+            top_skip = max(int(g.get("pad_top") or 0) for g in geo.values())
+            stats = {kk: _panel_colour_stats(c["path"], geo[kk], c["t"], top_skip) for kk, c in cl["clips"].items()}
+            ref_k = max(cl["clips"], key=lambda kk: cl["clips"][kk]["live_n"])
+            cl["colour"] = {}
+            for kk in cl["clips"]:
+                if kk == ref_k or stats.get(kk) is None or stats.get(ref_k) is None:
+                    cl["colour"][kk] = ("", "")
+                else:
+                    cl["colour"][kk] = _panel_colour_filter(stats[ref_k], stats[kk])
+        return cl["colour"].get(k, ("", ""))
+
+    def _crop_for(lay: str, part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        crop = _geom_crop(lay, part)
+        if crop is None:
+            return None
+        cl = member[(lay, part["slot"], str(part["src"]))][0]
+        flt, note = _colour_for(lay, part["slot"], cl, str(part["src"]))
+        if flt:
+            crop = dict(crop, filter=crop["filter"] + "," + flt, colour_note=note)
+        return crop
+
+    def _geom_crop(lay: str, part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        cl, reg, how = member[(lay, part["slot"], str(part["src"]))]
+        if cl.get("geom") is None:
+            return None
+        w_in, h_in = _dims(part["src"])
+        s_c = cl["geom"]["geom"]["s"] / max(0.01, reg["a"])
+        if abs(reg["a"] - 1.0) < 0.003 and abs(s_c * reg["tx"]) < 1.0 and abs(s_c * reg["ty"]) < 1.0:
+            reg = {"a": 1.0, "tx": 0.0, "ty": 0.0}                     # measuring noise, not a real shift
+        if (w_in, h_in) != cl["dims"] and how == "assumed":
+            crop = derive_registered_crop(cl["geom"], None, w_in, h_in)
+        else:
+            crop = derive_registered_crop(cl["geom"], reg, w_in, h_in)
+        crop["lock"] = {"how": how, "scale": round(reg["a"], 4),
+                        "shift_px": [round(s_c * reg["tx"], 1), round(s_c * reg["ty"], 1)]}
+        return crop
+
+    seen: set = set()
+    for row in rows:
+        lay = row["lay"]
+        cl_live = member[(lay, row["live"]["slot"], str(row["live"]["src"]))][0]
+        cl_peer = member[(lay, row["peer"]["slot"], str(row["peer"]["src"]))][0]
+        if cl_live.get("geom") is None or cl_peer.get("geom") is None:
+            lw, lh = cl_live["dims"]
+            pw, ph = cl_peer["dims"]
+            g_live, g_peer = compute_paired_split_crop_filters(
+                live_src=cl_live["ref"], peer_src=cl_peer["ref"],
+                src_w=lw, src_h=lh, peer_w=pw, peer_h=ph,
+                live_slot_w=row["live"]["size"][0], live_slot_h=row["live"]["size"][1],
+                peer_slot_w=row["peer"]["size"][0], peer_slot_h=row["peer"]["size"][1],
+            )
+            if cl_live.get("geom") is None:
+                cl_live["geom"] = g_live
+            if cl_peer.get("geom") is None:
+                cl_peer["geom"] = g_peer
+        live_crop, peer_crop = _crop_for(lay, row["live"]), _crop_for(lay, row["peer"])
+        if live_crop is None or peer_crop is None:
+            continue
+        out["segs"][row["sig"]] = {"live": live_crop, "peer": peer_crop}
+        for part, crop in ((row["live"], live_crop), (row["peer"], peer_crop)):
+            tag = (lay, part["slot"], str(part["src"]))
+            if tag in seen:
+                continue
+            seen.add(tag)
+            lk = crop["lock"]
+            if lk["how"] == "reference":
+                note = "fixes the frame"
+            elif lk["how"] == "assumed":
+                note = "same picture, same frame"
+            else:
+                note = f"lined up by background (moved {lk['shift_px'][0]:+.0f},{lk['shift_px'][1]:+.0f} px, size x{1.0 / max(0.01, lk['scale']):.3f})"
+            if crop.get("colour_note"):
+                note += "; " + crop["colour_note"]
+            if crop.get("clamp_px", 0) > 2.0:
+                note += f"; [SPLIT_ALIGN] {crop['clamp_px']:.0f} px short of a perfect match (the clip shows less of the scene)"
+            out["report"].append(f"{part['slot']:>6}: {part['src'].name} - {note}")
+    for key, cls in clusters.items():
+        if len(cls) > 1:
+            names = ", ".join(c["ref"].name for c in cls)
+            out["report"].append(f"{key[1]:>6}: [SPLIT_ALIGN] different backgrounds in one panel ({names}); each keeps its own frame")
+    return out
+
+
+def split_panel_lock(seg: Dict[str, Any], plan: Optional[Dict[str, Any]], W: int, H: int) -> Optional[Dict[str, Any]]:
+    """The locked crops (`live`, `peer`) of one split segment, or None when it cannot be locked."""
+    if not isinstance(plan, dict) or not plan.get("segments"):
+        return None
+    try:
+        key = hashlib.md5(json.dumps(
+            [[_split_seg_sig(s), _file_mtime_sig(s["src"])] for s in plan["segments"] if isinstance(s, dict)
+             and normalize_layout_name(s.get("layout")) in ("split_h", "split_v") and s.get("src")] + [W, H],
+            default=str).encode("utf-8")).hexdigest()
+        if key not in _SPLIT_LOCK_CACHE:
+            _SPLIT_LOCK_CACHE[key] = _compute_split_locks(plan, W, H)
+        plan_locks = _SPLIT_LOCK_CACHE[key]
+        return plan_locks["segs"].get(_split_seg_sig(seg))
+    except Exception:
+        return None
+
+
+def split_lock_report(plan: Optional[Dict[str, Any]], W: int, H: int) -> List[str]:
+    """Plain lines saying how each clip of each split panel was framed (printed once per render)."""
+    for seg in ((plan or {}).get("segments") or []):
+        if isinstance(seg, dict) and normalize_layout_name(seg.get("layout")) in ("split_h", "split_v"):
+            split_panel_lock(seg, plan, W, H)
+            break
+    for val in _SPLIT_LOCK_CACHE.values():
+        if val.get("report") is not None and any(
+            _split_seg_sig(s) in val["segs"] for s in ((plan or {}).get("segments") or []) if isinstance(s, dict) and s.get("src")
+        ):
+            return list(val["report"])
+    return []
+
+
 def build_segment_cache_key(
     seg: Dict[str, Any],
     plan: Optional[Dict[str, Any]],
@@ -1000,9 +1278,15 @@ def build_segment_cache_key(
                 "seam_band_frac": bspec["seam_band_frac"],
             }
 
+    split_lock_sig = None
+    if lay in ("split_h", "split_v"):
+        lock = split_panel_lock(seg, plan, W, H)
+        if lock:
+            split_lock_sig = [lock["live"]["filter"], lock["peer"]["filter"]]
+
     plan_loudness = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
     payload = {
-        "v": 14,
+        "v": 15,
         "src": _file_mtime_sig(seg["src"]),
         "start": round(float(seg["start"]), 4),
         "end": round(float(seg["end"]), 4),
@@ -1018,6 +1302,7 @@ def build_segment_cache_key(
         "zoom_dur": seg.get("zoom_dur"),
         "resolved_zoom": [round(rz0, 4), round(rz1, 4), rz_style, round(rz_at, 4), round(rz_dur, 4)],
         "baked_split": baked_sig,
+        "split_lock": split_lock_sig,
         "focus": seg.get("focus"),
         "focus_end": seg.get("focus_end"),
         "color_match": bool(seg.get("color_match") is True or (plan or {}).get("color_match") is True),
@@ -1453,6 +1738,10 @@ def build_segment_ffmpeg_args(
                 peer_focus=peer_focus,
                 return_focus=True,
             )
+            _lock = split_panel_lock(seg, plan, W, H)
+            if _lock:   # one frame per panel for the whole split: no jump between speaking and silent clip
+                live_crop, peer_crop = _lock["live"], _lock["peer"]
+                live_slot_focus, peer_slot_focus = list(live_crop["slot_focus"]), list(peer_crop["slot_focus"])
             live_slot_focus_end = (
                 [
                     min(0.80, max(0.20, live_slot_focus[0] + (fx1 - fx))),
@@ -1509,6 +1798,10 @@ def build_segment_ffmpeg_args(
                 peer_focus=peer_focus,
                 return_focus=True,
             )
+            _lock = split_panel_lock(seg, plan, W, H)
+            if _lock:   # one frame per panel for the whole split: no jump between speaking and silent clip
+                live_crop, peer_crop = _lock["live"], _lock["peer"]
+                live_slot_focus, peer_slot_focus = list(live_crop["slot_focus"]), list(peer_crop["slot_focus"])
             live_slot_focus_end = (
                 [
                     min(0.80, max(0.20, live_slot_focus[0] + (fx1 - fx))),

@@ -717,6 +717,9 @@ def compute_paired_split_crop_filters(
             "common_headroom_pct": round(common_hr * 100.0, 2),
             "extra_zoom": round(k, 3),
             "slot_focus": [slot_fx, slot_fy],
+            # Where the slot's top-left corner sits in the scaled source (y can be negative: padded top).
+            "geom": {"s": sw / float(w_in), "ox": float(crop_x), "oy": float(crop_y - pad_top),
+                     "src": [int(w_in), int(h_in)]},
         }
 
     live_crop = _build_one(src_w, src_h, live_slot_w, live_slot_h, s0_a, fx_a, y0_a, ey_a, k_a)
@@ -724,6 +727,154 @@ def compute_paired_split_crop_filters(
     if return_focus:
         return live_crop, peer_crop, list(live_crop["slot_focus"]), list(peer_crop["slot_focus"])
     return live_crop, peer_crop
+
+
+# ---------------------------------------------------------------------------
+# Split panel lock: one frame per panel, every clip of that panel lined up to it
+# ---------------------------------------------------------------------------
+_REGISTER_CACHE: Dict[str, Optional[Dict[str, float]]] = {}
+
+
+def _read_gray_frame(src: Union[str, Path], t: float) -> Optional["np.ndarray"]:
+    try:
+        cap = cv2.VideoCapture(str(src))
+        if not cap.isOpened():
+            return None
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, float(t)) * 1000.0)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, frame = cap.read()
+        cap.release()
+        if not ok or frame is None or frame.size == 0:
+            return None
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    except Exception:
+        return None
+
+
+def _person_mask(shape: Tuple[int, int], bbox_norm: Optional[Sequence[float]]) -> Optional["np.ndarray"]:
+    """Mask that hides the character (head and body), so only the background is matched."""
+    if not bbox_norm or len(bbox_norm) < 4:
+        return None
+    h, w = shape[:2]
+    x0, y0, x1, y1 = [float(v) for v in bbox_norm[:4]]
+    fw, fh = max(0.02, x1 - x0), max(0.02, y1 - y0)
+    mask = np.full((h, w), 255, dtype=np.uint8)
+    hx0, hx1 = int(max(0, (x0 - 0.30 * fw) * w)), int(min(w, (x1 + 0.30 * fw) * w))
+    hy0 = int(max(0, (y0 - 0.45 * fh) * h))
+    mask[hy0:int(min(h, (y1 + 0.15 * fh) * h)), hx0:hx1] = 0
+    bx0, bx1 = int(max(0, (x0 - 0.85 * fw) * w)), int(min(w, (x1 + 0.85 * fw) * w))
+    mask[int(min(h, (y1 + 0.10 * fh) * h)):h, bx0:bx1] = 0
+    return mask
+
+
+def register_background(
+    ref_src: Union[str, Path],
+    ref_t: float,
+    clip_src: Union[str, Path],
+    clip_t: float,
+    ref_bbox: Optional[Sequence[float]] = None,
+    clip_bbox: Optional[Sequence[float]] = None,
+) -> Optional[Dict[str, float]]:
+    """How the background of `clip_src` at `clip_t` sits against the background of `ref_src`
+    at `ref_t`: a point p in the reference frame is at `a * p + (tx, ty)` in the clip frame
+    (source pixels). None when the two backgrounds are not the same scene.
+    """
+    key = f"{ref_src}|{ref_t:.2f}|{clip_src}|{clip_t:.2f}"
+    if key in _REGISTER_CACHE:
+        return _REGISTER_CACHE[key]
+    out: Optional[Dict[str, float]] = None
+    try:
+        a_img = _read_gray_frame(ref_src, ref_t)
+        b_img = _read_gray_frame(clip_src, clip_t)
+        if a_img is not None and b_img is not None:
+            def _feats(img: "np.ndarray", bbox: Optional[Sequence[float]]):
+                k = 960.0 / max(img.shape[:2]) if max(img.shape[:2]) > 960 else 1.0
+                small = cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA) if k != 1.0 else img
+                orb = cv2.ORB_create(nfeatures=3000, fastThreshold=10)
+                kp, des = orb.detectAndCompute(small, _person_mask(small.shape, bbox))
+                return kp, des, k
+            ka, da, sa = _feats(a_img, ref_bbox)
+            kb, db, sb = _feats(b_img, clip_bbox)
+            if da is not None and db is not None and len(ka) >= 30 and len(kb) >= 30:
+                matches = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True).match(da, db)
+                if len(matches) >= 30:
+                    pa = np.float32([ka[m.queryIdx].pt for m in matches]) / sa
+                    pb = np.float32([kb[m.trainIdx].pt for m in matches]) / sb
+                    mat, inl = cv2.estimateAffinePartial2D(pa, pb, method=cv2.RANSAC, ransacReprojThreshold=1.5,
+                                                           maxIters=4000, confidence=0.995)
+                    n_in = int(inl.sum()) if inl is not None else 0
+                    if mat is not None and n_in >= 25 and n_in >= 0.12 * len(matches):
+                        a = float(math.hypot(mat[0, 0], mat[1, 0]))
+                        rot = abs(math.degrees(math.atan2(mat[1, 0], mat[0, 0])))
+                        if 0.6 <= a <= 1.6 and rot <= 1.5:
+                            out = {"a": a, "tx": float(mat[0, 2]), "ty": float(mat[1, 2]),
+                                   "inliers": float(n_in), "matches": float(len(matches))}
+    except Exception:
+        out = None
+    _REGISTER_CACHE[key] = out
+    return out
+
+
+def slot_filter_from_origin(
+    w_in: int, h_in: int, slot_w: int, slot_h: int, s: float, ox: float, oy: float,
+) -> Dict[str, Any]:
+    """FFmpeg filter that scales the source by `s` and shows the `slot_w x slot_h` window whose
+    top-left corner is at `(ox, oy)` of the scaled picture. A negative `oy` extends the top edge.
+    `clamp_px` says how far the window had to move to stay inside the picture (0 = exact).
+    """
+    slot_w, slot_h = _even(slot_w), _even(slot_h)
+    s_want = float(s)
+    s = max(s, slot_w / float(w_in), slot_h / float(h_in))   # the clip must still fill the panel
+    sw, sh = max(slot_w, _even(w_in * s)), max(slot_h, _even(h_in * s))
+    want_x, want_y = float(ox), float(oy)
+    crop_x = int(round(min(max(want_x, 0), sw - slot_w)))
+    pad_top = int(round(-want_y)) if want_y < -0.5 else 0
+    pad_top = min(pad_top, int(slot_h * 0.30))
+    if pad_top:
+        vis_h = min(slot_h - pad_top, sh)
+        crop_y = 0
+        flt = (f"scale={sw}:{sh}:flags=lanczos,crop={slot_w}:{vis_h}:{crop_x}:0,"
+               f"pad={slot_w}:{slot_h}:0:{pad_top}:color=black,fillborders=top={pad_top}:mode=smear")
+        got_y = -float(pad_top)
+    else:
+        crop_y = int(round(min(max(want_y, 0), max(0, sh - slot_h))))
+        flt = f"scale={sw}:{sh}:flags=lanczos,crop={slot_w}:{slot_h}:{crop_x}:{crop_y}"
+        got_y = float(crop_y)
+    return {
+        "filter": flt,
+        "pad_top": pad_top,
+        "scale": (sw, sh),
+        "crop": (crop_x, crop_y),
+        "slot_size": (slot_w, slot_h),
+        "clamp_px": round(max(abs(crop_x - want_x), abs(got_y - want_y),
+                              (s / s_want - 1.0) * max(slot_w, slot_h) if s > s_want * 1.002 else 0.0), 2),
+        "geom": {"s": sw / float(w_in), "ox": float(crop_x), "oy": got_y, "src": [int(w_in), int(h_in)]},
+    }
+
+
+def derive_registered_crop(
+    ref_crop: Dict[str, Any],
+    reg: Optional[Dict[str, float]],
+    w_in: int,
+    h_in: int,
+) -> Dict[str, Any]:
+    """Crop for another clip of the same panel so that its background lands on exactly the same
+    pixels as the reference clip's. `reg` comes from `register_background` (None = same framing).
+    """
+    g = ref_crop["geom"]
+    slot_w, slot_h = ref_crop["slot_size"]
+    a, tx, ty = (reg["a"], reg["tx"], reg["ty"]) if reg else (1.0, 0.0, 0.0)
+    if reg is None:
+        rw, rh = g["src"]
+        a = 0.5 * (w_in / float(rw) + h_in / float(rh))   # same picture at another resolution
+    s_c = g["s"] / a
+    out = slot_filter_from_origin(w_in, h_in, slot_w, slot_h, s_c, g["ox"] + s_c * tx, g["oy"] + s_c * ty)
+    out["common_headroom_pct"] = ref_crop.get("common_headroom_pct")
+    out["extra_zoom"] = ref_crop.get("extra_zoom")
+    out["slot_focus"] = list(ref_crop.get("slot_focus") or [0.5, 0.36])
+    return out
 
 
 def _load_clip_speech_spans(video_path: Path) -> List[Tuple[float, float]]:

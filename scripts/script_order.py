@@ -1298,10 +1298,8 @@ def style_report(plan: Dict[str, Any], work_dir: Optional[Path] = None) -> List[
         has_punch_crop = abs(max_z - 1.0) > 0.015
         dur = float(s["end"]) - float(s["start"])
         if lay in ("split_h", "split_v", "top_pip"):
-            if max_z > 1.15:
-                out.append(f"{s.get('id')}: split zoom {max_z:.2f} exceeds 1.15 (keep active-panel split zoom <= 1.12)")
-            elif lay in ("split_h", "split_v") and dur > 4.5 and not moves and not has_punch_crop:
-                out.append(f"{s.get('id')}: {lay} cut is {dur:.1f}s static; add an active-panel zoom (<= 1.12) or punch-in cut")
+            if moves or has_punch_crop:
+                out.append(f"{s.get('id')}: {lay} has a zoom ({z0:.2f}->{z1:.2f}); split screens never zoom, write z=1 (the renderer holds the panel still anyway)")
         if lay == "single":
             if s.get("src"):
                 live_srcs.add(str(s.get("src")))

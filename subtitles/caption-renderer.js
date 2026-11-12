@@ -579,7 +579,8 @@ const CaptionRenderer = (() => {
       const fStr = makeFontStr(effSize, false);
       const bleed = getHorizontalBleed(effSize);
       const single = measureLineMetrics(words, fStr, effSize, words, 0);
-      if (isSpecialTierLayout || words.length < 2 || (single.width + bleed.extraPadW) <= maxAllowedWidth) {
+      // Zeno: captions are always ONE row. A caption that is too wide is made slightly smaller, never wrapped to two rows.
+      if (style.singleLine || isSpecialTierLayout || words.length < 2 || (single.width + bleed.extraPadW) <= maxAllowedWidth) {
         return {
           fontStr: fStr,
           bleed,
@@ -2511,16 +2512,21 @@ const CaptionRenderer = (() => {
         if (highlightMode === 'progressive' || style.id === 5 || style.name === 'White Box') {
           const isCurrent = isHighlighted;
           const isSpoken = highlightIdx >= 0 && globalIdx < highlightIdx;
+          // Zeno: the spoken colour follows the style (black on a light box, white on a dark box).
+          const progHex = /^#[0-9a-fA-F]{6}$/.test(String(style.color || '')) ? String(style.color) : '#000000';
+          const progRgb = [1, 3, 5].map(o => parseInt(progHex.slice(o, o + 2), 16));
+          const progLight = (progRgb[0] + progRgb[1] + progRgb[2]) / 3 > 127;
+          const progFrom = progLight ? 150 : 102;
           if (isSpoken) {
-            textFillColor = '#000000';
+            textFillColor = progHex;
           } else if (isCurrent) {
             if (typeof animProgress === 'number' && animProgress < 1.0) {
               const p = Math.max(0, Math.min(1, animProgress));
               const eased = 1 - Math.pow(1 - p, 2.5);
-              const greyVal = Math.round(102 * (1 - eased));
-              textFillColor = `rgb(${greyVal}, ${greyVal}, ${greyVal})`;
+              const mix = progRgb.map(v => Math.round(progFrom + (v - progFrom) * eased));
+              textFillColor = `rgb(${mix[0]}, ${mix[1]}, ${mix[2]})`;
             } else {
-              textFillColor = '#000000';
+              textFillColor = progHex;
             }
           } else {
             textFillColor = style.inactiveColor || 'rgba(0, 0, 0, 0.40)';
@@ -2748,7 +2754,7 @@ const CaptionRenderer = (() => {
                   wStart,
                   wEnd: t1,
                   animProgress: 0.55,
-                  wordScale: 1.05,
+                  wordScale: 1.03,
                   frameTag: `cue_${i}_w${wIdx}_s0.png`,
                   subIndex: 0,
                   totalWords,
@@ -2761,7 +2767,7 @@ const CaptionRenderer = (() => {
                   wStart: t1,
                   wEnd: t2,
                   animProgress: 0.92,
-                  wordScale: 1.09,
+                  wordScale: 1.05,
                   frameTag: `cue_${i}_w${wIdx}_s1.png`,
                   subIndex: 1,
                   totalWords,

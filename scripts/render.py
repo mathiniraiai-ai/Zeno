@@ -942,6 +942,16 @@ def main() -> None:
     # 1) each segment -> normalized intermediate (cached by its settings)
     from common import thermal_pause  # a Mac slowed by heat gets time to cool between segments
 
+    if layouts is not None and hasattr(layouts, "split_lock_report") and first_src.is_file():
+        try:
+            lock_lines = layouts.split_lock_report(plan, W, H)
+        except Exception:
+            lock_lines = []
+        if lock_lines:
+            print("Split panels (one fixed frame per panel, no zoom):")
+            for ln in lock_lines:
+                print("  " + ln)
+
     files: List[Path] = []
     durs: List[float] = []
     for i, s in enumerate(segs):

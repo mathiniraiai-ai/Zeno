@@ -1241,8 +1241,8 @@ def main() -> None:
     ap.add_argument("--mark-pack", default="flash", help="Swappable ✓/✗ mark overlay pack (flash, vignette, default, glossy)")
     ap.add_argument("--name", default="", help="Notion name for this video; its outputs go to Zeno Outputs/<name>/ (reel_<name>.mp4 and SQ_<name>.mp4)")
     ap.add_argument("--style", default="", help="Style this job follows (a folder under styles/, for example micronarrative). Written into the plan as '#style <name>' so the job counts toward that style's readiness and the team's learning")
-    ap.add_argument("--subs", default=None, help="Burn-in subtitle style (default: 'auto' at y=72; pass 'off' to disable)")
-    ap.add_argument("--no-subs", action="store_true", help="Do not write default '#subs auto y=72' into initial plan.edl")
+    ap.add_argument("--subs", default=None, help="Burn-in subtitle style (default: 'auto' at y=68; pass 'off' to disable)")
+    ap.add_argument("--no-subs", action="store_true", help="Do not write default '#subs auto y=68' into initial plan.edl")
     ap.add_argument(
         "--fresh",
         action="store_true",
@@ -1360,7 +1360,7 @@ def main() -> None:
     subs_header: Optional[Dict[str, Any]] = None
     if not subs_disabled:
         subs_style = subs_arg if (subs_arg and subs_arg.lower() not in ("on", "true", "yes", "1")) else "auto"
-        subs_header = {"style": subs_style, "y": 72}
+        subs_header = {"style": subs_style, "y": 68}
 
     plan: Dict[str, Any] = {
         "output": common_unique_output(args.name or project_name).as_posix(),

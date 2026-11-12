@@ -24,7 +24,11 @@ A short story skit (`60–130s`): a live-action problem scene, a friend's tip or
 
 ## 2b. Emotion zooms, active-panel split engagement, and calibrated SFX
 
-The reference videos this style was first measured from used no digital zoom (`spec.json` -> `zoom`). For high-retention Reels / Meta ads, Zeno pairs tight narrative storytelling with dynamic motion, active-panel split zooms, smooth eased transitions, Premiere-grade `#subs auto y=72` captions, and calibrated post-`loudnorm` SFX:
+**Split screens never zoom (owner's rule, overrides any older wording in this file).** Every `split_h`, `split_v` and baked-split segment is `z=1`: no push-in, punch-in, step zoom or pull-out. The renderer ignores a zoom written on a split and holds each panel in one fixed frame (14% headroom, the speaking and the silent clip of a character lined up by their background), so switching between them never jumps.
+
+**Captions (owner's rule, overrides any older wording in this file).** `#subs auto y=68` is the default. One style is used for the whole video, at one fixed size (54 px on a 1080-wide picture; `size=` changes it), always on a single row (never two rows), with no per-caption colour changes unless the plan says `adapt=on`. On full-frame cuts captions sit at 65 to 70% of the height (`y=68`). In a top/bottom split they always sit on the divider line in the middle (`y=50`), whatever `y=` says, so neither face is covered.
+
+The reference videos this style was first measured from used no digital zoom (`spec.json` -> `zoom`). For high-retention Reels / Meta ads, Zeno pairs tight narrative storytelling with dynamic motion, active-panel split zooms, smooth eased transitions, Premiere-grade `#subs auto y=68` captions, and calibrated post-`loudnorm` SFX:
 
 - **The Director analyses the script first** and writes `work/<project>/script_analysis.md`: per spoken line the emotion (with intensity 1 to 3), the beat, the zoom kind (for both full-frame AND active split-screen panels), and the calibrated `-4 to 0 dB` SFX, scaling PEAK moments with video length (~1 PEAK every `12 to 18 s`). Full tables and exact timing rules live in [`agent/EDIT_RULES.md`](../../agent/EDIT_RULES.md).
 - **Values for this style:** rapid punch-in `sudden_in:1.08@<beat>` (one `flash_zoom:1.12` max on a full-frame climax), smooth push-in `1.0->1.06` / `1.0->1.07` on emotional or teaching turns `>= 2.5 s`, pause-trim / mid-stumble-trim step zoom `1.08`, closing CTA `1.0->1.06`; up to 16 rapid zooms per minute without two rapid `sudden_in` snaps back-to-back, keeping short calm reaction beats at `1.0` for contrast.
@@ -109,8 +113,8 @@ Always check how the raw footage was generated before assigning layouts in `plan
      - Full-frame `single` shots, safe live two-shots (`<= 1.10` with `focus=x,y`), AND active speaking panels in `split_h`, `split_v`, and baked splits (`<= 1.08`):
        - `zoom=1.08` step punch-in to mask internal `> 0.25s` pause cuts or mid-sentence stumble cuts (`L5a` + `L5b`).
        - Smooth sub-pixel push-in (`1.0->1.06` / `1.0->1.07`) on turns `>= 2.5s`, pull-out (`1.08->1.0` / `1.06->1.0`), or rapid `sudden_in:1.08@<beat>` / `flash_zoom:1.12@<beat>` on punchlines and emphasis words.
-4. **Premiere-Grade Auto-Captions (`#subs auto y=72`) & On-Screen Text (`21132` "Stop Saying" Hook)**:
-   - **Animated Auto-Captions ON by Default**: Include `#subs auto y=72` in `plan.edl` on every reel (`y=50` automatically on the `split_v` seam so faces are never covered; set `#subs off` **only** if the user explicitly asks for no subtitles).
+4. **Premiere-Grade Auto-Captions (`#subs auto y=68`) & On-Screen Text (`21132` "Stop Saying" Hook)**:
+   - **Animated Auto-Captions ON by Default**: Include `#subs auto y=68` in `plan.edl` on every reel (`y=50` automatically on the `split_v` seam so faces are never covered; set `#subs off` **only** if the user explicitly asks for no subtitles).
    - **Extra `banner:` Cards ONLY When Scripted**: Add stacked banners only where the script cues a `"Stop saying..."` list or strikethrough phrase (no unrequested decorative B-roll or spammy CTAs).
 5. **Where to Show Errors (`✗` / `✓`) & Snappy Hold Timing (`0.35–0.42s`)**:
    - **Show `✗` (`wrong`) and `✓` (`right`) marks ONLY** when the script marks a learner mistake (`[WRONG]`) or correction (`[RIGHT]`).

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Script-led AI video editing harness (`1080x1920` MP4). Zeno only transcribes, measures and renders. **The agent (Claude Opus or Sonnet) makes every editing decision and writes `plan.edl`**, following `agent/EDIT_RULES.md`. Finished videos go to `~/Downloads/Zeno Outputs/`.
 
-**Agent entry point**: read `agent/DIRECTOR.md` first, then `agent/EDIT_RULES.md` (how to make every decision). DIRECTOR sets the loop and points to one concept file per topic in `agent/concepts/` (script intake, footage intake, style library, reference learning, on-screen text, token budget). Learned styles live in `styles/<name>/`. Premiere-grade animated `#subs auto y=72` karaoke captions are ON by default (`y=50` automatically on the `split_v` seam; `#subs off` only if the user explicitly asks for no subtitles); extra text banners or graphics appear only when the script or style `SKILL.md` asks for them.
+**Agent entry point**: read `agent/DIRECTOR.md` first, then `agent/EDIT_RULES.md` (how to make every decision). DIRECTOR sets the loop and points to one concept file per topic in `agent/concepts/` (script intake, footage intake, style library, reference learning, on-screen text, token budget). Learned styles live in `styles/<name>/`. Premiere-grade animated `#subs auto y=68` karaoke captions are ON by default (`y=50` automatically on the `split_v` seam; `#subs off` only if the user explicitly asks for no subtitles); extra text banners or graphics appear only when the script or style `SKILL.md` asks for them.
 
 ## 1. Hard Rules
 1. **Workspace Isolation**: Never modify any files outside this Zeno folder (team PCs: `~/Documents/Zeno`; owner: `/Users/mathiniraiselvan/Documents/Office project/Zeno`). Never touch other projects in `Documents`.
@@ -17,7 +17,7 @@ Script-led AI video editing harness (`1080x1920` MP4). Zeno only transcribes, me
    - **Never** read `work/*/words.json`, `work/*/silences.json`, or `work/*/align.json` unless debugging a specific word timing.
    - **Never** read `scripts/*.py` during normal edits. Use the 3-step CLI workflow and `plan.edl` syntax below.
 6. **Fresh Session**: Start every video in a fresh session (`/clear` or new chat) with unused MCP connectors disabled.
-7. **Clean Editorial Style & Default Auto-Captions**: Premiere-grade animated `#subs auto y=72` karaoke captions (`y=50` automatically on `split_v` seam so faces are never covered) are **ON by default** (use `#subs off` only if the user explicitly asks for a clean/unsubtitled export). No unrequested decorative B-roll, no spammy CTAs, no decorative clutter, and zero untrimmed stumbles or repeated phrases (`! REPEAT / STUMBLE` in `facts.md`). Only best takes, snappy pause-trimmed cuts (`> 0.25s` pauses cut with `1.08` punch-ins, `0.06–0.15s` turn joins, `0.02–0.05s` breath margins), dynamic full-frame + active-panel split engagement, smooth eased transitions every `7–9s`, and script-driven `✓` / `✗` marks + calibrated `-4 to 0 dB` SFX.
+7. **Clean Editorial Style & Default Auto-Captions**: Premiere-grade animated `#subs auto y=68` karaoke captions (`y=50` automatically on `split_v` seam so faces are never covered) are **ON by default** (use `#subs off` only if the user explicitly asks for a clean/unsubtitled export). No unrequested decorative B-roll, no spammy CTAs, no decorative clutter, and zero untrimmed stumbles or repeated phrases (`! REPEAT / STUMBLE` in `facts.md`). Only best takes, snappy pause-trimmed cuts (`> 0.25s` pauses cut with `1.08` punch-ins, `0.06–0.15s` turn joins, `0.02–0.05s` breath margins), dynamic full-frame cuts and completely still split screens (no zoom in any split panel), smooth eased transitions every `7–9s`, and script-driven `✓` / `✗` marks + calibrated `-4 to 0 dB` SFX.
 
 ## 2. Token Budget & Mandatory Reporting
 - **Budget**: **`50k–70k tokens` per video** is the usual range; **quality comes first and it is not a hard stop**. Do not trim thinking, reading or checks to hit a number; remove only waste. Claude is the main brain and spends the tokens on editorial decisions; wav2vec2 (timing), the voice detector, the face/vision model and FFmpeg only measure and render.
@@ -53,7 +53,7 @@ Script-led AI video editing harness (`1080x1920` MP4). Zeno only transcribes, me
    ```
    - `--style <name>`: the style folder this job follows (for example `micronarrative`). Always pass it when the style is known: it writes `# style: <name>` into the plan so the job counts toward the style's readiness level and the team's learning.
    - `<lang>`: `en`, `kn`/`kannada`, `ta`/`tamil`, `hi`/`hindi`, `te`/`telugu`, `ml`/`malayalam`, or `auto`.
-   - Writes `work/<project>/line_map.md`, `facts.md`, `clip_sheet_<n>.jpg`, and `plan.edl` with a header (including `#subs auto y=72`) and **no segments**. Progress every ~48s (`work/<project>/progress.json` / `<PY> scripts/progress.py`).
+   - Writes `work/<project>/line_map.md`, `facts.md`, `clip_sheet_<n>.jpg`, and `plan.edl` with a header (including `#subs auto y=68`) and **no segments**. Progress every ~48s (`work/<project>/progress.json` / `<PY> scripts/progress.py`).
 2. **Edit (the agent decides everything)**: follow `agent/EDIT_RULES.md`: read the line map, facts (checking `! REPEAT / STUMBLE` flags to trim every false start, stutter, and boundary repeat) and clip sheets, write every segment of `plan.edl`, then run `<PY> scripts/zeno.py --check-plan work/<project>/plan.edl` until it passes cleanly. It blocks lines out of script order, missing or said twice, unscripted repeated words/phrases, stretched pauses, cuts inside a word, and a voice that does not match `sp=`. A deliberate scripted exception goes in `work/<project>/decisions.txt` (`accept L2 <reason>`).
 3. **Stop and ask**: show the user the plan and ask Yes/No once before rendering.
 4. **Render, Premiere `.prproj` Export & Verify (`1 command` after Yes)**:
@@ -66,13 +66,15 @@ Script-led AI video editing harness (`1080x1920` MP4). Zeno only transcribes, me
 
 | Layout Mode | Visual Layout (`1080×1920`) | When to Use |
 |---|---|---|
-| `single` | Full-frame clip (`zoom=1.08` jump-cut punch-in, `zoom=1.0->1.06` slow push, `flash_zoom`). | Solo teaching lines, hooks, live conversation, **OR pre-stitched Google Flow vertical split-screen clips** (match as `single` with `slot=top\|bottom\|left\|right` or `active=top\|bottom\|left\|right` so active-panel zoom `<= 1.12` zooms only the speaker while the baked seam and listener stay locked at `1.0`). |
-| `split_v` | Top/bottom 50/50 split (`1080×960` each) with stationary divider (`#subs auto` at `y=50` seam). Active panel zooms (`1.0->1.06`/`1.07`, `sudden_in:1.08@<beat>`, `1.08` pause-cut step; max `1.12`) + beat SFX while listener stays locked at `1.0`. | Two-character Q&A when Character A and Character B are **separate raw files** (e.g., HeyGen renders). |
-| `split_h` | Left/right 50/50 vertical split (`540×1920` each) with stationary divider. Active panel zooms (`<= 1.12`) + beat SFX while listener stays locked at `1.0`. | Side-by-side split screen when Character A and Character B are **separate raw files**. |
+| `single` | Full-frame clip (`zoom=1.08` jump-cut punch-in, `zoom=1.0->1.06` slow push, `flash_zoom`). | Solo teaching lines, hooks, live conversation, **OR pre-stitched Google Flow vertical split-screen clips** (match as `single` with `slot=top\|bottom\|left\|right` or `active=top\|bottom\|left\|right`, always `z=1`: split panels never zoom). |
+| `split_v` | Top/bottom 50/50 split (`1080×960` each) with stationary divider (`#subs auto` at `y=50` seam). Both panels stay still at `1.0` in one fixed frame (no zoom, ever); beat SFX and marks carry the emphasis. | Two-character Q&A when Character A and Character B are **separate raw files** (e.g., HeyGen renders). |
+| `split_h` | Left/right 50/50 vertical split (`540×1920` each) with stationary divider. Both panels stay still at `1.0` in one fixed frame (no zoom, ever); beat SFX and marks carry the emphasis. | Side-by-side split screen when Character A and Character B are **separate raw files**. |
 | `chat_bar` | Full-frame speaker + frosted glassmorphic prompt bar (`label="Phrase..."`). | Language drills ("How to say X?"). |
 | `video_call` | Full-frame speaker + rounded Picture-in-Picture (PiP) card (`pip=S1@3.2`). | Remote call / FaceTime style dialogues. |
 | `hybrid` | Mixes `single` on teaching monologues with `split_v`/`video_call`/`chat_bar` on dialogue turns. | **Default (`auto`)** — best retention. |
 
+- **Split screens never zoom (owner's rule, overrides any older wording in this file).** Every `split_h`, `split_v` and baked-split segment is `z=1`: no push-in, punch-in, step zoom or pull-out. The renderer ignores a zoom written on a split and holds each panel in one fixed frame (14% headroom, the speaking and the silent clip of a character lined up by their background), so switching between them never jumps.
+- **Captions (owner's rule, overrides any older wording in this file).** `#subs auto y=68` is the default. One style is used for the whole video, at one fixed size (54 px on a 1080-wide picture; `size=` changes it), always on a single row (never two rows), with no per-caption colour changes unless the plan says `adapt=on`. On full-frame cuts captions sit at 65 to 70% of the height (`y=68`). In a top/bottom split they always sit on the divider line in the middle (`y=50`), whatever `y=` says, so neither face is covered.
 - **Listener rule (every split: left/right or top/bottom).** While one character speaks, the OTHER panel shows the other character, silent and listening: left speaks -> right listens, right speaks -> left listens, and the same for top and bottom. Who sits where comes from the script (`Top: Robot | Bottom: Lady 1`, or `Woman - Right screen | Miss Nova - Left screen`, or "left screen" in the character list). The picture comes from that character's silent clip: put the character's name in the file name (`Robot_listening.mp4`, `Lady1_idle.mp4`); an unnamed silent clip is matched by how it looks (colours) and is left unassigned if unsure. Silent clips are walked through turn after turn, never restarted from the same frame. With no silent clip, a quiet mouth-closed moment of the character's own clip is used (a still frame if it is under 1 s) and the brief says `[LISTENER_FALLBACK]`; `[LISTENER_GUESS]` and `[LISTENER_MISSING]` mean a silent clip could not be tied to the character or does not exist. A character that lands in two panels is reported as `[PANEL_FLIP]`.
 
 **Swappable `✓`/`✗` Mark Packs (`--mark-pack` or `# mark_pack:`)**:
@@ -96,11 +98,11 @@ The agent makes all decisions in one pass, in the order given by `agent/EDIT_RUL
 # preset: hybrid
 # mark_pack: flash
 # loudness: -11.5
-#subs auto y=72
+#subs auto y=68
 
 # SEGMENTS: id | src | start-end | layout | zoom | transition | extras | note
 L1 | S1 | 1.12-5.40 | single | sudden_in:1.08 | cut | focus=0.5,0.45 | Hook question
-L2 | S2 | 0.85-4.62 | split_v:top=S1@5.48 | 1.0->1.06 | split_reveal:0.40 | active=bottom | Wrong student attempt (active bottom panel pushes in)
+L2 | S2 | 0.85-4.62 | split_v:top=S1@5.48 | 1.0 | split_reveal:0.40 | active=bottom | Wrong student attempt (split panels stay still)
 L3 | S3 | 1.05-5.88 | chat_bar | 1.08 | whip_right:0.34 | label="ನನಗೆ ಹಸಿವಾಗಿದೆ" | Teacher correction
 
 # MARKS: type | segment | at | duration | pos | size | sfx | gain_db

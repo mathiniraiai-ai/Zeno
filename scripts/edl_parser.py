@@ -220,9 +220,18 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                     style_parts: List[str] = []
                     y_val: Optional[float] = None
                     adapt_val: Optional[bool] = None
+                    extra_subs: Dict[str, Any] = {}
                     for tok in toks:
                         m_y = re.match(r"^y=([0-9.]+)%?$", tok, re.I)
                         m_a = re.match(r"^adapt=(on|off|true|false|1|0)$", tok, re.I)
+                        m_sz = re.match(r"^size=([0-9.]+)$", tok, re.I)
+                        m_sy = re.match(r"^split_y=([0-9.]+)%?$", tok, re.I)
+                        if m_sz:
+                            extra_subs["size"] = float(m_sz.group(1))
+                            continue
+                        if m_sy:
+                            extra_subs["split_y"] = float(m_sy.group(1))
+                            continue
                         m_st = re.match(r"^style=(.+)$", tok, re.I)
                         if m_y:
                             y_val = float(m_y.group(1))
@@ -246,6 +255,7 @@ def parse_edl(path_or_text: Union[str, Path]) -> Dict[str, Any]:
                         subs_obj: Dict[str, Any] = {"style": style_str, "y": y_val}
                         if adapt_val is not None:
                             subs_obj["adapt"] = adapt_val
+                        subs_obj.update(extra_subs)
                         plan["subs"] = subs_obj
             elif directive == "src_dir":
                 src_dir = _unquote(rest.split("|")[0].strip())
@@ -733,6 +743,10 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
                 s_line += " adapt=off"
             elif subs_val.get("adapt") is True:
                 s_line += " adapt=on"
+            if subs_val.get("size") is not None:
+                s_line += f" size={_fmt_num(float(subs_val['size']))}"
+            if subs_val.get("split_y") is not None:
+                s_line += f" split_y={_fmt_num(float(subs_val['split_y']))}"
             lines.append(s_line)
 
     segs = plan_dict.get("segments") or []

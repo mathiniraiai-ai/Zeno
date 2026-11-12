@@ -51,6 +51,9 @@ const { CaptionRenderer } = require('./caption-renderer.js');
   const fps = Math.max(24, Number(job.fps) || 25);
   const defaultPosY = job.positionY !== undefined ? Number(job.positionY) : (base.positionY !== undefined ? Number(base.positionY) : 72);
   const style = { ...base, positionY: defaultPosY };
+  // One fixed caption size for every style (set by Zeno), so captions stay neat and never oversized.
+  if (Number(job.fontSize) > 0) style.fontSize = Number(job.fontSize);
+  style.singleLine = job.singleLine !== false;   // one row only (owner's rule)
 
   const cues = Array.isArray(job.cues) ? job.cues : [];
   const cropBand = job.cropBand !== false;

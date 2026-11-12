@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import colorsys
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -22,12 +23,26 @@ HERE = Path(__file__).resolve().parent
 SUB_DIR = HERE.parent / "subtitles"
 MAX_WORDS_PER_CUE = 4          # max words per cue for Latin scripts
 MAX_INDIC_WORDS_PER_CUE = 3    # max words per cue for Indic scripts (wider conjuncts/matras)
-MAX_VISUAL_UNITS = 22.0        # target visual character width per single-line cue
+MAX_VISUAL_UNITS = 19.0        # widest caption (in letter widths) that fits ONE row at the fixed size in every style, so no caption is ever shrunk
 MAX_GAP_IN_CUE = 0.22          # speech pause > 0.22s starts a fresh caption card
 BRIDGE_GAP_MAX = 0.18          # bridge tiny intra-sentence gaps <= 0.18s without overlap
 SENTENCE_END = re.compile(r"[.?!।][\"'”’)\]]*$")
 CLAUSE_END = re.compile(r"[,;:—–][\"'”’)\]]*$")
 INDIC_RE = re.compile(r"[\u0900-\u0D7F]")
+
+DEFAULT_FONT_SIZE = 54          # one caption size for every style on a 1080-wide picture (the styles' own 66 to 74 read too large)
+SINGLE_Y = 68.0                 # full-frame cuts: captions at 65 to 70% of the height (owner's default)
+SEAM_Y = 50.0                   # top/bottom split: captions sit on the divider line, clear of both faces
+
+
+def caption_font_size(width: int, spec: Optional[Dict[str, Any]] = None) -> int:
+    """Caption size in pixels: `size=` in `#subs`, else `ZENO_SUBS_FONT_SIZE`, else the default, scaled to the picture width."""
+    raw = (spec or {}).get("size") or os.environ.get("ZENO_SUBS_FONT_SIZE") or DEFAULT_FONT_SIZE
+    try:
+        base = min(90.0, max(36.0, float(raw)))
+    except (TypeError, ValueError):
+        base = float(DEFAULT_FONT_SIZE)
+    return int(round(base * max(0.5, float(width or 1080) / 1080.0)))
 
 STYLE_ALIASES: Dict[str, int] = {
     "hormozi punch": 4,
@@ -39,17 +54,18 @@ STYLE_ALIASES: Dict[str, int] = {
     "docu bar": 28,
     "docu split bar": 28,
     "split bar": 28,
-    "frosted": 25,
-    "lyric": 25,
     "glass": 3,
     "glossy": 3,
-    "gradient": 27,
-    "cinema": 13,
-    "yellow": 13,
-    "comic": 24,
-    "3d comic": 24,
     "sticker": 12,
     "cutout": 12,
+    "white box": 5,
+    "black box": 30,
+    "yellow box": 31,
+    "marker": 10,
+    "highlighter": 10,
+    "rise": 2,
+    "cinema": 13,
+    "yellow": 13,
 }
 
 CONTRACTIONS: Dict[str, List[str]] = {
@@ -162,7 +178,8 @@ def resolve_style(token: Any) -> Optional[Dict[str, Any]]:
     tok = str(token).strip().strip("\"'").lower()
     if not tok:
         return None
-    pool = styles()
+    # A style's `autoWeight` says how often auto may pick it (default 6; Sticker Cutout is 1, so it turns up only rarely).
+    pool = [x for x in styles() for _ in range(max(1, int(x.get("autoWeight", 6))))]
     for s in pool:
         if str(s.get("id")) == tok or str(s.get("name", "")).lower() == tok:
             return s
@@ -629,15 +646,23 @@ def _synthesize_words_over_spans(
 
 # ---------------------------------------------------------------- phrase chunking & monotonic cues
 def _visual_units(text: str) -> float:
+    """Width of `text` on screen, in units of one Kannada/Hindi/Telugu letter (about 40 px at the fixed caption size).
+    Tamil and Malayalam letters are about 30% wider, Bengali 15%, lower-case Latin 20% narrower (measured on rendered captions)."""
     units = 0.0
     for ch in text:
         cat = unicodedata.category(ch)
         if cat == "Mn":
             continue
-        if cat == "Mc":
-            units += 0.5
+        cp = ord(ch)
+        if 0x0B80 <= cp <= 0x0BFF or 0x0D00 <= cp <= 0x0D7F:      # Tamil, Malayalam
+            w = 1.30
+        elif 0x0980 <= cp <= 0x09FF:                                # Bengali
+            w = 1.15
+        elif cp < 0x0250:                                           # Latin
+            w = 1.0 if (ch.isupper() or ch.isdigit()) else (0.45 if ch in "il.,'!|:;" else 0.80)
         else:
-            units += 1.0
+            w = 1.0
+        units += w * (0.5 if cat == "Mc" else 1.0)
     return units
 
 
@@ -702,7 +727,7 @@ def _chunk_continuous_phrase(run_words: List[Dict[str, Any]]) -> List[List[Dict[
             width += units[i] + (1.0 if i < j - 1 else 0.0)
             if j - i > 1 and width > MAX_VISUAL_UNITS:
                 break
-            if has_indic and j - i > MAX_INDIC_WORDS_PER_CUE and width > 19.0:
+            if has_indic and j - i > MAX_INDIC_WORDS_PER_CUE and width > 16.0:
                 continue
             if best[i] == INF:
                 continue
@@ -1041,7 +1066,13 @@ def resolve_safe_y_percent(
     raw_y = spec.get("y")
     explicit_y = raw_y is not None and str(raw_y).strip().lower() not in ("", "auto", "none")
     is_square = abs(width - height) <= width * 0.15
-    base_single_y = 82.0 if is_square else 72.0
+    # `y=` in the plan is where captions sit on full-frame cuts. A top/bottom split always puts them on
+    # the divider line (a caption at 65 to 70% would cover the lower character's face), unless `split_y=` says otherwise.
+    base_single_y = (float(raw_y) if explicit_y else (82.0 if is_square else SINGLE_Y))
+    try:
+        seam_y = float(spec.get("split_y")) if spec.get("split_y") is not None else SEAM_Y
+    except (TypeError, ValueError):
+        seam_y = SEAM_Y
 
     split_v_dur = 0.0
     measured_dur = 0.0
@@ -1054,7 +1085,7 @@ def resolve_safe_y_percent(
             split_v_dur += d
 
     majority_split_v = measured_dur > 0.0 and (split_v_dur / measured_dur) >= 0.50
-    default_y = float(raw_y) if explicit_y else (50.0 if majority_split_v else base_single_y)
+    default_y = seam_y if majority_split_v else base_single_y
 
     if not cues:
         return default_y
@@ -1081,7 +1112,7 @@ def resolve_safe_y_percent(
 
         seg = segs[seg_idx]
         t0 = float(starts[seg_idx]) if seg_idx < len(starts) else 0.0
-        cue_y = default_y if explicit_y else (50.0 if _is_split_v_segment(seg) else base_single_y)
+        cue_y = seam_y if _is_split_v_segment(seg) else base_single_y
 
         if banner_fn is not None and (seg.get("banners") or seg.get("stop_saying")):
             try:
@@ -1116,6 +1147,7 @@ def render_frames(
     y_percent: float = 72.0,
     fps: int = 25,
     return_meta: bool = False,
+    font_size: Optional[int] = None,
 ) -> Any:
     """Draw every caption state to a transparent PNG with the Node renderer;
     returns `frames` list by default, or the full manifest dict `{frames, bandY0, bandHeight, ...}` when `return_meta=True`."""
@@ -1128,6 +1160,7 @@ def render_frames(
         "styleId": style["id"],
         "outDir": str(out_dir),
         "positionY": y_percent,
+        "fontSize": int(font_size or caption_font_size(width)),
         "cues": clean_cues,
     }
     jf = out_dir / "job.json"
@@ -1249,7 +1282,8 @@ def remember_style(name: str, project: str, work_dir: Optional[Path] = None) -> 
 def choose_style(project: str, work_dir: Optional[Path] = None, avoid: int = 2) -> Dict[str, Any]:
     """`#subs auto`: a style that is not one of the last `avoid` used on this computer, picked by a stable hash of the project name so a
     re-render of the same edit keeps its look while the next edit gets another one."""
-    pool = styles()
+    # A style's `autoWeight` says how often auto may pick it (default 6; Sticker Cutout is 1, so it turns up only rarely).
+    pool = [x for x in styles() for _ in range(max(1, int(x.get("autoWeight", 6))))]
     recent = set(recent_styles(work_dir, avoid))
     fresh = [s for s in pool if s["name"] not in recent] or pool
     h = sum(ord(c) * (k + 1) for k, c in enumerate(project or "zeno"))
@@ -1398,9 +1432,9 @@ def build_overlay(
         style = choose_style(project, work_dir)
     else:
         style = resolve_style(spec["style"])
-    if style is None:
-        print(f"  [SUBS] unknown style '{spec['style']}'. Styles: auto, " + ", ".join(f"{s['id']} {s['name']}" for s in styles()) + ". Rendering without subtitles.")
-        return None
+    if style is None:   # a deleted or misspelt style must not cost the video its subtitles
+        style = choose_style(project, work_dir)
+        print(f"  [SUBS] unknown style '{spec['style']}' (styles: auto, " + ", ".join(f"{s['id']} {s['name']}" for s in styles()) + f"). Using '{style['name']}' instead.")
 
     script_lines: List[Dict[str, Any]] = []
     try:
@@ -1413,7 +1447,14 @@ def build_overlay(
         script_lines = []
 
     cache_hint = Path(report_dir) if (report_dir is not None and (Path(report_dir) / "clip_caches.json").is_file()) else Path(work_dir)
-    cues = build_cues(segs, starts, script_lines, work_dir=cache_hint)
+    # Sticker Cutout puts every word on its own sticker with gaps, so its cards must be narrower to stay on one row at the fixed size.
+    global MAX_VISUAL_UNITS
+    _units_before = MAX_VISUAL_UNITS
+    MAX_VISUAL_UNITS = _units_before * (0.80 if str(style.get("highlightMode")) == "sticker" else 1.0)
+    try:
+        cues = build_cues(segs, starts, script_lines, work_dir=cache_hint)
+    finally:
+        MAX_VISUAL_UNITS = _units_before
     if not cues:
         print("  [SUBS] no spoken words to show.")
         return None
@@ -1428,7 +1469,8 @@ def build_overlay(
     y_pct = resolve_safe_y_percent(spec, segs, starts, total, width, height, cues=cues)
 
     adapted = 0
-    if video is not None and spec.get("adapt", True):
+    # One style, one look for the whole video: colours change per caption only when the plan says `adapt=on`.
+    if video is not None and spec.get("adapt", False):
         try:
             probes = _frames_for_cues(Path(video), cues, out_dir)
             if probes:
@@ -1448,7 +1490,8 @@ def build_overlay(
         except Exception as exc:   # noqa: BLE001  (the stored colours are always readable; adapting is a refinement)
             print(f"  [SUBS] could not read the picture's colours, using the style's own: {exc}")
 
-    manifest = render_frames(cues, style, width, height, out_dir, y_pct, fps=eff_fps, return_meta=True)
+    manifest = render_frames(cues, style, width, height, out_dir, y_pct, fps=eff_fps, return_meta=True,
+                             font_size=caption_font_size(width, spec))
     frames = manifest["frames"]
     band_y0 = int(manifest.get("bandY0", 0))
     band_h = int(manifest.get("bandHeight", height))

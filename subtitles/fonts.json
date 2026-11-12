@@ -318,5 +318,285 @@
   "file": "Ramabhadra-400.ttf",
   "family": "Ramabhadra",
   "weight": 400
+ },
+ {
+  "file": "Anton-Regular.ttf",
+  "family": "Anton",
+  "weight": 400
+ },
+ {
+  "file": "BebasNeue-Regular.ttf",
+  "family": "Bebas Neue",
+  "weight": 400
+ },
+ {
+  "file": "ArchivoBlack-Regular.ttf",
+  "family": "Archivo Black",
+  "weight": 400
+ },
+ {
+  "file": "Poppins-Regular.ttf",
+  "family": "Poppins",
+  "weight": 400
+ },
+ {
+  "file": "Poppins-SemiBold.ttf",
+  "family": "Poppins",
+  "weight": 600
+ },
+ {
+  "file": "Poppins-Bold.ttf",
+  "family": "Poppins",
+  "weight": 700
+ },
+ {
+  "file": "Poppins-ExtraBold.ttf",
+  "family": "Poppins",
+  "weight": 800
+ },
+ {
+  "file": "Poppins-Black.ttf",
+  "family": "Poppins",
+  "weight": 900
+ },
+ {
+  "file": "Oswald-Regular.ttf",
+  "family": "Oswald",
+  "weight": 400
+ },
+ {
+  "file": "Oswald-Bold.ttf",
+  "family": "Oswald",
+  "weight": 700
+ },
+ {
+  "file": "Inter-400.ttf",
+  "family": "Inter",
+  "weight": 400
+ },
+ {
+  "file": "Inter-600.ttf",
+  "family": "Inter",
+  "weight": 600
+ },
+ {
+  "file": "Inter-700.ttf",
+  "family": "Inter",
+  "weight": 700
+ },
+ {
+  "file": "Inter-800.ttf",
+  "family": "Inter",
+  "weight": 800
+ },
+ {
+  "file": "Inter-900.ttf",
+  "family": "Inter",
+  "weight": 900
+ },
+ {
+  "file": "Caveat-Regular.ttf",
+  "family": "Caveat",
+  "weight": 400
+ },
+ {
+  "file": "Caveat-Bold.ttf",
+  "family": "Caveat",
+  "weight": 700
+ },
+ {
+  "file": "ShadowsIntoLight-Regular.ttf",
+  "family": "Shadows Into Light",
+  "weight": 400
+ },
+ {
+  "file": "Kalam-Regular.ttf",
+  "family": "Kalam",
+  "weight": 400
+ },
+ {
+  "file": "Kalam-Bold.ttf",
+  "family": "Kalam",
+  "weight": 700
+ },
+ {
+  "file": "AmaticSC-Regular.ttf",
+  "family": "Amatic SC",
+  "weight": 400
+ },
+ {
+  "file": "AmaticSC-Bold.ttf",
+  "family": "Amatic SC",
+  "weight": 700
+ },
+ {
+  "file": "Pacifico-Regular.ttf",
+  "family": "Pacifico",
+  "weight": 400
+ },
+ {
+  "file": "DancingScript-Regular.ttf",
+  "family": "Dancing Script",
+  "weight": 400
+ },
+ {
+  "file": "DancingScript-Bold.ttf",
+  "family": "Dancing Script",
+  "weight": 700
+ },
+ {
+  "file": "Bungee-Regular.ttf",
+  "family": "Bungee",
+  "weight": 400
+ },
+ {
+  "file": "Righteous-Regular.ttf",
+  "family": "Righteous",
+  "weight": 400
+ },
+ {
+  "file": "LuckiestGuy-Regular.ttf",
+  "family": "Luckiest Guy",
+  "weight": 400
+ },
+ {
+  "file": "Fredoka-Regular.ttf",
+  "family": "Fredoka",
+  "weight": 400
+ },
+ {
+  "file": "Fredoka-Bold.ttf",
+  "family": "Fredoka",
+  "weight": 700
+ },
+ {
+  "file": "Bangers-Regular.ttf",
+  "family": "Bangers",
+  "weight": 400
+ },
+ {
+  "file": "BagelFatOne-Regular.ttf",
+  "family": "Bagel Fat One",
+  "weight": 400
+ },
+ {
+  "file": "Acme-Regular.ttf",
+  "family": "Acme",
+  "weight": 400
+ },
+ {
+  "file": "Atma-Bold.ttf",
+  "family": "Atma",
+  "weight": 700
+ },
+ {
+  "file": "Baloo2-Bold.ttf",
+  "family": "Baloo 2",
+  "weight": 700
+ },
+ {
+  "file": "BalooBhai2-Bold.ttf",
+  "family": "Baloo Bhai 2",
+  "weight": 700
+ },
+ {
+  "file": "BalooChettan2-Bold.ttf",
+  "family": "Baloo Chettan 2",
+  "weight": 700
+ },
+ {
+  "file": "BalooDa2-Bold.ttf",
+  "family": "Baloo Da 2",
+  "weight": 700
+ },
+ {
+  "file": "BalooPaaji2-Bold.ttf",
+  "family": "Baloo Paaji 2",
+  "weight": 700
+ },
+ {
+  "file": "BalooTamma2-400.ttf",
+  "family": "Baloo Tamma 2",
+  "weight": 400
+ },
+ {
+  "file": "BalooTamma2-500.ttf",
+  "family": "Baloo Tamma 2",
+  "weight": 500
+ },
+ {
+  "file": "BalooTamma2-600.ttf",
+  "family": "Baloo Tamma 2",
+  "weight": 600
+ },
+ {
+  "file": "BalooTamma2-800.ttf",
+  "family": "Baloo Tamma 2",
+  "weight": 800
+ },
+ {
+  "file": "BalooThambi2-Bold.ttf",
+  "family": "Baloo Thambi 2",
+  "weight": 700
+ },
+ {
+  "file": "Chilanka-Regular.ttf",
+  "family": "Chilanka",
+  "weight": 400
+ },
+ {
+  "file": "Coiny-Regular.ttf",
+  "family": "Coiny",
+  "weight": 400
+ },
+ {
+  "file": "Galada-Regular.ttf",
+  "family": "Galada",
+  "weight": 400
+ },
+ {
+  "file": "Gidugu-Regular.ttf",
+  "family": "Gidugu",
+  "weight": 400
+ },
+ {
+  "file": "Kavivanar-Regular.ttf",
+  "family": "Kavivanar",
+  "weight": 400
+ },
+ {
+  "file": "Modak-Regular.ttf",
+  "family": "Modak",
+  "weight": 400
+ },
+ {
+  "file": "Mogra-Regular.ttf",
+  "family": "Mogra",
+  "weight": 400
+ },
+ {
+  "file": "RozhaOne-Regular.ttf",
+  "family": "Rozha One",
+  "weight": 400
+ },
+ {
+  "file": "RussoOne-400.ttf",
+  "family": "Russo One",
+  "weight": 400
+ },
+ {
+  "file": "Kalam-Light.ttf",
+  "family": "Kalam",
+  "weight": 300
+ },
+ {
+  "file": "Inter-500.ttf",
+  "family": "Inter",
+  "weight": 500
+ },
+ {
+  "file": "Poppins-500.ttf",
+  "family": "Poppins",
+  "weight": 500
  }
 ]

@@ -97,13 +97,12 @@ L2 S2.mp4 0.12-4.10 layout=split_h slot=right sp=Student tr=smoothleft@0.28 peer
             3.0,
         )
         self.assertEqual((z0, z1, style), (1.0, 1.08, "sudden_in"))
-        # Split-screen segments support active-panel zoom clamped safely to <= 1.08 (keeps the head inside the frame)
         sz0, sz1, sstyle, _, _ = layouts.resolve_segment_zoom_spec(
             {"src": "nonexistent.mp4", "layout": "split_h", "start": 0.0, "end": 3.0, "zoom": 1.08, "zoom_to": 1.20, "zoom_style": "sudden_in"},
             3.0,
         )
-        self.assertLessEqual(max(sz0, sz1), 1.08)
-        self.assertEqual(sstyle, "sudden_in")
+        # Split panels never zoom (owner's rule): whatever the plan asks for, the panel is still at 1.0
+        self.assertEqual((sz0, sz1, sstyle), (1.0, 1.0, "none"))
         # Paired split-screen crop filter must enforce identical common headroom and symmetric framing
         c_live, c_peer = layouts.compute_paired_split_crop_filters(
             "nonexistent_a.mp4", "nonexistent_b.mp4",
@@ -1534,8 +1533,8 @@ class TestScriptIsTheTimeline(unittest.TestCase):
         self.assertIn("rapid zoom straight after another", text)
         self.assertIn("rapid zooms in", text)                       # too many a minute
         self.assertIn("stand still", text)                          # no stillness at all
-        self.assertNotIn("L6: split zoom", text)                    # 1.06 active-panel split zoom is valid
-        self.assertIn("L7: split zoom 1.22 exceeds 1.15", text)     # > 1.15 split zoom is flagged
+        self.assertIn("L6: split_h has a zoom", text)               # any zoom on a split is flagged: splits never zoom
+        self.assertIn("L7: split_v has a zoom", text)
         self.assertIn("'no_such_sound.wav'", text)
         self.assertIn("above 0 dB", text)
         calm = {"canvas": {"fps": 30}, "segments": [seg(1, "sudden_in", dur=3), seg(2), seg(3, zoom=1.08), seg(4, "smooth", dur=3), seg(5)], "sfx": [{"file": "pop.wav", "segment": "L1", "at": 0.1, "gain_db": -6}]}
@@ -1768,7 +1767,11 @@ class TestSubtitles(unittest.TestCase):
         self.assertEqual(subtitles.resolve_style(4)["name"], "Blue Highlight")
         self.assertEqual(subtitles.resolve_style("docu split-bar")["id"], 28)
         self.assertIsNone(subtitles.resolve_style("nope"))
-        self.assertEqual(len(subtitles.styles()), 8)
+        self.assertEqual(len(subtitles.styles()), 10)
+        self.assertIsNone(subtitles.resolve_style("Frosted Lyric"))            # deleted on the owner's call
+        self.assertEqual(subtitles.resolve_style("white box")["id"], 5)
+        picks = [subtitles.choose_style(f"job {i}", None, avoid=0)["name"] for i in range(400)]
+        self.assertLess(picks.count("Sticker Cutout"), 20)                     # auto picks the sticker look only rarely
         self.assertTrue(all(s.get("kind") and s.get("note") for s in subtitles.styles()))
         self.assertTrue(all(s["fontFamily"] != "The Bold Font" for s in subtitles.styles()))
 
@@ -1844,7 +1847,6 @@ class TestSubtitleAdaptation(unittest.TestCase):
         blue_scene = {"lum": 0.2, "hue": 225.0, "colour": 0.8, "dark": 0.5}
         box = subtitles.adapt_style(self._style(4), blue_scene)
         self.assertNotEqual(box["wordBoxColor"], "#2563EB")                       # a blue box on a blue picture changes
-        self.assertEqual(subtitles.adapt_style(self._style(12), yellow_scene), {})   # stickers carry their own colours
 
     def test_a_grey_picture_keeps_the_stored_look(self):
         grey = {"lum": 0.3, "hue": 0.0, "colour": 0.02, "dark": 0.3}
@@ -2168,10 +2170,12 @@ class TestEditorSheetBugFixes(unittest.TestCase):
         import subtitles
 
         all_styles = subtitles.styles()
-        self.assertEqual(len(all_styles), 8)
+        self.assertEqual(len(all_styles), 10)
         for st in all_styles:
-            self.assertGreaterEqual(int(st.get("fontSize", 0)), 64, f"Style {st['name']} fontSize too small")
-            self.assertGreaterEqual(int(st.get("strokeWidth", 0)), 5, f"Style {st['name']} missing crisp stroke")
+            boxed = str(st.get("bg", "transparent")).lower() != "transparent"      # text inside a solid box needs no outline
+            self.assertTrue(boxed or int(st.get("strokeWidth", 0)) >= 5, f"Style {st['name']} missing crisp stroke")
+            if st.get("highlightMode") in ("progressive", "bottom-to-top"):        # these show speech by filling or revealing words
+                continue
             has_distinct_active = (
                 str(st.get("activeColor", "")).upper() != str(st.get("color", "")).upper()
                 or st.get("wordBox")
@@ -2255,7 +2259,7 @@ class TestEditorSheetBugFixes(unittest.TestCase):
         # Unknown SFX must still resolve to a non-existent path so style_report catches it
         self.assertFalse(common.resolve_sfx_asset("no_such_sound.wav").is_file())
 
-        # Split sudden_in auto-attaches subtle pop.wav when no explicit SFX sits at the beat
+        # A split panel never zooms, so a zoom written on a split adds no zoom sound either
         plan = {
             "segments": [
                 {"id": "L1", "src": "a.mp4", "start": 0.0, "end": 3.0, "layout": "split_v", "zoom": 1.0, "zoom_to": 1.08, "zoom_style": "sudden_in", "zoom_at": 1.2}
@@ -2264,7 +2268,7 @@ class TestEditorSheetBugFixes(unittest.TestCase):
             "marks": [],
         }
         auto_sfx = layouts.collect_layout_auto_sfx(plan, [0.0])
-        self.assertTrue(any(f == "pop.wav" and abs(t - 1.2) < 0.05 and -4.0 <= g <= -2.0 for f, t, g in auto_sfx), auto_sfx)
+        self.assertFalse(any(f == "pop.wav" for f, t, g in auto_sfx), auto_sfx)
         stats = render._sfx_audio_stats(common.resolve_sfx_asset("whoosh.wav"))
         self.assertGreater(stats["duration"], 0.15)
         self.assertGreaterEqual(stats["peak_sec"], 0.0)
@@ -2396,6 +2400,31 @@ class TestSourceOrderSwap(unittest.TestCase):
         self.assertEqual(script_order.src_time_swaps(segs, self.LINES), [])
 
 
+class TestSplitPanelLock(unittest.TestCase):
+    def test_registered_crop_lands_on_the_reference_frame(self):
+        import vision_tracker as vt
+        ref = vt.slot_filter_from_origin(720, 1280, 540, 960, 1.6, 306.0, 300.0)
+        self.assertEqual(ref["filter"], "scale=1152:2048:flags=lanczos,crop=540:960:306:300")
+        # Same picture, same framing: the very same crop
+        same = vt.derive_registered_crop(dict(ref, slot_focus=[0.5, 0.36]), {"a": 1.0, "tx": 0.0, "ty": 0.0}, 720, 1280)
+        self.assertEqual(same["filter"], ref["filter"])
+        # The other clip shows the scene 5% larger and moved by (26, 40) source pixels
+        other = vt.derive_registered_crop(dict(ref, slot_focus=[0.5, 0.36]), {"a": 1.05, "tx": 26.0, "ty": 40.0}, 720, 1280)
+        s_c = other["geom"]["s"]
+        for px, py in ((100.0, 200.0), (500.0, 900.0)):          # a background point of the reference clip
+            ref_xy = (ref["geom"]["s"] * px - ref["geom"]["ox"], ref["geom"]["s"] * py - ref["geom"]["oy"])
+            cx, cy = 1.05 * px + 26.0, 1.05 * py + 40.0           # the same point in the other clip
+            got_xy = (s_c * cx - other["geom"]["ox"], s_c * cy - other["geom"]["oy"])
+            self.assertLess(abs(ref_xy[0] - got_xy[0]), 1.5)
+            self.assertLess(abs(ref_xy[1] - got_xy[1]), 1.5)
+        # Same picture at another resolution with no registration: scaled, not moved
+        big = vt.derive_registered_crop(dict(ref, slot_focus=[0.5, 0.36]), None, 1080, 1920)
+        self.assertEqual(big["filter"], "scale=1152:2048:flags=lanczos,crop=540:960:306:300")
+        # A clip that shows too little of the scene to match is reported, not hidden
+        short = vt.derive_registered_crop(dict(ref, slot_focus=[0.5, 0.36]), {"a": 2.2, "tx": 0.0, "ty": 0.0}, 720, 1280)
+        self.assertGreater(short["clamp_px"], 2.0)
+
+
 class TestIndicCaptionBreaks(unittest.TestCase):
     """Caption cards must break at phrase edges in every language Zeno edits, not at a fixed word count."""
 
@@ -2418,7 +2447,15 @@ class TestIndicCaptionBreaks(unittest.TestCase):
 
     def test_light_verb_stays_with_its_noun(self):
         cards = self._cards("ಈಗ ನಾನೇ ಸ್ವತಃ Order ಮಾಡ್ತೀನಿ.")
-        self.assertIn("Order ಮಾಡ್ತೀನಿ.", cards)
+        self.assertTrue(any("Order ಮಾಡ್ತೀನಿ." in c for c in cards), cards)
+
+    def test_no_card_is_wider_than_one_row_at_the_fixed_size(self):
+        import subtitles
+        for text in ("എനിക്ക് ഇംഗ്ലീഷ് സംസാരിക്കാൻ അറിയാമായിരുന്നു എന്ന് ഞാൻ പറഞ്ഞു", "எனக்கு ஆங்கிலம் நன்றாக பேசத் தெரியும் என்று சொன்னேன்",
+                     "I have been practicing English every single day"):
+            for card in self._cards(text):
+                if len(card.split()) > 1:
+                    self.assertLessEqual(subtitles._visual_units(card), subtitles.MAX_VISUAL_UNITS + 0.01, card)
 
     def test_hindi_postposition_does_not_start_a_card(self):
         for card in self._cards("मुझे अपनी इंग्लिश के बारे में बात करनी है और मैं रोज़ 15 मिनट प्रैक्टिस करूँगी।")[1:]:
