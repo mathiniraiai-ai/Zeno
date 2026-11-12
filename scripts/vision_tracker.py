@@ -641,9 +641,9 @@ def compute_paired_split_crop_filters(
     # One fixed, generous headroom for EVERY cut (editor feedback: heads cut, head height jumping between cuts).
     # It no longer depends on how tall each clip's hair measured, so the crown sits at the same height in every cut.
     try:
-        common_hr = round(max(0.12, min(0.24, float(os.environ.get("ZENO_SPLIT_HEADROOM", "0.17")))), 4)
+        common_hr = round(max(0.12, min(0.24, float(os.environ.get("ZENO_SPLIT_HEADROOM", "0.14")))), 4)
     except ValueError:
-        common_hr = 0.17
+        common_hr = 0.14
 
     s0_a = max(live_slot_w / float(src_w), live_slot_h / float(src_h))
     s0_b = max(peer_slot_w / float(peer_w), peer_slot_h / float(peer_h))

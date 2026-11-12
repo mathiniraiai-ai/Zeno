@@ -112,7 +112,7 @@ L2 S2.mp4 0.12-4.10 layout=split_h slot=right sp=Student tr=smoothleft@0.28 peer
         )
         self.assertEqual(c_live["common_headroom_pct"], c_peer["common_headroom_pct"])
         # Fixed generous headroom (17%) on every cut, so the head sits at the same height in every cut
-        self.assertEqual(c_live["common_headroom_pct"], 17.0)
+        self.assertEqual(c_live["common_headroom_pct"], 14.0)
         c_peer_swap, c_live_swap = layouts.compute_paired_split_crop_filters(
             "nonexistent_b.mp4", "nonexistent_a.mp4",
             720, 1280, 720, 1280, 540, 1920, 540, 1920,
@@ -2394,6 +2394,43 @@ class TestSourceOrderSwap(unittest.TestCase):
         segs = [{"id": "L1a", "src": "F", "start": 0.0}, {"id": "L1b", "src": "F", "start": 3.0},
                 {"id": "L2", "src": "F", "start": 5.0}, {"id": "L3", "src": "G", "start": 1.0}]
         self.assertEqual(script_order.src_time_swaps(segs, self.LINES), [])
+
+
+class TestIndicCaptionBreaks(unittest.TestCase):
+    """Caption cards must break at phrase edges in every language Zeno edits, not at a fixed word count."""
+
+    @staticmethod
+    def _cards(text, step=0.3, gap_at=None, gap=0.0):
+        import subtitles
+        ws, t = [], 0.0
+        for i, w in enumerate(text.split()):
+            if gap_at is not None and i == gap_at:
+                t += gap
+            ws.append({"text": w, "start": t, "end": t + step})
+            t += step
+        return [" ".join(x["text"] for x in g) for g in subtitles._group_segment_words(ws)]
+
+    def test_number_stays_with_its_unit(self):
+        for cards in (self._cards("ಹಾಗಾದ್ರೆ ಬನ್ನಿ, ದಿನಾ 15 ನಿಮಿಷ ಒಟ್ಟಿಗೆ Practice ಮಾಡೋಣ."),
+                      self._cards("Husband ಕೂಡ 6 ವರ್ಷ ಎಲ್ಲಾ Flight-ನಲ್ಲೂ ನನಗೋಸ್ಕರ ಊಟ Order ಮಾಡ್ತಿದ್ರು.")):
+            for a, b in zip(cards, cards[1:]):
+                self.assertFalse(a.split()[-1].isdigit(), cards)
+
+    def test_light_verb_stays_with_its_noun(self):
+        cards = self._cards("ಈಗ ನಾನೇ ಸ್ವತಃ Order ಮಾಡ್ತೀನಿ.")
+        self.assertIn("Order ಮಾಡ್ತೀನಿ.", cards)
+
+    def test_hindi_postposition_does_not_start_a_card(self):
+        for card in self._cards("मुझे अपनी इंग्लिश के बारे में बात करनी है और मैं रोज़ 15 मिनट प्रैक्टिस करूँगी।")[1:]:
+            self.assertNotIn(card.split()[0], ("के", "का", "की", "को", "में", "से", "पर", "है"), card)
+
+    def test_short_pause_does_not_split_number_from_unit(self):
+        cards = self._cards("दिन में 15 मिनट प्रैक्टिस करो", gap_at=3, gap=0.5)
+        self.assertTrue(any("15 मिनट" in c for c in cards), cards)
+
+    def test_every_word_is_kept_in_order(self):
+        txt = "আমার খিদে পেয়েছে এবং আমি ক্ষমা চাইছি ধন্যবাদ"
+        self.assertEqual(" ".join(self._cards(txt)).split(), txt.split())
 
 
 if __name__ == "__main__":

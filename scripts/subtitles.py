@@ -641,48 +641,97 @@ def _visual_units(text: str) -> float:
     return units
 
 
+# Words a caption card must not END on (the next word completes the phrase) and must not START with (they finish the previous word's phrase).
+# Covers Kannada, Telugu, Tamil, Malayalam, Hindi/Marathi, Bengali and English, so a card never reads "15 | ನಿಮಿಷ" or "Order | ಮಾಡ್ತೀನಿ".
+_NO_END = {w.lower() for line in (
+    "ನನ್ನ ನಿನ್ನ ನಿಮ್ಮ ನಮ್ಮ ಅವನ ಅವಳ ಅವರ ಈ ಆ ಒಂದು ಮತ್ತೆ ಹಾಗೂ ಆದ್ರೆ ಆದರೆ ಯಾವ ಎಷ್ಟು",
+    "నా నీ మీ మా ఈ ఆ ఒక మరియు కానీ",
+    "என் உன் உங்கள் எங்கள் இந்த அந்த ஒரு மற்றும் ஆனால்",
+    "എന്റെ നിന്റെ നിങ്ങളുടെ ഞങ്ങളുടെ ഈ ആ ഒരു എന്നാൽ",
+    "मेरा मेरी मेरे तेरा तेरी तुम्हारा तुम्हारी आपका आपकी आपके हमारा हमारी इस उस एक और या कि लेकिन पर जो",
+    "माझा माझी माझे तुझा तुझी तुमचा तुमची तुमचे आमचा आमची हा ही हे तो ती आणि पण",
+    "আমার তোমার আপনার আমাদের এই ওই এক এবং কিন্তু",
+    "a an the to of in on at for with my your our his her their and or but that this these those is are was were be",
+) for w in line.split()}
+_NO_START = {w.lower() for line in (
+    "का की के को में से पर ने तक भी ही है हैं था थी थे हूँ हो हूं",
+    "ला चा ची चे ना त ही आहे आहेत होता होती",
+    "এর কে তে থেকে ও ই আছে হয় করে",
+) for w in line.split()}
+_NO_START_PREFIX = ("ಮಾಡ", "ಆಗ", "ಇದ್ದ", "ಇದೆ", "ಇರು", "ಕೊಡ", "చేయ", "చేస", "అవ", "ചെയ്", "ആയി", "ஆகு", "செய்", "করি", "করে", "করব", "করছ", "হবে", "হচ্ছ")
+
+
+def _core(w: str) -> str:
+    # strip punctuation only: Python's \W would also eat Indic vowel signs, which are combining marks
+    t = w or ""
+    i, j = 0, len(t)
+    while i < j and unicodedata.category(t[i])[0] in "PSZ":
+        i += 1
+    while j > i and unicodedata.category(t[j - 1])[0] in "PSZ":
+        j -= 1
+    return t[i:j].lower()
+
+
+def _is_no_end(text: str) -> bool:
+    c = _core(text)
+    return bool(c) and (c.isdigit() or c in _NO_END)
+
+
+def _is_no_start(text: str) -> bool:
+    c = _core(text)
+    return bool(c) and (c in _NO_START or c.startswith(_NO_START_PREFIX))
+
+
 def _chunk_continuous_phrase(run_words: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
-    if not run_words:
+    """Split one unbroken run of speech into caption cards (2 to 4 words, up to 3 for Indic), choosing the cheapest set of break points:
+    breaks go after commas, never after a number or possessive ("ನಿಮ್ಮ | AI English"), never before a postposition or light verb ("Order | ಮಾಡ್ತೀನಿ"),
+    and a lone one-word card is avoided."""
+    n = len(run_words)
+    if n == 0:
         return []
     has_indic = any(INDIC_RE.search(w["text"]) for w in run_words)
-    max_w = MAX_INDIC_WORDS_PER_CUE if has_indic else MAX_WORDS_PER_CUE
-
+    max_w = MAX_WORDS_PER_CUE   # Indic cards of 4 words are allowed only while they stay narrow (checked below)
+    units = [_visual_units(w["text"]) for w in run_words]
+    INF = float("inf")
+    best = [INF] * (n + 1)
+    prev = [0] * (n + 1)
+    best[0] = 0.0
+    for j in range(1, n + 1):
+        width = 0.0
+        for i in range(j - 1, max(-1, j - max_w - 1), -1):
+            width += units[i] + (1.0 if i < j - 1 else 0.0)
+            if j - i > 1 and width > MAX_VISUAL_UNITS:
+                break
+            if has_indic and j - i > MAX_INDIC_WORDS_PER_CUE and width > 19.0:
+                continue
+            if best[i] == INF:
+                continue
+            size = j - i
+            cost = 1.0 + (1.6 if size == 1 and n > 1 else 0.0) + (0.25 if size == 2 and n > 3 else 0.0)
+            if j < n:
+                last, nxt = run_words[j - 1]["text"], run_words[j]["text"]
+                if CLAUSE_END.search(last) or SENTENCE_END.search(last):
+                    cost -= 2.5
+                if _is_no_end(last):
+                    cost += 7.0
+                if _is_no_start(nxt):
+                    cost += 7.0
+                # keep a Latin word and the Indic word that carries its suffix/verb together
+                if INDIC_RE.search(nxt) and not INDIC_RE.search(last) and re.search(r"[A-Za-z]", last) and not (CLAUSE_END.search(last) or SENTENCE_END.search(last)):
+                    cost += 0.6
+            cost += (1.0 - min(1.0, width / MAX_VISUAL_UNITS)) * 0.4   # prefer fuller cards over thin ones
+            if best[i] + cost < best[j]:
+                best[j] = best[i] + cost
+                prev[j] = i
+    if best[n] == INF:   # cannot happen (a single word always fits), but never lose words
+        return [[w] for w in run_words]
     chunks: List[List[Dict[str, Any]]] = []
-    cur: List[Dict[str, Any]] = []
-    cur_units = 0.0
-
-    for w in run_words:
-        w_units = _visual_units(w["text"])
-        next_units = cur_units + (1.0 if cur else 0.0) + w_units
-        if cur and (len(cur) >= max_w or next_units > MAX_VISUAL_UNITS):
-            chunks.append(cur)
-            cur = []
-            cur_units = 0.0
-        cur.append(w)
-        cur_units += (1.0 if len(cur) > 1 else 0.0) + w_units
-        if len(cur) >= 2 and CLAUSE_END.search(w["text"]):
-            chunks.append(cur)
-            cur = []
-            cur_units = 0.0
-    if cur:
-        chunks.append(cur)
-
-    # Rebalance orphan 1-word tails within continuous phrase runs ([4, 4, 1] -> [3, 3, 3]; [4, 1] -> [3, 2]; [3, 1] -> [2, 2])
-    if len(chunks) >= 3 and [len(chunks[-3]), len(chunks[-2]), len(chunks[-1])] == [4, 4, 1]:
-        tail9 = chunks[-3] + chunks[-2] + chunks[-1]
-        if not any(CLAUSE_END.search(w["text"]) for w in tail9[:-1]):
-            g1, g2, g3 = tail9[0:3], tail9[3:6], tail9[6:9]
-            if all(sum(_visual_units(x["text"]) for x in g) + 2.0 <= MAX_VISUAL_UNITS + 4.0 for g in (g1, g2, g3)):
-                chunks[-3:] = [g1, g2, g3]
-    elif len(chunks) >= 2 and len(chunks[-1]) == 1 and len(chunks[-2]) >= 3:
-        prev_c = chunks[-2]
-        if not CLAUSE_END.search(prev_c[-1]["text"]) and not SENTENCE_END.search(prev_c[-1]["text"]):
-            moved = prev_c[-1]
-            cand_tail = [moved, chunks[-1][0]]
-            if sum(_visual_units(x["text"]) for x in cand_tail) + 1.0 <= MAX_VISUAL_UNITS + 4.0:
-                chunks[-2] = prev_c[:-1]
-                chunks[-1] = cand_tail
-
+    j = n
+    while j > 0:
+        i = prev[j]
+        chunks.append(run_words[i:j])
+        j = i
+    chunks.reverse()
     return [c for c in chunks if c]
 
 
@@ -694,7 +743,8 @@ def _group_segment_words(words: List[Dict[str, Any]]) -> List[List[Dict[str, Any
     for w in words:
         if cur_run:
             gap = w["start"] - cur_run[-1]["end"]
-            if gap > MAX_GAP_IN_CUE or SENTENCE_END.search(cur_run[-1]["text"]):
+            glued = gap <= 0.75 and (_is_no_end(cur_run[-1]["text"]) or _is_no_start(w["text"])) and not SENTENCE_END.search(cur_run[-1]["text"])
+            if (gap > MAX_GAP_IN_CUE and not glued) or SENTENCE_END.search(cur_run[-1]["text"]):
                 runs.append(cur_run)
                 cur_run = []
         cur_run.append(w)
