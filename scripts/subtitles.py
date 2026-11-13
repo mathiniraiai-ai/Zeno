@@ -143,8 +143,99 @@ CONTRACTIONS: Dict[str, List[str]] = {
 }
 
 
+IS_WIN = os.name == "nt"
+NODE_DIR = HERE.parent / "tools" / "node"          # Zeno's own portable Node (tools/ is never touched by updates)
+NODE_DIST = "https://nodejs.org/dist/latest-v22.x/"   # the current Node 22 LTS, checked against nodejs.org's own SHA-256 list
+
+
+def _local_node() -> Optional[Path]:
+    exe = NODE_DIR / ("node.exe" if IS_WIN else "bin/node")
+    return exe if exe.is_file() else None
+
+
 def node_path() -> str:
-    return shutil.which("node") or ""
+    """Node for the caption renderer: the computer's own, else Zeno's portable copy in tools/node."""
+    found = shutil.which("node")
+    if found:
+        return found
+    local = _local_node()
+    return str(local) if local else ""
+
+
+def _npm_cmd() -> Tuple[List[str], Dict[str, str]]:
+    """How to run npm, and an environment where npm can find node (npm is itself a Node script)."""
+    env = dict(os.environ)
+    sys_npm = shutil.which("npm")
+    if sys_npm and shutil.which("node"):
+        return [sys_npm], env
+    local = _local_node()
+    if not local:
+        return [], env
+    env["PATH"] = str(local.parent) + os.pathsep + env.get("PATH", "")
+    npm = NODE_DIR / ("npm.cmd" if IS_WIN else "bin/npm")
+    return ([str(npm)] if npm.is_file() else []), env
+
+
+def install_portable_node(timeout: float = 600.0) -> bool:
+    """Download the current Node 22 LTS for this computer into tools/node (about 30-50 MB, no admin rights), after checking it
+    against the SHA-256 list nodejs.org publishes. Used when the computer has no Node, so captions always render."""
+    import hashlib
+    import platform
+    import tarfile
+    import tempfile
+    import urllib.request
+    import zipfile
+
+    if _local_node():
+        return True
+    machine = platform.machine().lower()
+    arch = "arm64" if machine in ("arm64", "aarch64") else "x64"
+    if IS_WIN:
+        suffix = f"-win-{arch}.zip"
+    elif os.uname().sysname == "Darwin":
+        suffix = f"-darwin-{arch}.tar.gz"
+    else:
+        suffix = f"-linux-{arch}.tar.gz"
+    try:
+        with urllib.request.urlopen(NODE_DIST + "SHASUMS256.txt", timeout=30) as resp:   # noqa: S310 (nodejs.org)
+            sums = resp.read().decode("utf-8", "replace")
+        name, want = "", ""
+        for line in sums.splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1].startswith("node-v") and parts[1].endswith(suffix):
+                want, name = parts[0].lower(), parts[1]
+                break
+        if not name:
+            print(f"  [SUBS] nodejs.org lists no Node build for this computer ({suffix.strip('-')})")
+            return False
+        print(f"  [SUBS] Node.js is not installed: downloading {name} into tools/node (one time, no admin needed)...")
+        tmp = Path(tempfile.mkdtemp(prefix="zeno_node_"))
+        arc = tmp / name
+        with urllib.request.urlopen(NODE_DIST + name, timeout=timeout) as resp, open(arc, "wb") as fh:   # noqa: S310
+            shutil.copyfileobj(resp, fh)
+        if hashlib.sha256(arc.read_bytes()).hexdigest().lower() != want:
+            print("  [SUBS] the Node download did not match nodejs.org's checksum; not installed")
+            shutil.rmtree(tmp, ignore_errors=True)
+            return False
+        out = tmp / "x"
+        if name.endswith(".zip"):
+            with zipfile.ZipFile(arc) as zf:
+                zf.extractall(out)
+        else:
+            with tarfile.open(arc) as tf:
+                tf.extractall(out, filter="tar") if hasattr(tarfile, "data_filter") else tf.extractall(out)   # noqa: S202
+        inner = next(p for p in out.iterdir() if p.is_dir() and p.name.startswith("node-v"))
+        NODE_DIR.parent.mkdir(parents=True, exist_ok=True)
+        if NODE_DIR.exists():
+            shutil.rmtree(NODE_DIR, ignore_errors=True)
+        shutil.move(str(inner), str(NODE_DIR))
+        shutil.rmtree(tmp, ignore_errors=True)
+        ok = _local_node() is not None
+        print("  [SUBS] Node.js ready in tools/node" if ok else "  [SUBS] Node.js could not be unpacked")
+        return ok
+    except Exception as exc:   # noqa: BLE001
+        print(f"  [SUBS] could not install Node.js ({type(exc).__name__}: {exc}); captions need it (nodejs.org, LTS)")
+        return False
 
 
 def available() -> bool:
@@ -153,18 +244,24 @@ def available() -> bool:
 
 
 def ensure_ready() -> bool:
-    """Install the renderer's one dependency (node-canvas, a prebuilt binary of about 20 MB) the first time subtitles are used on this computer.
-    Needs Node and an internet connection; returns whether subtitles can be drawn."""
+    """Make captions drawable on this computer: Node (the computer's own, else a portable copy fetched once into tools/node) and
+    the renderer's one dependency (node-canvas, a prebuilt binary of about 20 MB). Needs internet only the first time."""
     if available():
         return True
-    npm = shutil.which("npm")
-    if node_path() and npm and (SUB_DIR / "package.json").is_file():
+    if not node_path():
+        install_portable_node()
+    npm, env = _npm_cmd()
+    if node_path() and npm and (SUB_DIR / "package.json").is_file() and not (SUB_DIR / "node_modules" / "canvas").is_dir():
         print("  [SUBS] first use on this computer: installing the caption renderer (about 20 MB)...")
         try:
-            subprocess.run([npm, "install", "--no-audit", "--no-fund", "--silent"], cwd=str(SUB_DIR), capture_output=True, text=True, timeout=600)
+            r = subprocess.run(npm + ["install", "--no-audit", "--no-fund", "--silent"], cwd=str(SUB_DIR), capture_output=True, text=True,
+                               timeout=600, env=env, shell=False)
+            if r.returncode != 0:
+                print("  [SUBS] caption renderer install failed: " + (r.stderr or r.stdout or "").strip()[-300:])
         except Exception as exc:   # noqa: BLE001
             print(f"  [SUBS] install failed: {exc}")
     return available()
+
 
 
 def styles() -> List[Dict[str, Any]]:
@@ -1546,3 +1643,11 @@ def build_overlay(
     except Exception:
         pass
     return ffconcat_path
+
+
+if __name__ == "__main__" and len(__import__("sys").argv) > 1 and __import__("sys").argv[1] == "--ensure":
+    # used by the installers: make captions ready now, so the first render does not wait for it
+    import sys as _sys
+    ok = ensure_ready()
+    print("  [SUBS] captions ready" if ok else "  [SUBS] captions NOT ready (see above)")
+    _sys.exit(0 if ok else 1)

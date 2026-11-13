@@ -79,6 +79,11 @@ if (Test-Path ".venv\Scripts\python.exe") {
 .venv\Scripts\python.exe scripts\gpu_install.py
 if ($LASTEXITCODE -ne 0) { Write-Host "      Package install reported a problem (see above)."; }
 
+# 3b. Captions need Node.js: use the PC's own, else a portable copy in tools\node (checked against nodejs.org, no admin),
+#     plus the caption renderer package, so the first video already has subtitles.
+& .venv\Scripts\python.exe scripts\subtitles.py --ensure
+if ($LASTEXITCODE -ne 0) { Write-Host "      Captions are not ready yet; Zeno will try again on the first render." }
+
 # 4. .env from the template (never overwrites an existing one)
 if (Test-Path ".env") {
     Write-Host "[4/5] .env already exists (kept as is)"

@@ -1883,6 +1883,40 @@ class TestTeamRuleSync(unittest.TestCase):
         self.assertFalse(any(r.get("source") for r in brain_memory.load_brain_memory("micronarrative")), "shipped rules carry no source")
 
 
+class TestFreshInstallHasWhatAJobNeeds(unittest.TestCase):
+    """A PC set up from the Zeno app gets only the update bundle. It must hold everything the pre-job check needs (the face model
+    used to be missing, so every edit was blocked), and the installers must make captions ready (Node)."""
+
+    def test_the_update_bundle_carries_the_face_model(self):
+        import io, zipfile, release
+        blob, _n, _sha = release.build_bundle_bytes()
+        names = set(zipfile.ZipFile(io.BytesIO(blob)).namelist())
+        self.assertIn("assets/vision/face_detection_yunet_2023mar.onnx", names)
+        self.assertIn("agent/FORMATS.md", names)
+
+    def test_the_face_model_is_found_without_a_models_folder(self):
+        import importlib, common
+        from unittest.mock import patch
+        missing = Path("/nonexistent/models")
+        with patch.object(Path, "is_file", lambda self: "assets/vision" in str(self).replace("\\", "/")):
+            p = next(p for p in (missing / "face_detection_yunet_2023mar.onnx",
+                                 common.ROOT / "assets" / "vision" / "face_detection_yunet_2023mar.onnx") if p.is_file())
+        self.assertTrue(str(p).replace("\\", "/").endswith("assets/vision/face_detection_yunet_2023mar.onnx"))
+        self.assertTrue(common.YUNET_MODEL.is_file())
+        self.assertGreater(common.YUNET_MODEL.stat().st_size, 100_000)
+
+    def test_both_installers_make_captions_ready(self):
+        self.assertIn("scripts/subtitles.py --ensure", (ROOT / "install.command").read_text(encoding="utf-8"))
+        self.assertIn("scripts\\subtitles.py --ensure", (ROOT / "scripts" / "install_windows.ps1").read_text(encoding="utf-8"))
+
+    def test_captions_fall_back_to_zenos_own_node(self):
+        import shutil as _sh, subtitles
+        from unittest.mock import patch
+        fake = subtitles.NODE_DIR / ("node.exe" if subtitles.IS_WIN else "bin/node")
+        with patch.object(_sh, "which", return_value=None), patch.object(subtitles, "_local_node", return_value=fake):
+            self.assertEqual(subtitles.node_path(), str(fake))
+
+
 class TestHookTransitionLimit(unittest.TestCase):
     def _plan(self, n_cuts, cut_secs, trans):
         segs = [{"id": f"L{i}", "src": "a.mp4", "start": 0.0, "end": cut_secs, "layout": "single", "zoom": 1.0,

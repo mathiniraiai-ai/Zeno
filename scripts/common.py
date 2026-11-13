@@ -254,7 +254,11 @@ OVERLAYS_DIR = ROOT / "assets" / "overlays"
 FONTS_DIR = ROOT / "assets" / "fonts"
 TEMPLATES_DIR = ROOT / "assets" / "templates"
 MODELS_DIR = ROOT / "models"
-YUNET_MODEL = MODELS_DIR / "face_detection_yunet_2023mar.onnx"
+# The face model ships with every update in assets/vision (models/ is never written by an update, so a PC set up from the
+# Zeno app had no face model and every pre-job check failed); an older copy in models/ is still used when it is there.
+YUNET_MODEL = next((p for p in (MODELS_DIR / "face_detection_yunet_2023mar.onnx",
+                                ROOT / "assets" / "vision" / "face_detection_yunet_2023mar.onnx") if p.is_file()),
+                   ROOT / "assets" / "vision" / "face_detection_yunet_2023mar.onnx")
 WORK = ROOT / "work"
 # Finished videos go to Downloads/Zeno Outputs on every PC (team rule); ZENO_OUTPUT_DIR in .env overrides it.
 OUTPUT = Path(os.environ.get("ZENO_OUTPUT_DIR", "").strip() or (Path.home() / "Downloads" / "Zeno Outputs")).expanduser()

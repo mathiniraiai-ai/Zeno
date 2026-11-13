@@ -1,6 +1,6 @@
 #!/bin/bash
 # Zeno one-click installer for macOS (Apple Silicon or Intel).
-# Double-click in Finder (first time: right-click > Open), or run:  bash install.command
+# Double-click in Finder (first time on macOS 15+: System Settings > Privacy & Security > Open Anyway), or run:  bash install.command
 # Safe to run again: it skips anything already installed. No admin password, no Homebrew needed.
 set -e
 cd "$(dirname "$0")"
@@ -70,6 +70,10 @@ else
   uv venv --python 3.12 .venv
 fi
 .venv/bin/python scripts/gpu_install.py
+
+# 3b. Captions need Node.js: use the Mac's own, else a portable copy in tools/node (checked against nodejs.org, no admin),
+#     plus the caption renderer package, so the first video already has subtitles.
+.venv/bin/python scripts/subtitles.py --ensure || echo "      Captions are not ready yet; Zeno will try again on the first render."
 
 # 4. .env from the template (never overwrites an existing one)
 if [ -f .env ]; then

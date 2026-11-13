@@ -18,7 +18,7 @@ Zeno turns raw clips and a script into a finished vertical video. An AI agent (C
      ```
    - **No Git yet?** Download https://github.com/mathiniraiai-ai/Zeno/archive/refs/heads/main.zip (no sign-in), unzip it, and go to step 2. The installer installs Git if needed and connects the folder to GitHub, so it can update itself like a normal clone. Your files, `.env` and videos are not touched.
 2. Double-click the installer:
-   - **Mac:** `install.command` (first time: right-click it, choose **Open**, then **Open** again).
+   - **Mac:** `install.command`. macOS blocks apps and scripts that are not signed by an Apple developer the first time. On macOS 15 or later right-click > Open no longer works: double-click, press **Done**, then open **System Settings > Privacy & Security**, scroll down and press **Open Anyway** (once). On older macOS: right-click, **Open**, **Open**.
    - **Windows:** `install.bat`.
 3. The installer asks you nothing and needs no admin password for Zeno itself (installing Git, only if it is missing, makes Windows ask for permission). It:
    - installs `uv`, which brings Python 3.12,
@@ -37,11 +37,11 @@ Running the installer again is always safe; it skips what is already there. Neve
 Wherever this page says `python`, use the project's Python: `.venv/bin/python` on Mac, `.venv\Scripts\python` on Windows.
 
 ## The Zeno app (optional, recommended)
-Install the Zeno desktop app (`app/README.md`) to watch each edit live: stages, face scan, who speaks, every cut and check. It only shows the work: start each video in Claude with `/zeno` (or by double-clicking `edit.command`), then watch it here and press **Render** in the pop-up when the plan is ready.
+Install the Zeno desktop app to watch each edit live. **A brand-new computer can start here instead of step 1:** install the app (Mac: open the `.dmg` for your Mac, Apple Silicon `arm64` or Intel `x64`, and drag Zeno to Applications; Windows: run `Zeno Setup .exe`), sign in with Google, and the app downloads Zeno into `Documents/Zeno` and opens the installer for you. The app: stages, face scan, who speaks, every cut and check. It only shows the work: start each video in Claude with `/zeno` (or by double-clicking `edit.command`), then watch it here and press **Render** in the pop-up when the plan is ready.
 
 ## 2. Before every video: the checks and the one question
 
-**Claude Code:** start each video with `edit.command` (Mac, first time right-click > Open) or `edit.bat` (Windows). It opens a new Claude Code session in this folder with the claude.ai connectors and extra MCP servers off (about 7.5k tokens smaller at the start) and runs `/edit`. After the first edit, `python3 scripts/setup.py --session-check` shows how big the session started; above 60k means something heavy is loaded.
+**Claude Code:** start each video with `edit.command` (Mac; the first time, allow it as for `install.command` above) or `edit.bat` (Windows). It opens a new Claude Code session in this folder with the claude.ai connectors and extra MCP servers off (about 7.5k tokens smaller at the start) and runs `/edit`. After the first edit, `python3 scripts/setup.py --session-check` shows how big the session started; above 60k means something heavy is loaded.
 **Antigravity or another agent:** start a **new agent session for each video**, open the Zeno folder, and say you want to edit a video.
 
 Start a **new agent session for each video** (it keeps token use low), open the Zeno folder, and say you want to edit a video. The agent reads `agent/DIRECTOR.md` and does this, in this order:
