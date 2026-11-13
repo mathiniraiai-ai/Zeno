@@ -35,7 +35,6 @@ MARK_TAIL_MAX_SEC = 0.48  # tail after a mark onset above this is reported
 RAPID_ZOOM_STYLES = ('sudden_in', 'flash_zoom')
 MAX_RAPID_PER_MIN = 16       # rapid zooms a minute of full-frame live conversation (Meta-ad tempo, owner decision 2026-11-06)
 AD_MIN_MOVING_SHARE = 0.60   # of the live conversation's cuts, at least this share should move (a zoom, or a transition into the cut)
-AD_SECONDS_PER_TRANSITION = 8.5   # aim for a crisp transition about this often in the live conversation
 MIN_STILL_SHARE = 0.25       # at least this share of single-speaker cuts should not move, so a zoom means something
 SNAP_REACH_SEC = 0.12   # a cut may move at most this far to reach a quiet point
 REPEAT_RECALL = 0.8   # two separate segments that each hold this much of a line say it twice
@@ -865,6 +864,15 @@ def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path, plan_path:
             g["style"] = list(g["style"]) + variety_report(plan)
         except Exception:
             pass
+        try:
+            from prepare import parse_script_file
+            _, s_lines = parse_script_file(Path(script_path)) if not isinstance(script_path, list) else ({}, script_path)
+        except Exception:
+            s_lines = []
+        try:
+            g["style"] = list(g["style"]) + ["TRANSITION " + x for x in transition_report(plan, s_lines, work_dir)]
+        except Exception:
+            pass
         g["blocked"] = bool(g["problems"])
         return g
     finally:
@@ -1268,12 +1276,143 @@ def variety_report(plan: Dict[str, Any]) -> List[str]:
             return [f"{name} is {round(100 * n / len(names))}% of the {what} ({n} of {len(names)}); vary it: {hint}"]
         return []
 
+    # Transitions are not varied for variety's sake any more: their kind follows their purpose (transition_report).
     sfx = [str(e.get("file", "")).lower() for e in plan.get("sfx", []) or [] if e.get("file")]
-    trs = [str(s.get("transition")).lower() for s in plan.get("segments", []) if s.get("transition") and s.get("transition") != "cut"]
-    out = share(sfx, "sound effects", "pop, click, sn_punch_1/2, sn_swish_1, w42_swoosh, w42_transition, kn20228_*")
-    out += share(trs, "transitions", "whip_left/right, slide_up/down, zoom_burst, flash_zoom, split_reveal, warm_flash, dip_to_black")
-    if len(set(trs)) < 3 and len(trs) >= 4:
-        out.append("only %d kind(s) of transition in %d; use at least 3 different ones in a reel of this length" % (len(set(trs)), len(trs)))
+    return share(sfx, "sound effects", "pop, click, sn_punch_1/2, sn_swish_1, w42_swoosh, w42_transition, kn20228_*")
+
+
+# ---------------------------------------------------------------- transitions follow the story, never a clock
+FORMATS_FILE = Path(__file__).resolve().parent.parent / "agent" / "formats.json"
+SPLIT_FAMILY = ("split_h", "split_v", "top_pip", "video_call", "chat_bar")
+
+
+@lru_cache(maxsize=1)
+def load_edit_formats() -> Dict[str, Any]:
+    """agent/formats.json: the formats of the team's Testing Formats sheet and each one's transition pattern."""
+    try:
+        import json
+        return json.loads(FORMATS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {"formats": []}
+
+
+def match_edit_format(text: str) -> Optional[Dict[str, Any]]:
+    """The format named in a 'Format: ...' line: an id written as such wins, then the longest name found in the text."""
+    low = (text or "").lower()
+    fmts = [f for f in load_edit_formats().get("formats", []) if not f.get("generation_only")]   # 3D to 2D: a look, not an edit
+    for f in fmts:
+        if re.search(r"(?<![a-z0-9_])" + re.escape(f["id"]) + r"(?![a-z0-9_])", low):
+            return f
+    def found(n: str) -> bool:
+        return bool(re.search(r"(?<![a-z0-9])" + re.escape(n.lower()) + r"(?![a-z0-9])", low))
+
+    # a family name ("micro narrative") only counts when no sub-format ("stop saying") is named
+    for key in ("names", "fallback_names"):
+        best, best_len = None, 0
+        for f in fmts:
+            for n in f.get(key, []):
+                if len(n) > best_len and found(n):
+                    best, best_len = f, len(n)
+        if best:
+            return best
+    return None
+
+
+def plan_edit_format(work_dir: Optional[Path]) -> Optional[Dict[str, Any]]:
+    """The format the Director named on the first line of script_analysis.md, or None."""
+    if work_dir is None:
+        return None
+    try:
+        for line in (Path(work_dir) / "script_analysis.md").read_text(encoding="utf-8").splitlines():
+            line = line.strip().lstrip("#").strip()
+            if line:
+                return match_edit_format(line) if line.lower().startswith("format") else None
+    except Exception:
+        return None
+    return None
+
+
+def _tr_kind(seg: Dict[str, Any]) -> str:
+    return str(seg.get("transition") or "cut").split("@")[0].strip().lower()
+
+
+def _layout_family(seg: Dict[str, Any]) -> str:
+    lay = str(seg.get("layout") or "single").split(":")[0].strip().lower()
+    return "split" if lay in SPLIT_FAMILY else lay
+
+
+def _shot_similarity(a: Dict[str, Any], b: Dict[str, Any]) -> Optional[float]:
+    """How alike the last frame of cut `a` and the first frame of cut `b` are (correlation of the blurred grey pictures,
+    1 = the same shot). Measured on the W45 videos: same shot 0.74 to 0.99, a new place 0.00 to 0.26. None when unreadable."""
+    try:
+        import numpy as np
+        import cv2
+        from common import resolve
+        from vision_tracker import _read_gray_frame
+        fa = _read_gray_frame(resolve(str(a["src"])), max(0.0, float(a["end"]) - 0.08))
+        fb = _read_gray_frame(resolve(str(b["src"])), float(b["start"]) + 0.08)
+        if fa is None or fb is None:
+            return None
+        ga = cv2.GaussianBlur(cv2.resize(fa, (72, 128), interpolation=cv2.INTER_AREA), (9, 9), 0).astype(np.float32)
+        gb = cv2.GaussianBlur(cv2.resize(fb, (72, 128), interpolation=cv2.INTER_AREA), (9, 9), 0).astype(np.float32)
+        za = (ga - ga.mean()) / (ga.std() + 1e-6)
+        zb = (gb - gb.mean()) / (gb.std() + 1e-6)
+        return float((za * zb).mean())
+    except Exception:
+        return None
+
+
+def transition_report(plan: Dict[str, Any], lines: Optional[List[Dict[str, Any]]] = None, work_dir: Optional[Path] = None,
+                      similarity: Any = None) -> List[str]:
+    """Advice only. A transition marks a change the viewer should feel (a new place or time, entering or leaving a split, a separate
+    call-to-action shot); everywhere else a hard cut is right. Flags transitions on the same shot, inside one line, inside a split,
+    flashes beyond one, kinds the format does not use, and more than the format needs. Editors' feedback W45 (Bruno, Jerin)."""
+    cfg = load_edit_formats()
+    fmt = plan_edit_format(work_dir)
+    flash_kinds = set(cfg.get("flash_kinds") or [])
+    same_cut = float(cfg.get("same_shot_structure", 0.70))
+    sim_fn = similarity or _shot_similarity
+    scene_of = {str(l.get("id")): str(l.get("scene") or "") for l in (lines or [])}
+    segs = [s for s in plan.get("segments", []) if isinstance(s, dict)]
+    out: List[str] = []
+    trans: List[Tuple[str, str]] = []
+    for i in range(1, len(segs)):
+        prev, s = segs[i - 1], segs[i]
+        kind = _tr_kind(s)
+        if kind in ("", "cut"):
+            continue
+        sid = str(s.get("id"))
+        trans.append((sid, kind))
+        fam_a, fam_b = _layout_family(prev), _layout_family(s)
+        if fam_a != fam_b:
+            continue                                      # entering or leaving a split: earned
+        if fam_b == "split":
+            continue                                      # inside a split: verify blocks it already
+        la, lb = _line_id_of(str(prev.get("id"))), _line_id_of(sid)
+        if la and la == lb:
+            out.append(f"{sid}: {kind} inside line {lb} (a pause cut); a transition there shows the jump: use tr=cut with a 1.08 punch-in")
+            continue
+        sc_a, sc_b = scene_of.get(la, ""), scene_of.get(lb, "")
+        same_src = str(prev.get("src")) == str(s.get("src"))
+        sim = None if same_src else sim_fn(prev, s)
+        same_shot = same_src or (sim is not None and sim >= same_cut)
+        if sc_a and sc_b and sc_a != sc_b and not same_shot:
+            continue                                      # a new scene in a new place: earned
+        if same_shot:
+            how = "the same clip" if same_src else f"the same shot (frames {sim:.2f} alike)"
+            where = f" in {sc_b}" if sc_b and sc_a == sc_b else ""
+            out.append(f"{sid}: {kind} between two cuts of {how}{where}; a transition there shows the jump instead of hiding it: use tr=cut")
+    flashes = [sid for sid, k in trans if k in flash_kinds]
+    if len(flashes) > 1:
+        out.append(f"{len(flashes)} flash transitions ({', '.join(flashes)}): keep at most one, and only where the script asks for a flash")
+    if fmt:
+        kinds = set(fmt.get("kinds") or [])
+        odd = [f"{sid}={k}" for sid, k in trans if kinds and k not in kinds and k not in flash_kinds]
+        if odd:
+            out.append(f"format {fmt['id']} does not use {', '.join(odd)}: see agent/FORMATS.md (" + ", ".join(sorted(kinds)) + ")")
+        cap = fmt.get("max_transitions")
+        if cap is not None and len(trans) > int(cap):
+            out.append(f"{len(trans)} transitions for a {fmt['id']} video; it needs {int(cap)} at most (agent/FORMATS.md): make the rest hard cuts")
     return out
 
 
@@ -1287,8 +1426,7 @@ def style_report(plan: Dict[str, Any], work_dir: Optional[Path] = None) -> List[
 
     rapid, flash, singles, still = [], 0, 0, 0
     prev_rapid = False
-    live_total, live_cuts, live_moving, live_trans = 0.0, 0, 0, 0
-    live_srcs: set = set()
+    live_total, live_cuts, live_moving = 0.0, 0, 0
     for s in segs:
         lay = str(s.get("layout") or "single").lower()
         style = str(s.get("zoom_style") or "")
@@ -1301,14 +1439,10 @@ def style_report(plan: Dict[str, Any], work_dir: Optional[Path] = None) -> List[
             if moves or has_punch_crop:
                 out.append(f"{s.get('id')}: {lay} has a zoom ({z0:.2f}->{z1:.2f}); split screens never zoom, write z=1 (the renderer holds the panel still anyway)")
         if lay == "single":
-            if s.get("src"):
-                live_srcs.add(str(s.get("src")))
             live_total += dur
-            has_tr = bool(s.get("transition")) and str(s.get("transition")) != "cut"
-            live_trans += 1 if has_tr else 0
             if dur >= 1.0:
                 live_cuts += 1
-                live_moving += 1 if (moves or has_punch_crop or has_tr) else 0
+                live_moving += 1 if (moves or has_punch_crop) else 0      # a transition is not movement (W45 feedback)
             if dur >= 1.5:
                 singles += 1
                 still += 0 if moves else 1
@@ -1329,11 +1463,7 @@ def style_report(plan: Dict[str, Any], work_dir: Optional[Path] = None) -> List[
         out.append(f"{len(rapid)} rapid zooms in {live_total:.0f}s of live conversation ({per_min:.1f} a minute; starting limit {MAX_RAPID_PER_MIN}): thin them out so the peaks still stand out")
     if live_total >= 10.0 and live_cuts >= 3:
         if live_moving / live_cuts < AD_MIN_MOVING_SHARE:
-            out.append(f"only {live_moving} of {live_cuts} live cuts move (a zoom or a transition): this is for a Meta ad, so aim for at least {int(AD_MIN_MOVING_SHARE * 100)}% (rapid zoom in on a stressed word, slow push or pull on longer cuts, a zoom out on release)")
-        if live_total >= 25.0 or len(live_srcs) >= 2:
-            want = max(1, int((live_total - 6.5) // AD_SECONDS_PER_TRANSITION))
-            if live_trans < want:
-                out.append(f"{live_trans} transition(s) in {live_total:.0f}s of live conversation: for a Meta ad aim for about {want} (whip_left/whip_right across clip changes, slide_up, zoom_burst on a reveal)")
+            out.append(f"only {live_moving} of {live_cuts} live cuts move (a zoom): this is for a Meta ad, so aim for at least {int(AD_MIN_MOVING_SHARE * 100)}% (rapid zoom in on a stressed word, slow push or pull on longer cuts, a zoom out on release)")
     if singles >= 4 and still / singles < MIN_STILL_SHARE:
         out.append(f"only {still} of {singles} single-speaker cuts stand still (aim for at least {int(MIN_STILL_SHARE * 100)}%): stillness is what gives a zoom its weight")
     sp = plan.get("subs")

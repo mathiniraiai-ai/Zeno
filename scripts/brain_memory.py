@@ -34,11 +34,19 @@ def load_brain_memory(style_name: str = "micronarrative") -> List[Dict[str, Any]
         return []
 
 
+def rule_text_hash(text: Any) -> str:
+    """The identity of a rule: its text, lower-cased with spaces collapsed. The Zeno server computes the same value."""
+    import hashlib
+    norm = " ".join(str(text or "").lower().split())
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
+
+
 def add_brain_memory_rule(
     rule_text: str,
     category: str = "editorial",
     rule_id: str = "",
     style_name: str = "micronarrative",
+    source: str = "remember",
 ) -> Dict[str, Any]:
     """Append or update a persistent editorial rule in `styles/<style>/brain_memory.json`."""
     clean_text = re.sub(r"\s+", " ", str(rule_text or "").strip())
@@ -61,10 +69,13 @@ def add_brain_memory_rule(
         words = re.findall(r"[A-Za-z0-9]+", clean_text.upper())[:4]
         rule_id = "_".join(words) if words else f"RULE_{len(rules) + 1}"
 
+    # source: "remember" = a person recorded it on this PC (sent to the team); "team" = pulled from the team's server.
+    # The rules that ship with Zeno carry no source and are never sent to the server: the release is where they live.
     new_entry = {
         "id": rule_id,
         "category": category,
         "rule": clean_text,
+        "source": source,
     }
     replaced = False
     for idx, existing in enumerate(rules):
@@ -103,8 +114,24 @@ def format_brain_memory_for_brief(style_name: str = "micronarrative", max_chars:
     return out
 
 
+def _save_rules(style_name: str, rules: List[Dict[str, Any]]) -> None:
+    path = _memory_path(style_name)
+    payload: Dict[str, Any] = {"style": style_name, "updated_at": dt.date.today().isoformat(), "rules": rules}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            payload = {**loaded, "updated_at": dt.date.today().isoformat(), "rules": rules}
+    except Exception:
+        pass
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def sync_brain_memory_with_cloud(style_name: str = "micronarrative") -> Dict[str, Any]:
-    """Push local `brain_memory.json` rules to Zeno Cloud (`/v1/learnings/rule`) and pull any new shared team rules."""
+    """Exchange team rules with Zeno Cloud.
+
+    The rules that ship with Zeno live in the release and are never uploaded (uploading them made every old version of a rule
+    come back to every PC after it was corrected). Only rules a person recorded here with `--remember` are sent. Rules the owner
+    retired on the server are removed here, and new team rules are pulled in."""
     import auth_session
     sess = auth_session.load_session()
     token = str(sess.get("token") or "").strip()
@@ -112,50 +139,49 @@ def sync_brain_memory_with_cloud(style_name: str = "micronarrative") -> Dict[str
     if not token or not cloud_url:
         return {"ok": False, "pushed": 0, "pulled": 0, "message": "No active Zeno Cloud session token"}
 
-    local_rules = load_brain_memory(style_name)
-    pushed = 0
-    pulled = 0
+    pushed = pulled = removed = 0
     try:
         import httpx
         headers = {"Authorization": f"Bearer {token}"}
         with httpx.Client(timeout=10.0) as client:
-            for r in local_rules:
-                resp = client.post(
-                    f"{cloud_url}/v1/learnings/rule",
-                    headers=headers,
-                    json={
-                        "rule": r.get("rule", ""),
-                        "category": r.get("category", "editorial"),
-                        "language": r.get("lang", "all"),
-                        "style": style_name,
-                        "source": "sync_learnings",
-                    },
-                )
+            get_resp = client.get(f"{cloud_url}/v1/learnings", headers=headers, params={"limit": 100})
+            if get_resp.status_code != 200:
+                return {"ok": False, "pushed": 0, "pulled": 0, "message": f"Cloud sync warning: HTTP {get_resp.status_code}"}
+            data = get_resp.json() if get_resp.content else {}
+            cloud_rules = (data.get("learned_rules") if isinstance(data, dict) else None) or []
+            retired = {str(h) for h in ((data.get("retired_hashes") if isinstance(data, dict) else None) or [])}
+
+            local_rules = load_brain_memory(style_name)
+            # 1. a rule the owner retired leaves this PC (only rules that came from people; the shipped ones follow the release)
+            kept = [r for r in local_rules
+                    if not (r.get("source") in ("team", "remember") and rule_text_hash(r.get("rule")) in retired)]
+            removed = len(local_rules) - len(kept)
+            if removed:
+                _save_rules(style_name, kept)
+            local_hashes = {rule_text_hash(r.get("rule")) for r in kept}
+
+            # 2. new team rules come in
+            cloud_hashes = set()
+            for cr in cloud_rules:
+                rtxt = str(cr.get("rule_text") or cr.get("rule") or "").strip()
+                h = rule_text_hash(rtxt)
+                cloud_hashes.add(h)
+                if rtxt and h not in local_hashes and h not in retired:
+                    add_brain_memory_rule(rule_text=rtxt, category=str(cr.get("category") or "editorial"),
+                                          rule_id=str(cr.get("rule_id") or ""), style_name=style_name, source="team")
+                    local_hashes.add(h)
+                    pulled += 1
+
+            # 3. what a person recorded on this PC goes to the team (once)
+            for r in kept:
+                if r.get("source") != "remember" or rule_text_hash(r.get("rule")) in cloud_hashes:
+                    continue
+                resp = client.post(f"{cloud_url}/v1/learnings/rule", headers=headers, json={
+                    "rule": r.get("rule", ""), "category": r.get("category", "editorial"), "language": r.get("lang", "all"),
+                    "style": style_name, "source": "cli_remember"})
                 if resp.status_code == 200:
                     pushed += 1
-
-            get_resp = client.get(f"{cloud_url}/v1/learnings", headers=headers, params={"limit": 100})
-            if get_resp.status_code == 200:
-                data = get_resp.json()
-                cloud_rules = data.get("learned_rules") if isinstance(data, dict) else []
-                existing_texts = {str(x.get("rule", "")).strip().lower() for x in local_rules}
-                for cr in cloud_rules or []:
-                    rtxt = str(cr.get("rule_text") or cr.get("rule") or "").strip()
-                    if rtxt and rtxt.lower() not in existing_texts:
-                        add_brain_memory_rule(
-                            rule_text=rtxt,
-                            category=str(cr.get("category") or "editorial"),
-                            rule_id=str(cr.get("rule_id") or ""),
-                            style_name=style_name,
-                        )
-                        existing_texts.add(rtxt.lower())
-                        pulled += 1
-        return {
-            "ok": True,
-            "pushed": pushed,
-            "pulled": pulled,
-            "message": f"Pushed {pushed} rule(s) to Zeno Cloud and pulled {pulled} new team rule(s).",
-        }
+        msg = f"Sent {pushed} rule(s) recorded here, pulled {pulled} new team rule(s)" + (f", removed {removed} retired rule(s)" if removed else "") + "."
+        return {"ok": True, "pushed": pushed, "pulled": pulled, "removed": removed, "message": msg}
     except Exception as exc:
         return {"ok": False, "pushed": pushed, "pulled": pulled, "message": f"Cloud sync warning: {exc}"}
-

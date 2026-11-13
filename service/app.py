@@ -812,6 +812,35 @@ def post_learned_rule(
     return {"ok": True, "rule_id": rule_id, "editor_name": name, "rule": rule_text, "language": lang_code}
 
 
+class RetireRulesBody(BaseModel):
+    ids: List[int] = []
+    retired: bool = True
+
+
+@app.get("/admin/api/learnings")
+def admin_list_learned_rules(authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None)) -> JSONResponse:
+    """Every team rule, retired ones included (admins only)."""
+    _check_admin(authorization, x_admin_password)
+    return JSONResponse({"rules": store().list_learned_rules()}, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/admin/api/learnings/retire")
+def admin_retire_learned_rules(
+    body: RetireRulesBody, authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None),
+    x_zeno_admin: Optional[str] = Header(None),
+) -> Dict[str, Any]:
+    """Hide team rules from every PC, or bring them back with `retired: false`. Nothing is deleted; every copy of the same text goes
+    with it, and a PC that still holds a retired rule cannot push it back."""
+    if x_zeno_admin != "1":
+        raise HTTPException(400, "Missing X-Zeno-Admin header")
+    admin = _check_admin(authorization, x_admin_password)
+    if not body.ids or len(body.ids) > 2000:
+        raise HTTPException(400, "Give 1 to 2000 rule ids")
+    changed = store().retire_learned_rules(body.ids, retired=body.retired)
+    log.info("learned rules %s by %s: ids=%d rows=%d", "retired" if body.retired else "restored", admin.get("email") or admin.get("name"), len(body.ids), changed)
+    return {"ok": True, "changed": changed, "retired": body.retired}
+
+
 # ---------------------------------------------------------------- key signup, Google OAuth & admin pages
 NO_STORE = {"Cache-Control": "no-store"}
 _signup_hits: Dict[str, deque] = defaultdict(deque)

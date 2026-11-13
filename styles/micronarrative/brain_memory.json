@@ -1,31 +1,36 @@
 {
   "style": "micronarrative",
-  "updated_at": "2026-11-11",
+  "updated_at": "2026-11-13",
   "rules": [
     {
-      "id": "SPLIT_ACTIVE_PANEL_ZOOM_AND_SFX",
+      "id": "FORMAT_FIRST",
+      "category": "format",
+      "rule": "Name the format first (agent/FORMATS.md: the team's 8 formats and sub-formats) on line 1 of script_analysis.md; each format has its own layouts, zoom and transition pattern."
+    },
+    {
+      "id": "SPLIT_SCREENS_NEVER_ZOOM",
       "category": "split_screen",
-      "rule": "In split_h, split_v & baked splits, zoom active speaker (1->1.06/1.07, sudden_in:1.08, max 1.12) while the silent listener panel and divider seam stay locked at 1.0, paired with clean beat SFX (pop.wav at -3 dB, whoosh.wav/sn_swish_1.wav at -3 to -2 dB on key shifts)."
+      "rule": "Split screens never zoom: split_h, split_v and baked splits are always z=1 (no push-in, punch-in, step zoom or pull-out); each panel holds one fixed frame. Emphasis in a split comes from the cut, the words, the marks and clean beat SFX (pop.wav at -3 dB on a key word)."
+    },
+    {
+      "id": "TRANSITIONS_FOLLOW_THE_STORY",
+      "category": "transitions",
+      "rule": "Transitions follow the story, never a clock (W45 editor feedback): one at a new place or time, into or out of a split, or into a separate call-to-action shot; hard cuts everywhere else, never between two cuts of the same shot, inside one line or inside a split. Kind by purpose: whip_left/whip_right/slide_up for a new place, split_reveal@0.40 for a split, dip_to_black for a time jump, dissolve for a flashback; warm_flash/dip_to_white/flash_zoom only when the script asks, once at most. Per-format patterns: agent/FORMATS.md."
+    },
+    {
+      "id": "DEFAULT_AUTO_CAPTIONS",
+      "category": "subtitles",
+      "rule": "Captions: #subs auto y=68 by default, one style, one fixed size, a single row; in a top/bottom split they sit on the divider (y=50) so no face is covered. #subs off ONLY if the user explicitly asks."
     },
     {
       "id": "SNAPPY_PACING_AND_PAUSE_CUTS",
       "category": "cutting",
-      "rule": "Cut >0.25s pauses in monologues & >5s split turns (L4a/L4b masked w/ z=1.08 punch-in); keep dialogue joins 0.06-0.15s, breath pad 0.02-0.05s max (never double-pad facts.md), and wrong/right mark tails 0.35-0.42s (0.48s 2-pulse flash)."
+      "rule": "Cut >0.25s pauses in full-frame monologues (L4a/L4b masked w/ z=1.08 punch-in); in a split cut only pauses >=0.5s (no zoom hides the cut). Keep dialogue joins 0.06-0.15s, breath pad 0.02-0.05s max (never double-pad facts.md), and wrong/right mark tails 0.35-0.42s (0.48s 2-pulse flash)."
     },
     {
       "id": "ZERO_UNSCRIPTED_REPEATS_STUMBLES",
       "category": "cutting",
       "rule": "Check ! REPEAT / STUMBLE in facts.md: trim every false start, stutter & cross-cut repeat inside cuts and across adjacent cut joins (split mid-sentence stumbles into L5a+L5b masked with z=1.08 punch-in)."
-    },
-    {
-      "id": "DEFAULT_AUTO_CAPTIONS_Y72",
-      "category": "subtitles",
-      "rule": "Include #subs auto y=72 by default in plan.edl (auto y=50 on split_v seam; #subs off ONLY if explicitly requested by the user) for Premiere-grade animated word-pop karaoke captions."
-    },
-    {
-      "id": "SMOOTH_TRANSITIONS_EVERY_7_TO_9S",
-      "category": "transitions",
-      "rule": "Place smooth transitions every 7-9s (4-6 in a 35-45s reel) at scene shifts, split entry/exit & topic turns: split_reveal@0.40 (opposing panel slide-in/out), warm_flash@0.38, whip_left@0.34, whip_right@0.34, slide_up@0.36, zoom_burst@0.36, flash_zoom@0.36; keep rapid intra-split swaps tr=cut."
     },
     {
       "id": "CALIBRATED_POST_LOUDNORM_SFX",
@@ -40,12 +45,12 @@
     {
       "id": "SUPERNOVA_AND_KEYPOINT_ZOOM_IN",
       "category": "zoom",
-      "rule": "In both full-frame live shots (single, safe two-shots <=1.10) and active split panels (split_h/split_v <=1.12), trigger sudden_in:1.08@<word_t> on Supernova callouts or [STRESS] emphasis words, releasing with sudden_out:1.08 or smooth 1.0->1.06."
+      "rule": "In full-frame live shots only (single, safe two-shots <=1.10), trigger sudden_in:1.08@<word_t> on Supernova callouts or [STRESS] emphasis words, releasing with sudden_out:1.08 or smooth 1.0->1.06. Never in a split."
     },
     {
       "id": "SPLIT_SCREEN_COMMON_HEADROOM",
       "category": "split_screen",
-      "rule": "In split_h (Left/Right) and split_v (Top/Bottom), both characters MUST share matched baseline headroom (14%-20% head-crown gap) and baseline face scale, alternating the active zoomed speaker and the steady 1.0 silent listener."
+      "rule": "In split_h (Left/Right) and split_v (Top/Bottom), both characters share matched headroom (14%) and face scale, and a character's speaking and silent clips are held in the same fixed frame (z=1), so switching between them never jumps."
     },
     {
       "id": "ACTOR_READINESS_ANTI_FREEZE",
@@ -70,7 +75,7 @@
     {
       "id": "HOLOGRAM_AND_EDGE_TWOSHOT_ZOOM_GUARD",
       "category": "zoom",
-      "rule": "Lock zoom=1.0 ONLY on 3D hologram shots, deliberate camera pans/dollies, and shared single-camera two-shots whose faces sit near frame edges ('none' in facts.md); safe live two-shots zoom up to 1.10 (focus=x,y) and split_h/split_v active panels zoom up to 1.12."
+      "rule": "Lock zoom=1.0 on every split, on 3D hologram shots, on deliberate camera pans/dollies, and on shared single-camera two-shots whose faces sit near frame edges ('none' in facts.md); safe live two-shots zoom up to 1.10 (focus=x,y)."
     },
     {
       "id": "MULTI_SPEAKER_SINGLE_CLIP_TURN_PRESERVATION",

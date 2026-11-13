@@ -177,6 +177,33 @@ check("POST /v1/learnings/rule stores shared rule", r_rule.status_code == 200 an
 r_lrn = client.get("/v1/learnings", headers={"Authorization": f"Bearer {g_key}"})
 check("GET /v1/learnings returns learned_rules & language_patterns", r_lrn.status_code == 200 and len(r_lrn.json().get("learned_rules") or []) >= 1)
 
+# Team rules: one row per text, and a retired rule stays retired (a PC with an old copy cannot bring it back)
+ADMIN_H = {**basic("admin-pw"), "X-Zeno-Admin": "1"}
+H_g = {"Authorization": f"Bearer {g_key}"}
+n_before = len(client.get("/v1/learnings", headers=H_g).json()["learned_rules"])
+dup_text = "Never put a transition between two cuts of the same shot."
+r_a = client.post("/v1/learnings/rule", headers=H_g, json={"rule": dup_text, "category": "transitions", "language": "all"})
+r_b = client.post("/v1/learnings/rule", headers=H_g, json={"rule": "  never put a transition   between two cuts of the same shot. ", "category": "cutting", "language": "auto"})
+lrn = client.get("/v1/learnings", headers=H_g).json()
+check("the same rule text is stored once, whatever category or language it arrives with",
+      r_a.status_code == 200 and r_b.status_code == 200 and len(lrn["learned_rules"]) == n_before + 1 and r_a.json()["rule_id"] == r_b.json()["rule_id"])
+check("GET /v1/learnings carries the retired list (empty so far)", lrn.get("retired_hashes") == [])
+check("the admin rule list needs an admin", client.get("/admin/api/learnings", headers={"Authorization": "Bearer zeno_notakey"}).status_code in (401, 403))
+adm = client.get("/admin/api/learnings", headers=ADMIN_H)
+rid = next(r["id"] for r in adm.json()["rules"] if r["rule_text"] == dup_text)
+check("retiring needs the admin header", client.post("/admin/api/learnings/retire", headers=basic("admin-pw"), json={"ids": [rid]}).status_code == 400)
+ret = client.post("/admin/api/learnings/retire", headers=ADMIN_H, json={"ids": [rid]})
+lrn2 = client.get("/v1/learnings", headers=H_g).json()
+check("a retired rule is hidden from every PC and listed by its hash",
+      ret.status_code == 200 and ret.json()["changed"] == 1 and all(r["rule_text"] != dup_text for r in lrn2["learned_rules"]) and len(lrn2["retired_hashes"]) == 1)
+r_c = client.post("/v1/learnings/rule", headers=H_g, json={"rule": dup_text.upper(), "category": "x", "language": "te", "source": "sync_learnings"})
+check("a PC that still holds a retired rule cannot push it back",
+      r_c.status_code == 200 and len(client.get("/v1/learnings", headers=H_g).json()["learned_rules"]) == n_before)
+check("retired rules stay in the database (nothing is deleted)", any(r["id"] == rid and r["retired"] for r in client.get("/admin/api/learnings", headers=ADMIN_H).json()["rules"]))
+back = client.post("/admin/api/learnings/retire", headers=ADMIN_H, json={"ids": [rid], "retired": False})
+check("a retired rule can be brought back", back.status_code == 200 and len(client.get("/v1/learnings", headers=H_g).json()["learned_rules"]) == n_before + 1)
+
+
 # Pre-job self-test: a small WAV plus a Gemini ping; needs a valid key
 import io as _io, wave as _wave  # noqa: E402
 

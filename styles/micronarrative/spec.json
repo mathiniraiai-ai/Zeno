@@ -140,7 +140,7 @@
  },
  "zoom": {
   "digital_zoom": "none measured in raw reference",
-  "owner_addition": "Active-panel split engagement & full-frame Meta-ad zooms: active speaking panels in split_h/split_v & baked splits zoom (1.0->1.06/1.07 on turns >=2.5s, sudden_in:1.08@<beat>, 1.08 pause-cut step, max 1.12) while silent listeners stay locked at 1.0; paired with smooth eased transitions every 7-9s and calibrated -4 to 0 dB post-loudnorm SFX. See agent/EDIT_RULES.md",
+  "owner_addition": "Active-panel split engagement & full-frame Meta-ad zooms: full-frame cuts zoom (1.0->1.06/1.07 on turns >=2.5s, sudden_in:1.08@<beat>, 1.08 pause-cut step); split screens never zoom; transitions only where the story changes place, layout or section (agent/FORMATS.md); and calibrated -4 to 0 dB post-loudnorm SFX. See agent/EDIT_RULES.md",
   "note": "face width stays within 4% inside shots 2, 3, 7 and 8; shots 4-6 changed 4-13%, most likely subject motion inside the AI clip."
  },
  "transition_between_scenes": {
@@ -254,8 +254,7 @@
   "wrong_sfx_gain_db": 1.0,
   "right_sfx_gain_db": 0.5,
   "whoosh_sfx_gain_db": -2.0,
-  "transition_cadence_sec": 8.0,
-  "max_hook_transitions": 6,
+    "max_hook_transitions": 6,
   "default_subs_style": "auto",
   "default_subs_y": 72,
   "split_v_subs_y": 50,

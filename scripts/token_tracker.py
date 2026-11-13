@@ -607,7 +607,8 @@ def finalize_job_telemetry(
 
     try:
         import brain_memory
-        learned_rules = brain_memory.load_brain_memory("micronarrative")
+        # only what a person recorded on this PC: the rules that ship with Zeno are not "learned" and must not be re-uploaded
+        learned_rules = [r for r in brain_memory.load_brain_memory("micronarrative") if r.get("source") == "remember"]
     except Exception:
         learned_rules = []
 

@@ -24,6 +24,12 @@ def hash_key(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 
+def rule_text_hash(text: Any) -> str:
+    """The identity of a team rule: its text, lower-cased with spaces collapsed. The Zeno client computes the same value."""
+    norm = " ".join(str(text or "").lower().split())
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
+
+
 class KeyStore:
     def __init__(self, database_url: Optional[str] = None, sqlite_path: Optional[str] = None):
         self.url = database_url or ""
@@ -147,6 +153,21 @@ class KeyStore:
             lang TEXT DEFAULT 'all',
             author_email TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+        # A rule's text is its identity (text_hash), so the same rule cannot be stored twice under different ids; a retired rule
+        # (retired_at) is hidden from every PC and cannot be pushed back by a PC that still holds an old copy.
+        for col, col_def in (("text_hash", "TEXT"), ("retired_at", real), ("source", "TEXT DEFAULT ''")):
+            try:
+                if self.postgres:
+                    self._run(f"ALTER TABLE zeno_learned_rules ADD COLUMN IF NOT EXISTS {col} {col_def}")
+                else:
+                    self._run(f"ALTER TABLE zeno_learned_rules ADD COLUMN {col} {col_def}")
+            except Exception:
+                pass
+        try:
+            for rid, text in self._run("SELECT id, rule_text FROM zeno_learned_rules WHERE text_hash IS NULL", (), "all") or []:
+                self._run("UPDATE zeno_learned_rules SET text_hash = %s WHERE id = %s", (rule_text_hash(text), rid))
+        except Exception:
+            pass
 
         # Tables added later live in their own step: if one cannot be created (for example on a database that rejects the
         # statement) the service still starts, signs people in and transcribes; only that feature reports an error.
@@ -475,18 +496,30 @@ class KeyStore:
             digest = hashlib.sha256(f"{category}:{lang}:{rule_text.lower()}".encode("utf-8")).hexdigest()[:16]
             rule_id = f"rule_{digest}"
 
+        thash = rule_text_hash(rule_text)
+        source = str(rule_dict.get("source") or "").strip()[:40]
+        same = self._run("SELECT id, rule_id, retired_at FROM zeno_learned_rules WHERE text_hash = %s ORDER BY id", (thash,), "all") or []
+        if any(r[2] is not None for r in same):
+            # Retired by the owner: a PC that still holds an old copy cannot bring it back.
+            return {"id": 0, "rule_id": "", "category": category, "rule_text": rule_text, "rule": rule_text, "lang": lang,
+                    "author_email": author, "retired": True}
+        if same:
+            # Already stored: the same text is one rule, whatever id, language tag or category it arrives with.
+            return {"id": int(same[0][0]), "rule_id": str(same[0][1] or ""), "category": category, "rule_text": rule_text,
+                    "rule": rule_text, "lang": lang, "author_email": author, "duplicate": True}
         self._run(
-            """INSERT INTO zeno_learned_rules (rule_id, category, rule_text, lang, author_email)
-               VALUES (%s, %s, %s, %s, %s)
+            """INSERT INTO zeno_learned_rules (rule_id, category, rule_text, lang, author_email, text_hash, source)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (rule_id) DO UPDATE SET
                    category = EXCLUDED.category,
                    rule_text = EXCLUDED.rule_text,
                    lang = EXCLUDED.lang,
+                   text_hash = EXCLUDED.text_hash,
                    author_email = CASE
                        WHEN EXCLUDED.author_email != '' THEN EXCLUDED.author_email
                        ELSE zeno_learned_rules.author_email
                    END""",
-            (rule_id, category, rule_text, lang, author),
+            (rule_id, category, rule_text, lang, author, thash, source),
         )
         row = self._run("SELECT id FROM zeno_learned_rules WHERE rule_id = %s", (rule_id,), "one")
         db_id = int(row[0]) if row else 0
@@ -518,10 +551,44 @@ class KeyStore:
                 "category": category,
                 "lang": language,
                 "author_email": email or editor_name,
+                "source": source,
             },
             author_email=email or editor_name,
         )
         return int(res.get("id") or 0)
+
+    def list_learned_rules(self) -> List[Dict[str, Any]]:
+        """Every team rule, retired ones included (admins)."""
+        rows = self._run(
+            "SELECT id, rule_id, category, rule_text, lang, author_email, created_at, text_hash, retired_at, source "
+            "FROM zeno_learned_rules ORDER BY id DESC", (), "all") or []
+        cols = ("id", "rule_id", "category", "rule_text", "lang", "author_email", "created_at", "text_hash", "retired_at", "source")
+        out = []
+        for r in rows:
+            d = dict(zip(cols, r))
+            ts = d.get("created_at")
+            d["created_at"] = ts.isoformat() if hasattr(ts, "isoformat") else str(ts or "")
+            d["retired"] = d.get("retired_at") is not None
+            out.append(d)
+        return out
+
+    def retire_learned_rules(self, ids: List[int], retired: bool = True) -> int:
+        """Hide rules from every PC (or bring them back). Nothing is deleted. Every stored copy of the same text goes with it, so a
+        duplicate cannot keep the rule alive. Returns how many rows changed."""
+        hashes = set()
+        for i in ids:
+            row = self._run("SELECT text_hash FROM zeno_learned_rules WHERE id = %s", (int(i),), "one")
+            if row and row[0]:
+                hashes.add(str(row[0]))
+        changed = 0
+        for h in hashes:
+            n = self._run("SELECT COUNT(*) FROM zeno_learned_rules WHERE text_hash = %s AND retired_at IS " + ("NULL" if retired else "NOT NULL"), (h,), "one")
+            changed += int(n[0]) if n else 0
+            if retired:
+                self._run("UPDATE zeno_learned_rules SET retired_at = %s WHERE text_hash = %s AND retired_at IS NULL", (time.time(), h))
+            else:
+                self._run("UPDATE zeno_learned_rules SET retired_at = NULL WHERE text_hash = %s", (h,))
+        return changed
 
     def get_learnings(
         self,
@@ -535,7 +602,7 @@ class KeyStore:
             rows = self._run(
                 """SELECT id, rule_id, category, rule_text, lang, author_email, created_at
                    FROM zeno_learned_rules
-                   WHERE LOWER(lang) IN ('all', %s)
+                   WHERE retired_at IS NULL AND LOWER(lang) IN ('all', %s)
                    ORDER BY id DESC LIMIT %s""",
                 (norm_lang, lim),
                 "all",
@@ -544,14 +611,23 @@ class KeyStore:
             rows = self._run(
                 """SELECT id, rule_id, category, rule_text, lang, author_email, created_at
                    FROM zeno_learned_rules
+                   WHERE retired_at IS NULL
                    ORDER BY id DESC LIMIT %s""",
                 (lim,),
                 "all",
             )
         cols = ("id", "rule_id", "category", "rule_text", "lang", "author_email", "created_at")
+        retired_hashes = sorted({str(r[0]) for r in (self._run(
+            "SELECT text_hash FROM zeno_learned_rules WHERE retired_at IS NOT NULL AND text_hash IS NOT NULL", (), "all") or [])})
+        retired_set = set(retired_hashes)
         learned_rules: List[Dict[str, Any]] = []
+        seen_text: set = set()
         for r in rows or []:
             item = dict(zip(cols, r))
+            thash = rule_text_hash(item.get("rule_text"))
+            if thash in retired_set or thash in seen_text:      # retired rules are hidden; one row per text
+                continue
+            seen_text.add(thash)
             ts = item.get("created_at")
             item["created_at"] = ts.isoformat() if hasattr(ts, "isoformat") else str(ts or "")
             item["rule"] = item.get("rule_text", "")
@@ -599,6 +675,7 @@ class KeyStore:
 
         return {
             "learned_rules": learned_rules,
+            "retired_hashes": retired_hashes,
             "edl_diffs": edl_diffs,
             "language_patterns": language_patterns,
             "assets_used": assets_used_counts,

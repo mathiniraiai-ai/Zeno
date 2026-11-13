@@ -9,14 +9,14 @@
   "bottom screen",
   "one above the other"
  ],
- "description": "Two panels stacked top and bottom with a stationary divider. Active speaker panel zooms (1.0->1.06/1.07, sudden_in:1.08, max 1.08) + beat SFX while listener stays locked at 1.0.",
- "when": "an AI teacher and a learner in a snappy lesson (0.06-0.15s joins, 0.35-0.42s mark tails, subs y=50 seam)",
+ "description": "Two panels stacked top and bottom with a stationary divider. Both panels stay completely still (z=1, one fixed frame each): the speaker talks, the other panel shows the silent listener; beat SFX and marks carry the emphasis.",
+ "when": "an AI teacher and a learner in a snappy lesson (0.06-0.15s joins, 0.35-0.42s mark tails, captions on the divider y=50)",
  "geometry": {
   "canvas": "1080x1920",
   "panel": "1080x960",
-  "active_zoom": "1.0->1.06/1.07 or sudden_in:1.08 (max 1.08); listener locked at 1.0",
   "subs_y": 50,
-  "headroom_pct": 25.8
+  "headroom_pct": 25.8,
+  "zoom": "none: every split segment is z=1"
  },
  "confidence": "measured",
  "source": "measured from Reel - W43 - Hindi - AI Only - Micro Narrative - Grandma in Cotton Field - Replication from Telugu - 121s - Prashanth - Hitesh.mp4 (36.0-120.0 s, 24 frames) on 2026-11-04",

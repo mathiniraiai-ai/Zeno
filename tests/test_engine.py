@@ -1697,7 +1697,11 @@ class TestAdTempoAndCoverage(unittest.TestCase):
     def test_flat_live_conversation_gets_advice_for_meta_ads(self):
         out = script_order.style_report(self._segs(10, moving=False))
         self.assertTrue(any("Meta ad" in x and "move" in x for x in out))
-        self.assertTrue(any("transition" in x for x in out))
+        self.assertFalse(any("transition" in x for x in out), out)     # no transition quota any more (W45 feedback)
+
+    def test_transitions_do_not_count_as_movement(self):
+        out = script_order.style_report(self._segs(10, moving=False, transition_every=1))
+        self.assertTrue(any("Meta ad" in x and "move" in x for x in out), out)
 
     def test_lively_live_conversation_gets_no_tempo_advice(self):
         out = script_order.style_report(self._segs(10, moving=True, transition_every=3))
@@ -1739,6 +1743,144 @@ class TestSafeZoomFocus(unittest.TestCase):
             self.assertGreaterEqual(lo + 1 / 1.08, 0.95 - 0.01)
         self.assertIsNone(prepare.safe_zoom_focus([(0.00, 0.30), (0.70, 1.00)], 1.08))   # faces at both edges: no safe zoom
         self.assertIsNone(prepare.safe_zoom_focus([], 1.08))
+
+
+class TestTransitionsFollowTheStory(unittest.TestCase):
+    """W45 editor feedback (Bruno, Jerin): transitions between two cuts of the same shot read as tacky. A transition marks a new
+    place, a split entry or exit, or a separate call-to-action shot; agent/FORMATS.md gives each format its own pattern."""
+
+    def setUp(self):
+        global script_order, json
+        import json, script_order
+
+    @staticmethod
+    def _plan(trs, scenes, srcs=None, layouts=None, ids=None):
+        n = len(trs)
+        segs = [{"id": (ids or [f"L{i + 1}" for i in range(n)])[i], "src": (srcs or [f"S{i + 1}.mp4" for i in range(n)])[i],
+                 "start": 0.0, "end": 6.0, "layout": (layouts or ["single"] * n)[i], "transition": trs[i]} for i in range(n)]
+        lines = [{"id": f"L{i + 1}", "scene": scenes[i]} for i in range(n)]
+        return {"segments": segs}, lines
+
+    def test_flashcard_drill_on_one_shot_flags_every_transition(self):
+        plan, lines = self._plan(["cut", "slide_up", "whip_left", "zoom_burst", "dip_to_white", "warm_flash"], ["Scene 1"] * 6)
+        out = script_order.transition_report(plan, lines, None, similarity=lambda a, b: 0.92)
+        self.assertEqual(sum("same shot" in x for x in out), 5, out)
+        self.assertTrue(any("flash transitions" in x for x in out), out)
+
+    def test_a_new_place_at_a_new_scene_is_earned(self):
+        plan, lines = self._plan(["cut", "whip_left", "whip_right", "slide_up", "whip_left"], [f"Scene {i}" for i in range(1, 6)])
+        self.assertEqual(script_order.transition_report(plan, lines, None, similarity=lambda a, b: 0.10), [])
+
+    def test_same_clip_and_inside_a_line_are_flagged_without_reading_frames(self):
+        plan, lines = self._plan(["cut", "whip_left"], ["Scene 1", "Scene 1"], srcs=["A.mp4", "A.mp4"])
+        out = script_order.transition_report(plan, lines, None, similarity=lambda a, b: self.fail("no frame read for one clip"))
+        self.assertTrue(any("same clip" in x for x in out), out)
+        plan, _ = self._plan(["cut", "slide_up"], ["Scene 1", "Scene 1"], ids=["L1a", "L1b"])
+        out = script_order.transition_report(plan, lines, None, similarity=lambda a, b: 0.1)
+        self.assertTrue(any("inside line L1" in x for x in out), out)
+
+    def test_entering_a_split_is_earned(self):
+        plan, lines = self._plan(["cut", "split_reveal"], ["Scene 1", "Scene 1"], layouts=["single", "split_h"])
+        self.assertEqual(script_order.transition_report(plan, lines, None, similarity=lambda a, b: 0.95), [])
+
+    def test_the_format_line_sets_the_cap_and_the_kinds(self):
+        import tempfile
+        wd = Path(tempfile.mkdtemp())
+        (wd / "script_analysis.md").write_text("Format: translate_drill (How would you translate)\nL1 ...\n", encoding="utf-8")
+        plan, lines = self._plan(["cut", "whip_left", "dissolve"], ["Scene 1", "Scene 2", "Scene 3"])
+        out = script_order.transition_report(plan, lines, wd, similarity=lambda a, b: 0.1)
+        self.assertTrue(any("translate_drill does not use" in x and "dissolve" in x for x in out), out)
+        self.assertTrue(any("needs 1 at most" in x for x in out), out)
+
+    def test_format_names_match_the_sheet_wording(self):
+        m = script_order.match_edit_format
+        self.assertEqual(m("Format: How would you translate - flashcard drill")["id"], "translate_drill")
+        self.assertEqual(m("Format: live grammar correction")["id"], "live_conversation")
+        self.assertEqual(m("Format: skit (3D to 2D)")["id"], "skit")          # 3D to 2D is a generation format only
+        self.assertEqual(m("Format: Stop saying micro narrative")["id"], "stop_saying")
+        self.assertIsNone(m("Format: none"))
+
+    def test_every_format_in_the_json_is_documented(self):
+        root = Path(script_order.__file__).resolve().parent.parent
+        doc = (root / "agent" / "FORMATS.md").read_text(encoding="utf-8")
+        cfg = json.loads((root / "agent" / "formats.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(cfg["families"]), 8)
+        for f in cfg["formats"]:
+            self.assertIn(f"`{f['id']}`", doc)
+
+    def test_variety_advice_no_longer_asks_for_more_kinds_of_transition(self):
+        plan = {"segments": [{"id": f"L{i}", "transition": "whip_left"} for i in range(6)], "sfx": []}
+        self.assertEqual(script_order.variety_report(plan), [])
+
+
+class TestTeamRuleSync(unittest.TestCase):
+    """The rules that ship with Zeno are never uploaded (old versions of a corrected rule used to come back to every PC);
+    only rules a person recorded are sent, and a rule the owner retired on the server leaves the PC."""
+
+    def _sync(self, local_rules, cloud):
+        import json as _json, tempfile
+        from unittest.mock import patch
+        import brain_memory
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "micronarrative").mkdir()
+        (tmp / "micronarrative" / "brain_memory.json").write_text(_json.dumps({"style": "micronarrative", "rules": local_rules}), encoding="utf-8")
+        posted = []
+
+        class _Resp:
+            def __init__(self, data): self.status_code, self._d, self.content = 200, data, b"x"
+            def json(self): return self._d
+
+        class _Client:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def get(self, url, **k): return _Resp(cloud)
+            def post(self, url, json=None, **k):
+                posted.append(json); return _Resp({"ok": True})
+
+        import auth_session, httpx
+        with patch.object(brain_memory, "STYLES_DIR", tmp), patch.object(httpx, "Client", _Client), \
+                patch.object(auth_session, "load_session", return_value={"token": "zeno_x", "cloud_url": "https://example.invalid"}):
+            res = brain_memory.sync_brain_memory_with_cloud("micronarrative")
+            rules = brain_memory.load_brain_memory("micronarrative")
+        return res, rules, posted
+
+    def test_shipped_rules_are_never_uploaded_and_recorded_ones_are(self):
+        local = [{"id": "SHIPPED", "category": "zoom", "rule": "Split screens never zoom."},
+                 {"id": "MINE", "category": "cutting", "rule": "Keep the laugh after the punchline.", "source": "remember"}]
+        res, rules, posted = self._sync(local, {"learned_rules": [], "retired_hashes": []})
+        self.assertTrue(res["ok"], res)
+        self.assertEqual([p["rule"] for p in posted], ["Keep the laugh after the punchline."])
+
+    def test_a_retired_rule_leaves_the_pc_and_is_not_pulled_back(self):
+        import brain_memory
+        old = "Place smooth transitions every 7-9s."
+        local = [{"id": "SHIPPED", "category": "zoom", "rule": "Split screens never zoom."},
+                 {"id": "OLD", "category": "transitions", "rule": old, "source": "team"}]
+        cloud = {"learned_rules": [{"rule_id": "r1", "category": "cutting", "rule_text": "A new team rule."},
+                                   {"rule_id": "r2", "category": "transitions", "rule_text": old.upper()}],
+                 "retired_hashes": [brain_memory.rule_text_hash(old)]}
+        res, rules, posted = self._sync(local, cloud)
+        texts = [r["rule"] for r in rules]
+        self.assertNotIn(old, texts)
+        self.assertIn("A new team rule.", texts)
+        self.assertIn("Split screens never zoom.", texts)
+        self.assertEqual(posted, [])
+        self.assertEqual((res["pulled"], res["removed"]), (1, 1))
+
+    def test_client_and_server_agree_on_a_rules_identity(self):
+        import brain_memory
+        sys.path.insert(0, str(ROOT / "service"))
+        import keystore
+        for text in ("Split  screens NEVER zoom. ", "ಕನ್ನಡ rule  text", ""):
+            self.assertEqual(brain_memory.rule_text_hash(text), keystore.rule_text_hash(text))
+
+    def test_the_shipped_rules_no_longer_contradict_the_owner(self):
+        import brain_memory
+        text = " ".join(r["rule"] for r in brain_memory.load_brain_memory("micronarrative"))
+        for stale in ("7-9s", "y=72", "max 1.12", "active panels zoom", "zoom active speaker"):
+            self.assertNotIn(stale, text)
+        self.assertFalse(any(r.get("source") for r in brain_memory.load_brain_memory("micronarrative")), "shipped rules carry no source")
 
 
 class TestHookTransitionLimit(unittest.TestCase):
