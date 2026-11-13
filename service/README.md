@@ -7,6 +7,8 @@ One small web service that turns audio into a verbatim transcript with Gemini. T
 
 Audio is processed in memory and never stored. Limits: 25 MB per upload, 20 requests per person per minute (both adjustable).
 
+**Deploying the server:** from the repo root run `railway up service --path-as-root --detach`. Plain `railway up` (even inside `service/`) uploads the whole repo (about 27 MB), Railway then finds no `app.py` at the top and the build fails with "No start command detected". A good upload is about 60 kB. Pushing to GitHub does not redeploy the server.
+
 ## Deploy on Railway (about 10 minutes, no Docker needed)
 Dashboard labels can change; follow the idea if a name differs. Railway detects Python from `requirements.txt` and starts the app from `Procfile`.
 1. In your existing Railway project, add a **new service from this GitHub repo**.

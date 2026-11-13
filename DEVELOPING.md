@@ -18,7 +18,8 @@ Use `.venv/bin/python` (Python 3.12; `uv venv --python 3.12 .venv && uv pip inst
 python service/test_keys.py                                                     # service: signup/admin/revoke/usage on local SQLite (add --database-url postgresql://... for Postgres)
 python service/test_service.py [--no-live | --url https://<host> --token zeno_...]
 python service/check_prompt_sync.py                                             # must pass after editing either copy of the Gemini prompt
-cd service && uvicorn app:app --port 8000                                       # run the key/transcription service locally
+cd service && uvicorn app:app --port 8000
+railway up service --path-as-root --detach                                     # deploy the server (from the repo root; plain `railway up` uploads the whole repo and fails)                                       # run the key/transcription service locally
 ```
 There is no linter or build step. `tests/test_engine.py` also scores a gold-set plan under `work/` (git-ignored), so that check only runs where the work folder exists.
 
