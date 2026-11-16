@@ -710,7 +710,8 @@ def finish_job_folder(plan_path: pathlib.Path) -> Optional[pathlib.Path]:
 def print_next_step(plan_path: pathlib.Path) -> None:
     rel = plan_path.relative_to(ROOT)
     print("\n[NEXT STEP] Zeno has measured the footage and decided nothing. The Director now:")
-    print(f"  1. reads agent/EDIT_RULES.md, then {plan_path.parent.relative_to(ROOT)}/line_map.md, facts.md and clip_sheet_*.jpg")
+    d = plan_path.parent.relative_to(ROOT)
+    print(f"  1. reads {d}/brief.md, line_map.md, facts.md and clip_sheet_*.jpg in ONE parallel batch (brief.md replaces agent/EDIT_RULES.md)")
     print(f"  2. writes every segment of {rel}")
     print(f"  3. runs: python3 scripts/zeno.py --check-plan {rel}")
     print("  4. asks the user Yes/No once, then runs:")

@@ -3030,5 +3030,69 @@ class TestIndicCaptionBreaks(unittest.TestCase):
         self.assertEqual(" ".join(self._cards(txt)).split(), txt.split())
 
 
+
+class TestTokenDiet(unittest.TestCase):
+    """A script that lists its dialogue twice, with bullets and set-up notes, gives each spoken line once (W46 Kannada)."""
+
+    SCRIPT = "\n".join([
+        "First Frames (3 images)",
+        "Visual Change : Split screen + scrolling text format.",
+        "Characters",
+        "* Arun : Man, on a phone call. Top half, left side.",
+        "* Kavya : Woman, on a phone call. Top half, right side.",
+        "",
+        "Set up :",
+        "1. The video is a horizontal split screen.",
+        "2. The bottom half is scrolling text.",
+        "Scrolling text (all the dialogues, each word highlighted as it is spoken)",
+        "* Hello?",
+        "* Hello, Arun. How are you?",
+        "* I am fine. Are you free today?",
+        "* Yes, I am free.",
+        "Dialogue scripts",
+        "Arun: \u201cHello?\u201d",
+        "Kavya: \u201cHello, Arun. How are you?\u201d",
+        "Arun: \u201cI am fine. Are you free today?\u201d",
+        "Kavya: \u201cYes, I am free.\u201d",
+    ])
+
+    def test_duplicate_dialogue_and_notes_are_dropped(self):
+        import prepare
+
+        meta, lines = prepare._parse_script_raw(self.SCRIPT, "t")
+        self.assertEqual([l["id"] for l in lines], ["L1", "L2", "L3", "L4"])
+        self.assertEqual([l["speaker"] for l in lines], ["Arun", "Kavya", "Arun", "Kavya"])
+        self.assertEqual(len(meta.get("setup", [])), 2)
+        self.assertIn("Set up:", meta["concept_brief"])
+
+    def test_one_repeated_phrase_is_kept(self):
+        import prepare
+
+        _, lines = prepare._parse_script_raw("A: Hello?\nB: Hi.\nA: Hello?\nB: Bye.", "t")
+        self.assertEqual(len(lines), 4)
+
+    def test_brief_keeps_only_this_formats_rules(self):
+        import edit_brief
+
+        page = edit_brief.build({"concept_brief": "x"}, {"page": {"mode": "scroll"}})
+        full = edit_brief.build({"concept_brief": "x"}, {"subs": {"style": "auto", "y": 68}})
+        self.assertIn("## Scrolling-text page", page)
+        self.assertNotIn("## Zoom", page)
+        self.assertIn("## Zoom", full)
+        self.assertNotIn("## Scrolling-text page", full)
+        self.assertIn("mark pack", full.lower())   # agent/REFERENCE.md travels with every non-page brief
+        self.assertLess(len(page), len(full))
+
+    def test_page_joins_a_lone_full_stop_to_its_word(self):
+        import scroll_page
+
+        cfg = {"wrong_phrases": [], "right_phrases": [], "wrong": "#f00", "right": "#0f0"}
+        cues = [{"segIndex": 0, "words": [{"text": "ಸಿಗೋಣ", "startTime": 1.0, "endTime": 1.4},
+                                          {"text": ".", "startTime": 1.4, "endTime": 1.5}]}]
+        paras = scroll_page.build_paragraphs(cues, [{"id": "L9", "speaker": "Arun"}], cfg)
+        self.assertEqual([w["text"] for w in paras[0]["words"]], ["ಸಿಗೋಣ."])
+        self.assertEqual(paras[0]["words"][0]["end"], 1.5)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

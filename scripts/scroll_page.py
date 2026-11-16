@@ -100,7 +100,14 @@ def build_paragraphs(
             paras.append({"words": [], "speaker": seg.get("speaker") or ""})
             last_key = key
         for w in cue.get("words") or []:
-            paras[-1]["words"].append({"text": str(w["text"]), "start": float(w["startTime"]), "end": float(w["endTime"])})
+            text = str(w["text"]).strip()
+            if not text:
+                continue
+            if not any(ch.isalnum() for ch in text) and paras[-1]["words"]:   # a transcript "." / "," joins the word before it
+                prev = paras[-1]["words"][-1]
+                prev["text"], prev["end"] = prev["text"].rstrip() + text, max(prev["end"], float(w["endTime"]))
+                continue
+            paras[-1]["words"].append({"text": text, "start": float(w["startTime"]), "end": float(w["endTime"])})
 
     def _mark(phrases: Sequence[str], colour: str) -> None:
         for phrase in phrases:

@@ -281,7 +281,12 @@ def find_rms_minimum(
 
 # --- Script cues that are directions or on-screen text, not spoken dialogue ---------------------------------------
 _URL_ONLY_RE = re.compile(r"^https?://\S+$", re.I)
-_META_LINE_RE = re.compile(r"^(?:visuals?|reference(?:\s+link)?|ref\s+link|concept)\s*:", re.I)
+_META_LINE_RE = re.compile(r"^(?:visuals?(?:\s+changes?)?|reference(?:\s+link)?|ref\s+link|concept)\s*:", re.I)
+# Production notes that are never spoken: "First Frames (3 images)", "Dialogue scripts", "Scrolling text (all the dialogues ...)"
+_PRODUCTION_NOTE_RE = re.compile(r"^(?:first\s+frames?\b.*|dialogue\s+scripts?\s*:?|scrolling\s+text\s*(?:\([^)]*\))?\s*:?)\s*$", re.I)
+_SETUP_HEAD_RE = re.compile(r"^(?:set\s*-?\s*up|production\s+notes?)\s*:?\s*$", re.I)   # "Set up :" then numbered notes
+_NUMBERED_NOTE_RE = re.compile(r"^\d{1,2}[.)]\s+\S")
+_BULLET_RE = re.compile(r"^[*•●▪◦]\s+")   # Google Doc bullets exported as "* text"
 _CHAR_DEF_RE = re.compile(r"^Character\s*\d*\s*[-–—]\s*(.+)$", re.I)
 # "Scene changes: ...", "Scene changes - ...", "Back to the site, ...", "Cut to ...", "Flashback ..."
 _SCENE_DIR_RE = re.compile(r"^(?:scene\s+chang(?:e|es|ed)|flash\s*back|(?:back|cut)\s+to)\b[\s:,\-–—]*(.*)$", re.I)
@@ -346,6 +351,44 @@ def layout_hint_from_direction(text: str) -> str:
     return ""
 
 
+def _drop_repeated_dialogue(lines: List[Dict[str, Any]], min_run: int = 3) -> List[Dict[str, Any]]:
+    """A script that lists the same dialogue twice (e.g. the scrolling-text list, then the dialogue script with speaker names)
+    keeps one copy: the run with more named speakers, else the first. A run is `min_run` or more consecutive lines whose
+    words match, so a single repeated phrase ("Hello?") is never dropped."""
+    def key(l):
+        return tuple(l.get("tokens") or ())
+    changed = True
+    while changed:
+        changed = False
+        n = len(lines)
+        for j in range(n):
+            if not key(lines[j]):
+                continue
+            for i in range(j):
+                k = 0
+                while i + k < j and j + k < n and key(lines[i + k]) and key(lines[i + k]) == key(lines[j + k]):
+                    k += 1
+                if k >= min_run:
+                    first, second = lines[i:i + k], lines[j:j + k]
+                    named = lambda run: sum(1 for l in run if l.get("speaker"))
+                    drop = range(i, i + k) if named(second) > named(first) else range(j, j + k)
+                    if named(second) > named(first):   # keep the speaker names, in the first copy's place in the order
+                        for a, b in zip(first, second):
+                            b["scene"], b["scene_visual"] = a.get("scene"), a.get("scene_visual")
+                    lines = [l for idx, l in enumerate(lines) if idx not in set(drop)]
+                    changed = True
+                    break
+            if changed:
+                break
+    if all(l["id"] == f"L{l['index']}" for l in lines):   # ids were numbered by the parser: number them again
+        for idx, l in enumerate(lines, 1):
+            l["id"], l["index"] = f"L{idx}", idx
+    else:
+        for idx, l in enumerate(lines, 1):
+            l["index"] = idx
+    return lines
+
+
 def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Parse script file into metadata header (concept_ref, visual_ref, characters, scenes) and structured script lines L1..LN.
 
@@ -377,12 +420,23 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
     current_panels: Dict[str, str] = {}
     pending_speaker = ""
     pending_note = ""
+    in_setup_block = False
 
     for raw_line in raw.splitlines():
-        s = raw_line.strip()
+        s = _BULLET_RE.sub("", raw_line.strip()).strip()
         if not s:
             if in_characters_block and meta["characters"]:
                 in_characters_block = False   # the character list ends at the first blank line after it
+            continue
+        # Production notes and a "Set up :" block of numbered notes are directions, never spoken lines
+        if _SETUP_HEAD_RE.match(s):
+            in_setup_block, in_characters_block = True, False
+            continue
+        if in_setup_block and _NUMBERED_NOTE_RE.match(s):
+            meta.setdefault("setup", []).append(s)
+            continue
+        in_setup_block = False
+        if _PRODUCTION_NOTE_RE.match(s):
             continue
         if s.startswith("#"):
             header_lines.append(s.lstrip("#").strip())
@@ -593,6 +647,8 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             "strike_text": (strike_override or text) if (strike_cue and not beat) else "",
         })
 
+    lines = _drop_repeated_dialogue(lines)
+
     char_side = {}
     for cname, cdesc in meta["characters"].items():
         m_side = _CHAR_SIDE_RE.search(cdesc or "")
@@ -635,6 +691,8 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
         brief_parts.append(" | ".join(f"{sc['scene']}: {sc['visual']}" if sc.get("visual") else sc["scene"] for sc in meta["scenes"]))
     if brief_parts and not meta["concept_brief"]:
         meta["concept_brief"] = " — ".join(brief_parts)
+    if meta.get("setup"):   # the writer's numbered set-up notes (layout, sides) travel with the brief
+        meta["concept_brief"] = (meta["concept_brief"] + " | Set up: " + " ".join(meta["setup"])).strip(" |")
     meta["header"] = " | ".join(header_lines)
     return meta, lines
 
@@ -1418,7 +1476,13 @@ def main() -> None:
 
     facts = format_facts(clips_data, script_lines)
     (proj_dir / "facts.md").write_text(facts, encoding="utf-8")
-    (proj_dir / "line_map.md").write_text(script_order.build_line_map(script_lines, clips_data, style=args.style or "micronarrative"), encoding="utf-8")
+    (proj_dir / "line_map.md").write_text(script_order.build_line_map(script_lines, clips_data), encoding="utf-8")
+    try:   # the job's rules, cut from agent/EDIT_RULES.md + FORMATS.md (the style's learned rules go here, not in line_map.md)
+        import edit_brief
+
+        edit_brief.write(proj_dir, meta, plan, style=args.style or "micronarrative")
+    except Exception as exc:   # noqa: BLE001  (the brief is a convenience; the rule files remain)
+        print(f"  [BRIEF] could not write brief.md ({exc}); read agent/EDIT_RULES.md instead")
     try:
         sheets = clip_sheet.build(proj_dir, [str(resolve(c["src"])) for c in clips_data])
     except Exception as exc:   # noqa: BLE001  (a picture is a help, not a requirement)
@@ -1428,6 +1492,7 @@ def main() -> None:
     segments: List[Dict[str, Any]] = []
     marks: List[Dict[str, Any]] = []
     print(f"Measured {len(clips_data)} clips. Nothing is decided yet: the Director writes plan.edl.")
+    print(f"  Rules for this job     : {proj_dir / 'brief.md'}")
     print(f"  Script + clips per line: {proj_dir / 'line_map.md'}")
     print(f"  Every word, pause, face : {proj_dir / 'facts.md'} (~{len(facts) // 3} tokens)")
     print(f"  Clip pictures           : {len(sheets)} sheet(s) in {proj_dir}")

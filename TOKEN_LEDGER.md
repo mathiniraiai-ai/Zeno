@@ -19,8 +19,22 @@ Full relational history is also stored in local SQLite (`work/zeno_telemetry.db`
 | `2026-11-05 20:01:21` | **`gdoc_16Xwq5WJhSlr_t_rm6a9obxu5e9`** (`te`) | **Antigravity** | `Gemini 4 Argon` | 12 (`235s → 02:46.60`) | `2,078` in / `3,514` out / **`5,592` total** (`~2,014/min`) | `22,092` in / `13,985` out / **`36,077` total** |
 | `2026-11-07 20:23:30` | **`gdoc_149jwRt8pzai_t_d8xozxjkesx5`** (`auto`) | **Claude Code** | `claude-sonnet-5-5` | 11 (`154s → 01:41.76`) | `132,444` in / `47,564` out / **`180,008` total** (`~106,137/min`) | `12,779` in / `5,171` out / **`17,950` total** |
 | `2026-11-16 16:30:47` | **`release_test_v1013`** (`auto`) | **Claude Code** | `claude-fable-5-2` | 23 (`0s → 01:10.25`) | `386,535` in / `41,289` out / **`427,824` total** (`~365,401/min`) | `0` in / `0` out / **`0` total** |
+| `2026-11-16 20:22:44` | **`abt_sonnet_wb`** (`auto`) | **Claude Code** | `claude-sonnet-5-5` | 18 (`0s → 01:03.08`) | `114,664` in / `26,105` out / **`140,769` total** (`~133,896/min`) | `0` in / `0` out / **`0` total** |
+| `2026-11-16 21:48:08` | **`gdoc_1F3i-288t96m_t_2sl36zopschq`** (`kn`) | **Codex** | `GPT-6.1 Sol` | 12 (102s → 01:17.33) | 115,265 uncached in / 5,132 out / **120,397 uncached in + out**; 2,925,824 cached in; **3,046,221 total** | 22,227 in / 8,084 out / **30,311 prior cached total** |
 
-## 2. Latest Job Clip-by-Clip Breakdown — `release_test_v1013` (`2026-11-16 16:30:47`)
+## 2. Latest Job Clip-by-Clip Breakdown — `gdoc_1F3i-288t96m_t_2sl36zopschq` (`2026-11-16 21:48:08`)
 
 | Clip | Raw → Kept | Words | Script Lines | Kept Segments | Raw Clip Process (Retakes / Cuts / Anomalies) | Gemini In | Gemini Out | Gemini Total |
 |---|---|---|---|---|---|---:|---:|---:|
+| `M extra` | `8.0s → 0.0s` | 0 | `-` | `dropped` | Clean take (pause-snapped) | `0` | `0` | **`0`** |
+| `M1` | `10.0s → 0.0s` | 20 | `-` | `dropped` | Clean take (pause-snapped) | `2,040` | `658` | **`2,698`** |
+| `M2` | `10.0s → 0.0s` | 25 | `-` | `dropped` | Clean take (pause-snapped) | `2,040` | `568` | **`2,608`** |
+| `M3` | `6.0s → 0.0s` | 16 | `-` | `dropped` | Clean take (pause-snapped) | `1,940` | `393` | **`2,333`** |
+| `M4` | `10.0s → 0.0s` | 24 | `-` | `dropped` | Clean take (pause-snapped) | `2,040` | `549` | **`2,589`** |
+| `M5` | `8.0s → 0.0s` | 20 | `-` | `dropped` | Clean take (pause-snapped) | `1,991` | `478` | **`2,469`** |
+| `M6` | `8.0s → 0.0s` | 23 | `-` | `dropped` | Clean take (pause-snapped) | `1,991` | `562` | **`2,553`** |
+| `M7` | `8.0s → 0.0s` | 21 | `-` | `dropped` | Clean take (pause-snapped) | `1,991` | `479` | **`2,470`** |
+| `W extra` | `8.0s → 0.0s` | 16 | `-` | `dropped` | Clean take (pause-snapped) | `1,991` | `2,837` | **`4,828`** |
+| `W1` | `10.0s → 0.0s` | 24 | `-` | `dropped` | Clean take (pause-snapped) | `2,110` | `587` | **`2,697`** |
+| `W2` | `10.0s → 0.0s` | 17 | `-` | `dropped` | Clean take (pause-snapped) | `2,110` | `565` | **`2,675`** |
+| `W3` | `6.0s → 0.0s` | 12 | `-` | `dropped` | Clean take (pause-snapped) | `1,983` | `408` | **`2,391`** |

@@ -1528,6 +1528,7 @@ def main() -> None:
             "-c:a", "aac", "-ac", "2", "-b:a", "192k", "-movflags", "+faststart", out_path,
             draft=bool(a.draft),
             bitrate_kbps=final_bitrate_kbps(total),
+            hw_decode=False,   # GPU-decoded picture + page through vstack came out green (VideoToolbox, W46)
         )
     elif sub_list:
         sub_fc = (

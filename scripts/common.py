@@ -1119,10 +1119,13 @@ def with_hardware_encoder(args, draft: bool = False, bitrate_kbps: int = None, h
     return out
 
 
-def ffmpeg_encode(*args, timeout=180, draft: bool = False, hardware: bool = True, bitrate_kbps: int = None):
-    """Run an ffmpeg command that decodes and encodes H.264 on the GPU when available, falling back cleanly if needed."""
+def ffmpeg_encode(*args, timeout=180, draft: bool = False, hardware: bool = True, bitrate_kbps: int = None,
+                  hw_decode: bool = True):
+    """Run an ffmpeg command that decodes and encodes H.264 on the GPU when available, falling back cleanly if needed.
+    `hw_decode=False` keeps decoding on the CPU (encoding stays on the GPU): stacking two GPU-decoded inputs with `vstack`
+    gave a green picture on Apple VideoToolbox, with no error to fall back on."""
     if hardware:
-        hw_dec = with_hardware_encoder(args, draft, bitrate_kbps, hwaccel_decode=True)
+        hw_dec = with_hardware_encoder(args, draft, bitrate_kbps, hwaccel_decode=hw_decode)
         hw_enc = with_hardware_encoder(args, draft, bitrate_kbps, hwaccel_decode=False)
         if hw_dec is not None:
             try:

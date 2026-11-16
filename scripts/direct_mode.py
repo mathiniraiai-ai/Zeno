@@ -109,11 +109,9 @@ def rules_text(style: str) -> str:
         t = _read(path)
         if t:
             parts.append(f"=== {title} ===\n{t.strip()}")
-    claude = _read(ROOT / "CLAUDE.md")
-    for start, end in (("## 4. ", "## 5. "), ("## 6. ", "## Developing Zeno itself")):
-        s = _section(claude, start, end)
-        if s:
-            parts.append(f"=== CLAUDE.md (layouts, marks, syntax) ===\n{s}")
+    ref = _read(ROOT / "agent/REFERENCE.md")
+    if ref:
+        parts.append(f"=== agent/REFERENCE.md (layouts, marks, syntax) ===\n{ref.strip()}")
     return "\n\n".join(parts)
 
 
