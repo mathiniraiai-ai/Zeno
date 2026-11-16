@@ -252,6 +252,39 @@ def _archive_blocked(stage: str, reason: str, script_arg: str = "", inputs: Opti
         pass
 
 
+SESSION_LIMIT = 150_000     # a new chat with /zeno loaded is about 50-70k; a chat that already holds earlier videos is far bigger
+SESSION_WARN = 250_000
+
+
+def session_gate(stage: str, block: bool, project_hint: str = "", script_arg: str = "", inputs: Optional[List[str]] = None) -> None:
+    """Every step the agent takes re-reads the whole chat, so an edit started in a chat that already holds earlier work
+    costs several times more (16 Nov: chats of 450-600k made each job re-read 5-10M tokens instead of about 1M).
+    At the start of a job (block=True) a chat over SESSION_LIMIT stops the job and asks for a new chat; later
+    (block=False) a chat over SESSION_WARN only prints a warning. Unknown size (another agent, no log) never stops anything."""
+    try:
+        import agent_log
+        s = agent_log.session_size()
+        limit = int(os.environ.get("ZENO_SESSION_LIMIT") or SESSION_LIMIT)
+    except Exception:
+        return
+    if not s:
+        return
+    k = s["tokens"] // 1000
+    if block and s["tokens"] > limit:
+        est = s["tokens"] * 15 / 1e6
+        print(f"\n[BLOCKED] NEW CHAT NEEDED. This chat already holds {k}k tokens of earlier work, and Claude re-reads all of it on every step:"
+              f"\n  this edit would re-read about {est:.0f}M tokens instead of about 1M, which uses up the team's Claude limit."
+              "\n  Tell the user exactly this: 'Type /clear (or open a new chat), then start this edit again with the same script,"
+              "\n  footage and Notion name. Nothing is lost: Zeno keeps every clip it already measured.'"
+              "\n  Do not try to work around this check; just ask the user to start a new chat.")
+        _archive_blocked("fresh_session", f"chat already held {s['tokens']} tokens ({s['steps']} steps) at {stage}", script_arg, inputs)
+        sys.exit(2)
+    if not block and s["tokens"] > SESSION_WARN:
+        where = f" in {project_hint}" if project_hint else ""
+        print(f"\n[TOKENS] This chat now holds {k}k tokens, and every step re-reads all of it. Finish this step, then make any further"
+              f"\n  changes in a new chat: tell the user to type /clear and say 'continue the edit{where}: <the change>'.")
+
+
 def job_gate(raw_inputs: List[str], script_arg: str, skip: bool = False, style: str = "") -> None:
     """Nothing starts until the live checks pass and the script and footage the user gave have been checked."""
     import preflight
@@ -259,6 +292,7 @@ def job_gate(raw_inputs: List[str], script_arg: str, skip: bool = False, style: 
     if skip:
         print("\n[WARN] --skip-preflight: live checks and input validation skipped (development only).")
         return
+    session_gate("inspect", block=True, script_arg=script_arg, inputs=raw_inputs)
     print("\n== Pre-job gate: live checks ==")
     checks = preflight.run_system_checks()
     preflight.print_checks(checks)
@@ -1004,6 +1038,7 @@ def main() -> None:
     if args.preflight:
         import preflight
 
+        session_gate("preflight", block=True, script_arg=args.script or "", inputs=args.inputs)
         print("\nZeno pre-job checks (live)")
         checks = preflight.run_system_checks()
         preflight.print_checks(checks)
@@ -1049,6 +1084,7 @@ def main() -> None:
         p_path = common.resolve(args.check_plan)
         msg = order_gate(load_edl(p_path), p_path)
         print(msg or "[PLAN PASS] Every line present, once, in script order; no cut inside a word; voices match.")
+        session_gate("check", block=False, project_hint=str(p_path.relative_to(ROOT)) if str(p_path).startswith(str(ROOT)) else str(p_path))
         try:   # the job archive keeps every version of the plan and what the check said about it
             import job_archive
             job_archive.snapshot_plan(p_path, "check", msg or "PLAN PASS")
@@ -1066,6 +1102,7 @@ def main() -> None:
 
     if args.execute:
         p_path = common.resolve(args.execute)
+        session_gate("render", block=False, project_hint=str(p_path.relative_to(ROOT)) if str(p_path).startswith(str(ROOT)) else str(p_path))
         apply_stage3_tweaks(p_path, swap_layout=args.swap_layout, swap_takes=args.swap_take, error_sfx=args.error_sfx)
         try:
             import job_archive

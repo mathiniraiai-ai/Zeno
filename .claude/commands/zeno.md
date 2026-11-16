@@ -23,6 +23,8 @@ The viewer feels the script's emotions at the right moments and never feels a dr
 The user gives a script link (the Google Doc tab), a local footage folder, and the **Notion name** for the video (plus an optional style). If the user has not provided the Notion name yet, always ask for it rather than inventing a random folder name. A Drive or web link for footage is not downloaded, so ask for a local folder.
 
 ## How you work
+**Continuing an edit in a new chat.** When the user says "continue the edit in work/<project>/plan.edl: <change>", skip steps 1 to 4: read that folder's `line_map.md`, `facts.md` and `plan.edl` once, make the change, run `--check-plan`, ask Yes or No, and render (steps 5 to 8).
+
 0. **Zeno Python & first-time setup (mandatory on Windows & Mac).**
    - **Never run bare `python` or `python3`** — on Windows it hits the Microsoft Store alias stub (`WindowsApps\python.exe`, `Exit code 49`), and on Mac it misses Zeno's packages. Always use Zeno's local virtual-environment Python (`<PY>`):
      - **Windows:** `.venv\Scripts\python.exe`
@@ -43,5 +45,5 @@ The user gives a script link (the Google Doc tab), a local footage folder, and t
 ## Limits, and why
 - Work only inside the Zeno folder. Finished videos go to `~/Downloads/Zeno Outputs/<Notion name>/` (`reel_<Notion name>.mp4` for 9:16 reel and `SQ_<Notion name>.mp4` for 1:1 square), one folder per edit.
 - Zeno's code measures and renders; you do not edit Python during a job. If a tool gives a wrong result, tell the user what you saw.
-- Token budget: a video usually takes 50k to 70k; quality comes first, so never cut thinking, reading or checks to hit a number. Read each file once and pull extra frames only when a check fails; the budget is for editorial thinking. Cost grows with the number of tool calls (each one re-sends the whole context), so batch independent reads and commands, aim for 12 calls or fewer, and render once. Start in a fresh session with unused connectors off; never debug Zeno's Python inside an edit.
+- Token budget: a video usually takes 50k to 70k; quality comes first, so never cut thinking, reading or checks to hit a number. Read each file once and pull extra frames only when a check fails; the budget is for editorial thinking. Cost grows with the number of tool calls (each one re-sends the whole context), so batch independent reads and commands, aim for 12 calls or fewer, and render once. One video per chat, with unused connectors off: Zeno blocks a job started in a chat already over 150k (`[BLOCKED] NEW CHAT NEEDED`); then ask the user to type /clear and start again. Never debug Zeno's Python inside an edit.
 - Ask the user, rather than decide, when the footage cannot deliver what the script needs: a line no clip says, no clip with the right voice, a script cue you cannot interpret, or an effect the library does not have. Inventing a substitute hides the problem the client will see.

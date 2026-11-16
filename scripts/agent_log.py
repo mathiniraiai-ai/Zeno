@@ -234,3 +234,48 @@ def collect(since: float, until: Optional[float] = None, root: Path = ROOT) -> D
                 "prompts": prompts, "steps": steps, "truncated": truncated}
     except Exception:
         return {}
+
+
+TAIL_BYTES = 3_000_000
+
+
+def session_size(root: Path = ROOT, max_age: float = 300.0) -> Optional[Dict[str, Any]]:
+    """How big the Claude Code chat that is running Zeno right now already is.
+
+    Every step the agent takes re-sends the whole chat (the "cache read" tokens), so a chat that already holds earlier
+    videos makes every step of this one cost several times more. Finds the most recently written Claude Code log whose
+    working folder is Zeno and returns the size of its last request: {"tokens", "steps", "session", "file"}.
+    Returns None when it cannot tell (another agent, no log, a read error): callers must then let the job go on."""
+    try:
+        root_s = str(root.resolve())
+        now = time.time()
+        files = [f for f in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")) if now - os.path.getmtime(f) <= max_age]
+        for f in sorted(files, key=os.path.getmtime, reverse=True)[:6]:
+            size = os.path.getsize(f)
+            with open(f, "rb") as fh:
+                if size > TAIL_BYTES:
+                    fh.seek(size - TAIL_BYTES)
+                data = fh.read().decode("utf-8", errors="ignore")
+            last: Optional[Dict[str, Any]] = None
+            ids = set()
+            ours = False
+            for line in data.splitlines():
+                if '"usage"' not in line and '"cwd"' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                if str(d.get("cwd") or "").startswith(root_s):
+                    ours = True
+                m = d.get("message") if d.get("type") == "assistant" else None
+                u = (m or {}).get("usage") if isinstance(m, dict) else None
+                if u:
+                    ids.add(m.get("id"))
+                    last = u
+            if ours and last:
+                tokens = int(last.get("input_tokens") or 0) + int(last.get("cache_creation_input_tokens") or 0) + int(last.get("cache_read_input_tokens") or 0)
+                return {"tokens": tokens, "steps": len(ids), "session": Path(f).stem, "file": f}
+        return None
+    except Exception:
+        return None

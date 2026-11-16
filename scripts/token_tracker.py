@@ -868,6 +868,11 @@ def print_console_summary(r: Dict[str, Any]) -> None:
         print("-" * 78)
     print(f"1. VIDEO EDIT AGENT ({r['agent_name']} · {r['agent_model']}):")
     print(f"   In: {r['agent_in_tokens']:>8,} | Out: {r['agent_out_tokens']:>8,} | TOTAL: {r['agent_total_tokens']:>9,} tokens (~{r['tokens_per_min']:,} tok/min)")
+    cache = int(r.get("agent_cached_tokens") or 0)
+    if cache:
+        print(f"   Re-read (cache): {cache:>10,} tokens: the chat re-sent on every step (counts toward the Claude plan limit as well)")
+        if cache > 2_000_000:
+            print("   [TOKENS] Over 2M re-read: this edit ran in a long chat. Start every video in a new chat (/clear).")
     print(f"2. GEMINI TRANSCRIPTION (Separate Cloud Audio API):")
     print(f"   In: {r['transcribe_in_tokens']:>8,} | Out: {r['transcribe_out_tokens']:>8,} | TOTAL: {r['transcribe_total_tokens']:>9,} tokens ({r['clips_count']} clips)")
     print(f"Saved -> TOKEN_LEDGER.md | work/{r['project']}/token_report.md | work/zeno_telemetry.db")

@@ -41,6 +41,10 @@ def setUpModule() -> None:
     _ARCHIVE_PATCHES = [patch.object(job_archive, "_post", return_value=False),
                         patch.object(job_archive, "OUTBOX", Path(_ARCHIVE_TMP.name) / "outbox"),
                         patch.object(job_archive, "send_in_background", return_value=None)]
+    import agent_log   # the tests run inside a developer's long chat: the new-chat gate must not stop them
+    global _REAL_SESSION_SIZE
+    _REAL_SESSION_SIZE = agent_log.session_size
+    _ARCHIVE_PATCHES.append(patch.object(agent_log, "session_size", return_value=None))
     for p_ in _ARCHIVE_PATCHES:
         p_.start()
 
@@ -2639,6 +2643,55 @@ class TestJobArchive(unittest.TestCase):
             self.assertEqual(list(outbox.glob("*.json")), [])
             with patch.dict("os.environ", {"ZENO_ARCHIVE": "0"}):
                 self.assertIsNone(job_archive.archive_job(plan_path, plan))
+
+
+class TestNewChatGate(unittest.TestCase):
+    """16 Nov: editors kept one chat all day, so each job re-read 5-10M tokens. A job must start in a new chat."""
+
+    def _log(self, home: Path, cwd: str, sizes) -> None:
+        import json
+        d = home / ".claude" / "projects" / "-zeno"
+        d.mkdir(parents=True, exist_ok=True)
+        lines = [json.dumps({"type": "user", "cwd": cwd, "message": {"content": "hi"}})]
+        for i, n in enumerate(sizes):
+            lines.append(json.dumps({"type": "assistant", "cwd": cwd, "message": {"id": f"m{i}", "usage": {
+                "input_tokens": 2, "cache_creation_input_tokens": 1000, "cache_read_input_tokens": n - 1002, "output_tokens": 50}}}))
+        (d / "sess1.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def test_reads_last_request_size_of_this_folders_chat(self):
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as td:
+            self._log(Path(td), str(ROOT), [60_000, 90_000, 480_000])
+            with patch.dict(_os.environ, {"HOME": td}):
+                s = _REAL_SESSION_SIZE(ROOT)
+            self.assertEqual((s["tokens"], s["steps"]), (480_000, 3))
+            self._log(Path(td), "/some/other/project", [480_000])
+            with patch.dict(_os.environ, {"HOME": td}):
+                self.assertIsNone(_REAL_SESSION_SIZE(ROOT))   # a chat in another folder is not this job
+
+    def test_gate_blocks_big_chat_and_lets_small_or_unknown_pass(self):
+        import io
+        from unittest.mock import patch
+        import agent_log
+        import zeno
+        big = {"tokens": 480_000, "steps": 40, "session": "s", "file": "f"}
+        with patch.object(agent_log, "session_size", return_value=big), patch.object(zeno, "_archive_blocked") as arch, \
+                patch("sys.stdout", new_callable=io.StringIO) as out:
+            with self.assertRaises(SystemExit) as cm:
+                zeno.session_gate("inspect", block=True)
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("NEW CHAT NEEDED", out.getvalue())
+        self.assertEqual(arch.call_args[0][0], "fresh_session")
+        for size in (None, {"tokens": 70_000, "steps": 3, "session": "s", "file": "f"}):
+            with patch.object(agent_log, "session_size", return_value=size), patch("sys.stdout", new_callable=io.StringIO) as out:
+                zeno.session_gate("inspect", block=True)   # no exit
+            self.assertNotIn("BLOCKED", out.getvalue())
+        with patch.object(agent_log, "session_size", return_value={"tokens": 300_000, "steps": 30, "session": "s", "file": "f"}), \
+                patch("sys.stdout", new_callable=io.StringIO) as out:
+            zeno.session_gate("render", block=False, project_hint="work/x/plan.edl")   # later steps only warn
+        self.assertIn("[TOKENS]", out.getvalue())
+        self.assertIn("work/x/plan.edl", out.getvalue())
 
 
 class TestEverythingIsRecorded(unittest.TestCase):
