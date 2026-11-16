@@ -2670,6 +2670,21 @@ class TestNewChatGate(unittest.TestCase):
             with patch.dict(_os.environ, {"HOME": td}):
                 self.assertIsNone(_REAL_SESSION_SIZE(ROOT))   # a chat in another folder is not this job
 
+    def test_prompt_hook_blocks_only_a_new_edit_in_a_long_chat(self):
+        import tempfile
+        import chat_guard
+        with tempfile.TemporaryDirectory() as td:
+            self._log(Path(td), str(ROOT), [60_000, 480_000])
+            path = str(Path(td) / ".claude" / "projects" / "-zeno" / "sess1.jsonl")
+            new = "/zeno ~/RAW https://docs.google.com/document/d/abc/edit?tab=t.1"
+            self.assertIn("/clear", chat_guard.decide({"prompt": new, "transcript_path": path}))
+            self.assertIn("/clear", chat_guard.decide({"prompt": "script: https://docs.google.com/document/d/abc", "transcript_path": path}))
+            self.assertEqual(chat_guard.decide({"prompt": "continue the edit in work/x/plan.edl: louder", "transcript_path": path}), "")
+            self.assertEqual(chat_guard.decide({"prompt": "make the subtitle smaller", "transcript_path": path}), "")
+            self.assertEqual(chat_guard.decide({"prompt": new, "transcript_path": str(Path(td) / "missing.jsonl")}), "")
+            self._log(Path(td), str(ROOT), [60_000])
+            self.assertEqual(chat_guard.decide({"prompt": new, "transcript_path": path}), "")   # a new chat goes through
+
     def test_gate_blocks_big_chat_and_lets_small_or_unknown_pass(self):
         import io
         from unittest.mock import patch

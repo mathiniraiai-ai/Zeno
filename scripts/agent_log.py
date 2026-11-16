@@ -239,6 +239,41 @@ def collect(since: float, until: Optional[float] = None, root: Path = ROOT) -> D
 TAIL_BYTES = 3_000_000
 
 
+def chat_size(path: str, root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """Size of the last request of one Claude Code chat log: {"tokens", "steps", "session", "file"}.
+    With `root`, only a chat whose working folder is inside `root` counts. None when it cannot tell."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            if size > TAIL_BYTES:
+                fh.seek(size - TAIL_BYTES)
+            data = fh.read().decode("utf-8", errors="ignore")
+        root_s = str(root.resolve()) if root else ""
+        last: Optional[Dict[str, Any]] = None
+        ids = set()
+        ours = not root_s
+        for line in data.splitlines():
+            if '"usage"' not in line and '"cwd"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if root_s and str(d.get("cwd") or "").startswith(root_s):
+                ours = True
+            m = d.get("message") if d.get("type") == "assistant" else None
+            u = (m or {}).get("usage") if isinstance(m, dict) else None
+            if u:
+                ids.add(m.get("id"))
+                last = u
+        if not (ours and last):
+            return None
+        tokens = int(last.get("input_tokens") or 0) + int(last.get("cache_creation_input_tokens") or 0) + int(last.get("cache_read_input_tokens") or 0)
+        return {"tokens": tokens, "steps": len(ids), "session": Path(path).stem, "file": str(path)}
+    except Exception:
+        return None
+
+
 def session_size(root: Path = ROOT, max_age: float = 300.0) -> Optional[Dict[str, Any]]:
     """How big the Claude Code chat that is running Zeno right now already is.
 
@@ -247,35 +282,12 @@ def session_size(root: Path = ROOT, max_age: float = 300.0) -> Optional[Dict[str
     working folder is Zeno and returns the size of its last request: {"tokens", "steps", "session", "file"}.
     Returns None when it cannot tell (another agent, no log, a read error): callers must then let the job go on."""
     try:
-        root_s = str(root.resolve())
         now = time.time()
         files = [f for f in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")) if now - os.path.getmtime(f) <= max_age]
         for f in sorted(files, key=os.path.getmtime, reverse=True)[:6]:
-            size = os.path.getsize(f)
-            with open(f, "rb") as fh:
-                if size > TAIL_BYTES:
-                    fh.seek(size - TAIL_BYTES)
-                data = fh.read().decode("utf-8", errors="ignore")
-            last: Optional[Dict[str, Any]] = None
-            ids = set()
-            ours = False
-            for line in data.splitlines():
-                if '"usage"' not in line and '"cwd"' not in line:
-                    continue
-                try:
-                    d = json.loads(line)
-                except Exception:
-                    continue
-                if str(d.get("cwd") or "").startswith(root_s):
-                    ours = True
-                m = d.get("message") if d.get("type") == "assistant" else None
-                u = (m or {}).get("usage") if isinstance(m, dict) else None
-                if u:
-                    ids.add(m.get("id"))
-                    last = u
-            if ours and last:
-                tokens = int(last.get("input_tokens") or 0) + int(last.get("cache_creation_input_tokens") or 0) + int(last.get("cache_read_input_tokens") or 0)
-                return {"tokens": tokens, "steps": len(ids), "session": Path(f).stem, "file": f}
+            r = chat_size(f, root)
+            if r:
+                return r
         return None
     except Exception:
         return None

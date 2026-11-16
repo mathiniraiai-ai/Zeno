@@ -9,5 +9,18 @@
     "allow": [
       "Read(./.env.example)"
     ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "p=\"$CLAUDE_PROJECT_DIR/.venv/bin/python\"; [ -x \"$p\" ] || p=\"$CLAUDE_PROJECT_DIR/.venv/Scripts/python.exe\"; [ -x \"$p\" ] || exit 0; \"$p\" \"$CLAUDE_PROJECT_DIR/scripts/chat_guard.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
   }
 }
