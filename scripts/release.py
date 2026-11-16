@@ -46,9 +46,14 @@ TOP_FILES = (
     "update.bat",
     "edit.command",
     "edit.bat",
+    "edit-codex.command",
+    "edit-codex.bat",
+    "DEVELOPING.md",
+    "LOW_COST_WORKFLOW.md",
 )
 
 BUNDLE_DIRS = (
+    "config",
     ".agent",
     ".claude",
     "agent",

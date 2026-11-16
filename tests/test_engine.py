@@ -1918,6 +1918,9 @@ class TestFreshInstallHasWhatAJobNeeds(unittest.TestCase):
         names = set(zipfile.ZipFile(io.BytesIO(blob)).namelist())
         self.assertIn("assets/vision/face_detection_yunet_2023mar.onnx", names)
         self.assertIn("agent/FORMATS.md", names)
+        for required in ("config/cost_controls.json", "edit-codex.command", "edit-codex.bat",
+                         "DEVELOPING.md", "LOW_COST_WORKFLOW.md"):
+            self.assertIn(required, names)
 
     def test_the_face_model_is_found_without_a_models_folder(self):
         import importlib, common
