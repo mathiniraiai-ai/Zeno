@@ -1363,7 +1363,7 @@ def main() -> None:
 
     # Stem 0 (`[adlg]`): Dialogue + subtle continuous -48 dBFS pink room-tone floor (+ optional music bed)
     fc.append(
-        f"anoisesrc=d={total:.4f}:c=pink:r=48000:a=0.00398,"
+        f"anoisesrc=d={total:.4f}:c=pink:r=48000:a=0.00398:seed=1,"
         f"highpass=f=80,lowpass=f=1800,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[rtone]"
     )
     fc.append(f"{au}aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[adlg_raw]")
@@ -1470,7 +1470,8 @@ def main() -> None:
     master_audio_fc = (
         f"[0:a:0]{dlg_ln_chain}[dlg_ln];"
         f"[dlg_ln][0:a:1]amix=inputs=2:weights=1 1:normalize=0:dropout_transition=0:duration=first,"
-        f"alimiter=limit=0.86:attack=3:release=40:level=false,"
+        # Oversample before limiting and leave AAC reconstruction headroom for the -1 dBTP ceiling.
+        f"aresample=192000,alimiter=limit=0.75:attack=3:release=40:level=false:latency=true,"
         f"aresample=48000,aformat=channel_layouts=stereo[aout]"
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1509,11 +1510,16 @@ def main() -> None:
             print(f"  [PAGE] could not build the scrolling page: {exc}")
         bar_h, page_h = page_geo["bar_h"], page_geo["below_h"]   # below the picture: its border line and the page
         if page_video:
+            # MKV timestamps are rounded to milliseconds. Give both streams the
+            # same frame clock before framesync stacks them, avoiding repeated
+            # picture frames when the page's fps filter uses an exact time base.
+            page_clock = (f"[0:v:0]fps={fps},settb=1/{fps},setpts=N[picture];"
+                          f"[1:v]fps={fps},settb=1/{fps},setpts=N[page];")
             if bar_h:
-                page_fc = (f"[1:v]fps={fps},split[pa][pb];[pa]crop={W}:{bar_h}:0:0[pbar];[pb]crop={W}:{page_h}:0:{bar_h}[ppage];"
-                           f"[pbar][0:v:0][ppage]vstack=inputs=3,format=yuv420p[vsub];")
+                page_fc = page_clock + (f"[page]split[pa][pb];[pa]crop={W}:{bar_h}:0:0[pbar];[pb]crop={W}:{page_h}:0:{bar_h}[ppage];"
+                                       f"[pbar][picture][ppage]vstack=inputs=3,format=yuv420p[vsub];")
             else:
-                page_fc = f"[1:v]fps={fps}[ppage];[0:v:0][ppage]vstack=inputs=2,format=yuv420p[vsub];"
+                page_fc = page_clock + "[picture][page]vstack=inputs=2,format=yuv420p[vsub];"
             page_inputs = ["-i", mix, "-i", str(page_video)]
         else:   # keep the full-size picture even without the page
             page_fc = f"[0:v:0]pad={W}:{FULL_H}:0:{bar_h}:color=white,format=yuv420p[vsub];"
@@ -1723,10 +1729,12 @@ def main() -> None:
     if _os.environ.get("ZENO_SKIP_TELEMETRY") != "1":
         try:
             import token_tracker
-            rec = token_tracker.finalize_job_telemetry(plan_path, plan, total, out_path)
+            import time as _telemetry_time
+            rec = token_tracker.finalize_job_telemetry(plan_path, plan, total, out_path,
+                                                     completed_at=_telemetry_time.time())
             token_tracker.print_console_summary(rec)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[WARNING] Token report could not be saved ({type(exc).__name__}). Video rendering finished; retry the report separately.")
 
         # 7b) the whole job, end to end, into the team's archive on the Zeno server (text only; waits in an outbox when offline)
         try:

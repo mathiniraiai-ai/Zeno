@@ -36,12 +36,13 @@ jobs:
           python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt -r service/requirements.txt
 
       - name: Run Zeno Engine Regression Suite
-        run: python3 tests/test_engine.py
+        run: python3 -m unittest discover -s tests
 
       - name: Run Service, Google OAuth & Learnings Tests
         run: |
           python3 service/test_keys.py
           python3 service/check_prompt_sync.py
+          python3 service/test_service.py --no-live
 
       - name: Prompt & Documentation Sync Check (CLAUDE.md, AGENTS.md, agent/concepts/)
         run: |
@@ -52,6 +53,7 @@ jobs:
           claude_md = (root / "CLAUDE.md").read_text(encoding="utf-8")
           agents_md = (root / "AGENTS.md").read_text(encoding="utf-8")
 
+          assert claude_md == agents_md, "CLAUDE.md and AGENTS.md must match"
           required_markers = [
               "agent/DIRECTOR.md",
               "~/Downloads/Zeno Outputs/",

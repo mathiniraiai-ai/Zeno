@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-LIMIT = 250_000
+LIMIT = 100_000
 _NEW_EDIT = re.compile(r"(?is)^\s*/(zeno|edit)\b|docs\.google\.com/document/")
 _CONTINUE = re.compile(r"(?i)\bcontinue the edit\b")
 
@@ -33,7 +33,8 @@ def decide(event: dict) -> str:
     import agent_log
     s = agent_log.chat_size(path)
     try:
-        limit = int(os.environ.get("ZENO_SESSION_LIMIT") or LIMIT)
+        from cost_control import settings
+        limit = int(os.environ.get("ZENO_SESSION_LIMIT") or settings()["new_chat_context_limit"])
     except ValueError:
         limit = LIMIT
     if not s or s["tokens"] <= limit:

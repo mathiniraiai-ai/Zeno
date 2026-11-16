@@ -83,6 +83,7 @@ def main():
     audio = Path(a.audio)
 
     proc = None
+    test_storage = tempfile.TemporaryDirectory(prefix="zeno-service-test-")
     if a.url:
         url, token = a.url.rstrip("/"), a.token
         if not token:
@@ -94,8 +95,10 @@ def main():
             raw = "zeno_test_" + hashlib.sha256((who + str(time.time())).encode()).hexdigest()[:24]
             tokens[who] = raw
         port = free_port()
-        env = {**os.environ, "GEMINI_API_KEY": env_key(), "ZENO_MAX_UPLOAD_MB": "5", "ZENO_RATE_PER_MIN": "6",
+        env = {**os.environ, "GEMINI_API_KEY": "" if a.no_live else env_key(), "ZENO_MAX_UPLOAD_MB": "5", "ZENO_RATE_PER_MIN": "6",
                "ZENO_API_TOKENS": ",".join(f"{n}:{hashlib.sha256(t.encode()).hexdigest()}" for n, t in tokens.items())}
+        env.pop("DATABASE_URL", None)
+        env["ZENO_DB_PATH"] = str(Path(test_storage.name) / "test.db")
         proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
                                 cwd=str(SERVICE), env=env)
         url, token = f"http://127.0.0.1:{port}", tokens["TestA"]
@@ -132,6 +135,7 @@ def main():
         if proc:
             proc.terminate()
             proc.wait(timeout=10)
+        test_storage.cleanup()
     print(f"\n{sum(results)}/{len(results)} checks passed")
     sys.exit(0 if all(results) else 1)
 

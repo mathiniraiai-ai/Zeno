@@ -493,7 +493,7 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             continue
 
         # 3. Scene heading (e.g. "Scene 1", "SCENE 2 - Canteen", "Scene 1: An Indian man...")
-        m_scene = re.match(r"^(Scene\s+\d+)(?:\s*[-:]\s*(.*))?$", s, re.I)
+        m_scene = re.match(r"^(Scene\s+\d+)(?:\s*[-:–—]\s*(.*))?$", s, re.I)
         if m_scene:
             in_characters_block = False
             current_scene = m_scene.group(1).strip()
@@ -1353,6 +1353,8 @@ def main() -> None:
 
     clips_data: List[Dict[str, Any]] = []
     for stem, src_str, wdir in clip_entries:
+        transcript_path = wdir / "gemini_transcript.json"
+        before = transcript_path.stat().st_mtime_ns if transcript_path.exists() else None
         info, hq_words, base_words = ensure_clip_transcribed(
             stem, src_str, wdir, lang=lang, script_path=script_path, clean_raw_json=args.clean_raw_json
         )
@@ -1364,6 +1366,8 @@ def main() -> None:
             hq_words, base_words = [], []
         clips_data.append({
             "stem": stem,
+            "transcription_reused": (before == transcript_path.stat().st_mtime_ns)
+                if transcript_path.exists() else True,
             "src": src_str,
             "work_dir": wdir,
             "info": info,
@@ -1476,7 +1480,8 @@ def main() -> None:
 
     facts = format_facts(clips_data, script_lines)
     (proj_dir / "facts.md").write_text(facts, encoding="utf-8")
-    (proj_dir / "line_map.md").write_text(script_order.build_line_map(script_lines, clips_data), encoding="utf-8")
+    import edit_packet
+    edit_packet.refresh_line_map(proj_dir, script_order.build_line_map(script_lines, clips_data))
     try:   # the job's rules, cut from agent/EDIT_RULES.md + FORMATS.md (the style's learned rules go here, not in line_map.md)
         import edit_brief
 
@@ -1488,6 +1493,9 @@ def main() -> None:
     except Exception as exc:   # noqa: BLE001  (a picture is a help, not a requirement)
         sheets = []
         print(f"  ! clip sheet not made: {exc}")
+
+    import edit_packet
+    print(f"[PACKET] {edit_packet.write(proj_dir)}")
 
     segments: List[Dict[str, Any]] = []
     marks: List[Dict[str, Any]] = []

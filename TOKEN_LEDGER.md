@@ -1,11 +1,11 @@
 # Zeno — Automated Token & Clip Telemetry Ledger
 
 Automatically updated by [`scripts/token_tracker.py`](scripts/token_tracker.py) after every video edit (`prepare.py` → `render.py`).
-Full relational history is also stored in local SQLite (`work/zeno_telemetry.db`) and synced to Railway PostgreSQL (`/admin`).
+The latest record per output is also stored in local SQLite (`work/zeno_telemetry.db`) and synced to Railway PostgreSQL (`/admin`). Historical rows retain their original inline labels.
 
 ## 1. All Video Edit Runs (AI Agent Tokens & Gemini Transcription Registered Separately)
 
-| Date | Project (`Lang`) | Agent (`Claude Code` / `Antigravity`) | Model | Clips (`Raw → Final`) | Video Edit Agent Tokens (`In / Out / Total` · `tok/min`) | Gemini Transcription Tokens (Separate `In / Out / Total`) |
+| Date | Project (`Lang`) | Agent | Model | Clips (`Raw → Final`) | Agent Tokens (uncached / cached / output / total) | Transcription Tokens (new / reused; unknown where unavailable) |
 |---|---|---|---|---|---|---|
 | `2026-11-01 00:12:42` | **`kannada_test`** (`kn`) | **Antigravity** | `Gemini 4 Argon` | 17 (`169s → 02:06.54`) | `9,367` in / `5,455` out / **`14,822` total** (`~7,028/min`) | `22,204` in / `7,947` out / **`30,151` total** |
 | `2026-11-01 13:01:48` | **`Malayalam_Friends_Ordering_Food_Abroad`** (`ml`) | **Antigravity** | `Gemini 4 Argon` | 18 (`164s → 01:42.13`) | `9,581` in / `9,879` out / **`19,460` total** (`~11,432/min`) | `26,015` in / `6,748` out / **`32,763` total** |
@@ -21,20 +21,17 @@ Full relational history is also stored in local SQLite (`work/zeno_telemetry.db`
 | `2026-11-16 16:30:47` | **`release_test_v1013`** (`auto`) | **Claude Code** | `claude-fable-5-2` | 23 (`0s → 01:10.25`) | `386,535` in / `41,289` out / **`427,824` total** (`~365,401/min`) | `0` in / `0` out / **`0` total** |
 | `2026-11-16 20:22:44` | **`abt_sonnet_wb`** (`auto`) | **Claude Code** | `claude-sonnet-5-5` | 18 (`0s → 01:03.08`) | `114,664` in / `26,105` out / **`140,769` total** (`~133,896/min`) | `0` in / `0` out / **`0` total** |
 | `2026-11-16 21:48:08` | **`gdoc_1F3i-288t96m_t_2sl36zopschq`** (`kn`) | **Codex** | `GPT-6.1 Sol` | 12 (102s → 01:17.33) | 115,265 uncached in / 5,132 out / **120,397 uncached in + out**; 2,925,824 cached in; **3,046,221 total** | 22,227 in / 8,084 out / **30,311 prior cached total** |
+| `2026-11-16 22:26:26` | **`gdoc_1F3i-288t96m_t_2sl36zopschq`** (`auto`) | **Codex** | `gpt-6.1-sol` | 12 (`102s → 01:17.62`) | `26,903` uncached in / `3,034,496` cached / `3,805` out / **`3,065,204` total including cache** | `0` new / `30,311` reused; 0 unknown clips <!-- zeno-output:/Users/mathiniraiselvan/Downloads/Zeno Outputs/W46 - Kannada - AI Only - Split screen + scrolling text - how to have a conversation in English - Competitor Replication English Seekho - Disha - Xs - Vidhat (4)/reel_W46 - Kannada - AI Only - Split screen + scrolling text - how to have a conversation in English - Competitor Replication English Seekho - Disha - Xs - Vidhat (4).mp4 --> |
+| `2026-11-16 22:49:53` | **`gdoc_1wJjuKQxyOVE_t_rg309xa356jl`** (`kn`) | **Codex** | `gpt-6.1-sol` | 6 (`190s → 02:17.57`) | `55,549` uncached in / `12,085,504` cached / `9,951` out / **`12,151,004` total including cache** | `16,066` new / `0` reused; 0 unknown clips <!-- zeno-output:/Users/mathiniraiselvan/Downloads/Zeno Outputs/W45 - Kannada - AI Only - Skit Micronarrative - Husband insults wife in front of people - come here practice - Replication with New Script - Disha - 142s - Abhishek/reel_W45 - Kannada - AI Only - Skit Micronarrative - Husband insults wife in front of people - come here practice - Replication with New Script - Disha - 142s - Abhishek.mp4 --> |
+| `2026-11-16 23:28:05` | **`gdoc_1wJjuKQxyOVE_t_rg309xa356jl`** (`auto`) | **Codex** | `gpt-6.1-sol` | 6 (`190s → 02:17.40`) | `52,795` uncached in / `2,675,328` cached / `7,708` out / **`2,735,831` total including cache** | `0` new / `16,066` reused; 0 unknown clips <!-- zeno-output:/Users/mathiniraiselvan/Downloads/Zeno Outputs/Reel - W45 - Kannada - AI Only - Skit Micronarrative - Husband insults wife in front of people - come here practice - Replication with New Script - Disha - 142s - Abhishek/Edited Reel.mp4 --> |
 
-## 2. Latest Job Clip-by-Clip Breakdown — `gdoc_1F3i-288t96m_t_2sl36zopschq` (`2026-11-16 21:48:08`)
+## 2. Latest Job Clip-by-Clip Breakdown — `gdoc_1wJjuKQxyOVE_t_rg309xa356jl` (`2026-11-16 23:28:05`)
 
 | Clip | Raw → Kept | Words | Script Lines | Kept Segments | Raw Clip Process (Retakes / Cuts / Anomalies) | Gemini In | Gemini Out | Gemini Total |
 |---|---|---|---|---|---|---:|---:|---:|
-| `M extra` | `8.0s → 0.0s` | 0 | `-` | `dropped` | Clean take (pause-snapped) | `0` | `0` | **`0`** |
-| `M1` | `10.0s → 0.0s` | 20 | `-` | `dropped` | Clean take (pause-snapped) | `2,040` | `658` | **`2,698`** |
-| `M2` | `10.0s → 0.0s` | 25 | `-` | `dropped` | Clean take (pause-snapped) | `2,040` | `568` | **`2,608`** |
-| `M3` | `6.0s → 0.0s` | 16 | `-` | `dropped` | Clean take (pause-snapped) | `1,940` | `393` | **`2,333`** |
-| `M4` | `10.0s → 0.0s` | 24 | `-` | `dropped` | Clean take (pause-snapped) | `2,040` | `549` | **`2,589`** |
-| `M5` | `8.0s → 0.0s` | 20 | `-` | `dropped` | Clean take (pause-snapped) | `1,991` | `478` | **`2,469`** |
-| `M6` | `8.0s → 0.0s` | 23 | `-` | `dropped` | Clean take (pause-snapped) | `1,991` | `562` | **`2,553`** |
-| `M7` | `8.0s → 0.0s` | 21 | `-` | `dropped` | Clean take (pause-snapped) | `1,991` | `479` | **`2,470`** |
-| `W extra` | `8.0s → 0.0s` | 16 | `-` | `dropped` | Clean take (pause-snapped) | `1,991` | `2,837` | **`4,828`** |
-| `W1` | `10.0s → 0.0s` | 24 | `-` | `dropped` | Clean take (pause-snapped) | `2,110` | `587` | **`2,697`** |
-| `W2` | `10.0s → 0.0s` | 17 | `-` | `dropped` | Clean take (pause-snapped) | `2,110` | `565` | **`2,675`** |
-| `W3` | `6.0s → 0.0s` | 12 | `-` | `dropped` | Clean take (pause-snapped) | `1,983` | `408` | **`2,391`** |
+| `LADY SV` | `20.0s → 0.0s` | 0 | `-` | `listener only / unused` | Clean take (pause-snapped) | `0` | `0` | **`0`** |
+| `ROBOT SV` | `20.0s → 0.0s` | 0 | `-` | `listener only / unused` | Clean take (pause-snapped) | `0` | `0` | **`0`** |
+| `Robot fv` | `105.1s → 100.3s` | 227 | `L4,L6,L8,L10,L12,L14,L16,L19,L21,L23,L25,L27` | `L4a + L4b + L4c + L6 + L8 + L10 + L12 + L14 + L16 + L19 + L21 + L23 + L25 + L27` | Clean take (pause-snapped) | `4,189` | `3,532` | **`7,721`** |
+| `S1` | `10.0s → 9.2s` | 28 | `L1,L2` | `L1a + L1b + L2a + L2b` | Clean take (pause-snapped) | `1,811` | `621` | **`2,432`** |
+| `S2` | `10.0s → 6.5s` | 15 | `L3` | `L3a + L3b + L3c` | Clean take (pause-snapped) | `1,811` | `448` | **`2,259`** |
+| `lady fv` | `25.1s → 21.3s` | 61 | `L5,L7,L9,L11,L13,L15,L17,L18,L20,L22,L24,L26` | `L5 + L7 + L9 + L11 + L13 + L15 + L17 + L18 + L20a + L20b + L22 + L24 + L26` | Clean take (pause-snapped) | `2,189` | `1,465` | **`3,654`** |

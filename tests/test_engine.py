@@ -2580,6 +2580,7 @@ class TestEditorSheetBugFixes(unittest.TestCase):
             self.assertIn("English", srt_body)
             loud_ok, lufs, tp = verify.check_loudness(out_mp4, -11.5)
             self.assertTrue(loud_ok, f"Loudness failed: I={lufs}, TP={tp}")
+            self.assertLessEqual(tp, -1.0, "Final AAC must preserve the owner's -1 dBTP ceiling")
 
 
 class TestSourceOrderSwap(unittest.TestCase):

@@ -252,8 +252,8 @@ def _archive_blocked(stage: str, reason: str, script_arg: str = "", inputs: Opti
         pass
 
 
-SESSION_LIMIT = 250_000     # a new chat with /zeno loaded is about 50-70k; a chat that already holds earlier videos is far bigger
-SESSION_WARN = 350_000
+SESSION_LIMIT = 100_000     # conservative default; config/cost_controls.json owns the normal limit
+SESSION_WARN = 150_000
 
 
 def session_gate(stage: str, block: bool, project_hint: str = "", script_arg: str = "", inputs: Optional[List[str]] = None) -> None:
@@ -261,28 +261,30 @@ def session_gate(stage: str, block: bool, project_hint: str = "", script_arg: st
     costs several times more (16 Nov: chats of 450-600k made each job re-read 5-10M tokens instead of about 1M).
     At the start of a job (block=True) a chat over SESSION_LIMIT stops the job and asks for a new chat; later
     (block=False) a chat over SESSION_WARN only prints a warning. Unknown size (another agent, no log) never stops anything."""
+    from cost_control import settings
+    policy = settings()
+    limit = int(os.environ.get("ZENO_SESSION_LIMIT") or policy["new_chat_context_limit"])
+    if limit <= 0:
+        raise ValueError("ZENO_SESSION_LIMIT must be positive")
     try:
         import agent_log
         s = agent_log.session_size()
-        limit = int(os.environ.get("ZENO_SESSION_LIMIT") or SESSION_LIMIT)
     except Exception:
-        return
+        s = None
     if not s:
+        print("[COST] Chat context could not be measured. Use a fresh edit chat; unknown usage is not zero.")
         return
     k = s["tokens"] // 1000
     if block and s["tokens"] > limit:
-        est = s["tokens"] * 15 / 1e6
-        print(f"\n[BLOCKED] NEW CHAT NEEDED. This chat already holds {k}k tokens of earlier work, and Claude re-reads all of it on every step:"
-              f"\n  this edit would re-read about {est:.0f}M tokens instead of about 1M, which uses up the team's Claude limit."
-              "\n  Tell the user exactly this: 'Type /clear (or open a new chat), then start this edit again with the same script,"
-              "\n  footage and Notion name. Nothing is lost: Zeno keeps every clip it already measured.'"
-              "\n  Do not try to work around this check; just ask the user to start a new chat.")
+        print(f"\n[BLOCKED] NEW CHAT NEEDED. This chat already holds {k}k input tokens."
+              "\n  Open a fresh editing chat with the same script, footage and Notion name."
+              "\n  Zeno keeps the measured clips and saved plans; no cache clearing is needed.")
         _archive_blocked("fresh_session", f"chat already held {s['tokens']} tokens ({s['steps']} steps) at {stage}", script_arg, inputs)
         sys.exit(2)
     if not block and s["tokens"] > SESSION_WARN:
         where = f" in {project_hint}" if project_hint else ""
         print(f"\n[TOKENS] This chat now holds {k}k tokens, and every step re-reads all of it. Finish this step, then make any further"
-              f"\n  changes in a new chat: tell the user to type /clear and say 'continue the edit{where}: <the change>'.")
+              f"\n  changes in a new chat: say 'continue the edit{where}: <the change>'.")
 
 
 def job_gate(raw_inputs: List[str], script_arg: str, skip: bool = False, style: str = "") -> None:
@@ -638,6 +640,8 @@ def run_inspect(
             job_archive.send_in_background(plan_path, "inspected")
         except Exception:
             pass
+        import cost_control
+        cost_control.print_checkpoint(plan_path.parent)
         return plan_path
     except Exception as exc:
         tracker.stop_heartbeat(final_state="error", final_detail=str(exc))
@@ -711,7 +715,7 @@ def print_next_step(plan_path: pathlib.Path) -> None:
     rel = plan_path.relative_to(ROOT)
     print("\n[NEXT STEP] Zeno has measured the footage and decided nothing. The Director now:")
     d = plan_path.parent.relative_to(ROOT)
-    print(f"  1. reads {d}/brief.md, line_map.md, facts.md and clip_sheet_*.jpg in ONE parallel batch (brief.md replaces agent/EDIT_RULES.md)")
+    print(f"  1. reads {d}/editing_packet.md and ALL clip_sheet_*.jpg in ONE batch; detailed files stay on disk")
     print(f"  2. writes every segment of {rel}")
     print(f"  3. runs: python3 scripts/zeno.py --check-plan {rel}")
     print("  4. asks the user Yes/No once, then runs:")
@@ -881,6 +885,10 @@ def apply_stage3_tweaks(
 
 
 def main() -> None:
+    if "--compact" in sys.argv[1:]:
+        from compact_run import run
+        args = [arg for arg in sys.argv[1:] if arg != "--compact"]
+        sys.exit(run([sys.executable, "-u", str(Path(__file__).resolve()), *args]))
     ap = argparse.ArgumentParser(
         description="Zeno — 5-Stage Standalone & Conversational AI Video Editor Harness"
     )
@@ -889,6 +897,7 @@ def main() -> None:
         nargs="*",
         help="Raw footage folder or .mp4/.mov clip paths (or plan.edl path when using --execute / --pitch)",
     )
+    ap.add_argument("--compact", action="store_true", help="Print concise results; keep full output in work/_logs")
     ap.add_argument("--check", action="store_true", help="Stage 0: Run Edit Bay & System Readiness Check")
     ap.add_argument(
         "--inspect",
@@ -1035,10 +1044,11 @@ def main() -> None:
             sys.exit(0)
 
     if args.inspect or (args.inputs and args.script):
-        common.job_begin()                # the token window of this edit starts here, when transcription starts (not at the pre-job checks)
+        common.job_begin(identity=json.dumps([args.script, args.name, args.inputs], ensure_ascii=False))
     if args.preflight:
         import preflight
 
+        common.job_start_epoch()
         session_gate("preflight", block=True, script_arg=args.script or "", inputs=args.inputs)
         print("\nZeno pre-job checks (live)")
         checks = preflight.run_system_checks()
@@ -1086,6 +1096,8 @@ def main() -> None:
         msg = order_gate(load_edl(p_path), p_path)
         print(msg or "[PLAN PASS] Every line present, once, in script order; no cut inside a word; voices match.")
         session_gate("check", block=False, project_hint=str(p_path.relative_to(ROOT)) if str(p_path).startswith(str(ROOT)) else str(p_path))
+        import cost_control
+        cost_control.print_checkpoint(p_path.parent)
         try:   # the job archive keeps every version of the plan and what the check said about it
             import job_archive
             job_archive.snapshot_plan(p_path, "check", msg or "PLAN PASS")

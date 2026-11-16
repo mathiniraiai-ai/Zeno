@@ -846,51 +846,74 @@ def resolve_user_project_name(base_name: str, work_root: Path | None = None, ema
 JOB_MARKER = WORK / "_job_marker.json"
 
 
-def job_start_epoch(create: bool = True) -> float:
-    """When this edit began. Written by the pre-job checks and kept until the render finishes, so the token report counts exactly one
-    edit: from the checks to the finished video. (Looking at a whole session's logs mixed several edits and any code work together.)"""
-    import time as _t
+def _job_marker_path() -> Path:
+    """Each identified chat owns its window; parallel chats must not overwrite it."""
+    import hashlib
+    session = (os.environ.get("CLAUDE_CODE_SESSION_ID") if os.environ.get("CLAUDECODE") else os.environ.get("CODEX_THREAD_ID"))
+    session = session or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if session:
+        suffix = hashlib.sha256(session.encode()).hexdigest()[:16]
+        return JOB_MARKER.with_name(f"{JOB_MARKER.stem}.{suffix}{JOB_MARKER.suffix}")
+    return JOB_MARKER
 
+
+def _read_job_marker() -> dict:
     try:
-        m = json.loads(JOB_MARKER.read_text(encoding="utf-8"))
-        if m.get("start") and _t.time() - float(m["start"]) < 6 * 3600:
-            return float(m["start"])
+        marker = json.loads(_job_marker_path().read_text(encoding="utf-8"))
+        if not isinstance(marker, dict):
+            return {}
+        if marker.get("start"):
+            marker["start"] = float(marker["start"])
+        return marker
     except (OSError, ValueError):
-        pass
-    now = _t.time()
-    if create:
-        try:
-            JOB_MARKER.parent.mkdir(parents=True, exist_ok=True)
-            JOB_MARKER.write_text(json.dumps({"start": now}), encoding="utf-8")
-        except OSError:
-            pass
-    return now
+        return {}
 
 
-def job_begin(reuse_minutes: float = 30.0) -> float:
-    """A new edit starts: `--inspect` (the start of transcription) calls this. Unlike the pre-job checks it always opens a fresh window, so work done
-    earlier in the same chat session is never counted. Running inspect again within `reuse_minutes` keeps the window (the same edit, measured twice)."""
-    import time as _t
-
+def _write_job_marker(marker: dict) -> None:
+    import uuid
+    path = _job_marker_path()
+    temp = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
     try:
-        m = json.loads(JOB_MARKER.read_text(encoding="utf-8"))
-        if m.get("start") and _t.time() - float(m["start"]) < reuse_minutes * 60:
-            return float(m["start"])
-    except (OSError, ValueError):
-        pass
-    now = _t.time()
-    try:
-        JOB_MARKER.parent.mkdir(parents=True, exist_ok=True)
-        JOB_MARKER.write_text(json.dumps({"start": now}), encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp.write_text(json.dumps(marker), encoding="utf-8")
+        temp.replace(path)
     except OSError:
         pass
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def job_start_epoch(create: bool = True) -> float:
+    """Start of the current chat's edit, from preflight through render completion."""
+    import time as _t
+    marker = _read_job_marker()
+    now = _t.time()
+    if marker.get("start") and 0 <= now - float(marker["start"]) < 6 * 3600:
+        return float(marker["start"])
+    if create:
+        _write_job_marker({"start": now})
     return now
+
+
+def job_begin(reuse_minutes: float = 30.0, identity: str = "") -> float:
+    """Reuse a pending preflight or a retry of this edit, never a different video."""
+    import time as _t
+    marker = _read_job_marker()
+    now = _t.time()
+    same_edit = not identity or not marker.get("identity") or marker["identity"] == identity
+    if (same_edit and marker.get("start") and
+            0 <= now - float(marker["start"]) < reuse_minutes * 60):
+        start = float(marker["start"])
+    else:
+        start = now
+    _write_job_marker({"start": start, "identity": identity or marker.get("identity", "")})
+    return start
 
 
 def job_done() -> None:
-    """The edit is finished: the next one starts a new window."""
+    """Finish only this chat's window; leave other edits and caches untouched."""
     try:
-        JOB_MARKER.unlink()
+        _job_marker_path().unlink()
     except OSError:
         pass
 

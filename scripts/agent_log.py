@@ -283,6 +283,13 @@ def session_size(root: Path = ROOT, max_age: float = 300.0) -> Optional[Dict[str
     Code (CLAUDECODE=1) it measures the chat named by CLAUDE_CODE_SESSION_ID; outside Claude Code (a terminal, Zeno's own
     direct mode) there is no chat to protect, so it returns None. Returns None also when it cannot tell (another agent, no log, a read error): callers must then let the job go on."""
     try:
+        if os.getenv("CODEX_THREAD_ID") and not os.getenv("CLAUDECODE"):
+            import codex_usage
+            usage = codex_usage.detect(time.time() - max_age, root=root)
+            if usage and usage.get("context_end"):
+                return {"tokens": usage["context_end"], "steps": usage["steps_count"],
+                        "session": usage["session_id"], "agent": "Codex"}
+            return None
         if not os.environ.get("CLAUDECODE"):        # run from a terminal or by Zeno itself: no chat is paying for it
             return None
         sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()

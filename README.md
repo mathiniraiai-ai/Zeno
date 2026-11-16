@@ -1,6 +1,6 @@
 # Zeno
 
-> **Zeno is a harness layer that lets any AI agent edit script-led short videos at about a quarter of the token cost** — for **Claude Code (Opus 4.5 / 5.5)** & **Antigravity (Gemini 4 Argon)** with **Meta Wav2Vec2 + `uroman` forced alignment**, **OpenCV visual tracking & motion analysis**, and **5 dynamic layouts**.
+> **Zeno lets an AI agent edit script-led short videos while Python handles transcription, timing, validation and rendering.** Works with Codex, Claude Code and Antigravity; uses Meta wav2vec2, OpenCV and FFmpeg.
 
 Give it raw footage and a script, and it returns a finished `1080×1920` (or `720×1280`) MP4:
 - **Best takes only** — retakes, false starts, stutters, dead air, and trailing AI clip babble removed
@@ -8,11 +8,11 @@ Give it raw footage and a script, and it returns a finished `1080×1920` (or `72
 - **OpenCV Visual Tracking & Dynamic Zooms** — OpenCV face/subject tracking, static-shot motion detection, sub-pixel `flash_zoom` / `sudden_in` on hooks & brand endorsements, and Meta Creative transitions (`whip_left`, `whip_right`, `zoom_burst`, `flash_zoom`, `warm_flash`, `slide_up`)
 - **5 Dynamic Speaker Layouts (+ `hybrid`)** — `single`, `split_v`, `split_h`, `chat_bar`, `video_call`, and `hybrid`
 - **Swappable `✓` / `✗` mark packs + SFX** — minimal 2-pulse end-of-sentence Red/Green flash overlays and strong right/wrong SFX placed automatically from script cues
-- **Claude edits, Zeno renders** — the agent makes every editing decision, at about `50k–70k tokens` per video
+- **The agent edits, Zeno renders** — a compact job brief supports editorial decisions; measured usage is reported separately from cost estimates.
 
 New team member? Start with [ONBOARDING.md](ONBOARDING.md).
 
-No B-roll, no unrequested captions, no CTA, no extra visual clutter. Everything needed runs self-contained inside this folder without touching any other project.
+Animated single-row captions are on by default; scrolling-text pages replace them. No unrequested B-roll, CTA or visual clutter. Everything needed runs self-contained inside this folder without touching any other project.
 
 ---
 
@@ -31,7 +31,7 @@ Third-party components keep their own licenses (see Section 7 of [LICENSE](LICEN
 | `input/footage/` | Raw input video clips (`S1.mp4`, `S2.mp4`, …) | Ignored (`*.mp4`, `.gitkeep` only) |
 | `input/script/` | Script files (`.txt`, `.md`, or `.docx` — read with the standard library, tables supported; converted to `work/_script_cache/<name>.txt`), or saved from chat | Tracked or ignored per project |
 | `output/` | Rendered final MP4 videos (`*.mp4`) + `*.timeline.txt` cut/effect logs | Ignored (`*.mp4`), `*.timeline.txt` optional |
-| `work/` | Per-clip intermediate JSONs (`words.json`, `silences.json`, `info.json`), render cache, plus `line_map.md`, `facts.md`, clip sheets, `plan.edl`, `plan.json`, and `marks_contact_sheet.jpg`. Safe to delete anytime. | **Ignored** (ephemeral local scratch) |
+| `work/` | Per-clip intermediate JSONs (`words.json`, `silences.json`, `info.json`), render cache, plus `line_map.md`, `facts.md`, clip sheets, `plan.edl`, `plan.json`, and `marks_contact_sheet.jpg`. Preserve these caches and records; use the supported cleanup command when needed. | **Ignored** (local job records and reusable caches) |
 | `scripts/` | Python pipeline tools (`setup.py`, `prepare.py`, `align_engine/`, `layouts.py`, `ui_generator.py`, `vision_tracker.py`, `edl_parser.py`, `render.py`, `verify.py`, `transcribe.py`, `script_intake.py`, `learn_reference.py`, `style_plan.py`, `clean.py`, `speaker_check.py`, `preproduce.py`, `motion.py`, `token_tracker.py`, `common.py`) | **Committed** |
 | `assets/sfx/` | Sound effects — Right: `correct_ding.wav`, `sn_correct.wav`, `w42_right.wav`; Wrong: `buzzer.wav`, `sn_wrong.wav`, `w42_wrong.wav`; Transitions: `whoosh.wav`, `pop.wav` | **Committed** |
 | `assets/transitions/` | Measured overlay transitions (`warm_flash.json`), applied over a hard cut by `render.py` | **Committed** |
@@ -45,67 +45,42 @@ Third-party components keep their own licenses (see Section 7 of [LICENSE](LICEN
 
 ---
 
-## One-time setup (macOS Apple Silicon & Windows)
+## Setup and fresh editing chats
 
-1. **Configure `.env`** (for Gemini 2.5 Flash Indic transcription fallback/assist):
+Run `bash install.command` on Mac, or `install.bat` on Windows. The installer creates `.venv`, installs the dependencies and handles sign-in. Do not paste keys into chat. Commands below use `.venv/bin/python`; on Windows use `.venv\Scripts\python.exe`.
+
+For a new Codex edit, open `edit-codex.command` (Mac) or `edit-codex.bat` (Windows). This opens a fresh CLI chat with configured connectors disabled for that launch. Your global settings and existing chats are unchanged; managed workspace tools may remain. `scripts/launch_edit.py --dry-run` previews the launch without a model call. Claude users can use `edit.command` / `edit.bat`.
+
+## Editing workflow
+
+1. Supply the local footage folder, the Google Doc's specific `?tab=...` link (or local script), and the exact Notion name. If anything is missing, run `--preflight --compact` first and request only the missing input.
+2. Inspect with live checks:
+
    ```bash
-   cp .env.example .env   # or create .env at project root
-   # Add: GEMINI_API_KEY=your_api_key_here
+   .venv/bin/python scripts/zeno.py --inspect "<footage>" --script "<script tab>" --name "<Notion name>" --compact
    ```
-2. **Run the setup bootstrapper**:
+
+   Add `--style <name>` when following a known learned style. Read the generated `brief.md`, `line_map.md`, `facts.md` and clip sheets. Reusable transcripts and alignment are kept automatically.
+3. Write the analysis and complete `plan.edl`; run `.venv/bin/python scripts/zeno.py --check-plan work/<project>/plan.edl`. Resolve failed checks and review pacing/style notes. Show the plan and get Yes/No once before rendering.
+4. Render and verify:
+
    ```bash
-   python3 scripts/setup.py
+   .venv/bin/python scripts/zeno.py --execute work/<project>/plan.edl --square --compact
    ```
-   - Verifies/links native `ffmpeg` + `ffprobe` (ARM64 on Apple Silicon M2 Air or `tools/ffmpeg/`).
-   - Generates all swappable `✓`/`✗` mark packs in `assets/marks/` (`default`, `glossy`, `flash`, `vignette`).
-   - Prepares the forced-alignment environment (Indic G2P, `uroman` fallback, and the Meta wav2vec2 aligner).
 
-### Windows (NVIDIA GPU)
+   Deliverables go to `~/Downloads/Zeno Outputs/<Notion name>/`: the vertical reel, square export, timeline, editable Premiere project/XML, script and plan. Review verification and contact sheets before delivery.
 
-Zeno runs the same on Windows. The aligner uses CUDA automatically when `torch.cuda.is_available()`, otherwise CPU (alignment is `<1s/clip` either way); rendering is FFmpeg `libx264` on CPU on both platforms.
+`--compact` keeps the complete diagnostic log under `work/_logs/` and prints stage changes, checks and failures. Live desktop progress continues locally; the agent need not reread progress files every few seconds.
 
-```powershell
-winget install Gyan.FFmpeg
-py -3.12 -m venv .venv
-.venv\Scripts\python -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/<cuda-tag>   # pick <cuda-tag> (e.g. cu126) at pytorch.org
-.venv\Scripts\python -m pip install -r requirements.txt
-.venv\Scripts\python scripts\setup.py --prewarm   # downloads the wav2vec2 weights into models/torch/ (~360 MB, not committed)
-```
-Run the pipeline with `.venv\Scripts\python scripts\prepare.py ...` (the scripts also auto-detect `.venv\Scripts\python.exe`).
+## Token and cost controls
 
-On Apple Silicon / macOS: `uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt`.
+- `AGENTS.md` and `CLAUDE.md` share one short set of rules. Each generated brief selects the relevant editing sections; references are read only as needed.
+- Codex usage is tied to the current chat and job window. Reports separate uncached input, cache reads, cache writes and output. A cached transcript is recorded as reused, not charged as a new transcription.
+- Read a saved report with `.venv/bin/python scripts/token_tracker.py --project <project>`. This does not rerun accounting or upload telemetry. `--refresh` explicitly rebuilds the report for its saved window.
+- INR estimates use versioned model rates, a dated exchange rate and an explicit speed assumption. They are API-equivalent estimates, not subscription invoices. Unknown model prices remain unavailable. Set `ZENO_USD_INR` or `ZENO_COST_SPEED=standard|fast|ultrafast` when needed.
+- 50k–70k is historical guidance, not a token target. Actual savings need comparison across equivalent fresh-session edits; smaller rule files alone do not prove a matching reduction in the final bill.
 
----
-
-## The 3-Step Low-Token Workflow
-
-In Claude Code, simply type **`/zeno`** (or follow these 3 steps manually in Claude Code or Antigravity):
-
-### 1. Analyse & Auto-Plan (`1 command`)
-```bash
-python3 scripts/prepare.py input/footage/*.mp4 \
-  --script input/script/<script>.txt \
-  --lang <lang> \
-  [--preset auto|single|split_v|split_h|chat_bar|video_call|hybrid] \
-  [--mark-pack default|glossy|flash|vignette]
-```
-- Transcribes clips, aligns every word, measures pauses, faces and silent clips. It decides nothing. It writes:
-  - `work/<project>/line_map.md` (the script, and which clip stretches say each line)
-  - `work/<project>/facts.md` (every word with its time)
-  - `work/<project>/clip_sheet_<n>.jpg` (pictures of every clip)
-  - `work/<project>/plan.edl` (header only)
-
-### 2. The agent edits
-- Claude Opus or Sonnet makes every decision by `agent/EDIT_RULES.md` and writes `plan.edl`, about 50k to 70k tokens per video.
-- `python3 scripts/zeno.py --check-plan work/<project>/plan.edl` must pass: script order, every line once, no cut inside a word, voices match.
-
-### 3. Render & Verify (`1 command`)
-```bash
-python3 scripts/render.py work/<project>/plan.edl --verify
-```
-- Renders `output/<name>.mp4` (H.264 CRF 18, AAC 192 kbps, `12ms` edge fades, two-pass `-14 LUFS` normalization) and `output/<name>.timeline.txt`.
-- Runs deterministic script-coverage & audio loudness checks (no second re-transcription pass needed).
-- Generates `work/<project>/marks_contact_sheet.jpg` so the agent can visually verify all `✓`/`✗` marks in **a single image read**.
+See [DEVELOPING.md](DEVELOPING.md) for the regression suite and development workflow.
 
 ---
 
@@ -144,7 +119,7 @@ Pass `--mark-pack <pack>` or set `# mark_pack: <pack>` in `plan.edl`:
 ## Token usage log
 
 Measured with the Claude desktop app's usage reading before and after each task:
-- **Context tokens** is how much the session's working context grew during the task. It's the closest figure available; the exact billed count isn't readable from inside the session.
+- **Context tokens** describes the request context size, not total spending. New reports use provider usage counters where available, separate cache reads and identify estimates or unavailable measurements. Historical rows retain their original measurement basis.
 - **Plan %** is the share of the 5-hour and weekly limits (Max plan) used during the task.
 
 | Date | Task | Context tokens (start → end) | Tokens used | 5-hour limit | Weekly limit |
@@ -167,3 +142,6 @@ Measured with the Claude desktop app's usage reading before and after each task:
 | 2026-11-05 | **Telugu – "W45 - Telugu - AI Only - Skit Micronarative - poor Indian girl orders the wrong meal - Replication from Kannada - Disha - Xs - Balesh"** (12 clips, 24 script lines, 26 cuts): ~02:47 final, 2 marks (✗ L10, ✓ L16), 3 peaks, 0 zooms (all two-shots/splits) → `~/Downloads/Zeno Outputs/<name>/` | n/a | ~60k (my estimate) + 36,077 Gemini transcription; no agent ledger in this telemetry | n/a | n/a |
 | 2026-11-16 | **Kannada – "W46 how to have a conversation in English (scrolling text)"** (12 clips, 17 script lines): 01:17 final, 0 ✓/✗ marks → `~/Downloads/Zeno Outputs/W46 - Kannada - AI Only - Split screen + scrolling text - how to have a conversation in English - Competitor Replication English Seekho - Disha - Xs - Vidhat (2)/` | n/a | ~99,637 (agent) + 30,311 (Gemini) | 834,092 | n/a | n/a |
 | 2026-11-16 | **Kannada – "W46 how to have a conversation in English (scrolling text)"** (12 clips, 17 script lines): 01:17 final, 0 ✓/✗ marks → `~/Downloads/Zeno Outputs/W46 - Kannada - AI Only - Split screen + scrolling text - how to have a conversation in English - Competitor Replication English Seekho - Disha - Xs - Vidhat (3)/reel_W46 - Kannada - AI Only - Split screen + scrolling text - how to have a conversation in English - Competitor Replication English Seekho - Disha - Xs - Vidhat (3).mp4` | ~73,383 → ~121,224 (request input) | **120,397** uncached input + output; 2,925,824 cached Codex input; 30,311 prior cached Gemini | unavailable | 3% → 3% |
+| 2026-11-16 | **auto – gdoc_1F3i-288t96m_t_2sl36zopschq** (12 clips): 01:17.62, 0 marks → `/Users/mathiniraiselvan/Downloads/Zeno Outputs/W46 - Kannada - AI Only - Split screen + scrolling text - how to have a conversation in English - Competitor Replication English Seekho - Disha - Xs - Vidhat (4)/reel_W46 - Kannada - AI Only - Split screen + scrolling text - how to have a conversation in English - Competitor Replication English Seekho - Disha - Xs - Vidhat (4).mp4` <!-- zeno-output:/Users/mathiniraiselvan/Downloads/Zeno Outputs/W46 - Kannada - AI Only - Split screen + scrolling text - how to have a conversation in English - Competitor Replication English Seekho - Disha - Xs - Vidhat (4)/reel_W46 - Kannada - AI Only - Split screen + scrolling text - how to have a conversation in English - Competitor Replication English Seekho - Disha - Xs - Vidhat (4).mp4 --> | 126,236 → 146,544 | 30,708 uncached input + output; 3,034,496 cached (exact) | unavailable | unavailable |
+| 2026-11-16 | **kn – gdoc_1wJjuKQxyOVE_t_rg309xa356jl** (6 clips): 02:17.57, 0 marks → `/Users/mathiniraiselvan/Downloads/Zeno Outputs/W45 - Kannada - AI Only - Skit Micronarrative - Husband insults wife in front of people - come here practice - Replication with New Script - Disha - 142s - Abhishek/reel_W45 - Kannada - AI Only - Skit Micronarrative - Husband insults wife in front of people - come here practice - Replication with New Script - Disha - 142s - Abhishek.mp4` <!-- zeno-output:/Users/mathiniraiselvan/Downloads/Zeno Outputs/W45 - Kannada - AI Only - Skit Micronarrative - Husband insults wife in front of people - come here practice - Replication with New Script - Disha - 142s - Abhishek/reel_W45 - Kannada - AI Only - Skit Micronarrative - Husband insults wife in front of people - come here practice - Replication with New Script - Disha - 142s - Abhishek.mp4 --> | 201,569 → 246,044 | 65,500 uncached input + output; 12,085,504 cached (exact) | unavailable | unavailable |
+| 2026-11-16 | **auto – gdoc_1wJjuKQxyOVE_t_rg309xa356jl** (6 clips): 02:17.40, 0 marks → `/Users/mathiniraiselvan/Downloads/Zeno Outputs/Reel - W45 - Kannada - AI Only - Skit Micronarrative - Husband insults wife in front of people - come here practice - Replication with New Script - Disha - 142s - Abhishek/Edited Reel.mp4` <!-- zeno-output:/Users/mathiniraiselvan/Downloads/Zeno Outputs/Reel - W45 - Kannada - AI Only - Skit Micronarrative - Husband insults wife in front of people - come here practice - Replication with New Script - Disha - 142s - Abhishek/Edited Reel.mp4 --> | 36,479 → 79,647 | 60,503 uncached input + output; 2,675,328 cached (exact) | unavailable | unavailable |

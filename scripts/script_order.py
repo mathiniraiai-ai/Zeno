@@ -161,6 +161,11 @@ def _ngram_occurrences(gram: List[str], toks: List[str]) -> int:
     return cnt
 
 
+def _repeat_tokens(words: List[str]) -> List[str]:
+    """Repeat-only contraction normalization; does not change alignment or timing."""
+    return [part for token in clean(words) for part in ({"gotta": ("got", "to")}.get(token, (token,)))]
+
+
 def find_unscripted_repeats(
     words: List[Dict[str, Any]],
     script_line_text: Union[str, List[str], None] = "",
@@ -186,16 +191,16 @@ def find_unscripted_repeats(
         if not isinstance(w, dict):
             continue
         raw_txt = str(w.get("w") or w.get("word") or w.get("text") or "").strip()
-        for t in clean(raw_txt.split()):
+        for t in _repeat_tokens(raw_txt.split()):
             items.append((t, w))
     n = len(items)
     if n < 2:
         return []
 
     if isinstance(script_line_text, (list, tuple)):
-        ref_toks = clean([str(x) for x in script_line_text])
+        ref_toks = _repeat_tokens([str(x) for x in script_line_text])
     else:
-        ref_toks = clean(str(script_line_text or "").split())
+        ref_toks = _repeat_tokens(str(script_line_text or "").split())
 
     toks = [t for t, _ in items]
     found: List[Dict[str, Any]] = []
@@ -741,7 +746,7 @@ def repeat_problems(
             t_cursor = 0.0
             for w in tail_a:
                 w_dur = max(0.05, float(w.get("end", 0.0)) - float(w.get("start", 0.0)))
-                nt = len(clean(str(w.get("w") or w.get("word") or "").split()))
+                nt = len(_repeat_tokens(str(w.get("w") or w.get("word") or "").split()))
                 if nt == 0:
                     continue
                 tail_tok_count += nt
@@ -756,7 +761,7 @@ def repeat_problems(
             t_cursor += 0.10
             for w in head_b:
                 w_dur = max(0.05, float(w.get("end", 0.0)) - float(w.get("start", 0.0)))
-                nt = len(clean(str(w.get("w") or w.get("word") or "").split()))
+                nt = len(_repeat_tokens(str(w.get("w") or w.get("word") or "").split()))
                 if nt == 0:
                     continue
                 combined.append({
@@ -772,7 +777,7 @@ def repeat_problems(
             # Map token index back to `combined` word entry for exact clip-local timestamps
             tok_to_comb: List[Dict[str, Any]] = []
             for cw_item in combined:
-                for _ in clean(str(cw_item.get("w") or "").split()):
+                for _ in _repeat_tokens(str(cw_item.get("w") or "").split()):
                     tok_to_comb.append(cw_item)
 
             allowed_pair = _script_tokens_for_segs([s_a, s_b], tail_a + head_b, by_id, lines)
@@ -849,8 +854,12 @@ def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path, plan_path:
         except Exception as exc:   # noqa: BLE001
             voices, note = [], f"voices not checked: {exc}"
         voices = still_open(voices)
-        if voices:
-            g["problems"]["WRONG VOICE"] = voices
+        uncertain = [v for v in voices if "[SHORT VOICE REVIEW]" in v]
+        definite = [v for v in voices if v not in uncertain]
+        if definite:
+            g["problems"]["WRONG VOICE"] = definite
+        if uncertain:
+            g["problems"]["VOICE REVIEW REQUIRED"] = uncertain
         g["voice_note"] = note
         try:
             g["tighten"] = tight_report(plan)
@@ -917,7 +926,7 @@ def _trim_edge_stumbles(
         # Map flat token index inside sub_ws back to word offset
         tok_to_off: List[int] = []
         for off in range(len(sub_ws)):
-            for _ in wtoks[cur_i + off]:
+            for _ in _repeat_tokens(wtoks[cur_i + off]):
                 tok_to_off.append(off)
         if not tok_to_off:
             return cur_r, cur_i, cur_j, reps
@@ -1093,7 +1102,16 @@ def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], lim
         cands.sort(key=lambda x: (-x[0][0], not x[0][1], -x[0][2], x[0][3], -x[0][4]))
         for _sk, r, name, a, b, _reps, c in cands:
             named.add(id(c))
-        for _sk, r, name, a, b, reps, _ in cands[:limit]:
+        # Text similarity cannot identify the speaker. Show each source's best
+        # candidate before additional takes from the same source.
+        diverse, seen_sources = [], set()
+        for candidate in cands:
+            if candidate[2] not in seen_sources:
+                diverse.append(candidate)
+                seen_sources.add(candidate[2])
+        selected = diverse + [c for c in cands if c not in diverse]
+        shown = selected[:max(limit, len(diverse))]
+        for _sk, r, name, a, b, reps, _ in shown:
             rep_note = ""
             if reps:
                 rp0 = reps[0]
@@ -1102,8 +1120,8 @@ def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], lim
                     f"('{rp0['phrase']}' {rp0['first_start']:.2f}-{rp0['first_end']:.2f} & {rp0['second_start']:.2f}-{rp0['second_end']:.2f})]"
                 )
             out.append(f"  CAND {name} {float(a):.2f}-{float(b):.2f} heard={r:.2f}{rep_note}")
-        if len(cands) > limit:
-            out.append(f"  +{len(cands) - limit} weaker")
+        if len(cands) > len(shown):
+            out.append(f"  +{len(cands) - len(shown)} alternate candidates (more takes of the sources above; see facts.md)")
         if not cands:
             out.append("  NO CLIP says this line (check facts.md, then tell the user to reshoot or accept the gap)")
     spare = [(c, ws) for c, ws, _ in prep if id(c) not in named and ws and not c.get("is_listening")]
@@ -1154,7 +1172,12 @@ def voice_problems(plan: Dict[str, Any]) -> Tuple[List[str], str]:
             if span_sec < 2.5 and same_file and not any(m in disagree for m in same_file):
                 doubts.append(f"{msg} (only {span_sec:.1f}s of speech; the file's other {len(same_file)} turn(s) match: check by ear)")
             else:
-                out.append(msg)
+                if span_sec < 2.5:
+                    out.append(f"{ids.get(n, n)} [SHORT VOICE REVIEW] {span_sec:.2f}s: expected "
+                               f"{sp.get('expected')}, classifier suggests {sp.get('heard')}. "
+                               "Review this source once by ear/reference; do not retry unchanged classification or guess another take.")
+                else:
+                    out.append(msg)
     return out, ("voice doubt: " + "; ".join(doubts)) if doubts else ""
 
 

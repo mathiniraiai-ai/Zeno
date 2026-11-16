@@ -75,8 +75,6 @@ def build(meta: Dict[str, Any], plan: Dict[str, Any], style: str = "") -> str:
     else:
         fmt = "\n\n".join(body for head, body in _sections(formats, "##")
                           if head and not head.lower().startswith(_FORMATS_SKIP))
-    if not page and REFERENCE.is_file():
-        out += ["", REFERENCE.read_text(encoding="utf-8").strip()]
     if fmt:
         out += ["", "# FORMATS (name the format on line 1 of script_analysis.md as `Format: <id> (<name>)`)", "", fmt]
     return "\n".join(out).rstrip() + "\n"

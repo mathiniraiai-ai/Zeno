@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Direct mode: Zeno asks Claude for the edit decisions itself, in a few calls, instead of a Claude Code agent loop.
+"""Tool-free planning entry point. Default: bounded GPT-6.1 Sol via Responses API.
+
+Use --dry-run to inspect the reserve without a paid call. OpenAI requires a separately
+configured OPENAI_API_KEY and separate API billing. See LOW_COST_WORKFLOW.md.
+The older Claude subscription CLI implementation remains behind --provider claude.
 
 Why: in a Claude Code chat every step re-sends Claude Code's own instructions and tools (about 56k tokens) plus the
 whole chat, and an edit takes 15 to 65 steps, so one 90 s video re-read 1 to 9 million tokens (16 Nov). The decisions
@@ -32,7 +36,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 PY = sys.executable
-MAX_IMAGES = 4
 CALL_TIMEOUT = 1200
 HEADER_KEYS = ("#output", "#script", "#src_dir", "#canvas", "#style")   # owned by Zeno, never taken from Claude's answer
 
@@ -92,8 +95,8 @@ def header_of(plan_text: str) -> List[str]:
 def style_of(plan_text: str) -> str:
     for l in plan_text.splitlines():
         if l.startswith("#style"):
-            return l.split(None, 1)[1].strip() if len(l.split(None, 1)) > 1 else "micronarrative"
-    return "micronarrative"
+            return l.split(None, 1)[1].strip() if len(l.split(None, 1)) > 1 else ""
+    return ""
 
 
 def rules_text(style: str) -> str:
@@ -118,17 +121,25 @@ def rules_text(style: str) -> str:
 def build_brief(proj: Path) -> Tuple[str, str, List[Path]]:
     """(system prompt, job message, clip sheet pictures)."""
     plan = _read(proj / "plan.edl")
-    system = SYSTEM + "\n" + rules_text(style_of(plan))
+    brief = _read(proj / "brief.md")
+    style = style_of(plan)
+    style_rules = _read(ROOT / "styles" / style / "SKILL.md") if style else ""
+    # A tool-free director cannot open the requested style later. Keep its rules,
+    # while avoiding another copy of all generic editing references.
+    system = SYSTEM + "\n" + ((brief + "\n" + style_rules) if brief else rules_text(style))
     job = [f"Project folder: {proj.relative_to(ROOT) if str(proj).startswith(str(ROOT)) else proj}",
            "=== plan.edl header (Zeno keeps it) ===\n" + "\n".join(header_of(plan))]
     for name in ("line_map.md", "facts.md"):
         t = _read(proj / name)
+        if name == "facts.md":
+            from edit_packet import compact_facts
+            t = compact_facts(t)
         if t:
             job.append(f"=== {name} ===\n{t.strip()}")
     dec = _read(proj / "decisions.txt").strip()
     if dec:
         job.append("=== decisions.txt already recorded (keep what still applies) ===\n" + dec)
-    sheets = sorted(proj.glob("clip_sheet_*.jpg"))[:MAX_IMAGES]
+    sheets = sorted(proj.glob("clip_sheet_*.jpg"))
     if sheets:
         job.append(f"The {len(sheets)} picture(s) attached are {', '.join(p.name for p in sheets)}: frames of each clip, as named in line_map.md.")
     job.append("Write the edit now.")
@@ -234,7 +245,7 @@ def run_check(proj: Path) -> Tuple[bool, str]:
     r = subprocess.run([PY, str(ROOT / "scripts" / "zeno.py"), "--check-plan", str(proj / "plan.edl")],
                        capture_output=True, text=True, cwd=str(ROOT), encoding="utf-8", errors="replace")
     out = (r.stdout or "") + (r.stderr or "")
-    return "[PLAN PASS]" in out, out.strip()
+    return r.returncode == 0 and "[PLAN PASS]" in out, out.strip()
 
 
 def _advice(check_out: str) -> List[str]:
@@ -330,7 +341,10 @@ def brief_only(proj: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("project", help="work/<project> (after zeno.py --inspect)")
-    ap.add_argument("--model", default="sonnet")
+    ap.add_argument("--provider", choices=("openai", "claude"), default="openai",
+                    help="OpenAI is the bounded Sol API planner; Claude is the legacy CLI path")
+    ap.add_argument("--model", default=None)
+    ap.add_argument("--dry-run", action="store_true", help="Validate size and budget reserve without a model call")
     ap.add_argument("--fixes", type=int, default=3, help="most fix rounds after the first plan")
     ap.add_argument("--no-polish", action="store_true", help="skip the round that clears [TIGHT]/[STYLE] advice")
     ap.add_argument("--brief-only", action="store_true")
@@ -341,7 +355,23 @@ def main() -> None:
     if a.brief_only:
         brief_only(proj)
         return
-    r = run(proj, model=a.model, max_fixes=a.fixes, polish=not a.no_polish)
+    if a.provider == "openai":
+        import sol_direct
+        if a.model and a.model != sol_direct.MODEL:
+            ap.error("The bounded planner currently supports gpt-6.1-sol only; no silent model switch.")
+        try:
+            r = sol_direct.run(proj, dry_run=a.dry_run)
+        except (ValueError, OSError, KeyError) as exc:
+            ap.error(str(exc))
+        summary = r if a.dry_run else {"model": r["model"], "passed": r["passed"], "calls": len(r["calls"]),
+                                      "stopped": r.get("stopped"), "review_required": r.get("review_required"),
+                                      "report": str(proj / "direct_report.json")}
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        sys.exit(0 if r.get("passed") or r.get("dry_run") else 2)
+    if a.dry_run:
+        brief_only(proj)
+        return
+    r = run(proj, model=a.model or "sonnet", max_fixes=a.fixes, polish=not a.no_polish)
     sys.exit(0 if r["passed"] else 1)
 
 

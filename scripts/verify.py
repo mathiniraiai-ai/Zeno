@@ -101,7 +101,7 @@ def check_loudness(mp4_path: Path, target_lufs: float = -11.5) -> Tuple[bool, fl
             cache_data = {}
 
     stat = mp4_path.stat()
-    key = f"{mp4_path.name}:{stat.st_size}:{int(stat.st_mtime)}"
+    key = f"{mp4_path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
     if key in cache_data:
         meas = cache_data[key]
         i_lufs = float(meas["input_i"])
@@ -120,17 +120,17 @@ def check_loudness(mp4_path: Path, target_lufs: float = -11.5) -> Tuple[bool, fl
         ]
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         m = re.search(r"\{[^{}]*\"input_i\"[^{}]*\}", r.stderr)
-        if m:
+        if r.returncode == 0 and m:
             meas = json.loads(m.group(0))
-            i_lufs = float(meas.get("input_i", target_lufs))
-            tp_db = float(meas.get("input_tp", -1.0))
+            i_lufs = float(meas.get("input_i", "nan"))
+            tp_db = float(meas.get("input_tp", "nan"))
             cache_data[key] = {"input_i": i_lufs, "input_tp": tp_db}
             try:
                 write_json(cache_path, cache_data)
             except Exception:
                 pass
         else:
-            i_lufs, tp_db = target_lufs, -1.0
+            i_lufs, tp_db = float("nan"), float("nan")
 
     ok = abs(i_lufs - target_lufs) <= 1.8 and tp_db <= -0.5
     return ok, i_lufs, tp_db
