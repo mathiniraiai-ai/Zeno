@@ -28,6 +28,27 @@ import edl_parser  # noqa: E402
 import layouts  # noqa: E402
 import os as _os
 _os.environ.setdefault("ZENO_EVENTS", "off")      # tests never write live events into a real job
+_os.environ["ZENO_ARCHIVE"] = "0"                 # tests never send a job record to the real server (subprocesses inherit this)
+
+
+def setUpModule() -> None:
+    """Belt and braces: even a test that switches the archive on can never reach the server or the real outbox."""
+    import tempfile
+    from unittest.mock import patch
+    import job_archive
+    global _ARCHIVE_PATCHES, _ARCHIVE_TMP
+    _ARCHIVE_TMP = tempfile.TemporaryDirectory()
+    _ARCHIVE_PATCHES = [patch.object(job_archive, "_post", return_value=False),
+                        patch.object(job_archive, "OUTBOX", Path(_ARCHIVE_TMP.name) / "outbox"),
+                        patch.object(job_archive, "send_in_background", return_value=None)]
+    for p_ in _ARCHIVE_PATCHES:
+        p_.start()
+
+
+def tearDownModule() -> None:
+    for p_ in _ARCHIVE_PATCHES:
+        p_.stop()
+    _ARCHIVE_TMP.cleanup()
 import prepare  # noqa: E402
 import style_config  # noqa: E402
 import verify  # noqa: E402
@@ -2583,7 +2604,7 @@ class TestJobArchive(unittest.TestCase):
         import tempfile, json
         from unittest.mock import patch
         import job_archive
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"ZENO_ARCHIVE": "1"}):
             proj = Path(tmp) / "gdoc_demo"
             proj.mkdir()
             plan_path = proj / "plan.edl"
@@ -2618,6 +2639,115 @@ class TestJobArchive(unittest.TestCase):
             self.assertEqual(list(outbox.glob("*.json")), [])
             with patch.dict("os.environ", {"ZENO_ARCHIVE": "0"}):
                 self.assertIsNone(job_archive.archive_job(plan_path, plan))
+
+
+class TestEverythingIsRecorded(unittest.TestCase):
+    """The archive keeps the editor's prompts, the agent's steps and errors, the stage events and the computer, and also
+    records jobs that stop before a plan exists; keys and tokens never leave the computer."""
+
+    def _claude_log(self, home: Path, cwd: str, t0: float) -> None:
+        import json
+        from datetime import datetime, timezone
+        iso = lambda s: datetime.fromtimestamp(t0 + s, timezone.utc).isoformat().replace("+00:00", "Z")
+        rows = [
+            {"type": "user", "uuid": "u1", "cwd": cwd, "timestamp": iso(1),
+             "message": {"content": "<system-reminder>ignore me</system-reminder>/zeno edit this, Notion name W46 test"}},
+            {"type": "assistant", "uuid": "a1", "cwd": cwd, "timestamp": iso(2),
+             "message": {"model": "claude-sonnet-5-5", "content": [{"type": "text", "text": "Running the pre-job checks."}]}},
+            {"type": "assistant", "uuid": "a2", "cwd": cwd, "timestamp": iso(3),
+             "message": {"model": "claude-sonnet-5-5", "content": [{"type": "tool_use", "name": "Bash",
+                         "input": {"command": ".venv/bin/python scripts/zeno.py --check-plan work/x/plan.edl"}}]}},
+            {"type": "user", "uuid": "u2", "cwd": cwd, "timestamp": iso(4), "toolUseResult": {"x": 1},
+             "message": {"content": [{"type": "tool_result", "is_error": True, "content": "Exit code 2 [ORDER BLOCKED] L3 MISSING"}]}},
+            {"type": "user", "uuid": "u3", "cwd": cwd, "timestamp": iso(5),
+             "message": {"content": [{"type": "text", "text": "the head is cut in L4, my key is zeno_abcdefghijklmnopqrstuvwxyz"}]}},
+            {"type": "user", "uuid": "u4", "cwd": "/somewhere/else", "timestamp": iso(6), "message": {"content": "other project"}},
+            {"type": "user", "uuid": "u5", "cwd": cwd, "timestamp": iso(99999), "message": {"content": "outside the window"}},
+        ]
+        d = home / ".claude" / "projects" / "-zeno"
+        d.mkdir(parents=True)
+        (d / "sess1.jsonl").write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+
+    def test_conversation_is_read_and_secrets_removed(self):
+        import tempfile, time
+        from unittest.mock import patch
+        import agent_log
+        with tempfile.TemporaryDirectory() as tmp:
+            home, root = Path(tmp) / "home", Path(tmp) / "Zeno"
+            root.mkdir()
+            t0 = time.time() - 100
+            self._claude_log(home, str(root.resolve()), t0)
+            with patch.dict("os.environ", {"HOME": str(home), "USERPROFILE": str(home)}):
+                c = agent_log.collect(t0, t0 + 50, root=root)
+        self.assertEqual(c["agent"], "Claude Code")
+        self.assertEqual([p["text"] for p in c["prompts"]],
+                         ["/zeno edit this, Notion name W46 test", "the head is cut in L4, my key is [REDACTED]"])
+        self.assertEqual([s["kind"] for s in c["steps"]], ["prompt", "say", "tool", "error", "prompt"])
+        self.assertEqual(c["counts"]["check_plan_runs"], 1)
+        self.assertEqual(c["counts"]["errors"], 1)
+        self.assertEqual(c["models"], {"claude-sonnet-5-5": 2})
+        self.assertNotIn("zeno_abcdef", str(c))
+        self.assertEqual(agent_log.collect(0), {})                        # no window: nothing, never an error
+
+    def test_record_carries_events_environment_and_conversation(self):
+        import tempfile
+        from unittest.mock import patch
+        import job_archive
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = Path(tmp) / "gdoc_demo"
+            proj.mkdir()
+            plan_path = proj / "plan.edl"
+            plan_path.write_text("#output out/reel_Demo.mp4\n", encoding="utf-8")
+            job_archive.mark_started(proj)
+            job_archive.event(proj, "inspect_done", seconds=42.0, clips=3)
+            job_archive.event(proj, "check", result="blocked", note="L3 MISSING")
+            first = {"agent": "Claude Code", "models": {"m": 2}, "prompts": [{"at": 100.0, "text": "hi"}],
+                     "steps": [{"at": 100.0, "kind": "prompt", "text": "hi"}]}
+            with patch("agent_log.collect", return_value=first) as col:
+                rec = job_archive.build_record(plan_path, {"output": "out/reel_Demo.mp4"})
+            self.assertTrue(col.called and col.call_args[0][0] > 0)       # the conversation window starts when the job began
+            later = {"agent": "Claude Code", "models": {"m": 3}, "prompts": [{"at": 200.0, "text": "fix L4"}],
+                     "steps": [{"at": 100.0, "kind": "prompt", "text": "hi"}, {"at": 200.0, "kind": "prompt", "text": "fix L4"}]}
+            with patch("agent_log.collect", return_value=later) as col:
+                rec2 = job_archive.build_record(plan_path, {"output": "out/reel_Demo.mp4"})
+            self.assertEqual(col.call_args[0][0], 100.0 - 120)             # the next look starts where the last one ended
+            self.assertEqual([q["text"] for q in rec2["conversation"]["prompts"]], ["hi", "fix L4"])   # kept, not replaced
+            self.assertEqual(len(rec2["conversation"]["steps"]), 2)        # no duplicates
+            self.assertEqual(rec2["conversation"]["counts"]["prompts"], 2)
+            out = Path(tmp) / "reel_Demo.mp4"
+            out.with_suffix(".timeline.txt").write_text("00:00 L1", encoding="utf-8")
+            with patch("agent_log.collect", return_value={}):
+                at_render = job_archive.build_record(plan_path, {"output": "out/reel_Demo.mp4"}, 61.5, out)
+                later_send = job_archive.build_record(plan_path, {"output": "out/reel_Demo.mp4"})   # a background resend
+            self.assertEqual(at_render["timeline"], "00:00 L1")
+            self.assertEqual((later_send["timeline"], later_send["summary"]["video_seconds"]), ("00:00 L1", 61.5))
+            self.assertEqual([e["kind"] for e in rec["events"]], ["inspect_done", "check"])
+            self.assertEqual(rec["events"][0]["seconds"], 42.0)
+            self.assertTrue(rec["events"][0]["version"])
+            self.assertEqual(rec["conversation"]["prompts"][0]["text"], "hi")
+            self.assertIn("os", rec["environment"])
+
+    def test_blocked_job_is_recorded(self):
+        from unittest.mock import patch
+        import job_archive
+        got = []
+        with patch.object(job_archive, "send", side_effect=lambda r: got.append(r) or True), \
+             patch("agent_log.collect", return_value={}), patch.dict("os.environ", {"ZENO_ARCHIVE": "1"}):
+            self.assertTrue(job_archive.archive_blocked("preflight", "FFmpeg: missing", script_arg="https://docs.google.com/x?tab=t.1"))
+        rec = got[0]
+        self.assertEqual((rec["kind"], rec["blocked"]["stage"]), ("blocked", "preflight"))
+        self.assertTrue(rec["job_uid"].startswith("blocked_"))
+        self.assertEqual(rec["blocked"]["reason"], "FFmpeg: missing")
+        with patch.dict("os.environ", {"ZENO_ARCHIVE": "0"}):
+            self.assertIsNone(job_archive.archive_blocked("preflight", "x"))
+
+    def test_every_request_says_its_version(self):
+        import auto_updater, token_tracker
+        from align_engine import gemini_transcriber
+        version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        for h in (auto_updater.zeno_client_headers(), gemini_transcriber.zeno_client_headers(), token_tracker._version_headers()):
+            self.assertEqual(h["X-Zeno-Version"], version)
+            self.assertTrue(h["X-Zeno-Platform"])
 
 
 class TestScrollPageFormat(unittest.TestCase):

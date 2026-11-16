@@ -404,5 +404,45 @@ check("admin reads one full record", _jg.status_code == 200 and _jg.json()["payl
       and _jg.json()["payload"]["feedback"][0]["text"] == "head cut in L4")
 check("oversized job record -> 413", client.post("/v1/jobs", headers=_auth, json={**_job, "facts": "x" * (4 * 1024 * 1024 + 10)}).status_code == 413)
 
+# Patterns: every record gets a small summary; the analysis groups outcomes by editor, version, format and model
+_good = {"job_uid": "job_pat_good", "kind": "render", "project": "p1", "video_name": "Good one", "zeno_version": "1.0.14",
+         "script_analysis": "Format: split_screen (Robot left)", "summary": {"renders": 1, "video_seconds": 60},
+         "job_report": {"plan_checks": [{"result": "blocked", "problems": {"WRONG VOICE": ["L3"]}}, {"result": "passed", "problems": {}}]},
+         "verify": {"ok": True, "text": "[VERIFY PASS] x\n[CUTS   PASS] fine"},
+         "tokens": {"agent_model": "claude-sonnet-5-5", "agent_total_tokens": 60000, "job_start_epoch": 1000, "job_end_epoch": 1600},
+         "events": [{"at": 1100, "kind": "render_start"}],
+         "conversation": {"agent": "Claude Code", "prompts": [{"at": 1000, "text": "edit this"}, {"at": 1200, "text": "the head is cut in L4"}],
+                          "counts": {"prompts": 2, "tool_calls": 9, "errors": 1}},
+         "feedback": [{"text": "this one is perfect"}]}
+_bad = {"job_uid": "job_pat_bad", "kind": "render_failed", "project": "p2", "video_name": "Bad one", "zeno_version": "1.0.13",
+        "script_analysis": "**Format:** 2. (live)", "summary": {"renders": 0}, "feedback": [{"text": "subtitle is wrong and too big"}],
+        "verify": {"ok": False, "text": "[CUTS   FAIL] clipped word"}}
+for _rec in (_good, _bad, {"job_uid": "blocked_x", "kind": "blocked", "zeno_version": "1.0.14", "blocked": {"stage": "preflight", "reason": "FFmpeg: missing"}}):
+    check(f"pattern record {_rec['job_uid']} stored", client.post("/v1/jobs", headers=_auth, json=_rec).status_code == 200)
+check("regular user cannot read patterns", client.get("/admin/api/patterns", headers=_auth).status_code in (401, 403))
+_pt = client.get("/admin/api/patterns", headers=_adm)
+check("admin reads patterns -> 200", _pt.status_code == 200, _pt.text[:200])
+_pa, _pj = _pt.json()["patterns"], {d["job_uid"]: d for d in _pt.json()["jobs"]}
+check("a verified render with praise is good", _pj["job_pat_good"]["outcome"] == "good" and _pj["job_pat_good"]["checks_until_pass"] == 2)
+check("the editor's prompt after the render is kept as a correction", _pj["job_pat_good"]["corrections"] == ["the head is cut in L4"])
+check("a failed render is bad", _pj["job_pat_bad"]["outcome"] == "bad" and _pj["job_pat_bad"]["verify_fails"] == ["CUTS FAIL"])
+check("format named by number maps to its family", _pj["job_pat_bad"]["format"] == "live conversation" and _pj["job_pat_good"]["format"] == "split_screen")
+check("a blocked job is counted by stage", dict(_pa["blocked_by_stage"]).get("preflight") == 1)
+check("check problems are counted", dict(_pa["top_check_problems"]).get("WRONG VOICE") == 1)
+check("groups by version", "1.0.14" in _pa["by"]["version"] and _pa["by"]["version"]["1.0.13"]["bad"] == 1)
+check("negative feedback is listed", any("too big" in f["text"] for f in _pa["feedback_negative"]))
+check("filter by editor", client.get("/admin/api/patterns?editor=nobody-at-all", headers=_adm).json()["patterns"]["overall"]["jobs"] == 0)
+
+# Versions: every request that says its version, and every update download, tells the server what each editor runs
+check("version check with header -> 200", client.get("/v1/version", headers={**_auth, "X-Zeno-Version": "1.0.13", "X-Zeno-Platform": "Windows AMD64"}).status_code == 200)
+_vv = client.get("/admin/api/versions", headers=_adm).json()
+_me = [k for k in _vv["keys"] if k.get("zeno_version")]
+check("the key's version is remembered", any(k["zeno_version"] == "1.0.13" and k["client_platform"] == "Windows AMD64" for k in _me), str(_me)[:200])
+client.get("/v1/update-bundle", headers=_auth)
+_vv = client.get("/admin/api/versions", headers=_adm).json()
+check("an update download moves the editor to that version", any(k.get("zeno_version") == "1.0.5" for k in _vv["keys"]))
+check("each change is in the version history", [e["source"] for e in _vv["history"]][:2] == ["downloaded update", "update check"], str(_vv["history"])[:300])
+check("regular user cannot read versions", client.get("/admin/api/versions", headers=_auth).status_code in (401, 403))
+
 print(f"\n{sum(results)}/{len(results)} checks passed")
 sys.exit(0 if all(results) else 1)

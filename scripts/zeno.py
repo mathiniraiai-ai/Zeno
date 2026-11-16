@@ -243,6 +243,15 @@ def style_hint(style: str) -> str:
     return f"[style] {style.lower()}"
 
 
+def _archive_blocked(stage: str, reason: str, script_arg: str = "", inputs: Optional[List[str]] = None) -> None:
+    """A job that stopped before it had a plan still goes to the server, with what stopped it (never blocks or slows)."""
+    try:
+        import job_archive
+        job_archive.archive_blocked(stage, reason, script_arg=script_arg, inputs=inputs)
+    except Exception:
+        pass
+
+
 def job_gate(raw_inputs: List[str], script_arg: str, skip: bool = False, style: str = "") -> None:
     """Nothing starts until the live checks pass and the script and footage the user gave have been checked."""
     import preflight
@@ -255,6 +264,8 @@ def job_gate(raw_inputs: List[str], script_arg: str, skip: bool = False, style: 
     preflight.print_checks(checks)
     if not preflight.save_state(checks):
         print("\n[BLOCKED] A live check failed, so the edit did not start. Fix the FAIL lines above and run again.")
+        _archive_blocked("preflight", "; ".join(f"{c[1]}: {c[2]}" for c in checks if isinstance(c, (list, tuple)) and len(c) >= 3 and not c[0])
+                         or str(checks)[:3000], script_arg, raw_inputs)
         sys.exit(2)
     print("\n== Pre-job gate: your script and footage ==")
     try:
@@ -262,11 +273,13 @@ def job_gate(raw_inputs: List[str], script_arg: str, skip: bool = False, style: 
     except Exception as exc:
         print(f"  [FAIL] script: {exc}")
         print("\n[BLOCKED] The script could not be loaded, so the edit did not start.")
+        _archive_blocked("script", f"{type(exc).__name__}: {exc}", script_arg, raw_inputs)
         sys.exit(2)
     res = preflight.validate_inputs(script_path, raw_inputs)
     preflight.print_inputs_report(res)
     if res["errors"]:
         print("\n[BLOCKED] The script or footage has a problem, so the edit did not start. Fix the FAIL lines and run again.")
+        _archive_blocked("inputs", json.dumps(res["errors"], ensure_ascii=False, default=str)[:6000], script_arg, raw_inputs)
         sys.exit(2)
     try:   # every job starts with the latest knowledge from the server; no git pull or redeploy is needed for it
         import format_library
@@ -463,6 +476,14 @@ def run_inspect(
     project_name = common.resolve_user_project_name(script_path.stem)
     work_dir = WORK / project_name
     common.stamp_job_owner(work_dir)
+    import time as _time
+    t_inspect = _time.time()
+    try:   # the job archive: when this edit began, and a stage log (see job_archive.py)
+        import job_archive
+        job_archive.mark_started(work_dir)
+        job_archive.event(work_dir, "inspect_start", clips=len(clips), lang=lang, style=style or "")
+    except Exception:
+        pass
 
     tracker = ProgressTracker(work_dir=work_dir, project_name=project_name, heartbeat_sec=48.0)
     tracker.start_heartbeat()
@@ -513,10 +534,13 @@ def run_inspect(
         done_clips = 0
         plan_path: Optional[pathlib.Path] = None
         assert proc.stdout is not None
+        import collections as _collections
+        out_tail: "_collections.deque[str]" = _collections.deque(maxlen=60)
         for raw_line in proc.stdout:
             line = raw_line.rstrip()
             if not line:
                 continue
+            out_tail.append(line)
             print(f"  {line}", flush=True)
             low = line.lower()
             if "transcrib" in low or "gemini" in low or "words.json" in low or "clip " in low:
@@ -544,6 +568,12 @@ def run_inspect(
         rc = proc.wait()
         if rc != 0:
             tracker.stop_heartbeat(final_state="error", final_detail=f"prepare.py exited with code {rc}")
+            try:
+                import job_archive
+                job_archive.event(work_dir, "inspect_failed", exit_code=rc, seconds=round(_time.time() - t_inspect, 1))
+            except Exception:
+                pass
+            _archive_blocked("inspect", f"prepare.py exited with code {rc}\n" + "\n".join(out_tail), script_arg, raw_inputs)
             raise RuntimeError(f"prepare.py failed with exit code {rc}")
 
         if plan_path is None or not plan_path.is_file():
@@ -568,9 +598,17 @@ def run_inspect(
             pct=60,
         )
         tracker.stop_heartbeat(final_state="awaiting_confirmation", final_detail="Measured; waiting for the Director's plan")
+        try:   # the measured job goes to the server now, so an edit abandoned before the render is still recorded
+            import job_archive
+            job_archive.event(plan_path.parent, "inspect_done", seconds=round(_time.time() - t_inspect, 1), clips=len(clips))
+            job_archive.send_in_background(plan_path, "inspected")
+        except Exception:
+            pass
         return plan_path
     except Exception as exc:
         tracker.stop_heartbeat(final_state="error", final_detail=str(exc))
+        if not str(exc).startswith("prepare.py failed"):
+            _archive_blocked("inspect", f"{type(exc).__name__}: {exc}", script_arg, raw_inputs)
         raise
 
 
@@ -999,6 +1037,7 @@ def main() -> None:
             print("[FEEDBACK] no job found; pass --plan work/<project>/plan.edl")
             sys.exit(2)
         job_archive.add_feedback(Path(fb_plan).parent, args.feedback, source=getattr(args, "feedback_from", "") or "editor")
+        job_archive.event(Path(fb_plan).parent, "feedback", text=args.feedback[:500])
         try:
             stored = job_archive.archive_job(Path(fb_plan), load_edl(Path(fb_plan)), kind="feedback")
         except Exception:
@@ -1013,6 +1052,8 @@ def main() -> None:
         try:   # the job archive keeps every version of the plan and what the check said about it
             import job_archive
             job_archive.snapshot_plan(p_path, "check", msg or "PLAN PASS")
+            job_archive.event(p_path.parent, "check", result="blocked" if msg else "passed", note=(msg or "")[:1500])
+            job_archive.send_in_background(p_path, "checking")
         except Exception:
             pass
         sys.exit(2 if msg else 0)
@@ -1029,8 +1070,11 @@ def main() -> None:
         try:
             import job_archive
             job_archive.snapshot_plan(p_path, "render")
+            job_archive.event(p_path.parent, "render_start", square=bool(args.square), draft=bool(args.draft))
         except Exception:
             pass
+        import time as _time
+        t_render = _time.time()
         rc = run_execute(
             args.execute,
             square=args.square,
@@ -1046,10 +1090,17 @@ def main() -> None:
                 pass
             try:   # a failed render is the most useful record of all
                 import job_archive
+                job_archive.event(p_path.parent, "render_failed", exit_code=rc, seconds=round(_time.time() - t_render, 1))
                 job_archive.archive_job(p_path, load_edl(p_path), kind="render_failed", extra={"exit_code": rc})
             except Exception:
                 pass
         if rc == 0:
+            try:
+                import job_archive
+                job_archive.event(p_path.parent, "render_done", seconds=round(_time.time() - t_render, 1))
+                job_archive.send_in_background(p_path, "render")   # the record again, now with the finished render's events
+            except Exception:
+                pass
             common.job_done()
             try:
                 folder = finish_job_folder(common.resolve(args.execute))

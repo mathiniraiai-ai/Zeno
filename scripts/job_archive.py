@@ -3,7 +3,13 @@
 One record per job, text only (never footage or video):
   the script, the script analysis, every version of the plan (from the first one the Director wrote to the one that was rendered),
   what each plan check said, the decisions file, the verification results, the timeline, how the split panels were framed,
-  the token numbers, the editor's feedback, and how many times the job was rendered.
+  the token numbers, the editor's feedback, and how many times the job was rendered;
+  the conversation with the AI agent (the editor's prompts word for word, every tool the agent ran, every error on the way:
+  see agent_log.py), the stage events (inspect, each check, render, blocked), and the computer it ran on.
+
+Records go up at every stage, not only after a render: when inspect finishes, after each plan check (in the background,
+so the check is not slowed), at the render, when it fails, and when a job is blocked before it starts. An edit that is
+abandoned half way is therefore on the server too.
 
 `snapshot_plan` keeps the plan's history as the job goes; `add_feedback` records what the editor said; `archive_job` builds the
 record and sends it. A record that cannot be sent waits in `work/_job_outbox/` and goes with the next job. Nothing here can stop
@@ -24,6 +30,9 @@ WORK = ROOT / "work"
 OUTBOX = WORK / "_job_outbox"
 HISTORY = "_history"
 FEEDBACK = "feedback.jsonl"
+EVENTS = "stage_events.jsonl"     # (events.jsonl is the live progress feed of events.py: also sent, as live_events)
+LIVE_EVENTS = "events.jsonl"
+STARTED = "job_started.json"
 MAX_TEXT = 400_000          # one text file inside a record (characters)
 MAX_VERSIONS = 40           # plan versions kept per job
 MAX_RECORD = 3_500_000      # bytes; the server refuses more than 4 MB
@@ -110,6 +119,131 @@ def _feedback(proj_dir: Path) -> List[Dict[str, Any]]:
     return out[-100:]
 
 
+def mark_started(proj_dir: Path) -> None:
+    """Remember when this edit began (the first inspect), so the record can find the agent conversation of the whole job."""
+    try:
+        f = Path(proj_dir) / STARTED
+        if f.is_file():
+            old = json.loads(f.read_text(encoding="utf-8")).get("start", 0)
+            if time.time() - float(old) < 12 * 3600:
+                return
+        Path(proj_dir).mkdir(parents=True, exist_ok=True)
+        try:
+            from common import job_start_epoch
+            start = job_start_epoch(create=False)
+        except Exception:
+            start = time.time()
+        f.write_text(json.dumps({"start": round(min(start, time.time()), 1)}), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def event(proj_dir: Path, kind: str, **data: Any) -> None:
+    """One line in the job's stage log: inspect, check, render, blocked, failed (with seconds taken and short results)."""
+    try:
+        Path(proj_dir).mkdir(parents=True, exist_ok=True)
+        row = {"at": round(time.time(), 1), "kind": kind, "version": _version()}
+        row.update({k: (v if isinstance(v, (int, float, bool)) or v is None else str(v)[:2000]) for k, v in data.items()})
+        with open(Path(proj_dir) / EVENTS, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _events(proj_dir: Path, name: str = EVENTS, last: int = 400) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    try:
+        for line in (Path(proj_dir) / name).read_text(encoding="utf-8").splitlines()[-last:]:
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+def _job_start(proj: Path, tokens: Any, index: List[Dict[str, Any]]) -> float:
+    """When this job began: the first inspect, else the token report's start, else the open job marker."""
+    cands: List[Any] = []
+    try:
+        cands.append(json.loads((proj / STARTED).read_text(encoding="utf-8")).get("start"))
+    except Exception:
+        pass
+    if isinstance(tokens, dict):
+        cands.append(tokens.get("job_start_epoch"))
+    for cand in cands:
+        try:
+            if cand and float(cand) > 0:
+                return float(cand)
+        except Exception:
+            continue
+    try:
+        from common import job_start_epoch
+        return job_start_epoch(create=False)
+    except Exception:
+        pass
+    return (float(index[0]["at"]) - 3 * 3600) if index else time.time() - 3 * 3600
+
+
+CONVERSATION = "_conversation.json"
+FIRST_WINDOW = 8 * 3600     # the first look back never reaches further than this (an old project reopened days later)
+
+
+def conversation(proj: Path, job_start: float) -> Dict[str, Any]:
+    """The editor-agent conversation of this job so far. Kept in work/<project>/_conversation.json and extended each time
+    with only what is new, so a long or reopened job keeps its whole history and never picks up other jobs' sessions."""
+    try:
+        import agent_log
+        cache_file = Path(proj) / CONVERSATION
+        try:
+            cache = json.loads(cache_file.read_text(encoding="utf-8"))
+        except Exception:
+            cache = {}
+        now = time.time()
+        since = float(cache.get("last_at") or 0) - 120 if cache.get("last_at") else max(float(job_start or 0), now - FIRST_WINDOW)
+        new = agent_log.collect(since, now + 60) or {}
+        if not cache and not new:
+            return {}
+
+        def merged(key: str) -> List[Dict[str, Any]]:
+            seen, out = set(), []
+            for row in list(cache.get(key) or []) + list(new.get(key) or []):
+                sig = (row.get("at"), row.get("kind"), row.get("tool"), row.get("text") or row.get("input"))
+                if sig not in seen:
+                    seen.add(sig)
+                    out.append(row)
+            return sorted(out, key=lambda r: float(r.get("at") or 0))
+
+        prompts, steps = merged("prompts"), merged("steps")
+        models = dict(cache.get("models") or {})
+        for m, n in (new.get("models") or {}).items():
+            models[m] = max(int(models.get(m, 0)), int(n))
+        sessions = list(dict.fromkeys(list(cache.get("sessions") or []) + list(new.get("sessions") or [])))[-10:]
+        last_at = max([float(r.get("at") or 0) for r in steps] + [float(cache.get("last_at") or 0)])
+        full = {"agent": new.get("agent") or cache.get("agent") or "", "models": models, "sessions": sessions,
+                "prompts": prompts, "steps": steps, "last_at": last_at}
+        cache_file.write_text(json.dumps(full, ensure_ascii=False), encoding="utf-8")
+        truncated = len(prompts) > agent_log.MAX_PROMPTS or len(steps) > agent_log.MAX_STEPS
+        keep_p = prompts[:5] + prompts[5:][-(agent_log.MAX_PROMPTS - 5):] if len(prompts) > agent_log.MAX_PROMPTS else prompts
+        keep_s = steps[:50] + steps[50:][-(agent_log.MAX_STEPS - 50):] if len(steps) > agent_log.MAX_STEPS else steps
+        return {"agent": full["agent"], "models": models, "sessions": sessions,
+                "window": [round(float(prompts[0]["at"] if prompts else since), 1), round(last_at, 1)],
+                "counts": agent_log._counts(prompts, steps), "prompts": keep_p, "steps": keep_s, "truncated": truncated}
+    except Exception:
+        return {}
+
+
+def environment() -> Dict[str, Any]:
+    """The computer the job ran on (no names, paths or secrets)."""
+    env = {"os": f"{platform.system()} {platform.release()}", "machine": platform.machine(),
+           "python": platform.python_version(), "cpus": os.cpu_count() or 0}
+    for k in ("ZENO_DEVICE", "ZENO_ENCODER", "ZENO_MAX_THREADS", "ZENO_COOL"):
+        if os.environ.get(k):
+            env[k.lower()] = os.environ[k][:40]
+    return env
+
+
 # ---------------------------------------------------------------- the record
 def build_record(
     plan_path: Path,
@@ -154,8 +288,21 @@ def build_record(
 
     out_name = Path(str(plan.get("output") or output_mp4 or proj.name)).stem
     timeline = ""
+    last_render = proj / "_archive_render.json"   # what only the render knows (timeline, length), reused by later sends
     if output_mp4 is not None:
         timeline = _read(Path(output_mp4).with_suffix(".timeline.txt"), 120_000)
+        try:
+            last_render.write_text(json.dumps({"timeline": timeline, "video_seconds": float(video_seconds or 0.0),
+                                               "output": str(output_mp4)}, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+    else:
+        try:
+            kept = json.loads(last_render.read_text(encoding="utf-8"))
+            timeline = str(kept.get("timeline") or "")
+            video_seconds = video_seconds or float(kept.get("video_seconds") or 0.0)
+        except Exception:
+            pass
     record: Dict[str, Any] = {
         "job_uid": job_uid(proj, plan),
         "kind": kind,
@@ -192,7 +339,11 @@ def build_record(
         "timeline": timeline,
         "tokens": _json("token_telemetry.json"),
         "feedback": _feedback(proj),
+        "events": _events(proj),
+        "live_events": _events(proj, LIVE_EVENTS, 300),
+        "environment": environment(),
     }
+    record["conversation"] = conversation(proj, _job_start(proj, record["tokens"], index))
     if extra:
         record.update(extra)
     # keep the record under the server's limit: the big measurement files go first
@@ -200,6 +351,10 @@ def build_record(
         if len(json.dumps(record, ensure_ascii=False).encode("utf-8")) <= MAX_RECORD:
             break
         record[key] = record[key][:40_000] + "\n… [cut to fit]"
+    conv = record.get("conversation") or {}
+    while conv.get("steps") and len(json.dumps(record, ensure_ascii=False).encode("utf-8")) > MAX_RECORD:
+        conv["steps"] = conv["steps"][: len(conv["steps"]) // 2]   # the agent's step list is the last thing to shrink
+        conv["truncated"] = True
     return record
 
 
@@ -221,7 +376,8 @@ def _post(record: Dict[str, Any], timeout: float = 20.0) -> bool:
     if cloud is None:
         return False
     body = json.dumps(record, ensure_ascii=False).encode("utf-8")
-    headers = {"Authorization": f"Bearer {cloud['token']}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {cloud['token']}", "Content-Type": "application/json",
+               "X-Zeno-Version": _version(), "X-Zeno-Platform": f"{platform.system()} {platform.machine()}"}
     try:
         import httpx
         return httpx.post(cloud["url"] + "/v1/jobs", headers=headers, content=body, timeout=timeout).status_code == 200
@@ -290,3 +446,89 @@ def archive_job(
         return send(build_record(plan_path, plan, video_seconds, output_mp4, kind=kind, extra=extra))
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------- jobs that stop early, and sending without waiting
+def archive_blocked(stage: str, reason: str, script_arg: str = "", inputs: Optional[List[str]] = None,
+                    extra: Optional[Dict[str, Any]] = None) -> Optional[bool]:
+    """A job that stopped before it had a plan (a failed live check, a script that would not load, bad footage, a crash in
+    inspect). Small record: what stopped it and the agent conversation so far. One record per script per day per computer."""
+    if not enabled():
+        return None
+    try:
+        day = time.strftime("%Y-%m-%d")
+        seed = f"{platform.node()}|{script_arg}|{day}"
+        try:
+            from common import job_start_epoch
+            since = job_start_epoch(create=False)
+        except Exception:
+            since = time.time() - 3600
+        try:
+            import agent_log
+            conv = agent_log.collect(since)
+        except Exception:
+            conv = {}
+        try:
+            import agent_log as _al
+            script_label = _al.redact(str(script_arg))[:300]
+        except Exception:
+            script_label = str(script_arg)[:300]
+        record = {
+            "job_uid": "blocked_" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24],
+            "kind": "blocked",
+            "project": "",
+            "video_name": "",
+            "zeno_version": _version(),
+            "platform": f"{platform.system()} {platform.machine()}",
+            "sent_at": round(time.time(), 1),
+            "blocked": {"stage": stage, "reason": str(reason)[:6000], "script": script_label,
+                        "clips": len(inputs or [])},
+            "environment": environment(),
+            "conversation": conv,
+        }
+        if extra:
+            record.update(extra)
+        return send(record)
+    except Exception:
+        return False
+
+
+def send_in_background(plan_path: Path, kind: str) -> None:
+    """Send this job's record from a separate process, so a plan check or inspect returns at once."""
+    if not enabled():
+        return
+    try:
+        import subprocess
+        import sys as _sys
+        args = [_sys.executable, str(Path(__file__).resolve()), "--send", str(Path(plan_path).resolve()), "--kind", kind]
+        kw: Dict[str, Any] = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
+                              "cwd": str(ROOT)}
+        if os.name == "nt":
+            kw["creationflags"] = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        else:
+            kw["start_new_session"] = True
+        subprocess.Popen(args, **kw)   # noqa: S603  (our own script, fixed arguments)
+    except Exception:
+        pass
+
+
+def _main() -> None:
+    import argparse
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent))
+    ap = argparse.ArgumentParser(description="Send one job's archive record (used in the background by zeno.py).")
+    ap.add_argument("--send", required=True, help="work/<project>/plan.edl")
+    ap.add_argument("--kind", default="checking")
+    a = ap.parse_args()
+    plan_path = Path(a.send)
+    plan = None
+    try:
+        from edl_parser import load_edl
+        plan = load_edl(plan_path)
+    except Exception:
+        plan = None
+    archive_job(plan_path, plan, kind=a.kind)
+
+
+if __name__ == "__main__":
+    _main()

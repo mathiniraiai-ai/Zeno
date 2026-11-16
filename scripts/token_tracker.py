@@ -815,6 +815,15 @@ Full relational history is also stored in local SQLite (`work/zeno_telemetry.db`
     LEDGER_MD.write_text(content, encoding="utf-8")
 
 
+def _version_headers() -> Dict[str, str]:
+    import platform as _platform
+    try:
+        ver = (ROOT / "VERSION").read_text(encoding="utf-8").strip()[:40]
+    except Exception:
+        ver = ""
+    return {"X-Zeno-Version": ver, "X-Zeno-Platform": f"{_platform.system()} {_platform.machine()}"[:80]}
+
+
 def _sync_to_cloud(r: Dict[str, Any]) -> bool:
     try:
         import auth_session
@@ -830,8 +839,8 @@ def _sync_to_cloud(r: Dict[str, Any]) -> bool:
         import httpx
         resp = httpx.post(
             url.rstrip("/") + "/v1/telemetry",
-            headers={"Authorization": f"Bearer {token}"},
-            json=r,
+            headers={"Authorization": f"Bearer {token}", **_version_headers()},
+            json={**r, "zeno_version": _version_headers()["X-Zeno-Version"]},
             timeout=10.0,
         )
         return resp.status_code == 200

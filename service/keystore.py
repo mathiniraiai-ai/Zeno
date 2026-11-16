@@ -16,6 +16,15 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+
+def _digest(payload: Dict[str, Any], editor: str, created_at: float, updated_at: float) -> str:
+    """The job's small summary (patterns.py) as JSON; empty when it cannot be made (never stops a record being stored)."""
+    try:
+        import patterns
+        return json.dumps(patterns.digest(payload, editor, created_at, updated_at), ensure_ascii=False)
+    except Exception:
+        return ""
+
 MAX_ACTIVE_KEYS_PER_EMAIL = int(os.getenv("ZENO_MAX_KEYS_PER_EMAIL", "3"))
 GOOGLE_MAX_ACTIVE_KEYS_PER_EMAIL = int(os.getenv("ZENO_GOOGLE_MAX_KEYS_PER_EMAIL", "50"))
 
@@ -260,6 +269,30 @@ class KeyStore:
             created_at {real} NOT NULL,
             updated_at {real} NOT NULL,
             payload_json TEXT NOT NULL)""")
+        # Which Zeno version each editor runs, learned from every request that says it and from every update download, plus
+        # the history of each change (who moved to which version, when, and how we know).
+        self._run(f"""CREATE TABLE IF NOT EXISTS zeno_version_events (
+            id {rule_pk},
+            key_id INTEGER,
+            editor_name TEXT NOT NULL DEFAULT '',
+            version TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '',
+            platform TEXT NOT NULL DEFAULT '',
+            created_at {real} NOT NULL)""")
+        for table, col, col_def in (
+            ("zeno_job_archive", "digest_json", "TEXT NOT NULL DEFAULT ''"),
+            ("zeno_keys", "zeno_version", "TEXT NOT NULL DEFAULT ''"),
+            ("zeno_keys", "version_seen_at", f"{real}"),
+            ("zeno_keys", "client_platform", "TEXT NOT NULL DEFAULT ''"),
+            ("zeno_transcriptions", "zeno_version", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            try:
+                if self.postgres:
+                    self._run(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_def}")
+                else:
+                    self._run(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+            except Exception:
+                pass
 
     # -- operations --------------------------------------------------------------------------
     def create(self, name: str, email: str) -> str:
@@ -445,17 +478,22 @@ class KeyStore:
                 email = str(row[1] or "").lower()
         body = json.dumps(payload, ensure_ascii=False)
         now = time.time()
+        old = self._run("SELECT created_at FROM zeno_job_archive WHERE job_uid = %s", (uid,), "one")
+        digest = _digest(payload, str(editor_name or ""), float(old[0]) if old else now, now)
         self._run(
             """INSERT INTO zeno_job_archive (job_uid, key_id, editor_name, user_email, project, video_name, zeno_version, kind,
-                                             size_bytes, created_at, updated_at, payload_json)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                             size_bytes, created_at, updated_at, payload_json, digest_json)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (job_uid) DO UPDATE SET
                    payload_json = EXCLUDED.payload_json, size_bytes = EXCLUDED.size_bytes, updated_at = EXCLUDED.updated_at,
-                   video_name = EXCLUDED.video_name, zeno_version = EXCLUDED.zeno_version, kind = EXCLUDED.kind""",
+                   video_name = EXCLUDED.video_name, zeno_version = EXCLUDED.zeno_version, kind = EXCLUDED.kind,
+                   digest_json = EXCLUDED.digest_json""",
             (uid, key_id, str(editor_name or "")[:120], email[:160], str(payload.get("project") or "")[:200],
              str(payload.get("video_name") or "")[:300], str(payload.get("zeno_version") or "")[:40],
-             str(payload.get("kind") or "render")[:30], len(body.encode("utf-8")), now, now, body),
+             str(payload.get("kind") or "render")[:30], len(body.encode("utf-8")), now, now, body, digest),
         )
+        if payload.get("zeno_version"):
+            self.note_version(key_id, str(payload["zeno_version"]), str(payload.get("platform") or ""), "job record", editor_name)
         row = self._run("SELECT id FROM zeno_job_archive WHERE job_uid = %s", (uid,), "one")
         return int(row[0]) if row else 0
 
@@ -468,6 +506,60 @@ class KeyStore:
         )
         cols = ("id", "job_uid", "editor_name", "user_email", "project", "video_name", "zeno_version", "kind", "size_bytes", "created_at", "updated_at")
         return [dict(zip(cols, r)) for r in rows or []]
+
+    def job_digests(self, since: float = 0.0, limit: int = 5000) -> List[Dict[str, Any]]:
+        """The small summary of every job (see patterns.py). Records stored before summaries existed get one now, once."""
+        rows = self._run(
+            """SELECT id, digest_json, editor_name, created_at, updated_at FROM zeno_job_archive
+               WHERE updated_at >= %s ORDER BY updated_at DESC LIMIT %s""", (float(since), int(limit)), "all") or []
+        out: List[Dict[str, Any]] = []
+        try:
+            import patterns
+            current = patterns.DIGEST_VERSION
+        except Exception:
+            current = 0
+        for job_id, dj, editor, created, updated in rows:
+            d = None
+            try:
+                d = json.loads(dj) if dj else None
+            except Exception:
+                d = None
+            if not d or d.get("v") != current:
+                full = self._run("SELECT payload_json FROM zeno_job_archive WHERE id = %s", (job_id,), "one")
+                try:
+                    payload = json.loads(full[0]) if full else {}
+                except Exception:
+                    payload = {}
+                dj = _digest(payload, str(editor or ""), float(created), float(updated))
+                if dj:
+                    self._run("UPDATE zeno_job_archive SET digest_json = %s WHERE id = %s", (dj, job_id))
+                    d = json.loads(dj)
+            if d:
+                d["id"] = int(job_id)
+                out.append(d)
+        return out
+
+    def note_version(self, key_id: Optional[int], version: str, platform: str = "", source: str = "", editor_name: str = "") -> None:
+        """Remember the Zeno version this key is on; a change is also written to the version history."""
+        version = str(version or "").strip()[:40]
+        if key_id is None or not version:
+            return
+        row = self._run("SELECT zeno_version, name FROM zeno_keys WHERE id = %s", (key_id,), "one")
+        if not row:
+            return
+        now = time.time()
+        self._run("UPDATE zeno_keys SET zeno_version = %s, version_seen_at = %s, client_platform = %s WHERE id = %s",
+                  (version, now, (platform or "")[:80] or "", key_id))
+        if str(row[0] or "") != version:
+            self._run("""INSERT INTO zeno_version_events (key_id, editor_name, version, source, platform, created_at)
+                         VALUES (%s, %s, %s, %s, %s, %s)""",
+                      (key_id, (editor_name or str(row[1] or ""))[:120], version, source[:60], (platform or "")[:80], now))
+
+    def version_events(self, limit: int = 500) -> List[Dict[str, Any]]:
+        rows = self._run("""SELECT key_id, editor_name, version, source, platform, created_at FROM zeno_version_events
+                            ORDER BY id DESC LIMIT %s""", (int(limit),), "all") or []
+        cols = ("key_id", "editor_name", "version", "source", "platform", "created_at")
+        return [dict(zip(cols, r)) for r in rows]
 
     def get_job(self, job_id: int) -> Optional[Dict[str, Any]]:
         row = self._run("SELECT payload_json, editor_name, user_email, created_at, updated_at FROM zeno_job_archive WHERE id = %s", (int(job_id),), "one")
@@ -683,12 +775,13 @@ class KeyStore:
 
     def list(self) -> List[Dict[str, Any]]:
         rows = self._run(
-            "SELECT id, name, email, created_at, last_used_at, revoked_at, requests, audio_seconds, input_tokens, output_tokens, total_tokens "
-            "FROM zeno_keys ORDER BY id DESC",
+            "SELECT id, name, email, created_at, last_used_at, revoked_at, requests, audio_seconds, input_tokens, output_tokens, total_tokens, "
+            "zeno_version, version_seen_at, client_platform FROM zeno_keys ORDER BY id DESC",
             (),
             "all",
         )
-        cols = ("id", "name", "email", "created_at", "last_used_at", "revoked_at", "requests", "audio_seconds", "input_tokens", "output_tokens", "total_tokens")
+        cols = ("id", "name", "email", "created_at", "last_used_at", "revoked_at", "requests", "audio_seconds", "input_tokens", "output_tokens", "total_tokens",
+                "zeno_version", "version_seen_at", "client_platform")
         return [dict(zip(cols, r)) for r in rows]
 
     def usage_runs(self, since: float = 0.0, limit: int = 5000) -> List[Dict[str, Any]]:
@@ -715,18 +808,19 @@ class KeyStore:
         return out
 
     _TX_COLS = ("id", "user_name", "created_at", "status", "http_status", "model", "failed_models", "words", "audio_seconds",
-                "bytes", "seconds", "in_tokens", "out_tokens", "cached", "reason")
+                "bytes", "seconds", "in_tokens", "out_tokens", "cached", "reason", "zeno_version")
 
     def log_transcription(self, key_id: Optional[int], user_name: str, status: str, http_status: int = 200, model: str = "",
                           failed_models: str = "", words: int = 0, audio_seconds: float = 0.0, size: int = 0, seconds: float = 0.0,
-                          in_tokens: int = 0, out_tokens: int = 0, cached: bool = False, reason: str = "") -> None:
+                          in_tokens: int = 0, out_tokens: int = 0, cached: bool = False, reason: str = "", zeno_version: str = "") -> None:
         """status is ok, incomplete (transcript far shorter than the audio) or failed."""
         self._run(
             """INSERT INTO zeno_transcriptions (key_id, user_name, created_at, status, http_status, model, failed_models, words,
-                   audio_seconds, bytes, seconds, in_tokens, out_tokens, cached, reason)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                   audio_seconds, bytes, seconds, in_tokens, out_tokens, cached, reason, zeno_version)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (key_id, user_name[:120], time.time(), status, int(http_status), model[:80], failed_models[:300], int(words),
-             float(audio_seconds), int(size), float(seconds), int(in_tokens), int(out_tokens), 1 if cached else 0, reason[:300]),
+             float(audio_seconds), int(size), float(seconds), int(in_tokens), int(out_tokens), 1 if cached else 0, reason[:300],
+             (zeno_version or "")[:40]),
         )
 
     def transcription_events(self, since: float = 0.0, limit: int = 3000) -> List[Dict[str, Any]]:

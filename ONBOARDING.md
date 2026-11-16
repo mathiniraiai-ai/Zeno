@@ -116,6 +116,9 @@ The agent prints a token table and adds a row to `README.md`. After a verified j
 - **Disk:** each 90-second video leaves about 330 MB of intermediates. The daily task frees space when the disk is nearly full; to do it yourself run `python scripts/clean.py` (shows what would go) and then `python scripts/clean.py --apply`.
 - **Updates:** Zeno updates itself daily and before each job. You can also double-click `update.command` (Mac) or `update.bat` (Windows). New format recipes from the team arrive at the start of each job without any update. Do not edit `styles/`, `agent/` or `scripts/` yourself; tell the owner what you need.
 
+## What Zeno records about each edit
+To find out what works and what goes wrong, every edit is stored on the team's Zeno server: the script, every version of the plan, each check and its result, the render and its verification, how long each step took, your Zeno version and computer type (no names or file paths), and **your conversation with the agent during the edit**: what you typed, what the agent said and ran, and any errors. This includes edits you stop half way. Footage and videos are never uploaded, and keys and passwords are removed before anything is sent. Only the Zeno owner can read the records. Comments you give on a finished video (`--feedback`) are stored with it, and they are the most useful part.
+
 ## Licences
 - Alignment model: Meta wav2vec2 base (95M), MIT licence, commercial use allowed.
 - Gemini is used under Google's API terms through the Zeno server (the Gemini key never reaches your computer).

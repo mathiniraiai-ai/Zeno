@@ -29,6 +29,17 @@ from typing import Any, Dict, List, Optional
 
 from .guardian import guardian_engine
 
+
+def zeno_client_headers() -> dict:
+    """X-Zeno-Version / X-Zeno-Platform, so the server knows which version every editor runs."""
+    import platform as _platform
+    try:
+        ver = (Path(__file__).resolve().parents[2] / "VERSION").read_text(encoding="utf-8").strip()[:40]
+    except Exception:
+        ver = ""
+    return {"X-Zeno-Version": ver, "X-Zeno-Platform": f"{_platform.system()} {_platform.machine()}"[:80]}
+
+
 logger = logging.getLogger("align_engine.gemini_transcriber")
 
 THIS_DIR = Path(__file__).resolve().parent
@@ -393,6 +404,7 @@ class GeminiTranscriber:
 
         url = self.cloud_url.rstrip("/") + "/v1/transcribe"
         headers = {"Authorization": f"Bearer {self.cloud_token}"} if self.cloud_token else {}
+        headers.update(zeno_client_headers())
         form_data = {
             "language_hint": language_hint or "auto",
             "target_script_lines": json.dumps(list(target_script_lines or [])[:40], ensure_ascii=False),

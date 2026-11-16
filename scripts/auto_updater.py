@@ -57,6 +57,16 @@ PROTECTED_PREFIXES = (
 )
 
 
+def zeno_client_headers() -> dict:
+    """X-Zeno-Version / X-Zeno-Platform, so the server knows which version every editor runs."""
+    import platform as _platform
+    try:
+        ver = (Path(__file__).resolve().parents[1] / "VERSION").read_text(encoding="utf-8").strip()[:40]
+    except Exception:
+        ver = ""
+    return {"X-Zeno-Version": ver, "X-Zeno-Platform": f"{_platform.system()} {_platform.machine()}"[:80]}
+
+
 def _find_python() -> str:
     if sys.platform.startswith("win") or os.name == "nt":
         cand = ROOT / ".venv" / "Scripts" / "python.exe"
@@ -164,7 +174,7 @@ def check_cloud_update(force: bool = False, timeout_sec: float = 8.0, cache_ttl_
 
     req = urllib.request.Request(
         f"{cloud_url}/v1/version",
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json", **zeno_client_headers()},
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:

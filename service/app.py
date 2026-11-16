@@ -270,6 +270,25 @@ def _log_transcription(key_id, name: str, **fields: Any) -> None:
         log.exception("could not record transcription event")
 
 
+def _client_version(request: Optional[Request]) -> Tuple[str, str]:
+    """The Zeno version and platform the client says it runs (headers X-Zeno-Version / X-Zeno-Platform; old clients send none)."""
+    if request is None:
+        return "", ""
+    v = re.sub(r"[^0-9A-Za-z.+_-]", "", str(request.headers.get("x-zeno-version") or ""))[:40]
+    plat = re.sub(r"[^0-9A-Za-z .+_()-]", "", str(request.headers.get("x-zeno-platform") or ""))[:80]
+    return v, plat
+
+
+def _note_version(key_id: Optional[int], name: str, version: str, platform: str, source: str) -> None:
+    """Never lets version tracking break a request."""
+    if not version:
+        return
+    try:
+        store().note_version(key_id, version, platform, source, name)
+    except Exception:
+        log.exception("could not note client version")
+
+
 def _allowed_domains() -> List[str]:
     """Email domains allowed to sign in: gosupernova.live unless ZENO_ALLOWED_EMAIL_DOMAINS lists others (comma-separated)."""
     raw = os.getenv("ZENO_ALLOWED_EMAIL_DOMAINS") or os.getenv("ZENO_ALLOWED_EMAIL_DOMAIN") or "gosupernova.live"
@@ -425,6 +444,8 @@ def transcribe(
 ) -> Dict[str, Any]:
     name, key_id = authenticate(authorization)
     check_rate(name)
+    client_version, client_platform = _client_version(request)
+    _note_version(key_id, name, client_version, client_platform, "transcribe")
     limit = int(float(os.getenv("ZENO_MAX_UPLOAD_MB", "25")) * 1024 * 1024)
     declared = int(request.headers.get("content-length") or 0)
     if declared > limit + 4096:
@@ -463,7 +484,8 @@ def transcribe(
         except HTTPException as exc:
             log.info("user=%s bytes=%d status=%d seconds=%.1f", name, len(audio), exc.status_code, time.time() - started)
             _log_transcription(key_id, name, status="failed", http_status=exc.status_code, failed_models="; ".join(trace), audio_seconds=duration,
-                               size=len(audio), seconds=time.time() - started, reason=(trace[-1].split(": ", 1)[-1] if trace else str(exc.detail)))
+                               size=len(audio), seconds=time.time() - started, reason=(trace[-1].split(": ", 1)[-1] if trace else str(exc.detail)),
+                               zeno_version=client_version)
             raise
         if result.get("words") and not result.get("warning"):   # an incomplete transcript is never cached
             try:
@@ -482,7 +504,7 @@ def transcribe(
     _log_transcription(key_id, name, status=("wrong_script" if result.get("foreign_script_words") else "incomplete") if result.get("warning") else "ok", model=str(result.get("model_used") or ""),
                        failed_models="; ".join(trace), words=len(result.get("words") or []), audio_seconds=duration, size=len(audio),
                        seconds=time.time() - started, in_tokens=in_tok, out_tokens=out_tok, cached=bool(result.get("cached")),
-                       reason=str(result.get("warning") or ""))
+                       reason=str(result.get("warning") or ""), zeno_version=client_version)
     log.info("user=%s bytes=%d status=200 model=%s words=%d in_tok=%d out_tok=%d seconds=%.1f%s", name, len(audio), result.get("model_used"), len(result.get("words") or []), in_tok, out_tok, time.time() - started, " WARNING=" + result["warning"] if result.get("warning") else "")
     return result
 
@@ -687,6 +709,8 @@ async def record_telemetry(request: Request, authorization: Optional[str] = Head
             raise ValueError("Expected JSON object")
     except Exception:
         raise HTTPException(400, "Invalid telemetry JSON")
+    v, plat = _client_version(request)
+    _note_version(key_id, name, str(payload.get("zeno_version") or v), plat, "telemetry")
     try:
         run_id = store().record_run(key_id, name, payload)
     except Exception:
@@ -735,6 +759,33 @@ def admin_list_jobs(
     """Index of the job archive, newest first (admins only: the records hold scripts and plans)."""
     _check_admin(authorization, x_admin_password)
     return JSONResponse({"jobs": store().list_jobs(limit=min(max(1, limit), 2000), since=since)}, headers=NO_STORE)
+
+
+@app.get("/admin/api/patterns")
+def admin_patterns(
+    days: float = 0.0, editor: str = "",
+    authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None),
+) -> JSONResponse:
+    """What the job archive teaches: outcomes and friction by editor, version, format, agent model and language; the most
+    common plan-check problems, verification failures and blocks; what editors said; what they corrected after a render."""
+    _check_admin(authorization, x_admin_password)
+    import patterns
+    since = time.time() - days * 86400 if days else 0.0
+    ds = store().job_digests(since=since)
+    if editor:
+        ds = [d for d in ds if editor.lower() in str(d.get("editor") or "").lower()]
+    return JSONResponse({"patterns": patterns.analyze(ds, days=days), "jobs": ds}, headers=NO_STORE)
+
+
+@app.get("/admin/api/versions")
+def admin_versions(authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None)) -> JSONResponse:
+    """Which Zeno version each editor runs (from their requests and update downloads), and the history of every change."""
+    _check_admin(authorization, x_admin_password)
+    ks = store()
+    keys = [{k: row.get(k) for k in ("name", "email", "zeno_version", "version_seen_at", "client_platform", "last_used_at", "revoked_at")}
+            for row in ks.list()]
+    return JSONResponse({"keys": keys, "history": ks.version_events(), "latest": ks.latest_release_meta(), "now": time.time()},
+                        headers=NO_STORE)
 
 
 @app.get("/admin/api/jobs/{job_id}")
@@ -1146,7 +1197,8 @@ def usage_log(authorization: Optional[str] = Header(None), x_admin_password: Opt
     """Every editor's runs as plain numbers, plus each key's server-counted totals. No plan files and no secrets."""
     _check_viewer(authorization, x_admin_password)
     ks = store()
-    keep = ("name", "email", "created_at", "last_used_at", "revoked_at", "requests", "audio_seconds", "input_tokens", "output_tokens", "total_tokens")
+    keep = ("name", "email", "created_at", "last_used_at", "revoked_at", "requests", "audio_seconds", "input_tokens", "output_tokens", "total_tokens",
+            "zeno_version", "version_seen_at")
     return JSONResponse(
         {"keys": [{k: row.get(k) for k in keep} for row in ks.list()], "runs": ks.usage_runs(), "now": time.time(),
          "transcriptions": ks.transcription_events(since=time.time() - 30 * 86400)},
@@ -1195,9 +1247,11 @@ def _check_release_publisher(
 
 
 @app.get("/v1/version")
-def get_latest_version(authorization: Optional[str] = Header(None)) -> JSONResponse:
+def get_latest_version(request: Request, authorization: Optional[str] = Header(None)) -> JSONResponse:
     """Fast metadata check for client auto-updaters and the Zeno desktop app's 'New update arrived' popup."""
-    authenticate(authorization)
+    name, key_id = authenticate(authorization)
+    v, plat = _client_version(request)
+    _note_version(key_id, name, v, plat, "update check")
     meta = store().latest_release_meta()
     if not meta:
         return JSONResponse({"ok": True, "has_release": False}, headers=NO_STORE)
@@ -1211,7 +1265,7 @@ def download_update_bundle(
     authorization: Optional[str] = Header(None),
 ) -> Response:
     """Authenticated download of the latest Zeno OTA update ZIP bundle."""
-    name, _ = authenticate(authorization)
+    name, key_id = authenticate(authorization)
     check_rate(name)
     res = store().latest_release_bundle(bundle_sha256=sha256)
     if not res:
@@ -1221,6 +1275,7 @@ def download_update_bundle(
     if if_none_match and if_none_match.strip() in (etag, meta["bundle_sha256"]):
         return Response(status_code=304, headers={"ETag": etag})
     log.info("ota_download user=%s version=%s sha=%s bytes=%d", name, meta["version"], meta["sha"], len(blob))
+    _note_version(key_id, name, str(meta["version"]), "", "downloaded update")   # even clients too old to say their version
     return Response(
         content=blob,
         media_type="application/zip",
