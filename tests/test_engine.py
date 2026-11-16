@@ -2663,11 +2663,20 @@ class TestNewChatGate(unittest.TestCase):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as td:
             self._log(Path(td), str(ROOT), [60_000, 90_000, 480_000])
-            with patch.dict(_os.environ, {"HOME": td}):
+            inside = {"HOME": td, "CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": ""}
+            with patch.dict(_os.environ, inside):
                 s = _REAL_SESSION_SIZE(ROOT)
             self.assertEqual((s["tokens"], s["steps"]), (480_000, 3))
+            with patch.dict(_os.environ, dict(inside, CLAUDE_CODE_SESSION_ID="sess1")):
+                self.assertEqual(_REAL_SESSION_SIZE(ROOT)["tokens"], 480_000)          # the chat Claude Code names
+            with patch.dict(_os.environ, dict(inside, CLAUDE_CODE_SESSION_ID="another")):
+                self.assertIsNone(_REAL_SESSION_SIZE(ROOT))                            # a fresh chat with no log yet
+            env = {k: v for k, v in _os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID")}
+            env["HOME"] = td
+            with patch.dict(_os.environ, env, clear=True):
+                self.assertIsNone(_REAL_SESSION_SIZE(ROOT))                            # a terminal run is never stopped
             self._log(Path(td), "/some/other/project", [480_000])
-            with patch.dict(_os.environ, {"HOME": td}):
+            with patch.dict(_os.environ, inside):
                 self.assertIsNone(_REAL_SESSION_SIZE(ROOT))   # a chat in another folder is not this job
 
     def test_prompt_hook_blocks_only_a_new_edit_in_a_long_chat(self):

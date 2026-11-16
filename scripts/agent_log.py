@@ -279,9 +279,16 @@ def session_size(root: Path = ROOT, max_age: float = 300.0) -> Optional[Dict[str
 
     Every step the agent takes re-sends the whole chat (the "cache read" tokens), so a chat that already holds earlier
     videos makes every step of this one cost several times more. Finds the most recently written Claude Code log whose
-    working folder is Zeno and returns the size of its last request: {"tokens", "steps", "session", "file"}.
-    Returns None when it cannot tell (another agent, no log, a read error): callers must then let the job go on."""
+    working folder is Zeno and returns the size of its last request: {"tokens", "steps", "session", "file"}. Inside Claude
+    Code (CLAUDECODE=1) it measures the chat named by CLAUDE_CODE_SESSION_ID; outside Claude Code (a terminal, Zeno's own
+    direct mode) there is no chat to protect, so it returns None. Returns None also when it cannot tell (another agent, no log, a read error): callers must then let the job go on."""
     try:
+        if not os.environ.get("CLAUDECODE"):        # run from a terminal or by Zeno itself: no chat is paying for it
+            return None
+        sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+        if sid:                                      # Claude Code names its own chat: measure exactly that one
+            exact = glob.glob(os.path.expanduser(f"~/.claude/projects/*/{glob.escape(sid)}.jsonl"))
+            return chat_size(exact[0], root) if exact else None
         now = time.time()
         files = [f for f in glob.glob(os.path.expanduser("~/.claude/projects/*/*.jsonl")) if now - os.path.getmtime(f) <= max_age]
         for f in sorted(files, key=os.path.getmtime, reverse=True)[:6]:
