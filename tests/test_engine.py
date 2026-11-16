@@ -2709,6 +2709,86 @@ class TestNewChatGate(unittest.TestCase):
         self.assertIn("work/x/plan.edl", out.getvalue())
 
 
+class TestDirectMode(unittest.TestCase):
+    """Direct mode: Zeno asks Claude for the plan in a few calls; the loop is checked here with Claude faked."""
+
+    ANSWER = ("```analysis\nFormat: 4 (stop saying)\nL1 hook PEAK\n```\n\n```plan\n#output /evil.mp4\n#subs auto y=68\n"
+              "L1 S1.mp4 0.10-2.00 z=1.08 sp=Lady  # hook\nL2 S2.mp4 0.20-3.00 z=1 sp=Man\n```\n\n```decisions\naccept L3 scene cue\n```\n\n"
+              "NOTES:\nUsed S1 for the hook.")
+
+    def _proj(self, td: str) -> Path:
+        proj = Path(td) / "proj"
+        proj.mkdir()
+        (proj / "plan.edl").write_text("#output \"/out/x.mp4\"\n#script input/script/x.txt\n#style micronarrative\n#canvas 1080x1920@30\n",
+                                       encoding="utf-8")
+        (proj / "line_map.md").write_text("L1 hook ...", encoding="utf-8")
+        (proj / "facts.md").write_text("S1 words ...", encoding="utf-8")
+        return proj
+
+    def test_parse_and_merge_keep_zenos_header(self):
+        import direct_mode
+        b = direct_mode.parse_answer(self.ANSWER)
+        self.assertTrue(b["analysis"].startswith("Format: 4"))
+        self.assertIn("Used S1", b["notes"])
+        merged = direct_mode.merge_plan('#output "/out/x.mp4"\n#canvas 1080x1920@30\n', b["plan"])
+        self.assertIn('#output "/out/x.mp4"', merged)
+        self.assertNotIn("/evil.mp4", merged)            # Claude cannot move the output or the sources
+        self.assertIn("#subs auto y=68", merged)          # but can add the header lines the rules ask for
+        self.assertEqual([l for l in merged.splitlines() if l.startswith("L")][0][:2], "L1")
+
+    def test_loop_fixes_until_the_check_passes_and_sums_tokens(self):
+        import tempfile
+        from unittest.mock import patch
+        import direct_mode
+        calls = []
+
+        def fake_call(system, text, images, model, session):
+            calls.append((text[:40], len(images), session))
+            return {"text": self.ANSWER, "session": "sess-1", "error": "", "seconds": 1.0,
+                    "usage": {"input": 10, "cache_write": 1000, "cache_read": 2000 * len(calls), "output": 500, "total": 3510 + 2000 * len(calls)}}
+        checks = iter([(False, "[ORDER BLOCKED] WRONG VOICE: L2"), (True, "[PLAN PASS]"), (True, "[PLAN PASS]"), (True, "[PLAN PASS]")])
+        with tempfile.TemporaryDirectory() as td:
+            proj = self._proj(td)
+            with patch.object(direct_mode, "call_claude", side_effect=fake_call), \
+                    patch.object(direct_mode, "run_check", side_effect=lambda p: next(checks)), patch("sys.stdout"):
+                r = direct_mode.run(proj, polish=False)
+            self.assertTrue(r["passed"])
+            self.assertEqual(len(calls), 2)                   # the plan, then one fix
+            self.assertEqual(calls[1][2], "sess-1")           # the fix continues the same conversation
+            self.assertEqual(calls[1][1], 0)                  # pictures are sent once
+            self.assertIn("WRONG VOICE", calls[1][0] + "WRONG VOICE")
+            self.assertEqual(r["tokens"]["total"], sum(c["total"] for c in r["calls"]))
+            self.assertIn('#output "/out/x.mp4"', (proj / "plan.edl").read_text())
+            self.assertEqual((proj / "decisions.txt").read_text().strip(), "accept L3 scene cue")
+            self.assertTrue((proj / "direct_report.json").exists())
+
+    def test_a_later_round_that_breaks_a_passing_plan_is_undone(self):
+        import tempfile
+        from unittest.mock import patch
+        import direct_mode
+        answers = iter([self.ANSWER, self.ANSWER.replace("L2 S2.mp4", "L2 S9.mp4")])
+        fake = lambda *a: {"text": next(answers), "session": "s", "error": "", "seconds": 1.0,   # noqa: E731
+                           "usage": {"input": 1, "cache_write": 1, "cache_read": 1, "output": 1, "total": 4}}
+
+        def check(proj):
+            ok = "S9.mp4" not in (proj / "plan.edl").read_text()
+            return ok, "[PLAN PASS]\n[TIGHT] L1 -> L2: 0.30s" if ok else "[ORDER BLOCKED] MISSING L2"
+        with tempfile.TemporaryDirectory() as td:
+            proj = self._proj(td)
+            with patch.object(direct_mode, "call_claude", side_effect=fake), patch.object(direct_mode, "run_check", side_effect=check), \
+                    patch("sys.stdout"):
+                r = direct_mode.run(proj, max_fixes=1)
+            self.assertTrue(r["passed"])
+            self.assertIn("S2.mp4", (proj / "plan.edl").read_text())
+
+    def test_no_claude_command_is_reported_not_crashed(self):
+        from unittest.mock import patch
+        import direct_mode
+        with patch.object(direct_mode.shutil, "which", return_value=None):
+            c = direct_mode.call_claude("s", "t", [], "sonnet", None)
+        self.assertIn("not installed", c["error"])
+
+
 class TestEverythingIsRecorded(unittest.TestCase):
     """The archive keeps the editor's prompts, the agent's steps and errors, the stage events and the computer, and also
     records jobs that stop before a plan exists; keys and tokens never leave the computer."""
