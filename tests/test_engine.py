@@ -2711,7 +2711,7 @@ class TestNewChatGate(unittest.TestCase):
             with patch.object(agent_log, "session_size", return_value=size), patch("sys.stdout", new_callable=io.StringIO) as out:
                 zeno.session_gate("inspect", block=True)   # no exit
             self.assertNotIn("BLOCKED", out.getvalue())
-        with patch.object(agent_log, "session_size", return_value={"tokens": 300_000, "steps": 30, "session": "s", "file": "f"}), \
+        with patch.object(agent_log, "session_size", return_value={"tokens": 400_000, "steps": 30, "session": "s", "file": "f"}), \
                 patch("sys.stdout", new_callable=io.StringIO) as out:
             zeno.session_gate("render", block=False, project_hint="work/x/plan.edl")   # later steps only warn
         self.assertIn("[TOKENS]", out.getvalue())

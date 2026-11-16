@@ -4,7 +4,7 @@
 Every step re-reads the whole chat, so a new video started in a long chat costs several times more (16 Nov: 5-10M
 re-read tokens per job instead of about 1M). Claude Code runs this before the message is sent, so a blocked message
 costs nothing. It blocks only when the message starts a new edit (/zeno, /edit, or a Google Doc script link) and the
-chat is over ZENO_SESSION_LIMIT (default 150k). Anything it cannot read lets the message through.
+chat is over ZENO_SESSION_LIMIT (default 250k). Anything it cannot read lets the message through.
 Exit 2 = blocked (Claude Code shows the reason to the editor); exit 0 = go on.
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-LIMIT = 150_000
+LIMIT = 250_000
 _NEW_EDIT = re.compile(r"(?is)^\s*/(zeno|edit)\b|docs\.google\.com/document/")
 _CONTINUE = re.compile(r"(?i)\bcontinue the edit\b")
 

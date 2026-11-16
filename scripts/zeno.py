@@ -252,8 +252,8 @@ def _archive_blocked(stage: str, reason: str, script_arg: str = "", inputs: Opti
         pass
 
 
-SESSION_LIMIT = 150_000     # a new chat with /zeno loaded is about 50-70k; a chat that already holds earlier videos is far bigger
-SESSION_WARN = 250_000
+SESSION_LIMIT = 250_000     # a new chat with /zeno loaded is about 50-70k; a chat that already holds earlier videos is far bigger
+SESSION_WARN = 350_000
 
 
 def session_gate(stage: str, block: bool, project_hint: str = "", script_arg: str = "", inputs: Optional[List[str]] = None) -> None:
