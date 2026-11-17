@@ -8,37 +8,70 @@ No build step: React 18.3.1 comes pinned from cdnjs and the components are writt
 before the `/*__DOM__*/` marker so tests can run them in Node without a browser. The cost is an estimate from list prices (USD per million
 tokens, PRICES below); models not listed, such as Gemini or Antigravity models, are shown without a cost instead of with a guess.
 """
-from ui import STYLE
-
-EXTRA_STYLE = """
-main.wide{max-width:1500px}
-.bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:0 0 18px}
-.chip{width:auto;display:inline-block;margin:0;border:1px solid rgba(148,163,184,.3);background:rgba(148,163,184,.08);color:#cfe0ff;border-radius:99px;padding:6px 14px;font:inherit;font-size:13px;cursor:pointer}
-.chip.on{background:#3a63d8;border-color:#3a63d8;color:#fff}
-.bar input{background:rgba(8,12,26,.6);border:1px solid rgba(148,163,184,.3);color:#e8eef7;border-radius:10px;padding:7px 12px;font:inherit;font-size:13px}
-.bar input[type=number]{width:84px}
-.grow{flex:1;min-width:220px}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
-.stat{background:rgba(8,12,26,.5);border:1px solid rgba(148,163,184,.16);border-radius:12px;padding:14px 16px}
-.stat b{display:block;font-size:22px;letter-spacing:-.3px}
-.stat span{color:#9fb0cc;font-size:12px}
-.scroll{overflow-x:auto}
-td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
-td.muted,.muted{color:#9fb0cc}
+NOTION_STYLE = """
+*{box-sizing:border-box}
+body{margin:0;background:#191919;color:#ebebeb;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+main{max-width:none;width:100%;margin:0;padding:36px 48px 80px}
+h1{margin:0 0 4px;font-size:30px;font-weight:700;letter-spacing:-.4px}
+h2{margin:34px 0 6px;font-size:16px;font-weight:600}
+a{color:#7fb2ff}
+p.sub,.sub{margin:0 0 10px;color:#9b9b9b;font-size:14px}
+.note{color:#9b9b9b;font-size:13px;margin:0 0 8px}
+.muted,td.muted{color:#9b9b9b}
 td.muted{white-space:nowrap}
-td.mail{white-space:nowrap}
-tr.total td{font-weight:700;border-top:2px solid rgba(148,163,184,.3)}
-.foot{color:#9fb0cc;font-size:12.5px;margin:14px 4px}
-table td{vertical-align:top}
-.tag{white-space:nowrap;display:inline-block;background:rgba(148,163,184,.14);border-radius:6px;padding:1px 7px;margin:1px 3px 1px 0;font-size:12px}
-.topbtn{position:fixed;top:16px;right:20px;z-index:5;border:1px solid rgba(148,163,184,.35);background:rgba(20,28,52,.85);color:#cfe0ff;border-radius:10px;padding:7px 16px;font:inherit;font-size:13px;font-weight:600;text-decoration:none;cursor:pointer}
-.signin{text-align:center;padding:36px 10px}
+.top{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:0 0 26px;color:#9b9b9b;font-size:13px}
+.top .sp{flex:1}
+.brand{font-weight:600;color:#ebebeb}
+button,input{font:inherit;color:inherit}
+button{cursor:pointer}
+.tabs{display:flex;flex-wrap:nowrap;gap:2px;margin:0 0 14px;border-bottom:1px solid #2f2f2f;overflow-x:auto;overflow-y:hidden;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tab{flex:none;white-space:nowrap;background:none;border:0;border-bottom:2px solid transparent;margin-bottom:-1px;padding:7px 12px;color:#9b9b9b;font-size:14px}
+.tab:hover{color:#ebebeb}
+.tab.on{color:#ebebeb;border-bottom-color:#ebebeb}
+.bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 6px}
+.chip{background:none;border:0;border-radius:4px;padding:4px 10px;color:#9b9b9b;font-size:13px;text-decoration:none}
+.chip:hover{background:#2a2a2a;color:#ebebeb}
+.chip.on{background:#2f2f2f;color:#ebebeb}
+.bar input{background:transparent;border:1px solid #2f2f2f;border-radius:4px;padding:4px 10px;font-size:13px;outline:none}
+.bar input:focus{border-color:#5a5a5a}
+.bar input[type=number]{width:70px}
+.bar label{color:#9b9b9b;font-size:13px;display:flex;align-items:center;gap:6px;margin:0}
+.grow{flex:1;min-width:200px}
+.card{margin:0 0 6px}
+.scroll{overflow-x:auto;scrollbar-width:thin;scrollbar-color:#3a3a3a transparent;padding-bottom:6px}
+.scroll::-webkit-scrollbar{height:8px}.scroll::-webkit-scrollbar-thumb{background:#3a3a3a;border-radius:4px}.scroll::-webkit-scrollbar-track{background:transparent}
+table{width:max-content;min-width:100%;border-collapse:collapse;font-size:14px}
+th,td{white-space:nowrap}
+th:first-child,td:first-child{position:sticky;left:0;background:#191919;z-index:1}
+tbody tr:hover td:first-child{background:#202020}
+th{text-align:left;font-weight:400;color:#9b9b9b;font-size:12.5px;padding:6px 10px;border-bottom:1px solid #2f2f2f}
+td{padding:7px 10px;border-bottom:1px solid #2f2f2f;vertical-align:top}
+tbody tr:hover td{background:#202020}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+td.mail{white-space:nowrap;color:#9b9b9b}
+tr.total td{font-weight:600}
+.tag{display:inline-block;background:#2a2a2a;border-radius:3px;padding:0 6px;margin:1px 4px 1px 0;font-size:12.5px;white-space:nowrap}
+.pill{display:inline-block;border-radius:3px;padding:0 6px;font-size:12.5px;white-space:nowrap}
+.pill.ok{background:rgba(70,150,100,.28);color:#8fd6ac}
+.pill.amber{background:rgba(205,150,40,.26);color:#e9c46a}
+.pill.red{background:rgba(210,80,70,.28);color:#f19a93}
+.pill.gray{background:#2a2a2a;color:#9b9b9b}
+.stats{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 12px}
+.stat{border:1px solid #2f2f2f;border-radius:4px;padding:8px 14px;min-width:150px}
+.stat b{display:block;font-size:20px;font-weight:600}
+.stat span{color:#9b9b9b;font-size:12.5px}
+.foot{color:#7a7a7a;font-size:12.5px;margin:30px 0 0}
+.signin{padding:40px 0}
+.signin h1{font-size:22px}
+.dayhead{margin:26px 0 4px;font-size:15px}
+@media(max-width:600px){main{padding:24px 14px 60px}h1{font-size:24px}}
 """
 
 USAGE_PAGE = """<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Zeno · Admin · Usage log</title><style>__STYLE__ __EXTRA__</style></head><body>
-<div id="root"><main class="wide"><div class="card"><h1>Zeno · Usage log</h1><p class="sub">Loading…</p></div></main></div>
+<title>Zeno · Usage</title><style>__STYLE__</style></head><body>
+<div id="root"><main><h1>Usage</h1><p class="sub">Loading…</p></main></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
 <script>
@@ -95,7 +128,75 @@ function costUsd(r) {
   return (aIn * p[1] + aCached * p[2] + aOut * p[4]) / 1e6;
 }
 function who(r) { return (r.user_email || r.editor_name || 'unknown').toLowerCase(); }
-function inPeriod(r, days, now) { return !days || (r.created_at >= now - days * 86400); }
+function periodCutoff(p, now) {  // 'today' = since local midnight, '7' / '30' = last N days, 'all' = everything
+  if (p === 'all') return 0;
+  if (p === 'today') { const d = new Date(now * 1000); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; }
+  return now - Number(p) * 86400;
+}
+function inPeriod(r, cutoff) { return !cutoff || n(r.created_at) >= cutoff; }
+const HEAVY_CACHE = 5000000;  // a run that re-read more than 5M cached tokens had a long chat with many steps
+function wasteGroups(runs) {  // one row per editor and project; flagged when a run re-read a lot or the project was run several times
+  const g = new Map();
+  for (const r of runs) {
+    if (!r.project) continue;
+    const k = who(r) + '|' + r.project;
+    const e = g.get(k) || {editor: r.editor_name || who(r), project: r.project, runs: 0, fresh: 0, cached: 0, maxCached: 0};
+    e.runs += 1; e.fresh += n(r.agent_in_tokens) + n(r.agent_out_tokens); e.cached += n(r.agent_cached_tokens); e.maxCached = Math.max(e.maxCached, n(r.agent_cached_tokens));
+    g.set(k, e);
+  }
+  const rows = [...g.values()].filter(e => e.runs > 1 || e.maxCached >= HEAVY_CACHE);
+  rows.forEach(e => { e.flags = [e.maxCached >= HEAVY_CACHE ? 'Long chat' : '', e.runs > 1 ? 'Run ' + e.runs + ' times' : ''].filter(Boolean); });
+  return rows.sort((a, b) => b.cached - a.cached);
+}
+function transcribeSummary(events) {
+  const ev = events || [];
+  const bad = ev.filter(e => e.status !== 'ok');
+  const failed = ev.filter(e => e.status === 'failed').length;
+  const by = {};
+  ev.forEach(e => { const u = by[e.user_name] || (by[e.user_name] = {name: e.user_name, n: 0, bad: 0, last: 0}); u.n += 1; if (e.status !== 'ok') u.bad += 1; u.last = Math.max(u.last, n(e.created_at)); });
+  return {calls: ev.length, bad: bad.length, failed, incomplete: bad.length - failed, rate: ev.length ? Math.round(100 * (ev.length - bad.length) / ev.length) : 100,
+    users: Object.values(by).sort((a, b) => b.bad - a.bad || b.n - a.n)};
+}
+function dayKey(t) { const d = new Date(n(t) * 1000); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+function dayLabel(k, short) { const d = new Date(k + 'T12:00:00'); return d.toLocaleDateString('en-GB', short ? {weekday: 'short', day: 'numeric'} : {weekday: 'long', day: 'numeric', month: 'short'}); }
+function byDay(runs) {  // newest day first; each day holds its runs
+  const days = new Map();
+  for (const r of runs) { const k = dayKey(r.created_at); if (!days.has(k)) days.set(k, []); days.get(k).push(r); }
+  return [...days.entries()].sort((a, b) => a[0] < b[0] ? 1 : -1).map(([key, rs]) => ({key, runs: rs}));
+}
+function quality(runs) {  // how complete the recorded numbers are for these videos
+  const q = {total: runs.length, noAgent: 0, noDetail: 0, mixed: 0, exact: 0, noGemini: 0};
+  for (const r of runs) {
+    const jr = r.job_report || {}, ag = jr.agent || {}, acc = jr.accounting || {};
+    if (!n(r.agent_total_tokens) && !n(r.agent_cached_tokens)) q.noAgent += 1;
+    if (ag.turns == null) q.noDetail += 1;
+    if (ag.mixed_with_development) q.mixed += 1;
+    if (acc.agent_token_precision === 'exact') q.exact += 1;
+    if (!n(r.transcribe_total_tokens)) q.noGemini += 1;
+  }
+  return q;
+}
+function verParts(v) { return String(v || '').replace(/^v/i, '').split('.').map(x => parseInt(x, 10) || 0); }
+function verCmp(a, b) { const x = verParts(a), y = verParts(b); for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); } return 0; }
+function versionRows(keys) {  // one row per editor: newest version their keys report, and when any key was last used
+  const by = new Map();
+  for (const k of keys || []) {
+    const name = String(k.name || '').trim();
+    if (!name || k.revoked_at) continue;
+    const id = name.toLowerCase();
+    const cur = by.get(id) || {name, version: '', last: 0};
+    cur.last = Math.max(cur.last, n(k.last_used_at));
+    if (k.zeno_version && (!cur.version || verCmp(k.zeno_version, cur.version) > 0)) cur.version = k.zeno_version;
+    by.set(id, cur);
+  }
+  const rows = [...by.values()].filter(r => r.last > 86400);
+  let newest = '';
+  rows.forEach(r => { if (r.version && (!newest || verCmp(r.version, newest) > 0)) newest = r.version; });
+  rows.forEach(r => { r.state = !r.version ? 'unknown' : verCmp(r.version, newest) < 0 ? 'behind' : 'current'; });
+  const rank = {behind: 0, unknown: 1, current: 2};
+  rows.sort((a, b) => rank[a.state] - rank[b.state] || b.last - a.last);
+  return {rows, newest};
+}
 function matches(r, q) {
   if (!q) return true;
   const hay = [r.editor_name, r.user_email, r.project, r.agent_name, r.agent_model, r.language].join(' ').toLowerCase();
@@ -129,7 +230,9 @@ const {useState, useEffect, useRef} = React;
 const h = React.createElement;
 const TOKEN_KEY = 'zeno_usage_jwt';
 const fmtNum = x => Number(x || 0).toLocaleString();
-const fmtDate = t => t ? new Date(t * 1000).toISOString().slice(0, 16).replace('T', ' ') : '';
+const fmtBig = x => { x = Number(x || 0); return x >= 1e9 ? (x / 1e9).toFixed(2) + 'B' : x >= 1e6 ? (x / 1e6).toFixed(1) + 'M' : x >= 1e4 ? Math.round(x / 1e3) + 'k' : fmtNum(x); };
+const pad2 = x => String(x).padStart(2, '0');
+const fmtDate = t => { if (!t) return ''; const d = new Date(t * 1000); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()); };
 const inr = (usd, rate) => '₹' + Math.round(usd * rate).toLocaleString();
 
 function csvOf(runs) {
@@ -144,30 +247,28 @@ function csvOf(runs) {
 function Tags({items}) { return h('span', null, [...items].map(x => h('span', {className: 'tag', key: x}, x))); }
 function Th({children, right}) { return h('th', {className: right ? 'n' : ''}, children); }
 
-function TranscriptionHealth({data, days}) {
-  const ev = (data.transcriptions || []).filter(e => inPeriod(e, days, data.now));
+const short = s => { s = String(s || ''); return s.length > 40 ? s.slice(0, 37) + '…' : s; };
+
+function TranscriptionHealth({data, cutoff}) {
+  const ev = (data.transcriptions || []).filter(e => inPeriod(e, cutoff));
   const bad = ev.filter(e => e.status !== 'ok');
-  const failed = ev.filter(e => e.status === 'failed').length;
+  const sm = transcribeSummary(ev);
   const avg = a => a.length ? a.reduce((s, x) => s + x, 0) / a.length : 0;
-  const rate = ev.length ? Math.round(100 * (ev.length - bad.length) / ev.length) : 100;
   const models = {};
   ev.filter(e => e.model).forEach(e => { const m = models[e.model] || (models[e.model] = {n: 0, s: []}); m.n += 1; m.s.push(n(e.seconds)); });
-  const by = {};
-  ev.forEach(e => { const u = by[e.user_name] || (by[e.user_name] = {name: e.user_name, n: 0, bad: 0, last: 0}); u.n += 1; if (e.status !== 'ok') u.bad += 1; u.last = Math.max(u.last, e.created_at); });
-  const users = Object.values(by).sort((a, b) => b.bad - a.bad || b.n - a.n);
-  const stat = (v, label) => h('div', {className: 'stat', key: label}, h('b', null, v), h('span', null, label));
   const fell = ev.filter(e => e.status === 'ok' && e.failed_models).length;
+  const stat = (v, label) => h('div', {className: 'stat', key: label}, h('b', null, v), h('span', null, label));
   return h('div', {className: 'card'},
     h('h1', null, 'Transcription health'),
     h('p', {className: 'sub'}, 'Every Gemini transcription call: who, which model answered, how long it took, and why a call failed. Numbers and short reasons only, never audio or text.'),
     h('div', {className: 'stats'},
-      stat(fmtNum(ev.length), 'transcription calls'), stat(rate + '%', 'answered fully'), stat(fmtNum(failed), 'failed'),
-      stat(fmtNum(bad.length - failed), 'incomplete'), stat(fmtNum(fell), 'saved by a fallback model'),
+      stat(fmtNum(sm.calls), 'transcription calls'), stat(sm.rate + '%', 'answered fully'), stat(fmtNum(sm.failed), 'failed'),
+      stat(fmtNum(sm.incomplete), 'incomplete'), stat(fmtNum(fell), 'saved by a fallback model'),
       stat(avg(ev.map(e => n(e.seconds))).toFixed(1) + ' s', 'average time')),
-    Object.keys(models).length ? h('p', {className: 'sub'}, 'Models that answered: ' + Object.keys(models).map(m => m + ' ' + models[m].n + ' calls, ' + avg(models[m].s).toFixed(1) + ' s').join(' · ')) : null,
+    Object.keys(models).length ? h('p', {className: 'sub', style: {marginTop: 14}}, 'Models that answered: ' + Object.keys(models).map(m => m + ' ' + models[m].n + ' calls, ' + avg(models[m].s).toFixed(1) + ' s').join(' · ')) : null,
     h('div', {className: 'scroll'}, h('table', null,
       h('thead', null, h('tr', null, h(Th, null, 'Editor'), h(Th, {right: true}, 'Calls'), h(Th, {right: true}, 'Problems'), h(Th, null, 'Last call'))),
-      h('tbody', null, users.length ? users.map(u => h('tr', {key: u.name},
+      h('tbody', null, sm.users.length ? sm.users.map(u => h('tr', {key: u.name},
         h('td', null, h('b', null, u.name)), h('td', {className: 'n'}, fmtNum(u.n)),
         h('td', {className: 'n'}, u.bad ? h('b', null, fmtNum(u.bad)) : '0'), h('td', {className: 'muted'}, fmtDate(u.last))))
         : h('tr', null, h('td', {colSpan: 4}, 'No transcription calls recorded in this period yet'))))),
@@ -178,86 +279,179 @@ function TranscriptionHealth({data, days}) {
         h('td', {className: 'muted'}, e.failed_models), h('td', {className: 'n'}, Math.round(n(e.audio_seconds))), h('td', {className: 'n'}, n(e.seconds).toFixed(1))))))) : null);
 }
 
-function Dashboard({data, days, setDays, q, setQ, rate, setRate, showAll, setShowAll}) {
-  const runs = data.runs.filter(r => inPeriod(r, days, data.now) && matches(r, q));
+const sumNew = t => t.ain + t.aout;
+const tokHead = () => [['i', 'Input'], ['cw', 'of which cache write'], ['cr', 'Re-read (cache read)'], ['o', 'Output'], ['gi', 'Gemini in'], ['go', 'Gemini out'], ['gt', 'Gemini total']]
+  .map(([k, label]) => h(Th, {right: true, key: k}, label));
+const tokCells = u => ['ain', 'cwrite', 'cached', 'aout', 'gin', 'gout', 'gtotal'].map(k => h('td', {className: 'n' + (k === 'cwrite' ? ' muted' : ''), key: k}, fmtNum(u[k])));
+const money = (t, rate) => inr(t.usd, rate) + (t.unpriced ? ' *' : '');
+
+function Daily({runs, rate}) {
   const {users, total: t} = aggregate(runs);
-  const stat = (v, label) => h('div', {className: 'stat', key: label}, h('b', null, v), h('span', null, label));
-  const shown = showAll ? runs : runs.slice(0, 100);
-  const star = t.unpriced ? ' *' : '';
+  const days = byDay(runs).slice(0, 31);
+  const cols = days.slice(0, 7).map(d => d.key).reverse();           // up to 7 days, oldest first
+  const count = new Map();
+  for (const r of runs) { const e = who(r), d = dayKey(r.created_at); if (!count.has(e)) count.set(e, new Map()); count.get(e).set(d, (count.get(e).get(d) || 0) + 1); }
+  const rows = users.slice().sort((a, b) => b.runs - a.runs || sumNew(b) - sumNew(a));
+  const sum = (arr, k) => arr.reduce((x, r) => x + n(r[k]), 0);
   return h('div', null,
-    h('div', {className: 'card'},
-      h('h1', null, 'Who is using what'),
-      h('p', {className: 'sub'}, 'Every editor and every video: e-mail, coding agent and model, tokens in and out, Gemini transcription, and an estimated cost.'),
-      h('div', {className: 'bar'},
-        [[1, 'Today'], [7, '7 days'], [30, '30 days'], [0, 'All time']].map(([d, label]) =>
-          h('button', {key: d, className: 'chip' + (days === d ? ' on' : ''), onClick: () => setDays(d)}, label)),
-        h('input', {className: 'grow', placeholder: 'Search an editor, e-mail, project or model', value: q, onChange: e => setQ(e.target.value)}),
-        h('label', {style: {color: '#9fb0cc', fontSize: 13}}, '₹ per $ ', h('input', {type: 'number', step: '0.1', value: rate, onChange: e => setRate(Number(e.target.value) || 0)})),
-        h('button', {className: 'chip', onClick: () => {
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(new Blob([csvOf(runs)], {type: 'text/csv'}));
-          a.download = 'zeno-usage.csv'; a.click();
-        }}, 'Download CSV')),
-      h('div', {className: 'stats'},
-        stat(fmtNum(t.editors), 'editors active'), stat(fmtNum(t.runs), 'videos edited'), stat((t.seconds / 60).toFixed(1), 'video minutes'),
-        stat(fmtNum(t.ain) + ' / ' + fmtNum(t.cached) + ' / ' + fmtNum(t.aout), 'agent tokens: in / cached read / out'),
-        stat(fmtNum(t.acombined), 'combined agent total (incl. cache)'),
-        stat(fmtNum(t.gin) + ' / ' + fmtNum(t.gout), 'Gemini tokens: in / out'),
-        stat(inr(t.usd, rate) + star, 'estimated agent cost'))),
-    h('div', {className: 'card'}, h('h1', null, 'By editor'),
-      h('div', {className: 'scroll'}, h('table', null,
-        h('thead', null, h('tr', null, h(Th, null, 'Editor'), h(Th, null, 'Email'), h(Th, null, 'Coding agent'), h(Th, null, 'Model'),
-          h(Th, {right: true}, 'Videos'), h(Th, {right: true}, 'Minutes'), h(Th, {right: true}, 'Input'), h(Th, {right: true}, 'Cached read'),
-          h(Th, {right: true}, 'Output'), h(Th, {right: true}, 'Combined total (incl. cache)'), h(Th, {right: true}, 'Gemini in'), h(Th, {right: true}, 'Gemini out'),
-          h(Th, {right: true}, 'Gemini total'), h(Th, {right: true}, 'Est. cost'), h(Th, null, 'Last run'))),
-        h('tbody', null,
-          users.map(u => h('tr', {key: u.key},
-            h('td', null, h('b', null, u.name)), h('td', {className: 'mail'}, u.email),
-            h('td', null, h(Tags, {items: u.agents})), h('td', null, h(Tags, {items: u.models})),
-            h('td', {className: 'n'}, fmtNum(u.runs)), h('td', {className: 'n'}, (u.seconds / 60).toFixed(1)),
-            h('td', {className: 'n', title: u.cwrite ? ('Includes ' + fmtNum(u.cwrite) + ' cache write tokens') : ''}, fmtNum(u.ain)),
-            h('td', {className: 'n'}, fmtNum(u.cached)), h('td', {className: 'n'}, fmtNum(u.aout)),
-            h('td', {className: 'n', title: 'Uncached in + out: ' + fmtNum(u.atotal)}, h('b', null, fmtNum(u.acombined))),
-            h('td', {className: 'n'}, fmtNum(u.gin)), h('td', {className: 'n'}, fmtNum(u.gout)), h('td', {className: 'n'}, h('b', null, fmtNum(u.gtotal))),
-            h('td', {className: 'n'}, (u.usd || !u.unpriced) ? inr(u.usd, rate) + (u.unpriced ? ' *' : '') : '–'),
-            h('td', {className: 'muted'}, fmtDate(u.last)))),
-          users.length ? h('tr', {className: 'total'}, h('td', null, 'All editors'), h('td', null), h('td', null), h('td', null),
-            h('td', {className: 'n'}, fmtNum(t.runs)), h('td', {className: 'n'}, (t.seconds / 60).toFixed(1)),
-            h('td', {className: 'n'}, fmtNum(t.ain)), h('td', {className: 'n'}, fmtNum(t.cached)), h('td', {className: 'n'}, fmtNum(t.aout)), h('td', {className: 'n'}, fmtNum(t.acombined)),
-            h('td', {className: 'n'}, fmtNum(t.gin)), h('td', {className: 'n'}, fmtNum(t.gout)), h('td', {className: 'n'}, fmtNum(t.gtotal)),
-            h('td', {className: 'n'}, inr(t.usd, rate) + star), h('td', null))
-            : h('tr', null, h('td', {colSpan: 15}, 'No runs in this period')))))),
-    h(TranscriptionHealth, {data, days}),
-    h('div', {className: 'card'},
-      h('h1', null, 'Every run ', runs.length > 100 ? h('button', {className: 'chip', style: {marginLeft: 12}, onClick: () => setShowAll(!showAll)},
-        showAll ? 'Show latest 100' : 'Show all ' + runs.length) : null),
-      h('div', {className: 'scroll'}, h('table', null,
-        h('thead', null, h('tr', null, h(Th, null, 'When'), h(Th, null, 'Editor'), h(Th, null, 'Email'), h(Th, null, 'Project'), h(Th, null, 'Lang'),
-          h(Th, null, 'Coding agent'), h(Th, null, 'Model'), h(Th, {right: true}, 'Clips'), h(Th, {right: true}, 'Seconds'),
-          h(Th, {right: true}, 'Input'), h(Th, {right: true}, 'Cached read'), h(Th, {right: true}, 'Output'), h(Th, {right: true}, 'Combined total (incl. cache)'),
-          h(Th, {right: true}, 'Gemini in'), h(Th, {right: true}, 'Gemini out'), h(Th, {right: true}, 'Gemini total'), h(Th, {right: true}, 'Est. cost'),
-          h(Th, null, 'Video type'), h(Th, null, 'Plan checks'), h(Th, null, 'Failures'), h(Th, {right: true}, 'Cleaned MB'))),
-        h('tbody', null, shown.length ? shown.map(r => {
-          const c = costUsd(r), cw = cacheWriteTokens(r), comb = agentCombinedTotal(r), mixed = ((r.job_report || {}).agent || {}).mixed_with_development;
-          return h('tr', {key: r.id},
-          h('td', {className: 'muted'}, fmtDate(r.created_at)), h('td', null, r.editor_name), h('td', {className: 'mail'}, r.user_email), h('td', null, r.project),
-          h('td', null, r.language), h('td', null, r.agent_name), h('td', null, r.agent_model),
-          h('td', {className: 'n'}, fmtNum(r.clips_count)), h('td', {className: 'n'}, Math.round(n(r.video_seconds))),
-          h('td', {className: 'n', title: cw ? ('Uncached input includes ' + fmtNum(cw) + ' cache write tokens') : ''}, fmtNum(r.agent_in_tokens)),
-          h('td', {className: 'n'}, fmtNum(r.agent_cached_tokens)), h('td', {className: 'n'}, fmtNum(r.agent_out_tokens)),
-          h('td', {className: 'n', title: 'Uncached in + out: ' + fmtNum(r.agent_total_tokens) + (cw ? (' · Cache write: ' + fmtNum(cw)) : '') + (mixed ? ' · This window also holds work on Zeno code, so it is not the cost of one edit' : '')}, h('b', null, fmtNum(comb)), mixed ? ' (mixed with dev work)' : ''),
-          h('td', {className: 'n'}, fmtNum(r.transcribe_in_tokens)), h('td', {className: 'n'}, fmtNum(r.transcribe_out_tokens)), h('td', {className: 'n'}, fmtNum(r.transcribe_total_tokens)),
+    h('p', {className: 'sub', style: {marginTop: 14}}, t.runs ? fmtNum(t.runs) + ' videos by ' + fmtNum(t.editors) + ' editors · ' + fmtNum(sumNew(t)) + ' new tokens · ' + money(t, rate) + ' estimated' : 'No videos in this period.'),
+    h('h2', null, 'Videos per editor, per day'),
+    h('div', {className: 'scroll'}, h('table', null,
+      h('thead', null, h('tr', null, h(Th, null, 'Editor'), cols.map(c => h(Th, {right: true, key: c}, dayLabel(c, true))), h(Th, {right: true}, 'Total'))),
+      h('tbody', null, rows.map(u => h('tr', {key: u.key}, h('td', null, h('b', null, u.name)),
+          cols.map(c => { const v = (count.get(u.key) || new Map()).get(c) || 0; return h('td', {className: 'n' + (v ? '' : ' muted'), key: c}, v || '–'); }),
+          h('td', {className: 'n'}, h('b', null, fmtNum(u.runs))))),
+        rows.length ? h('tr', {className: 'total'}, h('td', null, 'All editors'), cols.map(c => h('td', {className: 'n', key: c}, fmtNum((days.find(d => d.key === c) || {runs: []}).runs.length))), h('td', {className: 'n'}, fmtNum(t.runs))) : null))),
+    cols.length < days.length ? h('p', {className: 'note'}, 'The table shows the latest 7 days; every day is listed below.') : null,
+    h('h2', null, 'Usage per editor, day by day'),
+    days.map(d => {
+      const a = aggregate(d.runs);
+      return h('div', {key: d.key},
+        h('div', {className: 'dayhead'}, h('b', null, dayLabel(d.key)), h('span', {className: 'muted'}, '  ' + d.runs.length + (d.runs.length === 1 ? ' video' : ' videos') + ' · ' + fmtNum(sumNew(a.total)) + ' new tokens · ' + money(a.total, rate))),
+        h('div', {className: 'scroll'}, h('table', null,
+          h('thead', null, h('tr', null, h(Th, null, 'Editor'), h(Th, {right: true}, 'Videos'), tokHead(), h(Th, {right: true}, 'Est. cost'), h(Th, null, 'Last video'))),
+          h('tbody', null, a.users.slice().sort((x, y) => y.runs - x.runs || sumNew(y) - sumNew(x)).map(u => h('tr', {key: u.key},
+            h('td', null, h('b', null, u.name)), h('td', {className: 'n'}, fmtNum(u.runs)), tokCells(u),
+            h('td', {className: 'n'}, (u.usd || !u.unpriced) ? inr(u.usd, rate) + (u.unpriced ? ' *' : '') : '–'), h('td', {className: 'muted'}, fmtDate(u.last)))),
+            h('tr', {className: 'total'}, h('td', null, 'Day total'), h('td', {className: 'n'}, fmtNum(a.total.runs)), tokCells(a.total), h('td', {className: 'n'}, money(a.total, rate)), h('td', null))))));
+    }),
+    t.unpriced ? h('p', {className: 'foot'}, '* ' + t.unpriced + ' video(s) use a model with no price here and are left out of the cost.') : null);
+}
+
+function Videos({runs, rate, showAll, setShowAll}) {
+  const shown = showAll ? runs : runs.slice(0, 100);
+  return h('div', null,
+    h('p', {className: 'sub', style: {marginTop: 14}}, 'One row per video, newest first. A project edited again appears again.'),
+    h('div', {className: 'scroll'}, h('table', null,
+      h('thead', null, h('tr', null, h(Th, null, 'When'), h(Th, null, 'Editor'), h(Th, null, 'Project'), h(Th, null, 'Language'), h(Th, {right: true}, 'Clips'), h(Th, {right: true}, 'Seconds'),
+        tokHead(), h(Th, {right: true}, 'Agent steps'), h(Th, {right: true}, 'Window (min)'), h(Th, {right: true}, 'Est. cost'), h(Th, null, 'Notes'))),
+      h('tbody', null, shown.length ? shown.map(r => {
+        const c = costUsd(r), ag = (r.job_report || {}).agent || {}, fails = ((r.job_report || {}).failures || []).length;
+        const u = {ain: n(r.agent_in_tokens), cwrite: cacheWriteTokens(r), cached: n(r.agent_cached_tokens), aout: n(r.agent_out_tokens), gin: n(r.transcribe_in_tokens), gout: n(r.transcribe_out_tokens), gtotal: n(r.transcribe_total_tokens)};
+        return h('tr', {key: r.id},
+          h('td', {className: 'muted'}, fmtDate(r.created_at)), h('td', null, h('b', null, r.editor_name)), h('td', {title: r.project}, short(r.project)), h('td', null, r.language),
+          h('td', {className: 'n'}, fmtNum(r.clips_count)), h('td', {className: 'n'}, Math.round(n(r.video_seconds))), tokCells(u),
+          h('td', {className: 'n muted'}, ag.turns != null ? fmtNum(ag.turns) : '–'), h('td', {className: 'n muted'}, ag.window_minutes != null ? ag.window_minutes : '–'),
           h('td', {className: 'n'}, c === null ? '–' : inr(c, rate)),
-          h('td', null, (r.job_report || {}).format || ''),
-          h('td', null, (r.job_report || {}).plan_check_runs ? ((r.job_report.plan_check_runs - r.job_report.plan_check_blocked) + ' passed, ' + r.job_report.plan_check_blocked + ' blocked') : ''),
-          h('td', {title: ((r.job_report || {}).failures || []).map(f => f.stage + ': ' + f.detail).join(' | ')}, ((r.job_report || {}).failures || []).length ? h('b', null, String(r.job_report.failures.length) + ' (' + r.job_report.failures[r.job_report.failures.length - 1].stage + ': ' + r.job_report.failures[r.job_report.failures.length - 1].detail + ')') : ''),
-          h('td', {className: 'n'}, (r.job_report || {}).cleanup && r.job_report.cleanup.ran ? String(r.job_report.cleanup.freed_mb) : '')); })
-          : h('tr', null, h('td', {colSpan: 21}, 'No runs in this period')))))),
+          h('td', null, n(r.agent_cached_tokens) >= HEAVY_CACHE ? h('span', {className: 'pill amber', style: {marginRight: 4}}, 'Long chat') : null,
+            !n(r.agent_total_tokens) && !n(r.agent_cached_tokens) ? h('span', {className: 'pill red', style: {marginRight: 4}}, 'No agent tokens') : null,
+            ag.mixed_with_development ? h('span', {className: 'pill gray', style: {marginRight: 4}, title: 'This window also holds work on Zeno code, so it is not the cost of one edit'}, 'Mixed with dev work') : null,
+            fails ? h('span', {className: 'pill red'}, fails + (fails === 1 ? ' failure' : ' failures')) : null));
+      }) : h('tr', null, h('td', {colSpan: 19}, 'No videos in this period'))))),
+    runs.length > 100 ? h('p', {className: 'note', style: {marginTop: 10}}, h('a', {href: '#', onClick: e => { e.preventDefault(); setShowAll(!showAll); }}, showAll ? 'Show latest 100' : 'Show all ' + runs.length)) : null);
+}
+
+function Editors({runs, rate, vers}) {
+  const {users, total: t} = aggregate(runs);
+  const verOf = new Map(vers.rows.map(r => [r.name.toLowerCase(), r]));
+  const dayCount = u => new Set(runs.filter(r => who(r) === u.key).map(r => dayKey(r.created_at))).size;
+  return h('div', null,
+    h('p', {className: 'sub', style: {marginTop: 14}}, 'Totals for the chosen period, one row per editor.'),
+    h('div', {className: 'scroll'}, h('table', null,
+      h('thead', null, h('tr', null, h(Th, null, 'Editor'), h(Th, null, 'Version'), h(Th, {right: true}, 'Videos'), h(Th, {right: true}, 'Active days'), h(Th, {right: true}, 'Videos per day'),
+        tokHead(), h(Th, {right: true}, 'New tokens per video'), h(Th, {right: true}, 'Est. cost'), h(Th, null, 'Last video'))),
+      h('tbody', null, users.slice().sort((a, b) => b.runs - a.runs).map(u => {
+        const v = verOf.get(String(u.name).toLowerCase()), d = dayCount(u) || 1;
+        return h('tr', {key: u.key}, h('td', null, h('b', null, u.name)),
+          h('td', null, v && v.version ? h('span', {className: 'pill ' + (v.state === 'behind' ? 'amber' : 'gray')}, 'v' + String(v.version).replace(/^v/i, '')) : ''),
+          h('td', {className: 'n'}, fmtNum(u.runs)), h('td', {className: 'n'}, fmtNum(d)), h('td', {className: 'n'}, (u.runs / d).toFixed(1)), tokCells(u),
+          h('td', {className: 'n'}, fmtNum(Math.round(sumNew(u) / Math.max(1, u.runs)))),
+          h('td', {className: 'n'}, (u.usd || !u.unpriced) ? inr(u.usd, rate) + (u.unpriced ? ' *' : '') : '–'), h('td', {className: 'muted'}, fmtDate(u.last)));
+      }),
+        users.length ? h('tr', {className: 'total'}, h('td', null, 'All editors'), h('td', null), h('td', {className: 'n'}, fmtNum(t.runs)), h('td', null), h('td', null), tokCells(t),
+          h('td', {className: 'n'}, fmtNum(Math.round(sumNew(t) / Math.max(1, t.runs)))), h('td', {className: 'n'}, money(t, rate)), h('td', null))
+          : h('tr', null, h('td', {colSpan: 17}, 'No videos in this period'))))));
+}
+
+function Problems({data, runs, cutoff}) {
+  const waste = wasteGroups(runs);
+  return h('div', null,
+    h('h2', null, 'Waste watch'),
+    h('p', {className: 'note'}, 'Projects where a video re-read over ' + fmtNum(HEAVY_CACHE) + ' cached tokens (a long chat), or that were edited more than once.'),
+    h('div', {className: 'scroll'}, h('table', null,
+      h('thead', null, h('tr', null, h(Th, null, 'Editor'), h(Th, null, 'Project'), h(Th, {right: true}, 'Videos'), h(Th, {right: true}, 'New tokens'), h(Th, {right: true}, 'Re-read'), h(Th, null, 'Why flagged'))),
+      h('tbody', null, waste.length ? waste.slice(0, 20).map(e => h('tr', {key: e.editor + e.project},
+        h('td', null, h('b', null, e.editor)), h('td', {title: e.project}, short(e.project)), h('td', {className: 'n'}, fmtNum(e.runs)), h('td', {className: 'n'}, fmtNum(e.fresh)),
+        h('td', {className: 'n'}, fmtNum(e.cached)), h('td', null, e.flags.map(f => h('span', {className: 'pill amber', key: f, style: {marginRight: 4}}, f)))))
+        : h('tr', null, h('td', {colSpan: 6}, 'Nothing flagged in this period'))))),
+    h(TranscriptionHealth, {data, cutoff}));
+}
+
+function Health({health, vers}) {
+  const ok = (v, yes, no) => h('span', {className: 'pill ' + (v ? 'ok' : 'red')}, v ? yes : no);
+  return h('div', null,
+    h('h2', null, 'Server'),
+    h('div', {className: 'scroll'}, h('table', null, h('tbody', null, health ? [
+      ['Server', ok(health.ok, 'Up', 'Problem')], ['Gemini key', ok(health.gemini_configured, 'Configured', 'Missing')],
+      ['Key store', ok(health.key_store_ok, (health.key_store || '?') + ' working', (health.key_store || '?') + ' not working')],
+      ['Google sign-in', ok(health.google_oauth_enabled, 'On', 'Off')]].map(r => h('tr', {key: r[0]}, h('td', {style: {width: 200}}, r[0]), h('td', null, r[1])))
+      : h('tr', null, h('td', null, 'Checking…'))))),
+    h(Versions, {vers}));
+}
+
+function Versions({vers}) {
+  const pill = r => r.state === 'behind' ? h('span', {className: 'pill amber'}, 'Update needed') : r.state === 'current' ? h('span', {className: 'pill ok'}, 'Up to date') : h('span', {className: 'pill gray'}, 'Unknown');
+  return h('div', {className: 'card'}, h('h1', null, 'Zeno versions'),
+    h('p', {className: 'sub'}, 'The newest version each editor\\'s keys have reported, compared with the newest version seen across the team' + (vers.newest ? ' (v' + String(vers.newest).replace(/^v/i, '') + ')' : '') + '.'),
+    h('div', {className: 'scroll'}, h('table', null,
+      h('thead', null, h('tr', null, h(Th, null, 'Editor'), h(Th, null, 'Version'), h(Th, null, 'Status'), h(Th, null, 'Last used'))),
+      h('tbody', null, vers.rows.length ? vers.rows.map(r => h('tr', {key: r.name},
+        h('td', null, h('b', null, r.name)), h('td', null, r.version ? 'v' + String(r.version).replace(/^v/i, '') : '–'), h('td', null, pill(r)), h('td', {className: 'muted'}, fmtDate(r.last))))
+        : h('tr', null, h('td', {colSpan: 4}, 'No version data yet')))))); 
+}
+
+function Notes({runs, data}) {
+  const q = quality(runs);
+  const pct = x => q.total ? Math.round(100 * x / q.total) + '%' : '–';
+  const row = (label, v, why) => h('tr', {key: label}, h('td', null, label), h('td', {className: 'n'}, fmtNum(v)), h('td', {className: 'n muted'}, pct(v)), h('td', {className: 'muted', style: {whiteSpace: 'normal'}}, why));
+  const para = (t) => h('p', {className: 'note', style: {maxWidth: 900, fontSize: 14, color: '#cfcfcf'}}, t);
+  return h('div', null,
+    h('h2', null, 'How each video is recorded'),
+    para('One row is one video job. When the editor finishes, their Zeno reads the coding agent\\'s own log (Claude Code, Codex or Antigravity) for the time from the start of the job to its end, and sends the totals to the server.'),
+    para('Input = fresh input plus cache write. Cache write is shown again in its own column. Re-read = cache read: the chat sent again on every step. Output = what the agent wrote. Every response is counted once, summed over all steps in the window, so the numbers are exact for what the agent log holds.'),
+    para('Gemini in / out / total are the transcription tokens of that video\\'s clips, added up per video. Gemini calls are also logged one by one (including failed ones and retries) in the Problems tab, but those calls are not tied to a single video.'),
+    h('h2', null, 'How complete is the data for this period?'),
+    h('div', {className: 'scroll'}, h('table', null,
+      h('thead', null, h('tr', null, h(Th, null, 'Check'), h(Th, {right: true}, 'Videos'), h(Th, {right: true}, 'Share'), h(Th, null, 'What it means'))),
+      h('tbody', null,
+        row('Videos in this period', q.total, 'Every row on the Videos tab.'),
+        row('Marked "exact" by the agent log', q.exact, 'Newer records say how precise the token count is. Older rows do not carry this.'),
+        row('Without step and window details', q.noDetail, 'Older records: no cache write, steps or window minutes, so the cache write column can show 0.'),
+        row('Mixed with work on Zeno code', q.mixed, 'The same chat also edited Zeno itself, so these tokens are more than the cost of one edit.'),
+        row('No agent tokens recorded', q.noAgent, 'The agent log could not be read for that job (token count shows 0).'),
+        row('No Gemini tokens recorded', q.noGemini, 'No transcription tokens were reported for the video.')))),
+    h('p', {className: 'note', style: {marginTop: 10}}, 'A video is a job that was reported to the server. An editor who edits the same project again creates a second row.'));
+}
+
+const TABS = [['daily', 'Daily'], ['videos', 'Videos'], ['editors', 'Editors'], ['problems', 'Problems'], ['health', 'Health'], ['notes', 'How it is recorded']];
+function Dashboard({data, period, setPeriod, q, setQ, rate, setRate, showAll, setShowAll, tab, setTab, health}) {
+  const cutoff = periodCutoff(period, data.now);
+  const runs = data.runs.filter(r => inPeriod(r, cutoff) && matches(r, q)).sort((a, b) => n(b.created_at) - n(a.created_at));
+  const vers = versionRows(data.keys);
+  const cur = TABS.some(t => t[0] === tab) ? tab : 'daily';
+  return h('div', null,
+    h('div', {className: 'tabs'}, TABS.map(([id, label]) => h('button', {key: id, className: 'tab' + (cur === id ? ' on' : ''), onClick: () => setTab(id)}, label))),
+    h('div', {className: 'bar'},
+      [['today', 'Today'], ['7', '7 days'], ['30', '30 days'], ['all', 'All time']].map(([d, label]) =>
+        h('button', {key: d, className: 'chip' + (period === d ? ' on' : ''), onClick: () => setPeriod(d)}, label)),
+      h('input', {className: 'grow', placeholder: 'Search an editor, project or language', value: q, onChange: e => setQ(e.target.value)}),
+      h('label', null, '₹ per $', h('input', {type: 'number', step: '0.1', value: rate, onChange: e => setRate(Number(e.target.value) || 0)})),
+      h('button', {className: 'chip', onClick: () => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([csvOf(runs)], {type: 'text/csv'}));
+        a.download = 'zeno-usage.csv'; a.click();
+      }}, 'Download CSV')),
+    cur === 'daily' ? h(Daily, {runs, rate})
+      : cur === 'videos' ? h(Videos, {runs, rate, showAll, setShowAll})
+      : cur === 'editors' ? h(Editors, {runs, rate, vers})
+      : cur === 'problems' ? h(Problems, {data, runs, cutoff})
+      : cur === 'health' ? h(Health, {health, vers})
+      : cur === 'notes' ? h(Notes, {runs, data})
+      : h(Daily, {runs, rate}),
     h('p', {className: 'foot'},
-      'Numbers are what each editor\\'s Zeno reported after a job (agent tokens from the coding agent\\'s log for that edit, Gemini tokens from transcription). ' +
-      'Cost is an estimate from list prices per million tokens (' + PRICES.map(p => p[0] + ' $' + p[1] + '/$' + p[2] + '/$' + p[3] + '/$' + p[4]).join(', ') + ' for in / cached read / cache write / out). ' +
-      (t.unpriced ? '* ' + t.unpriced + ' run(s) use a model with no price here (for example Gemini or Antigravity models) and are left out of the cost. ' : '') +
-      'Tokens counted per job are an approximation of what the provider billed.'));
+      'Input includes cache write. Re-read = cache read: the chat sent again on every step (cheaper, but it counts toward the plan limit). ' +
+      'Cost is an estimate from list prices (USD per million tokens: ' + PRICES.map(p => p[0] + ' ' + p[1] + '/' + p[2] + '/' + p[3] + '/' + p[4]).join(', ') + ' for in / cached read / cache write / out). ' +
+      'Numbers are what each editor\\'s Zeno reported after a job; tokens per job are an approximation of what the provider billed. Times are in your local time.'));
 }
 
 function SignIn({message, onToken}) {
@@ -279,19 +473,23 @@ function SignIn({message, onToken}) {
     })();
     return () => { dead = true; };
   }, []);
-  return h('div', {className: 'card signin'}, h('h1', null, 'Sign in to see the usage log'), h('p', {className: 'sub'}, note), h('div', {ref: box, style: {display: 'inline-block'}}));
+  return h('div', {className: 'signin'}, h('h1', null, 'Sign in to see the usage log'), h('p', {className: 'sub'}, note), h('div', {ref: box, style: {display: 'inline-block'}}));
 }
 
 function App() {
   const read = k => { try { return sessionStorage.getItem(k) || ''; } catch (e) { return ''; } };
   const [token, setToken] = useState(read(TOKEN_KEY));
   const [data, setData] = useState(null);
+  const [health, setHealth] = useState(null);
   const [msg, setMsg] = useState('');
-  const [days, setDays] = useState(30);
+  const [period, setPeriod] = useState('7');
+  const [tab, setTabState] = useState(() => { const hsh = (location.hash || '').replace('#', ''); if (hsh) return hsh; try { return localStorage.getItem('zeno_tab') || 'daily'; } catch (e) { return 'daily'; } });
+  const setTab = t => { setTabState(t); try { localStorage.setItem('zeno_tab', t); } catch (e) {} };
   const [q, setQ] = useState('');
   const [showAll, setShowAll] = useState(false);
   const [rate, setRate] = useState(() => { try { return Number(localStorage.getItem('zeno_rate')) || 94.8; } catch (e) { return 94.8; } });
   useEffect(() => { try { localStorage.setItem('zeno_rate', String(rate)); } catch (e) {} }, [rate]);
+  useEffect(() => { fetch('/health').then(r => r.json()).then(setHealth).catch(() => setHealth({ok: false})); }, []);
   useEffect(() => {
     if (!token) { setData(null); return; }
     fetch('/api/usage', {headers: {Authorization: 'Bearer ' + token}}).then(async r => {
@@ -305,13 +503,18 @@ function App() {
     }).catch(e => setMsg(e.message));
   }, [token]);
   const onToken = t => { try { sessionStorage.setItem(TOKEN_KEY, t); } catch (e) {} setToken(t); };
-  return h('main', {className: 'wide'},
-    h('a', {className: 'topbtn', href: '/'}, 'Zeno home'),
-    h('div', {className: 'brand'}, h('span', {className: 'dot'}), ' Zeno Video AI · Admin · Usage log'),
-    data ? h(Dashboard, {data, days, setDays, q, setQ, rate, setRate, showAll, setShowAll})
+  return h('main', null,
+    h('div', {className: 'top'},
+      h('div', {className: 'brand'}, 'Zeno Video AI'),
+      h('span', {className: 'sp'}),
+      data ? h('span', {className: 'muted', style: {fontSize: 13}}, 'Updated ' + fmtDate(data.now)) : null,
+      h('a', {className: 'chip', href: '/'}, 'Zeno home')),
+    h('h1', null, 'Usage'),
+    h('p', {className: 'sub'}, 'How many videos each editor made, and how many tokens they used.'),
+    data ? h(Dashboard, {data, period, setPeriod, q, setQ, rate, setRate, showAll, setShowAll, tab, setTab, health})
          : token ? h('div', {className: 'card'}, h('h1', null, 'Loading…'), h('p', {className: 'sub'}, msg))
                  : h(SignIn, {message: msg, onToken}));
 }
 if (typeof document !== 'undefined' && document.getElementById('root')) ReactDOM.createRoot(document.getElementById('root')).render(h(App));
 </script></body></html>
-""".replace("__STYLE__", STYLE).replace("__EXTRA__", EXTRA_STYLE)
+""".replace("__STYLE__", NOTION_STYLE)

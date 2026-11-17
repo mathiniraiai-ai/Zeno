@@ -158,7 +158,7 @@ def _status(d: Path, prog: Optional[Dict[str, Any]], plan: Optional[Dict[str, An
     if reel and reel["at"] >= plan_t:
         return {"phase": "done", "label": "Rendered", "detail": f"{reel['mb']} MB"}
     if plan:
-        return {"phase": "plan", "label": "Plan ready, waiting for your Yes", "detail": f"{plan['cuts']} cuts, {plan['seconds']} s"}
+        return {"phase": "plan", "label": "Plan ready · Auto-rendering", "detail": f"{plan['cuts']} cuts, {plan['seconds']} s"}
     if (d / "line_map.md").is_file():
         return {"phase": "measured", "label": "Measured, waiting for the editor's plan", "detail": ""}
     return {"phase": "new", "label": "New", "detail": ""}

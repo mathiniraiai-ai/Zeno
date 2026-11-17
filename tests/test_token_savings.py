@@ -679,6 +679,32 @@ class CacheCleanupAndMcpIsolationTests(unittest.TestCase):
             )
             self.assertEqual(len(ks.usage_runs()), 2)
 
+    def test_run_auto_plan_chains_auto_render_by_default_and_honors_plan_only(self):
+        import direct_mode
+        import zeno
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = Path(tmp) / "proj_auto"
+            pdir.mkdir()
+            plan_p = pdir / "plan.edl"
+            plan_p.write_text("#output out.mp4\n#script s.txt\nL1 C1.mp4 0.00-1.00 sp=\"A\"\n", encoding="utf-8")
+
+            fake_res = {"passed": True, "model": "sonnet", "calls": [{}], "tokens": {"total": 24000}, "seconds": 12.0, "notes": "clean"}
+            with patch.object(direct_mode, "resolve_provider", return_value="claude"), \
+                 patch.object(direct_mode, "run", return_value=fake_res), \
+                 patch.object(zeno, "build_editorial_pitch_card", return_value="PITCH CARD OK"), \
+                 patch.object(zeno, "session_gate"), \
+                 patch("cost_control.print_checkpoint"), \
+                 patch.object(zeno, "_execute_and_finalize", return_value=0) as mock_exec:
+                rc_auto = zeno.run_auto_plan(plan_p, planner="claude")
+                self.assertEqual(rc_auto, 0)
+                self.assertEqual(mock_exec.call_count, 1)
+
+                mock_exec.reset_mock()
+                rc_plan_only = zeno.run_auto_plan(plan_p, planner="claude", auto_render=False)
+                self.assertEqual(rc_plan_only, 0)
+                self.assertEqual(mock_exec.call_count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -628,12 +628,12 @@ def run_inspect(
 
         tracker.update(
             stage=3,
-            detail=f"Editorial Pitch ready ({plan_path.relative_to(ROOT)}) — waiting for approval to render.",
+            detail=f"Measured ({plan_path.relative_to(ROOT)}) — ready for 1-call plan & auto-render.",
             completed=len(clips),
             total=len(clips),
             pct=60,
         )
-        tracker.stop_heartbeat(final_state="awaiting_confirmation", final_detail="Measured; waiting for the Director's plan")
+        tracker.stop_heartbeat(final_state="measured", final_detail="Measured; ready for 1-call plan & auto-render")
         try:   # the measured job goes to the server now, so an edit abandoned before the render is still recorded
             import job_archive
             job_archive.event(plan_path.parent, "inspect_done", seconds=round(_time.time() - t_inspect, 1), clips=len(clips))
@@ -723,12 +723,78 @@ def print_next_step(plan_path: pathlib.Path) -> None:
     print(f"  1. reads {d}/editing_packet.md and ALL clip_sheet_*.jpg in ONE batch; detailed files stay on disk")
     print(f"  2. writes every segment of {rel}")
     print(f"  3. runs: {py_cmd} scripts/zeno.py --check-plan {rel} --compact")
-    print("  4. asks the user Yes/No once, then runs:")
+    print("  4. immediately renders without asking Yes/No:")
     print(f"     {py_cmd} scripts/zeno.py --execute {rel} --square --compact")
 
 
-def run_auto_plan(plan_path: pathlib.Path, planner: str = "auto") -> int:
-    """Run Zeno's isolated 1-call planner on `plan_path.parent`, verify `--check-plan`, and print the pitch card."""
+def _execute_and_finalize(
+    plan_path: pathlib.Path,
+    square: bool = True,
+    loudness: Optional[float] = None,
+    gain_db: Optional[float] = None,
+    draft: bool = False,
+    swap_layout: Optional[str] = None,
+    swap_takes: Optional[List[str]] = None,
+    error_sfx: Optional[str] = None,
+) -> int:
+    """Run Stage 4–5 render, QC verification, archive upload, post-job cleanup, and job-folder assembly."""
+    p_path = common.resolve(str(plan_path))
+    session_gate("render", block=False, project_hint=str(p_path.relative_to(ROOT)) if str(p_path).startswith(str(ROOT)) else str(p_path))
+    apply_stage3_tweaks(p_path, swap_layout=swap_layout, swap_takes=swap_takes, error_sfx=error_sfx)
+    try:
+        import job_archive
+        job_archive.snapshot_plan(p_path, "render")
+        job_archive.event(p_path.parent, "render_start", square=bool(square), draft=bool(draft))
+    except Exception:
+        pass
+    import time as _time
+    t_render = _time.time()
+    rc = run_execute(
+        str(p_path),
+        square=square,
+        loudness=loudness,
+        gain_db=gain_db,
+        draft=draft,
+    )
+    if rc != 0:
+        try:
+            import job_report
+            job_report.record_failure(p_path.parent, "render", f"render or verify stopped with code {rc}")
+        except Exception:
+            pass
+        try:   # a failed render is the most useful record of all
+            import job_archive
+            job_archive.event(p_path.parent, "render_failed", exit_code=rc, seconds=round(_time.time() - t_render, 1))
+            job_archive.archive_job(p_path, load_edl(p_path), kind="render_failed", extra={"exit_code": rc})
+        except Exception:
+            pass
+    if rc == 0:
+        try:
+            import job_archive
+            job_archive.event(p_path.parent, "render_done", seconds=round(_time.time() - t_render, 1))
+            job_archive.send_in_background(p_path, "render")   # the record again, now with the finished render's events
+        except Exception:
+            pass
+        common.job_done()
+        try:
+            folder = finish_job_folder(p_path)
+            if folder:
+                print(f"\n[JOB FOLDER] Everything for this edit is in: {folder}", flush=True)
+        except Exception as exc:   # noqa: BLE001  (the videos are already made; this is only tidying)
+            print(f"  ! could not gather the script into the job folder: {exc}", flush=True)
+    return rc
+
+
+def run_auto_plan(
+    plan_path: pathlib.Path,
+    planner: str = "auto",
+    auto_render: bool = True,
+    square: bool = True,
+    loudness: Optional[float] = None,
+    gain_db: Optional[float] = None,
+    draft: bool = False,
+) -> int:
+    """Run Zeno's isolated 1-call planner, verify `--check-plan`, print the Pitch Card, and auto-render by default."""
     import cost_control
     import direct_mode
 
@@ -796,8 +862,12 @@ def run_auto_plan(plan_path: pathlib.Path, planner: str = "auto") -> int:
         job_archive.send_in_background(plan_path, "checking")
     except Exception:
         pass
-    print(f"[NEXT STEP] Plan verified. Ask the user Yes/No once, then run: {py_cmd} scripts/zeno.py --execute {rel} --square --compact", flush=True)
-    return 0
+    do_render = bool(auto_render) and os.environ.get("ZENO_NO_AUTO_RENDER", "").strip() != "1"
+    if not do_render:
+        print(f"[PLAN READY] Plan-only mode requested. To render: {py_cmd} scripts/zeno.py --execute {rel} --square --compact", flush=True)
+        return 0
+    print("[AUTO-RENDER] Plan verified — rendering 9:16 + 1:1 Square automatically (no Yes/No pause)...", flush=True)
+    return _execute_and_finalize(plan_path, square=square, loudness=loudness, gain_db=gain_db, draft=draft)
 
 
 def run_execute(
@@ -1062,7 +1132,14 @@ def main() -> None:
         default="auto",
         help="Isolated planner provider for --auto-plan (default: auto)",
     )
-    ap.add_argument("--yes", "-y", action="store_true", help="Auto-confirm the Stage 3 Yes/No gate in standalone mode")
+    ap.add_argument(
+        "--no-auto-render",
+        "--plan-only",
+        dest="no_auto_render",
+        action="store_true",
+        help="Stop after --auto-plan without rendering automatically (default: auto-render ON)",
+    )
+    ap.add_argument("--yes", "-y", action="store_true", help="(Default ON) Auto-render immediately without asking Yes/No")
     args = ap.parse_args()
     if args.fresh:
         os.environ["ZENO_FRESH"] = "1"   # prepare.py runs as a child process and reads this
@@ -1204,49 +1281,16 @@ def main() -> None:
 
     if args.execute:
         p_path = common.resolve(args.execute)
-        session_gate("render", block=False, project_hint=str(p_path.relative_to(ROOT)) if str(p_path).startswith(str(ROOT)) else str(p_path))
-        apply_stage3_tweaks(p_path, swap_layout=args.swap_layout, swap_takes=args.swap_take, error_sfx=args.error_sfx)
-        try:
-            import job_archive
-            job_archive.snapshot_plan(p_path, "render")
-            job_archive.event(p_path.parent, "render_start", square=bool(args.square), draft=bool(args.draft))
-        except Exception:
-            pass
-        import time as _time
-        t_render = _time.time()
-        rc = run_execute(
-            args.execute,
+        rc = _execute_and_finalize(
+            p_path,
             square=args.square,
             loudness=args.loudness,
             gain_db=args.gain_db,
             draft=args.draft,
+            swap_layout=args.swap_layout,
+            swap_takes=args.swap_take,
+            error_sfx=args.error_sfx,
         )
-        if rc != 0:
-            try:
-                import job_report
-                job_report.record_failure(common.resolve(args.execute).parent, "render", f"render or verify stopped with code {rc}")
-            except Exception:
-                pass
-            try:   # a failed render is the most useful record of all
-                import job_archive
-                job_archive.event(p_path.parent, "render_failed", exit_code=rc, seconds=round(_time.time() - t_render, 1))
-                job_archive.archive_job(p_path, load_edl(p_path), kind="render_failed", extra={"exit_code": rc})
-            except Exception:
-                pass
-        if rc == 0:
-            try:
-                import job_archive
-                job_archive.event(p_path.parent, "render_done", seconds=round(_time.time() - t_render, 1))
-                job_archive.send_in_background(p_path, "render")   # the record again, now with the finished render's events
-            except Exception:
-                pass
-            common.job_done()
-            try:
-                folder = finish_job_folder(common.resolve(args.execute))
-                if folder:
-                    print(f"\n[JOB FOLDER] Everything for this edit is in: {folder}")
-            except Exception as exc:   # noqa: BLE001  (the videos are already made; this is only tidying)
-                print(f"  ! could not gather the script into the job folder: {exc}")
         sys.exit(rc)
 
     if args.inspect:
@@ -1263,7 +1307,17 @@ def main() -> None:
             name=args.name,
         )
         if args.auto_plan:
-            sys.exit(run_auto_plan(plan_path, planner=args.planner))
+            sys.exit(
+                run_auto_plan(
+                    plan_path,
+                    planner=args.planner,
+                    auto_render=not args.no_auto_render,
+                    square=args.square,
+                    loudness=args.loudness,
+                    gain_db=args.gain_db,
+                    draft=args.draft,
+                )
+            )
         print_next_step(plan_path)
         sys.exit(0)
 
@@ -1279,7 +1333,17 @@ def main() -> None:
             name=args.name,
         )
         if args.auto_plan:
-            sys.exit(run_auto_plan(plan_path, planner=args.planner))
+            sys.exit(
+                run_auto_plan(
+                    plan_path,
+                    planner=args.planner,
+                    auto_render=not args.no_auto_render,
+                    square=args.square,
+                    loudness=args.loudness,
+                    gain_db=args.gain_db,
+                    draft=args.draft,
+                )
+            )
         print_next_step(plan_path)
         sys.exit(0)
 
@@ -1292,7 +1356,17 @@ def main() -> None:
         if not plan_path.is_file():
             print(f"[BLOCKED] Edit plan not found: {target} (run zeno.py --inspect first)", flush=True)
             sys.exit(2)
-        sys.exit(run_auto_plan(plan_path, planner=args.planner))
+        sys.exit(
+            run_auto_plan(
+                plan_path,
+                planner=args.planner,
+                auto_render=not args.no_auto_render,
+                square=args.square,
+                loudness=args.loudness,
+                gain_db=args.gain_db,
+                draft=args.draft,
+            )
+        )
 
     ap.print_help()
 

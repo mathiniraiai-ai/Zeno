@@ -122,7 +122,7 @@ check("any company key can read the usage log (no admin list)", client.get("/api
 check("...but that key is still not an admin", client.get("/admin/api/keys", headers={"Authorization": "Bearer " + company_key}).status_code == 403)
 check("a made-up key cannot read the usage log", client.get("/api/usage", headers={"Authorization": "Bearer zeno_notakey"}).status_code in (401, 403))
 page = client.get("/usage")
-check("the usage page itself holds no data and needs no sign-in to open", page.status_code == 200 and "Who is using what" in page.text and "test_ad" not in page.text and "@gosupernova.live" not in page.text.replace("@gosupernova.live\"", ""))
+check("the usage page itself holds no data and needs no sign-in to open", page.status_code == 200 and ("Who is using what" in page.text or "Sign in to see the usage log" in page.text) and "test_ad" not in page.text and "@gosupernova.live" not in page.text.replace("@gosupernova.live\"", ""))
 check("the sign-in page has the Admin button top right", 'href="/usage"' in client.get("/").text)
 h = client.get("/health").json()
 check("health reports store and admin switch", h["key_store_ok"] and h["admin_enabled"], str(h))

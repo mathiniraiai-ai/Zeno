@@ -37,7 +37,7 @@ function fitList() {
   if (hidden) { const m = document.createElement('li'); m.className = 'more'; m.textContent = `+${hidden} older`; ul.appendChild(m); }
 }
 const shortTitle = (t) => String(t).replace(/^W\d+\s*-\s*/, '').replace(/\s*-\s*(Replication|Competitor|Xs|Abhishek|Balesh|Disha|Sandeep|Aliva).*$/i, '').replace(/AI Only\s*-\s*/i, '');
-const shortStatus = (st) => ({ plan: 'Waiting for Yes', measured: 'Measured', done: 'Rendered', failed: 'Failed', stalled: 'No update', new: 'New' }[st.phase] || st.label);
+const shortStatus = (st) => ({ plan: 'Plan ready', measured: 'Measured', done: 'Rendered', failed: 'Failed', stalled: 'No update', new: 'New' }[st.phase] || st.label);
 
 // ---------------------------------------------------------------- main view
 function pipeHtml(d) {
@@ -183,7 +183,7 @@ function mainHtml(d) {
     return skeletonHtml('No edit selected', state.jobs.length ? 'Pick an edit on the left, or start a new one in Claude with /zeno and it appears here live.' : 'Start an edit in Claude with /zeno. This window then shows every step live.', false);
   }
   const s = d.status;
-  return `<div class="top"><h1 title="${esc(d.title)}">${esc(shortTitle(d.title))}</h1>${s.phase === 'plan' ? '<button class="askbtn" data-ask="1">Render…</button>' : ''}${s.phase !== 'working' ? '<button class="closebtn" data-close="1" title="Close this project and start fresh">Close project</button>' : ''}${s.phase === 'working' ? `<span class="ovr" title="Overall progress"><i style="width:${d.pct || 0}%"></i></span><b class="ovn">${d.pct || 0}%</b>` : ''}<span class="pill ${s.phase}">${esc(s.phase === 'working' ? `Working${d.elapsed ? ' · ' + d.elapsed : ''}` : shortStatus(s))}</span></div>
+  return `<div class="top"><h1 title="${esc(d.title)}">${esc(shortTitle(d.title))}</h1>${s.phase === 'plan' ? '<button class="askbtn" data-render="1">Render now</button>' : ''}${s.phase !== 'working' ? '<button class="closebtn" data-close="1" title="Close this project and start fresh">Close project</button>' : ''}${s.phase === 'working' ? `<span class="ovr" title="Overall progress"><i style="width:${d.pct || 0}%"></i></span><b class="ovn">${d.pct || 0}%</b>` : ''}<span class="pill ${s.phase}">${esc(s.phase === 'working' ? `Working${d.elapsed ? ' · ' + d.elapsed : ''}` : shortStatus(s))}</span></div>
   <div class="pipe">${pipeHtml(d)}</div>
   <div class="body">
     <div class="col">
@@ -235,7 +235,6 @@ function renderMain() {
   const keep = $('#scanview'); if (keep) keep.remove();
   const keepRes = $('#resview'); if (keepRes) keepRes.remove();           // the scan player is moved, not rebuilt, so it never restarts or flickers
   $('#main').innerHTML = html;
-  if (state.detail && state.detail.status.phase === 'plan' && !asked.has(state.detail.name)) { asked.add(state.detail.name); state.askOpen = state.detail.name; }
   paintAsk(); paintDone();
   const slot = $('#scanview'); if (keep && slot) { slot.replaceWith(keep); }
   const slotR = $('#resview'); if (keepRes && slotR && keepRes.dataset.src === slotR.dataset.src) slotR.replaceWith(keepRes);

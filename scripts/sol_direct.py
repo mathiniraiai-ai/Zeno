@@ -190,7 +190,7 @@ def run(project: Path, *, dry_run: bool = False) -> dict:
             report["notes"] = blocks.get("notes", "")
             if ok:
                 report["passed"] = True
-                report["review_required"] = "Review notes, check log and images, then ask Yes/No before rendering."
+                report["review_required"] = "Plan verified; proceed directly to render without asking Yes/No unless plan-only review was requested."
                 break  # no extra model round for nonblocking advice
             if any(term in diagnostics for term in ("VOICE REVIEW REQUIRED", "WRONG VOICE", "voices not checked")):
                 report["stopped"] = "Voice evidence needs review; no repeated classifier or model retries."

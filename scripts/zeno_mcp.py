@@ -61,20 +61,20 @@ TOOLS: List[Dict[str, Any]] = [
      "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "description": "how many, newest first (default 8)"}}}},
     {"name": "zeno_job", "description": "One edit in detail: stage, progress, plan summary, output files and the last steps.",
      "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "work folder name from zeno_jobs"}}, "required": ["name"]}},
-    {"name": "zeno_start_edit", "description": "Run Zeno's 1-call inspect + isolated auto-planner (--inspect --auto-plan --compact) and return the verified Pitch Card directly. When [PLAN PASS] is returned, show the Pitch Card and ask Yes/No once; do NOT read line_map.md, facts.md, editing_packet.md, or clip_sheet_*.jpg.",
+    {"name": "zeno_start_edit", "description": "Run Zeno's 1-call inspect + isolated auto-planner + automatic 9:16 & 1:1 Square render (--inspect --auto-plan --compact) end-to-end without asking Yes/No. Returns the Pitch Card, verification result, output MP4 paths, and token report directly; do NOT read line_map.md, facts.md, editing_packet.md, or clip_sheet_*.jpg.",
      "inputSchema": {"type": "object", "properties": {"script": {"type": "string", "description": "Google Doc tab link (must end in ?tab=...) or a script file"},
                                                        "footage": {"type": "string", "description": "local folder with the raw clips"},
                                                        "name": {"type": "string", "description": "the Notion name of the video"},
                                                        "style": {"type": "string"}, "lang": {"type": "string"},
-                                                       "wait_seconds": {"type": "integer", "description": "seconds to wait before continuing in background (default 240)"}},
+                                                       "wait_seconds": {"type": "integer", "description": "seconds to wait before continuing in background (default 480)"}},
                      "required": ["script", "footage", "name"]}},
-    {"name": "zeno_auto_plan", "description": "Run Zeno's isolated 1-call planner (--auto-plan --compact) on an already-inspected edit and return the verified Pitch Card.",
+    {"name": "zeno_auto_plan", "description": "Run Zeno's isolated 1-call planner + automatic render (--auto-plan --compact) on an already-inspected edit without asking Yes/No.",
      "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "work folder name from zeno_jobs"}}, "required": ["name"]}},
     {"name": "zeno_check_plan", "description": "Run the plan check on a job's plan and return its verdict and advice lines.",
      "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
-    {"name": "zeno_render", "description": "Render the approved plan (9:16 reel and 1:1 square) with automatic QC + post-job cleanup, returning the verification & token summary directly. Call only after the editor says Yes.",
+    {"name": "zeno_render", "description": "Render a verified plan (9:16 reel and 1:1 square) immediately without asking Yes/No, with automatic QC + post-job cleanup.",
      "inputSchema": {"type": "object", "properties": {"name": {"type": "string"},
-                                                       "wait_seconds": {"type": "integer", "description": "seconds to wait before continuing in background (default 240)"}}, "required": ["name"]}},
+                                                       "wait_seconds": {"type": "integer", "description": "seconds to wait before continuing in background (default 360)"}}, "required": ["name"]}},
 ]
 
 
@@ -168,17 +168,17 @@ def call(name: str, a: Dict[str, Any]) -> Dict[str, Any]:
         for flag, key in (("--style", "style"), ("--lang", "lang")):
             if a.get(key):
                 cmd += [flag, str(a[key])]
-        wait_s = max(0, min(600, int(a.get("wait_seconds") if a.get("wait_seconds") is not None else 240)))
+        wait_s = max(0, min(900, int(a.get("wait_seconds") if a.get("wait_seconds") is not None else 480)))
         log = ROOT / "work" / "_mcp_start.log"
         rc, tail = _run_with_log_tail(cmd, log, wait_s=wait_s)
         if rc is None:
             return _text(
-                "Measuring + 1-call auto-planning is running in the background (heavy clip batch). "
-                "Wait ~60s before calling zeno_jobs ONCE — NEVER poll in a loop, and once ready show pitch_card.md without reading line_map.md or facts.md."
+                "Measuring + 1-call auto-planning + auto-render is running in the background (heavy clip batch). "
+                "Wait ~60s before calling zeno_jobs ONCE — NEVER poll in a loop, NEVER ask Yes/No, and NEVER open line_map.md or facts.md."
             )
         rule = (
-            "\n\n[ZENO 1-CALL RULE] When [PLAN PASS] is shown above, present the Pitch Card and ask Yes/No once. "
-            "Do NOT open editing_packet.md, line_map.md, facts.md, EDIT_RULES.md, or clip_sheet_*.jpg."
+            "\n\n[ZENO 1-CALL RULE] Auto-render completed above (no Yes/No needed). Deliver the Pitch Card summary, "
+            "output MP4 paths, and saved token report directly — do NOT open editing_packet.md, line_map.md, facts.md, EDIT_RULES.md, or clip_sheet_*.jpg."
         )
         return _text((tail or f"zeno_start_edit exited with code {rc}") + (rule if rc == 0 else ""), rc != 0)
     if name == "zeno_auto_plan":
