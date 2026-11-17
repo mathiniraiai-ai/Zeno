@@ -65,6 +65,22 @@ tr.total td{font-weight:600}
 .signin{padding:40px 0}
 .signin h1{font-size:22px}
 .dayhead{margin:26px 0 4px;font-size:15px}
+.gantt{margin:6px 0 4px}
+.grow2{display:grid;grid-template-columns:170px 1fr;align-items:center;gap:10px;margin:0}
+.glabel{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600;padding:5px 0}
+.gtrack{position:relative;height:30px;border-bottom:1px solid #2f2f2f;background:repeating-linear-gradient(90deg,transparent 0,transparent calc(var(--hw) - 1px),#262626 calc(var(--hw) - 1px),#262626 var(--hw))}
+.gb{position:absolute;top:6px;height:18px;min-width:4px;border-radius:3px;opacity:.95}
+.gb.long{top:12px;height:5px;opacity:.5}
+.gb.good{background:#3d9a6b}.gb.rework{background:#d9a441}.gb.bad{background:#d4574b}.gb.open{background:#6b7480}
+.gaxis{display:grid;grid-template-columns:170px 1fr;gap:10px;color:#9b9b9b;font-size:12px}
+.gticks{position:relative;height:18px}.gticks span{position:absolute;transform:translateX(-50%)}
+.legend{display:flex;flex-wrap:wrap;gap:16px;margin:10px 0 0;color:#9b9b9b;font-size:12.5px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+.rw{color:#e9c46a;font-size:12px;margin-left:6px}
+.dt{background:transparent;border:1px solid #2f2f2f;border-radius:4px;padding:3px 8px;color:inherit;font:inherit;font-size:13px;color-scheme:dark}
+select.dt{padding:4px 8px}
+.pill.ok2{background:rgba(70,150,100,.28);color:#8fd6ac}
+
 @media(max-width:600px){main{padding:24px 14px 60px}h1{font-size:24px}}
 """
 
@@ -128,12 +144,13 @@ function costUsd(r) {
   return (aIn * p[1] + aCached * p[2] + aOut * p[4]) / 1e6;
 }
 function who(r) { return (r.user_email || r.editor_name || 'unknown').toLowerCase(); }
-function periodCutoff(p, now) {  // 'today' = since local midnight, '7' / '30' = last N days, 'all' = everything
-  if (p === 'all') return 0;
-  if (p === 'today') { const d = new Date(now * 1000); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; }
-  return now - Number(p) * 86400;
+function periodCutoff(p, now, from, to) {  // returns {from, to} in seconds; to = 0 means "until now"
+  if (p === 'all') return {from: 0, to: 0};
+  if (p === 'custom') { const a = from ? new Date(from).getTime() / 1000 : 0, b = to ? new Date(to).getTime() / 1000 : 0; return {from: a || 0, to: b || 0}; }
+  if (p === 'today') { const d = new Date(now * 1000); d.setHours(0, 0, 0, 0); return {from: d.getTime() / 1000, to: 0}; }
+  return {from: now - Number(p) * 86400, to: 0};
 }
-function inPeriod(r, cutoff) { return !cutoff || n(r.created_at) >= cutoff; }
+function inPeriod(r, rg) { const t = n(r.created_at); return t >= n(rg.from) && (!rg.to || t <= rg.to); }
 const HEAVY_CACHE = 5000000;  // a run that re-read more than 5M cached tokens had a long chat with many steps
 function wasteGroups(runs) {  // one row per editor and project; flagged when a run re-read a lot or the project was run several times
   const g = new Map();
@@ -175,6 +192,61 @@ function quality(runs) {  // how complete the recorded numbers are for these vid
     if (!n(r.transcribe_total_tokens)) q.noGemini += 1;
   }
   return q;
+}
+function notionName(v) { return String(v || '').replace(/^(reel_|SQ_)/i, '').replace(/\\.mp4$/i, '').replace(/\\s*\\(\\d+\\)\\s*$/, '').trim(); }
+function clusterRuns(rs) {  // renders of one video share the job start, so each later render already holds the earlier ones: keep the last of each window
+  const sorted = rs.slice().sort((a, b) => n(a.created_at) - n(b.created_at));
+  const out = [];
+  for (const r of sorted) {
+    const w = n(((r.job_report || {}).agent || {}).window_minutes);
+    const start = w ? n(r.created_at) - w * 60 : null;
+    const last = out[out.length - 1];
+    if (last && start != null && last.start != null && Math.abs(start - last.start) <= 300) out[out.length - 1] = {start, row: r};
+    else out.push({start, row: r});
+  }
+  return out.map(c => c.row);
+}
+function jobOutcome(j) {
+  if (j.kind === 'blocked' || j.kind === 'render_failed') return 'bad';
+  if (j.kind === 'render') return j.idx > 0 ? 'rework' : 'good';
+  if (j.kind === 'feedback') return 'rework';
+  return 'open';
+}
+function buildEdits(jobs, runs) {  // one video edit = one editor + one script; every extra job on it is a rework
+  const by = new Map(), loose = [];
+  for (const j of jobs || []) {
+    if (!j.project) { loose.push(Object.assign({idx: 0}, j)); continue; }
+    const k = String(j.editor_name || '').toLowerCase() + '|' + j.project;
+    if (!by.has(k)) by.set(k, {key: k, editor: j.editor_name, project: j.project, jobs: []});
+    by.get(k).jobs.push(Object.assign({}, j));
+  }
+  const edits = [];
+  for (const e of by.values()) {
+    e.jobs.sort((a, b) => n(a.created_at) - n(b.created_at));
+    e.jobs.forEach((j, i) => { j.idx = i; });
+    const named = e.jobs.filter(j => j.video_name);
+    e.name = notionName(named.length ? named[named.length - 1].video_name : '') || e.project;
+    e.start = n(e.jobs[0].created_at);
+    const ok = e.jobs.filter(j => j.kind === 'render');
+    e.finished = ok.length ? n(ok[0].updated_at) : 0;
+    e.last = Math.max(...e.jobs.map(j => n(j.updated_at)));
+    e.nJobs = e.jobs.length; e.rendersOk = ok.length;
+    e.failed = e.jobs.filter(j => j.kind === 'render_failed').length;
+    e.feedback = e.jobs.filter(j => j.kind === 'feedback').length;
+    e.blocked = e.jobs.filter(j => j.kind === 'blocked').length;
+    e.result = !ok.length ? 'open' : e.nJobs === 1 ? 'one' : 'rework';
+    const mine = (runs || []).filter(r => String(r.editor_name || '').toLowerCase() === String(e.editor || '').toLowerCase() && r.project === e.project);
+    const kept = clusterRuns(mine);
+    e.tok = aggregate(kept).total; e.raw = mine.length; e.kept = kept.length;
+    e.warn = [];
+    if (e.nJobs > 1) e.warn.push(e.nJobs + ' jobs');
+    if (e.feedback) e.warn.push(e.feedback + (e.feedback === 1 ? ' feedback' : ' feedbacks'));
+    if (e.failed) e.warn.push(e.failed + (e.failed === 1 ? ' failed render' : ' failed renders'));
+    if (!ok.length) e.warn.push('not finished');
+    edits.push(e);
+  }
+  edits.sort((a, b) => b.start - a.start);
+  return {edits, loose, jobs: edits.flatMap(e => e.jobs).concat(loose)};
 }
 function verParts(v) { return String(v || '').replace(/^v/i, '').split('.').map(x => parseInt(x, 10) || 0); }
 function verCmp(a, b) { const x = verParts(a), y = verParts(b); for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); } return 0; }
@@ -294,8 +366,8 @@ function Daily({runs, rate}) {
   const rows = users.slice().sort((a, b) => b.runs - a.runs || sumNew(b) - sumNew(a));
   const sum = (arr, k) => arr.reduce((x, r) => x + n(r[k]), 0);
   return h('div', null,
-    h('p', {className: 'sub', style: {marginTop: 14}}, t.runs ? fmtNum(t.runs) + ' videos by ' + fmtNum(t.editors) + ' editors · ' + fmtNum(sumNew(t)) + ' new tokens · ' + money(t, rate) + ' estimated' : 'No videos in this period.'),
-    h('h2', null, 'Videos per editor, per day'),
+    h('p', {className: 'sub', style: {marginTop: 14}}, t.runs ? fmtNum(t.runs) + ' renders by ' + fmtNum(t.editors) + ' editors · ' + fmtNum(sumNew(t)) + ' new tokens · ' + money(t, rate) + ' estimated' : 'No renders in this period.'),
+    h('h2', null, 'Renders per editor, per day'),
     h('div', {className: 'scroll'}, h('table', null,
       h('thead', null, h('tr', null, h(Th, null, 'Editor'), cols.map(c => h(Th, {right: true, key: c}, dayLabel(c, true))), h(Th, {right: true}, 'Total'))),
       h('tbody', null, rows.map(u => h('tr', {key: u.key}, h('td', null, h('b', null, u.name)),
@@ -303,13 +375,13 @@ function Daily({runs, rate}) {
           h('td', {className: 'n'}, h('b', null, fmtNum(u.runs))))),
         rows.length ? h('tr', {className: 'total'}, h('td', null, 'All editors'), cols.map(c => h('td', {className: 'n', key: c}, fmtNum((days.find(d => d.key === c) || {runs: []}).runs.length))), h('td', {className: 'n'}, fmtNum(t.runs))) : null))),
     cols.length < days.length ? h('p', {className: 'note'}, 'The table shows the latest 7 days; every day is listed below.') : null,
-    h('h2', null, 'Usage per editor, day by day'),
+    h('h2', null, 'Usage per editor, day by day (per render)'),
     days.map(d => {
       const a = aggregate(d.runs);
       return h('div', {key: d.key},
-        h('div', {className: 'dayhead'}, h('b', null, dayLabel(d.key)), h('span', {className: 'muted'}, '  ' + d.runs.length + (d.runs.length === 1 ? ' video' : ' videos') + ' · ' + fmtNum(sumNew(a.total)) + ' new tokens · ' + money(a.total, rate))),
+        h('div', {className: 'dayhead'}, h('b', null, dayLabel(d.key)), h('span', {className: 'muted'}, '  ' + d.runs.length + (d.runs.length === 1 ? ' render' : ' renders') + ' · ' + fmtNum(sumNew(a.total)) + ' new tokens · ' + money(a.total, rate))),
         h('div', {className: 'scroll'}, h('table', null,
-          h('thead', null, h('tr', null, h(Th, null, 'Editor'), h(Th, {right: true}, 'Videos'), tokHead(), h(Th, {right: true}, 'Est. cost'), h(Th, null, 'Last video'))),
+          h('thead', null, h('tr', null, h(Th, null, 'Editor'), h(Th, {right: true}, 'Renders'), tokHead(), h(Th, {right: true}, 'Est. cost'), h(Th, null, 'Last render'))),
           h('tbody', null, a.users.slice().sort((x, y) => y.runs - x.runs || sumNew(y) - sumNew(x)).map(u => h('tr', {key: u.key},
             h('td', null, h('b', null, u.name)), h('td', {className: 'n'}, fmtNum(u.runs)), tokCells(u),
             h('td', {className: 'n'}, (u.usd || !u.unpriced) ? inr(u.usd, rate) + (u.unpriced ? ' *' : '') : '–'), h('td', {className: 'muted'}, fmtDate(u.last)))),
@@ -321,7 +393,7 @@ function Daily({runs, rate}) {
 function Videos({runs, rate, showAll, setShowAll}) {
   const shown = showAll ? runs : runs.slice(0, 100);
   return h('div', null,
-    h('p', {className: 'sub', style: {marginTop: 14}}, 'One row per video, newest first. A project edited again appears again.'),
+    h('p', {className: 'sub', style: {marginTop: 14}}, 'One row per finished render, newest first. A video rendered again appears again. The Video edits tab counts each video once.'),
     h('div', {className: 'scroll'}, h('table', null,
       h('thead', null, h('tr', null, h(Th, null, 'When'), h(Th, null, 'Editor'), h(Th, null, 'Project'), h(Th, null, 'Language'), h(Th, {right: true}, 'Clips'), h(Th, {right: true}, 'Seconds'),
         tokHead(), h(Th, {right: true}, 'Agent steps'), h(Th, {right: true}, 'Window (min)'), h(Th, {right: true}, 'Est. cost'), h(Th, null, 'Notes'))),
@@ -348,8 +420,8 @@ function Editors({runs, rate, vers}) {
   return h('div', null,
     h('p', {className: 'sub', style: {marginTop: 14}}, 'Totals for the chosen period, one row per editor.'),
     h('div', {className: 'scroll'}, h('table', null,
-      h('thead', null, h('tr', null, h(Th, null, 'Editor'), h(Th, null, 'Version'), h(Th, {right: true}, 'Videos'), h(Th, {right: true}, 'Active days'), h(Th, {right: true}, 'Videos per day'),
-        tokHead(), h(Th, {right: true}, 'New tokens per video'), h(Th, {right: true}, 'Est. cost'), h(Th, null, 'Last video'))),
+      h('thead', null, h('tr', null, h(Th, null, 'Editor'), h(Th, null, 'Version'), h(Th, {right: true}, 'Renders'), h(Th, {right: true}, 'Active days'), h(Th, {right: true}, 'Renders per day'),
+        tokHead(), h(Th, {right: true}, 'New tokens per render'), h(Th, {right: true}, 'Est. cost'), h(Th, null, 'Last render'))),
       h('tbody', null, users.slice().sort((a, b) => b.runs - a.runs).map(u => {
         const v = verOf.get(String(u.name).toLowerCase()), d = dayCount(u) || 1;
         return h('tr', {key: u.key}, h('td', null, h('b', null, u.name)),
@@ -423,17 +495,111 @@ function Notes({runs, data}) {
     h('p', {className: 'note', style: {marginTop: 10}}, 'A video is a job that was reported to the server. An editor who edits the same project again creates a second row.'));
 }
 
-const TABS = [['daily', 'Daily'], ['videos', 'Videos'], ['editors', 'Editors'], ['problems', 'Problems'], ['health', 'Health'], ['notes', 'How it is recorded']];
-function Dashboard({data, period, setPeriod, q, setQ, rate, setRate, showAll, setShowAll, tab, setTab, health}) {
-  const cutoff = periodCutoff(period, data.now);
+function dayOptions(jobs) { return [...new Set(jobs.map(j => dayKey(j.created_at)))].sort().reverse(); }
+
+function Timeline({jobs, day, setDay, days}) {
+  const list = jobs.filter(j => dayKey(j.created_at) === day);
+  const hr = 3600;
+  const isLong = j => n(j.updated_at) - n(j.created_at) > 3 * hr;   // a record that stayed open for hours: its real working time is unknown
+  const core = list.filter(j => !isLong(j)), basis = core.length ? core : list;
+  const starts = basis.map(j => n(j.created_at)), ends = basis.map(j => Math.max(n(j.updated_at), n(j.created_at)));
+  const x0 = Math.floor(Math.min(...starts) / hr) * hr, x1 = Math.max(x0 + 4 * hr, Math.ceil(Math.max(...ends) / hr) * hr);
+  const pos = t => Math.max(0, Math.min(100, 100 * (t - x0) / (x1 - x0)));
+  const hours = []; for (let t = x0; t <= x1; t += hr) hours.push(t);
+  const step = hours.length > 14 ? 2 : 1, hw = (100 / (hours.length - 1)).toFixed(4) + '%';
+  const by = new Map();
+  list.forEach(j => { const k = j.editor_name || '?'; if (!by.has(k)) by.set(k, []); by.get(k).push(j); });
+  const rows = [...by.entries()].sort((a, b) => Math.min(...a[1].map(j => n(j.created_at))) - Math.min(...b[1].map(j => n(j.created_at))));
+  const hhmm = t => { const d = new Date(t * 1000); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); };
+  const kindText = {render: 'finished', feedback: 'feedback job', render_failed: 'render failed', blocked: 'blocked at the check', inspected: 'started, not finished', checking: 'started, not finished'};
+  return h('div', null,
+    h('div', {className: 'bar', style: {margin: '0 0 8px'}}, h('span', {className: 'note', style: {margin: 0}}, 'Day'),
+      h('select', {className: 'dt', value: day, onChange: e => setDay(e.target.value)}, days.map(d => h('option', {key: d, value: d}, dayLabel(d))))),
+    list.length ? h('div', {className: 'gantt'},
+      rows.map(([name, js]) => h('div', {className: 'grow2', key: name}, h('div', {className: 'glabel'}, name),
+        h('div', {className: 'gtrack', style: {'--hw': hw}}, js.map(j => h('div', {key: j.id, className: 'gb ' + jobOutcome(j) + (isLong(j) ? ' long' : ''),
+          style: {left: pos(n(j.created_at)) + '%', width: Math.max(0.3, pos(Math.max(n(j.updated_at), n(j.created_at))) - pos(n(j.created_at))) + '%'},
+          title: (notionName(j.video_name) || j.project || 'No video yet') + '\\n' + (kindText[j.kind] || j.kind) + (j.idx > 0 ? ' (job ' + (j.idx + 1) + ', rework)' : '') + '\\n' + hhmm(n(j.created_at)) + ' to ' + hhmm(n(j.updated_at)) + (isLong(j) ? '\\nThis record stayed open for ' + Math.round((n(j.updated_at) - n(j.created_at)) / hr) + ' h, so the real working time is unknown' : '')}))))),
+      h('div', {className: 'gaxis'}, h('div', null), h('div', {className: 'gticks'}, hours.map((t, i) => i % step === 0 ? h('span', {key: t, style: {left: pos(t) + '%'}}, hhmm(t)) : null))),
+      h('div', {className: 'legend'},
+        h('span', null, h('i', {style: {background: '#3d9a6b'}}), 'Finished in the first job'), h('span', null, h('i', {style: {background: '#d9a441'}}), 'Rework: a second or later job on the same video'),
+        h('span', null, h('i', {style: {background: '#d4574b'}}), 'Failed render or blocked at the check'), h('span', null, h('i', {style: {background: '#6b7480'}}), 'Started, never finished'),
+        h('span', null, h('i', {style: {background: '#6b7480', opacity: .5, height: 4}}), 'Thin faded line: the job record stayed open for hours, real working time unknown'), h('span', null, 'Each bar runs from job start to job end. Hover for the Notion name.')))
+      : h('p', {className: 'note'}, 'No jobs on this day.'));
+}
+
+function EditsView({data, jobs, jobsMsg, rg, q, rate, day, setDay}) {
+  if (!jobs) return h('p', {className: 'note', style: {marginTop: 14}}, jobsMsg || 'Loading the job log…');
+  const built = buildEdits(jobs, data.runs);
+  const inRg = j => inPeriod({created_at: j.created_at}, rg);
+  const qq = String(q || '').toLowerCase().split(/\\s+/).filter(Boolean);
+  const hay = e => (String(e.editor) + ' ' + e.name + ' ' + e.project).toLowerCase();
+  const edits = built.edits.filter(e => inPeriod({created_at: e.start}, rg) && qq.every(w => hay(e).includes(w)));
+  const jobsIn = built.jobs.filter(inRg).filter(j => !qq.length || qq.every(w => (String(j.editor_name) + ' ' + notionName(j.video_name) + ' ' + String(j.project)).toLowerCase().includes(w)));
+  const days = dayOptions(jobsIn);
+  const curDay = days.includes(day) ? day : (days[0] || '');
+  const names = [...new Set(edits.map(e => e.editor))];
+  const cols = dayOptions(edits.map(e => ({created_at: e.start}))).slice(0, 7).reverse();
+  const cell = (ed, d) => edits.filter(e => e.editor === ed && dayKey(e.start) === d);
+  const score = names.map(ed => {
+    const es = edits.filter(e => e.editor === ed);
+    const t = aggregate([].concat(...es.map(e => clusterRuns((data.runs || []).filter(r => String(r.editor_name || '').toLowerCase() === String(ed).toLowerCase() && r.project === e.project))))).total;
+    return {ed, n: es.length, one: es.filter(e => e.result === 'one').length, re: es.filter(e => e.result === 'rework').length, open: es.filter(e => e.result === 'open').length,
+      failed: es.reduce((x, e) => x + e.failed, 0), blocked: jobsIn.filter(j => !j.project && j.editor_name === ed && j.kind === 'blocked').length, tok: t};
+  }).sort((a, b) => b.n - a.n);
+  const tot = score.reduce((x, r) => ({n: x.n + r.n, one: x.one + r.one, re: x.re + r.re, open: x.open + r.open, failed: x.failed + r.failed, blocked: x.blocked + r.blocked}), {n: 0, one: 0, re: 0, open: 0, failed: 0, blocked: 0});
+  const rate1 = (a, b) => b ? Math.round(100 * a / b) + '%' : '–';
+  const resultPill = e => e.result === 'one' ? h('span', {className: 'pill ok2'}, 'Finished in 1 job') : e.result === 'rework' ? h('span', {className: 'pill amber'}, 'Finished after ' + e.nJobs + ' jobs') : h('span', {className: 'pill red'}, 'Not finished');
+  const span = e => { const end = e.finished || e.last; const m = Math.max(0, Math.round((end - e.start) / 60)); return m >= 60 ? Math.floor(m / 60) + ' h ' + (m % 60) + ' min' : m + ' min'; };
+  return h('div', null,
+    h('p', {className: 'sub', style: {marginTop: 14}}, edits.length ? fmtNum(edits.length) + ' video edits by ' + names.length + ' editors: ' + tot.one + ' finished in one job, ' + tot.re + ' needed more than one job, ' + tot.open + ' not finished' : 'No video edits in this range.'),
+    h('h2', null, 'Timeline'),
+    h('p', {className: 'note'}, 'A job starts when the editor gives the script, footage and Notion name, and ends when the video is in the output folder. A second job on the same video counts as rework.'),
+    curDay ? h(Timeline, {jobs: jobsIn, day: curDay, setDay, days}) : h('p', {className: 'note'}, 'No jobs in this range.'),
+    h('h2', null, 'Video edits per editor, per day'),
+    h('p', {className: 'note'}, 'Number of different videos started that day. The amber number is how many of them needed more than one job.'),
+    h('div', {className: 'scroll'}, h('table', null,
+      h('thead', null, h('tr', null, h(Th, null, 'Editor'), cols.map(c => h(Th, {right: true, key: c}, dayLabel(c, true))), h(Th, {right: true}, 'Total'))),
+      h('tbody', null, score.map(r => h('tr', {key: r.ed}, h('td', null, h('b', null, r.ed)),
+        cols.map(c => { const es = cell(r.ed, c), rw = es.filter(e => e.result !== 'one').length; return h('td', {className: 'n' + (es.length ? '' : ' muted'), key: c}, es.length || '–', rw ? h('span', {className: 'rw'}, rw) : null); }),
+        h('td', {className: 'n'}, h('b', null, r.n)))),
+        names.length ? h('tr', {className: 'total'}, h('td', null, 'All editors'), cols.map(c => h('td', {className: 'n', key: c}, edits.filter(e => dayKey(e.start) === c).length || '–')), h('td', {className: 'n'}, tot.n)) : null))),
+    h('h2', null, 'Scorecard'),
+    h('div', {className: 'scroll'}, h('table', null,
+      h('thead', null, h('tr', null, h(Th, null, 'Editor'), h(Th, {right: true}, 'Video edits'), h(Th, {right: true}, 'In 1 job'), h(Th, {right: true}, 'Needed rework'), h(Th, {right: true}, 'Not finished'),
+        h(Th, {right: true}, 'One-job rate'), h(Th, {right: true}, 'Failed renders'), h(Th, {right: true}, 'Blocked checks'), h(Th, {right: true}, 'New tokens per edit'), h(Th, {right: true}, 'Re-read per edit'))),
+      h('tbody', null, score.map(r => h('tr', {key: r.ed}, h('td', null, h('b', null, r.ed)), h('td', {className: 'n'}, r.n), h('td', {className: 'n'}, r.one),
+        h('td', {className: 'n'}, r.re ? h('span', {className: 'pill amber'}, r.re) : 0), h('td', {className: 'n'}, r.open ? h('span', {className: 'pill red'}, r.open) : 0),
+        h('td', {className: 'n'}, rate1(r.one, r.n)), h('td', {className: 'n'}, r.failed || 0), h('td', {className: 'n'}, r.blocked || 0),
+        h('td', {className: 'n'}, fmtNum(Math.round(sumNew(r.tok) / Math.max(1, r.n)))), h('td', {className: 'n'}, fmtNum(Math.round(r.tok.cached / Math.max(1, r.n)))))),
+        names.length ? h('tr', {className: 'total'}, h('td', null, 'All editors'), h('td', {className: 'n'}, tot.n), h('td', {className: 'n'}, tot.one), h('td', {className: 'n'}, tot.re), h('td', {className: 'n'}, tot.open),
+          h('td', {className: 'n'}, rate1(tot.one, tot.n)), h('td', {className: 'n'}, tot.failed), h('td', {className: 'n'}, tot.blocked), h('td', null), h('td', null)) : null))),
+    h('h2', null, 'Every video edit'),
+    h('p', {className: 'note'}, 'One row per video. Tokens count each video once: renders that share the same job start are not added together.'),
+    h('div', {className: 'scroll'}, h('table', null,
+      h('thead', null, h('tr', null, h(Th, null, 'Started'), h(Th, null, 'Finished'), h(Th, null, 'Time taken'), h(Th, null, 'Editor'), h(Th, null, 'Notion name'), h(Th, {right: true}, 'Jobs'), h(Th, null, 'Result'),
+        h(Th, {right: true}, 'Input'), h(Th, {right: true}, 'Output'), h(Th, {right: true}, 'Re-read'), h(Th, {right: true}, 'Gemini in'), h(Th, {right: true}, 'Gemini out'), h(Th, {right: true}, 'Est. cost'), h(Th, null, 'Warnings'))),
+      h('tbody', null, edits.length ? edits.map(e => h('tr', {key: e.key},
+        h('td', {className: 'muted'}, fmtDate(e.start)), h('td', {className: 'muted'}, e.finished ? fmtDate(e.finished) : '–'), h('td', {className: 'muted'}, span(e)),
+        h('td', null, h('b', null, e.editor)), h('td', {title: e.name + '  (' + e.project + ')', style: {maxWidth: 440, overflow: 'hidden', textOverflow: 'ellipsis'}}, e.name), h('td', {className: 'n'}, e.nJobs), h('td', null, resultPill(e)),
+        h('td', {className: 'n'}, e.kept ? fmtNum(e.tok.ain) : '–'), h('td', {className: 'n'}, e.kept ? fmtNum(e.tok.aout) : '–'), h('td', {className: 'n'}, e.kept ? fmtNum(e.tok.cached) : '–'),
+        h('td', {className: 'n'}, e.kept ? fmtNum(e.tok.gin) : '–'), h('td', {className: 'n'}, e.kept ? fmtNum(e.tok.gout) : '–'), h('td', {className: 'n'}, e.kept ? money(e.tok, rate) : '–'),
+        h('td', null, e.warn.map(w => h('span', {className: 'pill amber', key: w, style: {marginRight: 4}}, w)))))
+        : h('tr', null, h('td', {colSpan: 14}, 'No video edits in this range'))))));
+}
+
+const TABS = [['edits', 'Video edits'], ['daily', 'Daily'], ['videos', 'Renders'], ['editors', 'Editors'], ['problems', 'Problems'], ['health', 'Health'], ['notes', 'How it is recorded']];
+function Dashboard({data, period, setPeriod, q, setQ, rate, setRate, showAll, setShowAll, tab, setTab, health, jobs, jobsMsg, cf, setCf, ct, setCt, day, setDay}) {
+  const cutoff = periodCutoff(period, data.now, cf, ct);
   const runs = data.runs.filter(r => inPeriod(r, cutoff) && matches(r, q)).sort((a, b) => n(b.created_at) - n(a.created_at));
   const vers = versionRows(data.keys);
-  const cur = TABS.some(t => t[0] === tab) ? tab : 'daily';
+  const cur = TABS.some(t => t[0] === tab) ? tab : 'edits';
   return h('div', null,
     h('div', {className: 'tabs'}, TABS.map(([id, label]) => h('button', {key: id, className: 'tab' + (cur === id ? ' on' : ''), onClick: () => setTab(id)}, label))),
     h('div', {className: 'bar'},
-      [['today', 'Today'], ['7', '7 days'], ['30', '30 days'], ['all', 'All time']].map(([d, label]) =>
+      [['today', 'Today'], ['7', '7 days'], ['30', '30 days'], ['all', 'All time'], ['custom', 'Custom']].map(([d, label]) =>
         h('button', {key: d, className: 'chip' + (period === d ? ' on' : ''), onClick: () => setPeriod(d)}, label)),
+      period === 'custom' ? [h('label', {key: 'f'}, 'From', h('input', {type: 'datetime-local', className: 'dt', value: cf, onChange: e => setCf(e.target.value)})), h('label', {key: 't'}, 'To', h('input', {type: 'datetime-local', className: 'dt', value: ct, onChange: e => setCt(e.target.value)}))] : null,
       h('input', {className: 'grow', placeholder: 'Search an editor, project or language', value: q, onChange: e => setQ(e.target.value)}),
       h('label', null, '₹ per $', h('input', {type: 'number', step: '0.1', value: rate, onChange: e => setRate(Number(e.target.value) || 0)})),
       h('button', {className: 'chip', onClick: () => {
@@ -441,13 +607,14 @@ function Dashboard({data, period, setPeriod, q, setQ, rate, setRate, showAll, se
         a.href = URL.createObjectURL(new Blob([csvOf(runs)], {type: 'text/csv'}));
         a.download = 'zeno-usage.csv'; a.click();
       }}, 'Download CSV')),
-    cur === 'daily' ? h(Daily, {runs, rate})
+    cur === 'edits' ? h(EditsView, {data, jobs, jobsMsg, rg: cutoff, q, rate, day, setDay})
+      : cur === 'daily' ? h(Daily, {runs, rate})
       : cur === 'videos' ? h(Videos, {runs, rate, showAll, setShowAll})
       : cur === 'editors' ? h(Editors, {runs, rate, vers})
       : cur === 'problems' ? h(Problems, {data, runs, cutoff})
       : cur === 'health' ? h(Health, {health, vers})
       : cur === 'notes' ? h(Notes, {runs, data})
-      : h(Daily, {runs, rate}),
+      : h(EditsView, {data, jobs, jobsMsg, rg: cutoff, q, rate, day, setDay}),
     h('p', {className: 'foot'},
       'Input includes cache write. Re-read = cache read: the chat sent again on every step (cheaper, but it counts toward the plan limit). ' +
       'Cost is an estimate from list prices (USD per million tokens: ' + PRICES.map(p => p[0] + ' ' + p[1] + '/' + p[2] + '/' + p[3] + '/' + p[4]).join(', ') + ' for in / cached read / cache write / out). ' +
@@ -483,7 +650,12 @@ function App() {
   const [health, setHealth] = useState(null);
   const [msg, setMsg] = useState('');
   const [period, setPeriod] = useState('7');
-  const [tab, setTabState] = useState(() => { const hsh = (location.hash || '').replace('#', ''); if (hsh) return hsh; try { return localStorage.getItem('zeno_tab') || 'daily'; } catch (e) { return 'daily'; } });
+  const [jobs, setJobs] = useState(null);
+  const [jobsMsg, setJobsMsg] = useState('');
+  const [cf, setCf] = useState('');
+  const [ct, setCt] = useState('');
+  const [day, setDay] = useState('');
+  const [tab, setTabState] = useState(() => { const hsh = (location.hash || '').replace('#', ''); if (hsh) return hsh; try { return localStorage.getItem('zeno_tab') || 'edits'; } catch (e) { return 'edits'; } });
   const setTab = t => { setTabState(t); try { localStorage.setItem('zeno_tab', t); } catch (e) {} };
   const [q, setQ] = useState('');
   const [showAll, setShowAll] = useState(false);
@@ -500,6 +672,9 @@ function App() {
       }
       if (!r.ok) throw new Error('Could not load (' + r.status + ').');
       setData(await r.json()); setMsg('');
+      fetch('/api/jobs', {headers: {Authorization: 'Bearer ' + token}}).then(async j => {
+        if (j.ok) setJobs((await j.json()).jobs || []); else setJobsMsg('The job log is not available on this server yet (status ' + j.status + ').');
+      }).catch(e => setJobsMsg('Could not load the job log: ' + e.message));
     }).catch(e => setMsg(e.message));
   }, [token]);
   const onToken = t => { try { sessionStorage.setItem(TOKEN_KEY, t); } catch (e) {} setToken(t); };
@@ -510,8 +685,8 @@ function App() {
       data ? h('span', {className: 'muted', style: {fontSize: 13}}, 'Updated ' + fmtDate(data.now)) : null,
       h('a', {className: 'chip', href: '/'}, 'Zeno home')),
     h('h1', null, 'Usage'),
-    h('p', {className: 'sub'}, 'How many videos each editor made, and how many tokens they used.'),
-    data ? h(Dashboard, {data, period, setPeriod, q, setQ, rate, setRate, showAll, setShowAll, tab, setTab, health})
+    h('p', {className: 'sub'}, 'Video edits per editor, how many jobs each took, and the tokens they used.'),
+    data ? h(Dashboard, {data, period, setPeriod, q, setQ, rate, setRate, showAll, setShowAll, tab, setTab, health, jobs, jobsMsg, cf, setCf, ct, setCt, day, setDay})
          : token ? h('div', {className: 'card'}, h('h1', null, 'Loading…'), h('p', {className: 'sub'}, msg))
                  : h(SignIn, {message: msg, onToken}));
 }

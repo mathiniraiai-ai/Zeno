@@ -1495,6 +1495,15 @@ def usage_log(authorization: Optional[str] = Header(None), x_admin_password: Opt
     )
 
 
+@app.get("/api/jobs")
+def jobs_log(authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None)) -> JSONResponse:
+    """The job index for the usage page: who, which script, the Notion-named output, status, start and end. No scripts, plans or e-mails."""
+    _check_viewer(authorization, x_admin_password)
+    keep = ("id", "editor_name", "project", "video_name", "kind", "zeno_version", "created_at", "updated_at")
+    rows = store().list_jobs(limit=2000, since=time.time() - 60 * 86400)
+    return JSONResponse({"jobs": [{k: row.get(k) for k in keep} for row in rows], "now": time.time()}, headers=NO_STORE)
+
+
 @app.post("/admin/api/keys/{key_id}/revoke")
 def admin_revoke(
     key_id: int,
