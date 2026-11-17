@@ -9,7 +9,7 @@ Zeno edits script-led videos (`plan.edl` by agent; Python measures/renders/check
 - Preserve local work; never clear caches (`--fresh` only for proven cache bugs). Cleanup needs dry-run approval.
 
 ## Video workflow
-- Queue videos back-to-back (up to `1M` / `1,000,000` context tokens) with Notion & Meta connectors on; each `--inspect` isolates a cost window. Require `?tab=...` or local script, local footage, exact Notion name (read from Notion if shared; never invent name/tab). Never re-ask inputs.
+- Queue videos back-to-back (up to `1M` / `1,000,000` context tokens) with claude.ai connectors off (`.claude/settings.json` loads the Zeno server only); each `--inspect` isolates a cost window. Require `?tab=...` or local script, local footage, exact Notion name (given by the editor; never invent name/tab). Never re-ask inputs.
 - **Turn 1 (Primary 1-call)**: Missing inputs -> `<PY> scripts/zeno.py --preflight --compact`, show results, ask. Else run `<PY> scripts/zeno.py --inspect <footage> --script <script> --name "<name>" --auto-plan --compact` (never `--skip-preflight`): preflight, clip reuse, 1-call planner (`20k–55k`), `--check-plan`, Pitch Card, auto 9:16 + 1:1 render without Yes/No. If `[PLAN PASS]`, do NOT open packets/sheets/rules; deliver outputs + token report.
 - **Manual / Fallback Cap (4–5 turns max, NEVER 40+)**:
   - **Turn 2**: Read `editing_packet_p*.md` (or `editing_packet.md`) + ALL `clip_sheet_*.jpg` in ONE parallel batch.
