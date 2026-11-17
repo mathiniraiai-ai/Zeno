@@ -300,6 +300,231 @@ class TestV1018TokenArrestAndNotionQueue(unittest.TestCase):
             ok, cov, tot, dups = verify.check_script_coverage(plan_c, script_path=Path(__file__))
         self.assertEqual((ok, cov, tot, dups), (True, 2, 2, 0))
 
+    def test_gemini_cooldown_moves_429_and_404_models_behind_healthy_buckets(self):
+        svc_dir = str(ROOT / "service")
+        if svc_dir not in sys.path:
+            sys.path.insert(0, svc_dir)
+        import app as svc_app
+
+        g = svc_app._Gemini()
+        with patch.object(svc_app, "_gemini_keys", return_value=["k0"]), \
+             patch.object(svc_app, "MODELS", ["m-429", "m-404", "m-ok"]):
+            ttl_daily = g.mark_failure(0, "m-429", RuntimeError("429 RESOURCE_EXHAUSTED generate_content_free_tier_requests"))
+            ttl_404 = g.mark_failure(0, "m-404", RuntimeError("404 NOT_FOUND"))
+            self.assertEqual(ttl_daily, 300.0)
+            self.assertEqual(ttl_404, 3600.0)
+            self.assertEqual(g.candidate_models(), ["m-ok", "m-429", "m-404"])
+            g.mark_ok(0, "m-429")
+            self.assertEqual(g.candidate_models(), ["m-429", "m-ok", "m-404"])
+
+
+class GeminiQuotaQueueAndSafetyTests(unittest.TestCase):
+    def _import_service_app(self):
+        svc_dir = str(ROOT / "service")
+        if svc_dir not in sys.path:
+            sys.path.insert(0, svc_dir)
+        import app as svc_app
+        return svc_app
+
+    def test_fair_queue_bounds_concurrency_and_alternates_editors(self):
+        import concurrent.futures
+        import threading
+        import time
+
+        svc_app = self._import_service_app()
+        g = svc_app._Gemini()
+        active = 0
+        max_active = 0
+        start_order = []
+        guard = threading.Lock()
+        first_entered = threading.Event()
+        release_first = threading.Event()
+
+        def worker(who: str, idx: int, hold: bool = False):
+            nonlocal active, max_active
+            with patch.dict(os.environ, {"GEMINI_CONCURRENCY": "1", "GEMINI_QUEUE_TIMEOUT": "10"}):
+                ok = g.acquire_slot(owner=who, timeout=10.0)
+            self.assertTrue(ok)
+            try:
+                with guard:
+                    active += 1
+                    max_active = max(max_active, active)
+                    start_order.append((who, idx))
+                if hold:
+                    first_entered.set()
+                    release_first.wait(timeout=3.0)
+                else:
+                    time.sleep(0.01)
+            finally:
+                with guard:
+                    active -= 1
+                g.release_slot()
+
+        with patch.dict(os.environ, {"GEMINI_CONCURRENCY": "1", "GEMINI_QUEUE_TIMEOUT": "10"}):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+                f0 = ex.submit(worker, "abhishek", 0, True)
+                self.assertTrue(first_entered.wait(timeout=2.0))
+                # Enqueue two more jobs for Abhishek while slot is held, then Balesh arrives
+                fa1 = ex.submit(worker, "abhishek", 1, False)
+                fa2 = ex.submit(worker, "abhishek", 2, False)
+                # Poll briefly until abhishek's 2 waiters are registered in FIFO queue
+                for _ in range(50):
+                    with g._q_cond:
+                        if len(g._q_waiters.get("abhishek", ())) >= 2:
+                            break
+                    time.sleep(0.01)
+                fb1 = ex.submit(worker, "balesh", 1, False)
+                for _ in range(50):
+                    with g._q_cond:
+                        if "balesh" in g._q_waiters:
+                            break
+                    time.sleep(0.01)
+                release_first.set()
+                for fut in (f0, fa1, fa2, fb1):
+                    fut.result(timeout=5.0)
+
+        self.assertEqual(max_active, 1)
+        self.assertEqual(start_order[0], ("abhishek", 0))
+        # Round-robin fairness: abhishek[1] gets next slot, then balesh[1] goes BEFORE abhishek[2]
+        self.assertEqual(start_order[1:], [("abhishek", 1), ("balesh", 1), ("abhishek", 2)])
+
+    def test_parse_retry_after_and_daily_quota_detection(self):
+        svc_app = self._import_service_app()
+        g = svc_app._Gemini()
+
+        d1 = g._parse_retry_after(RuntimeError("429 RESOURCE_EXHAUSTED. Please retry in 1h57m12.5s."))
+        self.assertIsNotNone(d1)
+        self.assertAlmostEqual(d1, 7032.5, places=1)
+
+        d2 = g._parse_retry_after(RuntimeError("details: [{'retryDelay': '27s'}]"))
+        self.assertEqual(d2, 27.0)
+
+        self.assertTrue(g._is_daily_quota(RuntimeError("429 RESOURCE_EXHAUSTED generate_content_free_tier_requests PerDay")))
+        self.assertFalse(g._is_daily_quota(RuntimeError("429 RESOURCE_EXHAUSTED rate limit RPM exceeded")))
+
+    def test_singleflight_deduplicates_concurrent_identical_uploads(self):
+        import concurrent.futures
+        import threading
+        import time
+
+        svc_app = self._import_service_app()
+        calls = 0
+        call_lock = threading.Lock()
+        entered = threading.Event()
+
+        def fake_transcribe(audio, prompt, duration, trace, language_hint="auto", owner="anon"):
+            nonlocal calls
+            with call_lock:
+                calls += 1
+            entered.set()
+            time.sleep(0.08)
+            return {
+                "language": "en",
+                "full_transcript": "hello world",
+                "words": [{"w": "hello", "start": 0.1, "end": 0.4}],
+                "cues": [],
+                "model_used": "gemini-3.1-flash-lite",
+                "usage": {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150},
+            }
+
+        with patch.object(svc_app._gemini, "transcribe", side_effect=fake_transcribe):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+                f1 = ex.submit(svc_app._transcribe_singleflight, "sf_key_1", b"RIFF0000", ["hello"], "en", 1.5, [], "abhishek")
+                self.assertTrue(entered.wait(timeout=2.0))
+                f2 = ex.submit(svc_app._transcribe_singleflight, "sf_key_1", b"RIFF0000", ["hello"], "en", 1.5, [], "hitesh")
+                r1 = f1.result(timeout=3.0)
+                r2 = f2.result(timeout=3.0)
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(r1.get("model_used"), "gemini-3.1-flash-lite")
+        self.assertTrue(r2.get("cached"))
+        self.assertEqual(r2["usage"]["total_tokens"], 0)
+
+    def test_cloud_transcriber_fails_closed_after_retries_never_fabricates_cuts(self):
+        import wave
+        from unittest.mock import MagicMock
+        from align_engine.gemini_transcriber import GeminiTranscriber
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "clip.wav"
+            with wave.open(str(wav), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(b"\x01\x00" * 16000)
+
+            busy = MagicMock()
+            busy.status_code = 429
+            busy.headers = {"retry-after": "2"}
+            busy.json.return_value = {"detail": "All Gemini models hit API quota limits right now. Wait and retry."}
+            busy.raise_for_status.side_effect = RuntimeError("HTTP 429")
+
+            with patch.dict(os.environ, {"ZENO_CLOUD_URL": "https://zeno.example.com", "ZENO_CLOUD_TOKEN": "tok"}):
+                tr = GeminiTranscriber(api_keys=[])
+            with patch("httpx.Client") as mock_client_cls, \
+                 patch("time.sleep") as mock_sleep, \
+                 patch("random.uniform", side_effect=lambda a, b: a):
+                mock_http = mock_client_cls.return_value.__enter__.return_value
+                mock_http.post.return_value = busy
+                res = tr.transcribe(str(wav), "en", ["Test line one", "Test line two"], work_dir=Path(tmp))
+
+            self.assertEqual(mock_http.post.call_count, 8)
+            self.assertEqual(mock_sleep.call_count, 7)
+            self.assertEqual(res.get("status"), "cloud_failed")
+            self.assertEqual(res.get("model_used"), "cloud_error")
+            self.assertEqual(res.get("words"), [])
+            self.assertIn("429", str(res.get("error") or ""))
+
+    def test_prepare_main_blocks_cleanly_on_transcript_error_without_plan_output(self):
+        import wave
+        import prepare
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tpath = Path(tmp)
+            clip_ok = tpath / "C1.mp4"
+            clip_bad = tpath / "C2.mp4"
+            clip_ok.write_bytes(b"fake")
+            clip_bad.write_bytes(b"fake")
+            script_f = tpath / "script.txt"
+            script_f.write_text("Line one\nLine two\n", encoding="utf-8")
+            work_root = tpath / "work" / "proj_block"
+
+            def fake_ensure(clip_stem, resolved_src, work_dir, lang="auto", script_path=None, clean_raw_json=False):
+                work_dir.mkdir(parents=True, exist_ok=True)
+                wav = work_dir / "audio16k.wav"
+                with wave.open(str(wav), "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(16000)
+                    wf.writeframes(b"\x10\x00" * 16000)
+                if clip_stem == "C1":
+                    words = [{"w": "Line", "start": 0.1, "end": 0.4}, {"w": "one", "start": 0.4, "end": 0.7}]
+                    (work_dir / "hq_words.json").write_text(json.dumps(words), encoding="utf-8")
+                    return {"width": 1080, "height": 1920, "fps": 30}, words, words
+                return {
+                    "width": 1080,
+                    "height": 1920,
+                    "fps": 30,
+                    "_transcript_error": "HTTP 429: All Gemini models hit API quota limits",
+                }, [], []
+
+            with patch.object(prepare, "WORK", tpath / "work"), \
+                 patch.object(prepare, "clip_work_dir", side_effect=lambda fp: work_root / fp.stem), \
+                 patch.object(prepare, "ensure_cache_current", return_value=False), \
+                 patch.object(prepare, "ensure_clip_transcribed", side_effect=fake_ensure), \
+                 patch.object(prepare, "compute_10ms_rms_envelope", return_value=[0.05] * 100), \
+                 patch.object(prepare, "detect_two_tier_silences", return_value=([], [])), \
+                 patch.object(prepare, "clip_has_no_sound", return_value=False), \
+                 patch.object(sys, "argv", ["prepare.py", str(clip_ok), str(clip_bad), "--script", str(script_f), "--project", "proj_block"]):
+                with self.assertRaises(SystemExit) as ctx:
+                    prepare.main()
+
+            self.assertEqual(ctx.exception.code, 2)
+            # C1's good transcription remains cached on disk for seamless retry, while no broken plan was emitted
+            self.assertTrue((work_root / "C1" / "hq_words.json").is_file())
+            self.assertFalse((work_root / "plan.auto.edl").exists())
+            self.assertFalse((work_root / "line_map.md").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

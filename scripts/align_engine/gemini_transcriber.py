@@ -263,14 +263,15 @@ class GeminiTranscriber:
             os.getenv("GEMINI_FORCE_MODEL", "").strip()
             or "gemini-3.1-flash-lite"
         )
-        # Put fast, reliable models in rotation: gemini-3.1-flash-lite, gemini-3-flash-preview, gemini-3.5-flash, gemini-3.5-flash-lite, gemini-2.5-flash
+        # Put fast, audio-capable models with healthy quota pools in rotation:
         default_models = [
             "gemini-3.1-flash-lite",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite-preview",
             "gemini-3-flash-preview",
             "gemini-3.5-flash",
-            "gemini-3.5-flash-lite",
-            "gemini-2.5-flash",
             "gemini-flash-lite-latest",
+            "gemini-flash-latest",
         ]
         self.models = [primary] + [m for m in default_models if m != primary]
         self.cloud_url = (
@@ -411,21 +412,48 @@ class GeminiTranscriber:
         }
         audio_bytes = _pad_short_wav(Path(wav_path).read_bytes())
         resp = None
+        max_attempts = 8
         with httpx.Client(timeout=240.0) as http:
-            for attempt in range(6):
+            for attempt in range(max_attempts):
                 resp = http.post(
                     url,
                     headers=headers,
                     data=form_data,
                     files={"file": (os.path.basename(wav_path), audio_bytes, "audio/wav")},
                 )
-                if resp.status_code not in (429, 503):
+                if resp.status_code not in (429, 502, 503):
                     break
-                # "too many requests" (20 a minute per person by default) or the server is busy: wait, never fall back to a guess
-                wait = float(resp.headers.get("retry-after") or 15)
-                print(f"[transcribe] server busy ({resp.status_code}); waiting {wait:.0f}s (attempt {attempt + 1}/6)", file=sys.stderr)
-                time.sleep(min(wait, 30.0))
-        resp.raise_for_status()
+                if attempt >= max_attempts - 1:
+                    break
+                # Official Gemini/HTTP guidance: respect Retry-After + truncated exponential backoff with full jitter
+                retry_hdr = resp.headers.get("retry-after") if getattr(resp, "headers", None) else None
+                try:
+                    hdr_wait = float(retry_hdr) if retry_hdr else 0.0
+                except Exception:
+                    hdr_wait = 0.0
+                base_wait = (5.0 if resp.status_code == 502 else 8.0) * (1.6 ** attempt)
+                jitter_wait = random.uniform(1.0, min(45.0, base_wait))
+                wait = min(45.0, max(1.0, hdr_wait, jitter_wait))
+                print(
+                    f"[transcribe] server busy ({resp.status_code}); waiting {wait:.1f}s (attempt {attempt + 1}/{max_attempts})",
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
+        if resp is None:
+            raise RuntimeError("No HTTP response from transcription service")
+        if int(getattr(resp, "status_code", 0) or 0) >= 400:
+            detail = ""
+            try:
+                body = resp.json()
+                detail = str(body.get("detail") or body.get("error") or "")[:300]
+            except Exception:
+                detail = str(getattr(resp, "text", "") or "")[:300]
+            try:
+                resp.raise_for_status()
+            except Exception as exc:
+                if detail:
+                    raise RuntimeError(f"HTTP {resp.status_code}: {detail}") from exc
+                raise
         data = resp.json()
         if data.get("warning"):
             print(f"[transcribe] WARNING from service: {data['warning']}", file=sys.stderr)
@@ -477,27 +505,53 @@ class GeminiTranscriber:
                 work_dir=wdir,
             )
 
-        if self.cloud_url and not self.api_keys:
+        last_error = ""
+        if self.cloud_url:
             try:
                 res = self._transcribe_via_cloud(str(wav_p), language_hint, target_script_lines)
                 if res.get("words"):
                     self._save_cache(cache_file, wav_p, res)
                 return res
             except Exception as e:
-                logger.warning("Cloud transcription failed, falling back to offline: %s", e)
-                print(f"[transcribe] WARNING: transcription service failed ({type(e).__name__}); using the OFFLINE script-based fallback, "
-                      "which cannot hear retakes or ad-libs. Check SCRIPTCUT_CLOUD_URL / SCRIPTCUT_CLOUD_TOKEN.", file=sys.stderr)
-                return transcribe_offline_fallback(
-                    wav_path=str(wav_p),
-                    lang=language_hint,
-                    script_lines=target_script_lines,
-                    work_dir=wdir,
+                last_error = f"{type(e).__name__}: {e}"
+                logger.warning("Cloud transcription failed: %s", e)
+                if not self.api_keys:
+                    print(
+                        f"[transcribe] ERROR: transcription service failed ({last_error}); "
+                        "refusing to fabricate forced-aligned cuts. Check Zeno Cloud session or quota.",
+                        file=sys.stderr,
+                    )
+                    return {
+                        "status": "cloud_failed",
+                        "model_used": "cloud_error",
+                        "error": last_error,
+                        "language": language_hint,
+                        "full_transcript": "",
+                        "words": [],
+                        "cues": [],
+                    }
+                print(
+                    f"[transcribe] WARNING: cloud transcription failed ({type(e).__name__}); "
+                    "falling back to local Gemini API key rotation.",
+                    file=sys.stderr,
                 )
+
+        if not self.api_keys:
+            return {
+                "status": "cloud_failed",
+                "model_used": "cloud_error",
+                "error": last_error or "No Gemini API keys configured",
+                "language": language_hint,
+                "full_transcript": "",
+                "words": [],
+                "cues": [],
+            }
 
         audio_bytes = wav_p.read_bytes()
         prompt = build_transcribe_prompt(target_script_lines, language_hint=language_hint)
 
         max_attempts = max(4, len(self.api_keys) * len(self.models))
+        last_empty_res: Optional[Dict[str, Any]] = None
         for attempt in range(max_attempts):
             try:
                 from google.genai import types
@@ -526,22 +580,34 @@ class GeminiTranscriber:
                 if res.get("words"):
                     self._save_cache(cache_file, wav_p, res)
                     return res
+                last_empty_res = res
+                self._rotate()
             except Exception as e:
                 err_str = str(e)
+                last_error = f"{type(e).__name__}: {err_str[:250]}"
                 self._rotate()
-                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                    time.sleep(min(4.0, 1.0 + attempt + random.uniform(0.1, 0.5)))
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "503" in err_str or "UNAVAILABLE" in err_str:
+                    backoff = min(30.0, (2.0 ** min(attempt, 4)) + random.uniform(0.5, 2.5))
+                    time.sleep(backoff)
                 else:
                     time.sleep(0.2)
 
-        print("[transcribe] WARNING: Gemini failed on every attempt; using the OFFLINE script-based fallback, "
-              "which cannot hear retakes or ad-libs.", file=sys.stderr)
-        return transcribe_offline_fallback(
-            wav_path=str(wav_p),
-            lang=language_hint,
-            script_lines=target_script_lines,
-            work_dir=wdir,
+        if last_empty_res is not None and not last_error:
+            return last_empty_res
+        print(
+            f"[transcribe] ERROR: Gemini failed on every attempt ({last_error}); "
+            "refusing to fabricate forced-aligned cuts.",
+            file=sys.stderr,
         )
+        return {
+            "status": "cloud_failed",
+            "model_used": "cloud_error",
+            "error": last_error or "Gemini transcription failed on every attempt",
+            "language": language_hint,
+            "full_transcript": "",
+            "words": [],
+            "cues": [],
+        }
 
     @staticmethod
     def _save_cache(cache_file: Path, wav_p: Path, res: Dict[str, Any]) -> None:

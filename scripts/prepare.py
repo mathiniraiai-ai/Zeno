@@ -802,6 +802,7 @@ def ensure_clip_transcribed(
         print(f"  [{clip_stem}] no sound in this clip: not sent for transcription")
 
     # If neither hq_words nor base_words is cached, invoke align_engine or transcribe scripts
+    transcript_err = ""
     if not hq_words and not base_words and wav_path.is_file() and not no_sound:
         max_tries = 2 if active_speech_sec >= 0.8 else 1
         for attempt in range(max_tries):
@@ -820,13 +821,20 @@ def ensure_clip_transcribed(
                     )
                     if isinstance(res, list):
                         hq_words = res
-                    elif isinstance(res, dict) and "words" in res:
-                        hq_words = res["words"]
+                    elif isinstance(res, dict):
+                        res_status = str(res.get("status") or "").strip().lower()
+                        if "words" in res:
+                            hq_words = res["words"]
+                        if res_status in ("cloud_failed", "quota_exceeded"):
+                            transcript_err = str(res.get("error") or res_status)
+                            break
                     if hq_words:
+                        transcript_err = ""
                         write_json(hq_path, hq_words)
                         write_json(words_path, hq_words)
                         break
                 except Exception as exc:
+                    transcript_err = f"{type(exc).__name__}: {exc}"
                     print(f"  [WARN] align_engine fallback on {clip_stem}: {exc}")
 
             if attempt == 0 and active_speech_sec >= 0.8 and not hq_words:
@@ -834,24 +842,27 @@ def ensure_clip_transcribed(
                     f"  [WARN] {clip_stem}: empty words returned despite {active_speech_sec:.2f}s of active speech; retrying transcription..."
                 )
 
-        if not hq_words and not base_words:
+        if not hq_words and not base_words and not transcript_err:
             # Fallback to transcribe.py
             venv_py = find_venv_python()
             cmd = [str(venv_py), str(ROOT / "scripts" / "transcribe.py"), str(resolved_src), "--lang", lang]
             if script_path:
                 cmd += ["--script", str(script_path)]
             try:
-                subprocess.run(cmd, check=False, capture_output=True)
+                proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
                 if words_path.is_file():
                     base_words = read_json(words_path)
-            except Exception:
-                pass
+                elif proc.returncode != 0:
+                    transcript_err = (proc.stderr or proc.stdout or f"transcribe.py exit {proc.returncode}").strip()[:250]
+            except Exception as exc:
+                transcript_err = f"{type(exc).__name__}: {exc}"
 
-        # Never persist an empty `words: []` cache as valid when >= 0.8s of speech was measured
-        if not hq_words and not base_words and active_speech_sec >= 0.8:
+        # Never persist an empty `words: []` cache as valid when >= 0.8s of speech was measured or an error occurred
+        if not hq_words and not base_words and (active_speech_sec >= 0.8 or transcript_err):
             print(
-                f"  [WARN] {clip_stem}: 0 words transcribed despite {active_speech_sec:.2f}s of active speech; "
-                "marking transcript cache incomplete so next run retries without --fresh"
+                f"  [WARN] {clip_stem}: 0 words transcribed"
+                + (f" ({transcript_err[:120]})" if transcript_err else f" despite {active_speech_sec:.2f}s of active speech")
+                + "; marking transcript cache incomplete so next run retries without --fresh"
             )
             for empty_f in (align_path, hq_path, words_path, gem_cache_path):
                 if empty_f.is_file():
@@ -867,6 +878,8 @@ def ensure_clip_transcribed(
             if isinstance(ev, dict):
                 ev["transcript"] = "incomplete"
                 write_json(marker, ev)
+        if not hq_words and not base_words and transcript_err:
+            info["_transcript_error"] = transcript_err
 
     if not hq_words:
         hq_words = base_words
@@ -1541,6 +1554,8 @@ def main() -> None:
             base_c = by_stem_upper.get(base_up)
             if base_c is not None and len(c.get("hq_words") or []) > len(base_c.get("hq_words") or []):
                 base_had_speech = bool(base_c.get("hq_words")) and not clip_is_silent(base_c)
+                if isinstance(base_c.get("info"), dict):
+                    base_c["info"].pop("_transcript_error", None)
                 base_c["hq_words"] = c["hq_words"]
                 base_c["base_words"] = c["base_words"]
                 base_c["rms_env"] = c["rms_env"]
@@ -1557,6 +1572,22 @@ def main() -> None:
                         base_wav = base_wdir / "audio16k.wav"
                         sig = [base_wav.stat().st_size, int(base_wav.stat().st_mtime)] if base_wav.is_file() else [0, 0]
                         write_json(base_wdir / "speech_spans.json", {"sig": sig, "spans": [list(sp) for sp in vo_spans]})
+
+    failed_transcripts = [
+        (c["stem"], str((c.get("info") or {}).get("_transcript_error") or "transcription failed"))
+        for c in clips_data
+        if not c.get("hq_words") and (c.get("info") or {}).get("_transcript_error")
+    ]
+    if failed_transcripts:
+        print("\n[BLOCKED] Safe transcription guard stopped before cutting/planning:", file=sys.stderr)
+        for fst, ferr in failed_transcripts:
+            print(f"  - {fst}: {ferr}", file=sys.stderr)
+        print(
+            "  All clips that already succeeded remain cached on disk. "
+            "Wait 1-2 minutes for Gemini quota recovery (or check Zeno Cloud) and re-run --inspect.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
 
     # Zeno stops here: it has measured. Every editing decision is the Director's (see agent/EDIT_RULES.md).
     for c in clips_data:

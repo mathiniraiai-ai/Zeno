@@ -287,6 +287,8 @@ def transcribe_and_align_clip(
             "language": detected_lang,
             "tail_noise": [],
             "model_used": trans_res.get("model_used", "none"),
+            "status": trans_res.get("status", "ok"),
+            "error": trans_res.get("error", ""),
         }
 
     # 2. Forced alignment via Meta Wav2Vec2 95M + uroman + IndicPhoneticMapper + Viterbi + OnsetVerifier
