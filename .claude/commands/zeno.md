@@ -6,7 +6,7 @@ argument-hint: "<footage> <script-tab> --name <Notion name>"
 
 User inputs: `$ARGUMENTS`
 
-Follow `AGENTS.md` and `agent/DIRECTOR.md`. Queue multiple videos back-to-back in one chat (up to `1M` / `1,000,000` context tokens) with Notion and Meta connectors enabled; read the exact Notion name from Notion when a card/queue is shared, and use supplied inputs without asking again. Each `--inspect` opens an isolated per-video `INR 40` / `24`-request cost window.
+Follow `AGENTS.md` and `agent/DIRECTOR.md`. One video per chat: start each video in a new chat, so every step re-reads a small chat (claude.ai connectors are off, so the editor gives the exact Notion name); use supplied inputs without asking again. The planner makes at most 2 model calls per video. If the output says `[PLANNER STOPPED]` (the planner used its 2 model calls and the plan still fails), do not plan by hand: report the `[BLOCKED]` lines to the editor and ask. Each `--inspect` opens an isolated per-video `INR 40` / `24`-request cost window.
 
 ## Procedure
 1. **Turn 1 (Primary 1-call)**: Run `<PY> scripts/zeno.py --inspect <footage> --script <script> --name "<name>" --auto-plan --compact` (if inputs are missing, run `--preflight --compact`, show results, and ask for them; never `--skip-preflight`). `--auto-plan` runs live preflight, inspects/reuses clips, runs Zeno's isolated 1-call subscription planner (`claude -p` or `codex exec`, zero connector/history overhead, typically `20k–55k` tokens), runs `--check-plan`, prints the Pitch Card, and automatically renders 9:16 + 1:1 Square without asking Yes/No. When `--auto-plan` passes `[PLAN PASS]`, do NOT open packets/sheets/rules; deliver outputs + token report.

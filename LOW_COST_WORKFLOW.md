@@ -2,11 +2,11 @@
 
 The INR figures below are API-equivalent model estimates before tax, not subscription invoices; transcription and host/tool charges are separate.
 
-## Default: `< 1,00,000`-token 1-call subscription workflow & `1M` multi-video queue (no API key)
+## Default: `< 1,00,000`-token 1-call subscription workflow, one video per chat (no API key)
 
-Editors may work directly in one desktop or CLI chat session across a queue of multiple videos back-to-back (up to **`1M` / `1,000,000` context tokens**) while keeping **Notion and Meta connectors enabled**, or launch a clean CLI session via `edit-codex.command` (Mac) / `edit-codex.bat` (Windows). Each video's `--inspect` starts its own isolated per-video telemetry and cost window (`INR 40` / `24` chat requests per video).
+Editors start each video in a new desktop or CLI chat, with claude.ai connectors off in this folder (`.claude/settings.json`), so every step re-reads a small chat. The planner makes at most 2 model calls per video (the plan, then one fix); if the plan still fails it prints `[PLANNER STOPPED]` and the editor decides, the chat does not plan by hand. Editors may also work in the chat directly, or launch a clean CLI session via `edit-codex.command` (Mac) / `edit-codex.bat` (Windows). Each video's `--inspect` starts its own isolated per-video telemetry and cost window (`INR 40` / `24` chat requests per video).
 
-1. Supply the local footage folder, exact script `?tab=...` (or local path), and exact Notion name (which the agent may read directly from Notion when a Notion card or queue is shared). Run:
+1. Supply the local footage folder, exact script `?tab=...` (or local path), and exact Notion name (given by the editor). Run:
    ```sh
    .venv/bin/python scripts/zeno.py --inspect <footage> --script <script> --name "<name>" --auto-plan --compact
    ```
@@ -29,7 +29,7 @@ Editors may work directly in one desktop or CLI chat session across a queue of m
 | Model estimate checkpoint (isolated per video) | INR 40 |
 | Chat request checkpoint (isolated per video) | 24 |
 | Context limit at new-edit intake (multi-video queue) | 1,000,000 tokens |
-| Direct Sol calls, including corrections | 3 per edit |
+| Planner calls (Claude, Codex or Sol), including corrections | 2 per edit |
 | Direct output limit per call, including reasoning | 8,000 tokens |
 | Direct text payload limit | 100,000 UTF-8 bytes |
 | Direct reasoning | medium |

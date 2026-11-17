@@ -16,7 +16,7 @@ import token_cost
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULTS = {"schema": 1, "model_budget_inr": 40.0, "chat_request_limit": 24,
-            "new_chat_context_limit": 1000000, "direct_max_calls": 3,
+            "new_chat_context_limit": 1000000, "direct_max_calls": 2, "planner_max_calls": 2,
             "direct_max_output_tokens": 8000, "direct_max_input_bytes": 100000,
             "direct_image_token_reserve": 10000, "direct_reasoning_effort": "medium"}
 

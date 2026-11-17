@@ -782,6 +782,32 @@ class OptionBBatchedWorkflowTests(unittest.TestCase):
             self.assertEqual(list(proj.glob("editing_packet_p*.md")), [])
             self.assertEqual(edit_packet.packet_parts(proj), [proj / "editing_packet.md"])
 
+    def test_a_planner_that_used_its_calls_stops_and_does_not_hand_the_plan_to_the_chat(self):
+        import contextlib
+        import io
+        import os
+        from unittest.mock import patch
+        import compact_run
+        import zeno
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_p = Path(tmp) / "proj_stop" / "plan.edl"
+            plan_p.parent.mkdir()
+            plan_p.write_text("#output out.mp4\n", encoding="utf-8")
+            buf = io.StringIO()
+            with patch.dict(os.environ, {"ZENO_MANUAL_FALLBACK": ""}), contextlib.redirect_stdout(buf):
+                zeno.print_planner_stop(plan_p, "plan check did not pass", 2)
+            out = buf.getvalue()
+            self.assertIn("[PLANNER STOPPED]", out)
+            self.assertIn("2 model call(s)", out)
+            self.assertNotIn("[MANUAL_FALLBACK_PACK]", out)
+            self.assertNotIn("[TURN 2]", out)
+            self.assertTrue(compact_run.IMPORTANT.match("[PLANNER STOPPED] The planner used 2"))
+            buf = io.StringIO()
+            with patch.dict(os.environ, {"ZENO_MANUAL_FALLBACK": "1"}), contextlib.redirect_stdout(buf):
+                zeno.print_planner_stop(plan_p, "plan check did not pass", 2)
+            self.assertIn("[MANUAL_FALLBACK_PACK]", buf.getvalue())   # the owner's switch brings the old path back
+
     def test_zeno_manual_fallback_pack_and_compact_regex(self):
         import contextlib
         import io

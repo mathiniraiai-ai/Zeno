@@ -805,6 +805,22 @@ def print_next_step(plan_path: pathlib.Path, fallback_reason: str = "") -> None:
         print(line, flush=True)
 
 
+def print_planner_stop(plan_path: pathlib.Path, reason: str, n_calls: int) -> None:
+    """The isolated planner used its calls and the plan still does not pass: stop here. Planning by hand in the chat
+    is what re-read millions of tokens (17 Nov usage page), so it needs the owner's ZENO_MANUAL_FALLBACK=1."""
+    if os.environ.get("ZENO_MANUAL_FALLBACK", "").strip() == "1":
+        print_next_step(plan_path, fallback_reason=reason)
+        return
+    clean_reason = " ".join(str(reason).split())[:220]
+    print(
+        f"\n[PLANNER STOPPED] The planner used {n_calls} model call(s), the limit for one edit, and the plan still "
+        f"does not pass ({clean_reason}). Do NOT plan by hand in this chat, do NOT read the packet, line_map.md, "
+        "facts.md or clip sheets, and do NOT run the planner again. Tell the editor the [BLOCKED] lines above, "
+        f"exactly as printed, and ask how to go on (reshoot, change the script, or a new chat). Saved: {_rel_workspace_path(plan_path)}",
+        flush=True,
+    )
+
+
 def _execute_and_finalize(
     plan_path: pathlib.Path,
     square: bool = True,
@@ -909,7 +925,10 @@ def run_auto_plan(
             job_archive.send_in_background(plan_path, "checking")
         except Exception:
             pass
-        print_next_step(plan_path, fallback_reason=reason)
+        if n_calls:
+            print_planner_stop(plan_path, reason, n_calls)
+        else:   # the planner never answered (not installed, not signed in): the batch playbook is the only way left
+            print_next_step(plan_path, fallback_reason=reason)
         return 2
 
     tok_note = f", {tot:,} tokens" if tot else ""
@@ -921,7 +940,7 @@ def run_auto_plan(
         msg = order_gate(load_edl(plan_path), plan_path)
         print(msg or "[BLOCKED] Plan check failed after auto-plan.", flush=True)
         cost_control.print_checkpoint(work_dir)
-        print_next_step(plan_path, fallback_reason="post-plan check failed")
+        print_planner_stop(plan_path, "post-plan check failed", n_calls)
         return 2
 
     print("[PLAN PASS] Every line present, once, in script order; no cut inside a word; voices match.", flush=True)

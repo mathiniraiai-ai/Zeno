@@ -1,11 +1,11 @@
 ---
 name: video-edit
-description: End-to-end <100k-token 1-call script-led video editing workflow for Zeno (supporting 1M-context multi-video queues and Notion connectors). Use whenever editing local footage folders against a Google Doc ?tab=... or local script, planning/verifying splits (z=1, 14% headroom), captions (#subs auto y=68 / y=50 on split_v), #page scroll, right/wrong marks and SFX, or rendering and verifying reel/square MP4 outputs.
+description: End-to-end <100k-token 1-call script-led video editing workflow for Zeno (one video per chat, at most 2 planner calls, connectors off). Use whenever editing local footage folders against a Google Doc ?tab=... or local script, planning/verifying splits (z=1, 14% headroom), captions (#subs auto y=68 / y=50 on split_v), #page scroll, right/wrong marks and SFX, or rendering and verifying reel/square MP4 outputs.
 ---
 
 Follow `AGENTS.md` and `agent/DIRECTOR.md`:
 
-1. **Queue & Notion Support**: Queue multiple videos back-to-back in one chat session (up to `1M` / `1,000,000` context tokens) with Notion and Meta connectors enabled; read the exact Notion name from Notion when a card/queue is shared. Each `--inspect` starts an isolated per-video telemetry/cost window (`INR 40` / `24` requests, `< 100k` total tokens including cache, typically `20k–55k`).
+1. **One Video per Chat**: One video per chat: start each video in a new chat, so every step re-reads a small chat (claude.ai connectors are off, so the editor gives the exact Notion name). The planner makes at most 2 model calls per video. If the output says `[PLANNER STOPPED]` (the planner used its 2 model calls and the plan still fails), do not plan by hand: report the `[BLOCKED]` lines to the editor and ask. Each `--inspect` starts an isolated per-video telemetry/cost window (`INR 40` / `24` requests, `< 100k` total tokens including cache, typically `20k–55k`).
 2. **Turn 1 — Primary 1-Call Inspect, Auto-Plan & Auto-Render**: Run `<PY> scripts/zeno.py --inspect <footage> --script <script> --name "<name>" --auto-plan --compact` (or `--preflight --compact` if inputs are missing; never `--skip-preflight`). This runs live preflight, inspects/reuses clips, runs Zeno's isolated 1-call subscription planner (`claude -p` or `codex exec`), checks `--check-plan`, prints the Pitch Card, and automatically renders 9:16 + 1:1 Square without asking Yes/No. When `--auto-plan` passes `[PLAN PASS]`, do NOT open packets/sheets/rules; deliver outputs + token report.
 3. **Strict Manual / Fallback Cap (4–5 Turns Max, NEVER 40+)**:
    - **Turn 2**: Read `editing_packet_p*.md` (or `editing_packet.md`) + ALL `clip_sheet_*.jpg` in ONE parallel batch.

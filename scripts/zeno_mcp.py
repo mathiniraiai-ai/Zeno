@@ -314,6 +314,13 @@ def _finish_auto_edit(
             "line_map.md, clip_caches.json, ffprobe, or dir."
         )
     proj_dir = d or _find_job_dir(title, tail, jobs_mod=jobs_mod)
+    if "[PLANNER STOPPED]" in (tail or ""):
+        return _text(
+            (tail or "") + "\n\n[ZENO 2-CALL RULE] The planner reached its call limit. Do NOT plan by hand, do NOT open "
+            "editing_packet*.md, line_map.md, facts.md or clip_sheet_*.jpg, and do NOT call this tool again for this "
+            "video. Report the [BLOCKED] lines to the editor and ask how to go on.",
+            True,
+        )
     if _is_manual_fallback(rc, tail, proj_dir):
         payload = _option_b_payload(proj_dir, status="manual_fallback", output=tail, returncode=rc)
         return _text(json.dumps(payload, ensure_ascii=False, indent=2), False)

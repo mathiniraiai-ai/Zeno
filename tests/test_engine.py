@@ -2802,6 +2802,25 @@ class TestDirectMode(unittest.TestCase):
             self.assertTrue(r["passed"])
             self.assertIn("S2.mp4", (proj / "plan.edl").read_text())
 
+    def test_the_planner_never_makes_more_than_two_calls(self):
+        """Owner's rule (17 Nov): one plan call and one fix call per edit, whatever --fixes or --polish ask for."""
+        import tempfile
+        from unittest.mock import patch
+        import direct_mode
+        fake = lambda *a, **k: {"text": self.ANSWER, "session": "s", "error": "", "seconds": 1.0,   # noqa: E731
+                           "usage": {"input": 1, "cache_write": 1, "cache_read": 1, "output": 1, "total": 4}}
+        n = iter(range(100))
+        for runner, target in ((direct_mode.run, "call_claude"), (direct_mode.run_codex, "call_codex")):
+            with tempfile.TemporaryDirectory() as td:
+                proj = self._proj(td)
+                with patch.object(direct_mode, target, side_effect=fake), patch("sys.stdout"), \
+                        patch.object(direct_mode, "run_check", side_effect=lambda p: (False, f"[ORDER BLOCKED] MISSING L{next(n)}")):
+                    r = runner(proj, max_fixes=9, polish=True)
+                self.assertFalse(r["passed"])
+                self.assertEqual(len(r["calls"]), 2, target)
+                self.assertEqual(r["max_calls"], 2)
+        self.assertEqual(direct_mode.planner_max_calls(), 2)
+
     def test_no_claude_command_is_reported_not_crashed(self):
         from unittest.mock import patch
         import direct_mode

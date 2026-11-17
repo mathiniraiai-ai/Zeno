@@ -4,7 +4,7 @@ argument-hint: "<raw_dir_or_clips> <script_path_or_gdoc_url> [--lang <lang>] [--
 ---
 # /edit (alias for /zeno)
 
-User inputs: `$ARGUMENTS` — follow `AGENTS.md` and `agent/DIRECTOR.md` (multi-video queue up to `1M` / `1,000,000` context tokens with Notion/Meta connectors enabled; read exact Notion name from Notion if shared; use supplied inputs directly):
+User inputs: `$ARGUMENTS` — follow `AGENTS.md` and `agent/DIRECTOR.md` (one video per chat; claude.ai connectors are off, so the editor gives the exact Notion name; at most 2 planner calls per video, and on `[PLANNER STOPPED]` report the `[BLOCKED]` lines and ask, never plan by hand; use supplied inputs directly):
 
 1. **Turn 1 (Primary 1-call)**: Run `<PY> scripts/zeno.py --inspect <footage> --script <script> --name "<name>" --auto-plan --compact` (or `--preflight --compact` first if inputs are missing; never `--skip-preflight`). This plans in 1 isolated call, verifies `--check-plan`, and automatically renders 9:16 + 1:1 Square without asking Yes/No. When `--auto-plan` passes `[PLAN PASS]`, do NOT open packets/sheets/rules; deliver outputs + token report.
 2. **Strict Manual / Fallback Cap (4–5 turns max, NEVER 40+)**:

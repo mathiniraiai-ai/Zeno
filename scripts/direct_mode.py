@@ -560,7 +560,23 @@ def _advice(check_out: str) -> List[str]:
     return [l for l in check_out.splitlines() if l.startswith(("[TIGHT]", "[STYLE]"))]
 
 
-def run(proj: Path, model: str = DEFAULT_CLAUDE_MODEL, max_fixes: int = 2, polish: bool = False) -> Dict[str, Any]:
+def planner_max_calls() -> int:
+    """Most model calls the isolated planner may make for one edit (the plan, then fixes). Owner's rule: 2."""
+    try:
+        import cost_control
+        return max(1, int(cost_control.settings().get("planner_max_calls", 2)))
+    except Exception:
+        return 2
+
+
+def _rounds(max_fixes: Optional[int], polish: bool) -> Tuple[int, int]:
+    """(fix rounds allowed, total calls allowed): never more calls than planner_max_calls, whatever is asked for."""
+    cap = planner_max_calls()
+    fixes = cap - 1 if max_fixes is None else max(0, min(int(max_fixes), cap - 1))
+    return fixes, min(fixes + 1 + (1 if polish else 0), cap)
+
+
+def run(proj: Path, model: str = DEFAULT_CLAUDE_MODEL, max_fixes: Optional[int] = None, polish: bool = False) -> Dict[str, Any]:
     """Isolated 1-call Claude subscription planner (`claude -p` in an empty temporary directory)."""
     global _RUN_TMP_CWD
     proj = proj.resolve()
@@ -574,6 +590,8 @@ def run(proj: Path, model: str = DEFAULT_CLAUDE_MODEL, max_fixes: int = 2, polis
         "project": proj.name, "provider": "claude", "model": model,
         "started": time.time(), "calls": [], "passed": False,
     }
+    max_fixes, total_calls = _rounds(max_fixes, polish)
+    report["max_calls"] = total_calls
     session: Optional[str] = None
     passing: Dict[str, str] = {}
     previous_failure: Optional[str] = None
@@ -582,7 +600,7 @@ def run(proj: Path, model: str = DEFAULT_CLAUDE_MODEL, max_fixes: int = 2, polis
     with tempfile.TemporaryDirectory(prefix="zeno_direct_") as tmp_cwd:
         _RUN_TMP_CWD = tmp_cwd
         try:
-            for n in range(1, max_fixes + 2 + (1 if polish else 0)):
+            for n in range(1, total_calls + 1):
                 print(f"\n[direct] call {n} ({kind}, provider=claude) ...", flush=True)
                 c = call_claude(system, text, images, model, session)
                 session = c.get("session")
@@ -646,7 +664,7 @@ def run(proj: Path, model: str = DEFAULT_CLAUDE_MODEL, max_fixes: int = 2, polis
     return report
 
 
-def run_codex(proj: Path, model: str = DEFAULT_CODEX_MODEL, max_fixes: int = 2, polish: bool = False) -> Dict[str, Any]:
+def run_codex(proj: Path, model: str = DEFAULT_CODEX_MODEL, max_fixes: Optional[int] = None, polish: bool = False) -> Dict[str, Any]:
     """Isolated 1-call Codex subscription planner (`codex exec` in an empty temporary directory)."""
     proj = proj.resolve()
     original = _read(proj / "plan.edl")
@@ -659,12 +677,14 @@ def run_codex(proj: Path, model: str = DEFAULT_CODEX_MODEL, max_fixes: int = 2, 
         "project": proj.name, "provider": "codex", "model": model,
         "started": time.time(), "calls": [], "passed": False,
     }
+    max_fixes, total_calls = _rounds(max_fixes, polish)
+    report["max_calls"] = total_calls
     passing: Dict[str, str] = {}
     previous_failure: Optional[str] = None
     last_answer = ""
     text, images, kind = job, sheets, "plan"
 
-    for n in range(1, max_fixes + 2 + (1 if polish else 0)):
+    for n in range(1, total_calls + 1):
         print(f"\n[direct] call {n} ({kind}, provider=codex) ...", flush=True)
         c = call_codex(system, text, images, model=model)
         u = c.get("usage") or {}
@@ -792,7 +812,7 @@ def main() -> None:
                     help="Subscription CLI (`auto`, `claude`, `codex`) or bounded OpenAI API (`openai`)")
     ap.add_argument("--model", default=None)
     ap.add_argument("--dry-run", action="store_true", help="Validate binary/reserve and brief size without a model call")
-    ap.add_argument("--fixes", type=int, default=2, help="most fix rounds after the first plan (default: 2)")
+    ap.add_argument("--fixes", type=int, default=None, help="most fix rounds after the first plan (default and most: planner_max_calls - 1)")
     ap.add_argument("--polish", action="store_true", help="opt-in extra round to clear non-blocking [TIGHT]/[STYLE] advice")
     ap.add_argument("--no-polish", action="store_true", help="skip non-blocking [TIGHT]/[STYLE] advice round (default)")
     ap.add_argument("--brief-only", action="store_true")
