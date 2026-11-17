@@ -431,37 +431,109 @@ class KeyStore:
             job_report_json = "{}"
 
         now = time.time()
-        self._run(
-            """INSERT INTO zeno_runs (
-                key_id, editor_name, user_email, project, language, agent_name, agent_model,
-                clips_count, video_seconds, transcribe_in_tokens, transcribe_out_tokens, transcribe_total_tokens,
-                agent_in_tokens, agent_cached_tokens, agent_out_tokens, agent_total_tokens, grand_total_tokens,
-                clips_json, initial_edl, final_edl, edl_diff_json, learned_rules_json, assets_used_json, job_report_json, created_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (
-                key_id,
-                str(resolved_name or "unknown")[:60],
-                user_email[:120],
-                str(payload.get("project") or "unnamed")[:120],
-                str(payload.get("language") or "auto")[:20],
-                str(payload.get("agent_name") or "unknown")[:60],
-                str(payload.get("agent_model") or "unknown")[:80],
-                int(payload.get("clips_count") or len(clips)),
-                float(payload.get("video_seconds") or 0.0),
-                t_in, t_out, t_tot,
-                a_in, a_cache, a_out, a_tot, grand,
-                json.dumps(clips[:60], ensure_ascii=False),
-                initial_edl,
-                final_edl,
-                edl_diff_json,
-                learned_rules_json,
-                assets_used_json,
-                job_report_json,
-                now,
-            ),
-        )
-        row = self._run("SELECT MAX(id) FROM zeno_runs", (), "one")
-        run_id = int(row[0] or 0)
+        proj_str = str(payload.get("project") or "unnamed")[:120]
+        editor_str = str(resolved_name or "unknown")[:60]
+        email_str = user_email[:120]
+        new_sess = ""
+        if isinstance(jr_raw, dict):
+            new_sess = str(((jr_raw.get("accounting") or {}).get("agent_session_id")) or "").strip()
+        if not new_sess:
+            new_sess = str(payload.get("agent_session_id") or "").strip()
+        if new_sess in ("local", "unknown"):
+            new_sess = ""
+
+        # Deduplicate re-render checkpoints of the same active edit so 5 re-renders in one session update 1 row instead of 5x summing
+        existing_id: Optional[int] = None
+        if proj_str and proj_str != "unnamed":
+            cutoff = now - 6 * 3600.0
+            if email_str:
+                prev_row = self._run(
+                    "SELECT id, agent_cached_tokens, job_report_json FROM zeno_runs WHERE user_email = %s AND project = %s AND created_at >= %s ORDER BY id DESC LIMIT 1",
+                    (email_str, proj_str, cutoff),
+                    "one",
+                )
+            elif key_id is not None:
+                prev_row = self._run(
+                    "SELECT id, agent_cached_tokens, job_report_json FROM zeno_runs WHERE key_id = %s AND project = %s AND created_at >= %s ORDER BY id DESC LIMIT 1",
+                    (key_id, proj_str, cutoff),
+                    "one",
+                )
+            else:
+                prev_row = None
+            if prev_row:
+                cand_id = int(prev_row[0] or 0)
+                old_cache = int(prev_row[1] or 0)
+                old_sess = ""
+                try:
+                    ojr = json.loads(prev_row[2] or "{}")
+                    old_sess = str(((ojr.get("accounting") or {}).get("agent_session_id")) or "").strip()
+                    if old_sess in ("local", "unknown"):
+                        old_sess = ""
+                except Exception:
+                    old_sess = ""
+                if new_sess and old_sess:
+                    if new_sess == old_sess:
+                        existing_id = cand_id
+                elif a_cache >= old_cache:
+                    existing_id = cand_id
+
+        if existing_id:
+            self._run(
+                """UPDATE zeno_runs SET
+                    key_id = %s, editor_name = %s, user_email = %s, language = %s, agent_name = %s, agent_model = %s,
+                    clips_count = %s, video_seconds = %s, transcribe_in_tokens = %s, transcribe_out_tokens = %s, transcribe_total_tokens = %s,
+                    agent_in_tokens = %s, agent_cached_tokens = %s, agent_out_tokens = %s, agent_total_tokens = %s, grand_total_tokens = %s,
+                    clips_json = %s, initial_edl = %s, final_edl = %s, edl_diff_json = %s, learned_rules_json = %s, assets_used_json = %s,
+                    job_report_json = %s, created_at = %s
+                WHERE id = %s""",
+                (
+                    key_id, editor_str, email_str,
+                    str(payload.get("language") or "auto")[:20],
+                    str(payload.get("agent_name") or "unknown")[:60],
+                    str(payload.get("agent_model") or "unknown")[:80],
+                    int(payload.get("clips_count") or len(clips)),
+                    float(payload.get("video_seconds") or 0.0),
+                    t_in, t_out, t_tot,
+                    a_in, a_cache, a_out, a_tot, grand,
+                    json.dumps(clips[:60], ensure_ascii=False),
+                    initial_edl, final_edl, edl_diff_json, learned_rules_json, assets_used_json,
+                    job_report_json, now,
+                    existing_id,
+                ),
+            )
+            run_id = existing_id
+        else:
+            self._run(
+                """INSERT INTO zeno_runs (
+                    key_id, editor_name, user_email, project, language, agent_name, agent_model,
+                    clips_count, video_seconds, transcribe_in_tokens, transcribe_out_tokens, transcribe_total_tokens,
+                    agent_in_tokens, agent_cached_tokens, agent_out_tokens, agent_total_tokens, grand_total_tokens,
+                    clips_json, initial_edl, final_edl, edl_diff_json, learned_rules_json, assets_used_json, job_report_json, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    key_id,
+                    editor_str,
+                    email_str,
+                    proj_str,
+                    str(payload.get("language") or "auto")[:20],
+                    str(payload.get("agent_name") or "unknown")[:60],
+                    str(payload.get("agent_model") or "unknown")[:80],
+                    int(payload.get("clips_count") or len(clips)),
+                    float(payload.get("video_seconds") or 0.0),
+                    t_in, t_out, t_tot,
+                    a_in, a_cache, a_out, a_tot, grand,
+                    json.dumps(clips[:60], ensure_ascii=False),
+                    initial_edl,
+                    final_edl,
+                    edl_diff_json,
+                    learned_rules_json,
+                    assets_used_json,
+                    job_report_json,
+                    now,
+                ),
+            )
+            row = self._run("SELECT MAX(id) FROM zeno_runs", (), "one")
+            run_id = int(row[0] or 0)
 
         run_lang = str(payload.get("language") or "all").strip().lower() or "all"
         for item in learned_list:

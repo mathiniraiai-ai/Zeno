@@ -526,5 +526,159 @@ class GeminiQuotaQueueAndSafetyTests(unittest.TestCase):
             self.assertFalse((work_root / "line_map.md").exists())
 
 
+class CacheCleanupAndMcpIsolationTests(unittest.TestCase):
+    def test_zeno_mcp_start_edit_uses_auto_plan_compact_and_hot_reloads_on_update(self):
+        import zeno_mcp
+
+        tools = zeno_mcp.handle({"jsonrpc": "2.0", "id": 10, "method": "tools/list"})["result"]["tools"]
+        names = [t["name"] for t in tools]
+        self.assertIn("zeno_auto_plan", names)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_dir = Path(tmp) / "raw"
+            raw_dir.mkdir()
+            captured = {}
+
+            def fake_run_tail(cmd, log_path, wait_s, max_chars=7000):
+                captured["cmd"] = cmd
+                captured["wait_s"] = wait_s
+                return 0, "[PLAN PASS] Every line present.\nPitch Card here"
+
+            with patch.object(zeno_mcp, "_run_with_log_tail", side_effect=fake_run_tail):
+                res = zeno_mcp.call(
+                    "zeno_start_edit",
+                    {
+                        "script": "https://docs.google.com/document/d/abc/edit?tab=t.0",
+                        "footage": str(raw_dir),
+                        "name": "W47 Test Video",
+                    },
+                )
+            self.assertFalse(res["isError"])
+            self.assertIn("--auto-plan", captured["cmd"])
+            self.assertIn("--compact", captured["cmd"])
+            self.assertIn("[ZENO 1-CALL RULE]", res["content"][0]["text"])
+            self.assertNotIn("read line_map.md, facts.md", res["content"][0]["text"])
+
+    def test_cleanup_after_job_and_after_update_clear_transient_bloat_and_preserve_clips(self):
+        import clean
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seg = root / "work" / "_segments"
+            seg.mkdir(parents=True)
+            (seg / "chunk1.mp4").write_bytes(b"a" * 5000)
+
+            proj = root / "work" / "proj_a"
+            (proj / "_sub_frames").mkdir(parents=True)
+            (proj / "_sub_frames" / "f001.png").write_bytes(b"p" * 3000)
+            (proj / "scratch.tmp").write_bytes(b"t" * 1000)
+            (proj / "direct_call_pending.json").write_text("{}", encoding="utf-8")
+            (proj / "plan.edl").write_text("#output out.mp4\n", encoding="utf-8")
+
+            clip_dir = root / "work" / "_clips" / "C1"
+            clip_dir.mkdir(parents=True)
+            (clip_dir / "hq_words.json").write_text("[{\"w\":\"hi\"}]", encoding="utf-8")
+
+            r_job = clean.cleanup_after_job(root, project_dir=proj)
+            self.assertTrue(r_job["ran"])
+            self.assertFalse((seg / "chunk1.mp4").exists())
+            self.assertFalse((proj / "_sub_frames").exists())
+            self.assertFalse((proj / "scratch.tmp").exists())
+            self.assertFalse((proj / "direct_call_pending.json").exists())
+            self.assertTrue((proj / "plan.edl").is_file())
+            self.assertTrue((clip_dir / "hq_words.json").is_file())
+
+            # Test cleanup_after_update
+            pyc_dir = root / "scripts" / "__pycache__"
+            pyc_dir.mkdir(parents=True)
+            (pyc_dir / "old.cpython-312.pyc").write_bytes(b"c" * 2000)
+            ota_dir = root / "work" / "_ota_stage_999"
+            ota_dir.mkdir(parents=True)
+            (ota_dir / "file.py").write_bytes(b"x" * 1000)
+            (root / "work" / "_update_check.json").write_text("{}", encoding="utf-8")
+
+            r_upd = clean.cleanup_after_update(root, version="1.0.21")
+            self.assertTrue(r_upd["ran"])
+            self.assertFalse(pyc_dir.exists())
+            self.assertFalse(ota_dir.exists())
+            self.assertFalse((root / "work" / "_update_check.json").exists())
+            self.assertTrue((root / "work" / ".last_cleanup_state.json").is_file())
+            self.assertTrue((clip_dir / "hq_words.json").is_file())
+
+    def test_prepare_common_job_start_resets_epoch_on_different_project(self):
+        import time
+        import common
+        import prepare
+
+        with tempfile.TemporaryDirectory() as tmp:
+            marker_f = Path(tmp) / "job_marker.json"
+            old_t = time.time() - 3600.0
+            marker_f.write_text(json.dumps({"start": old_t, "identity": "video_one"}), encoding="utf-8")
+            with patch.object(common, "_job_marker_path", return_value=marker_f):
+                t_same = prepare.common_job_start("video_one")
+                # Older than 30 min -> resets even for same identity; test within 10 min too:
+                recent_t = time.time() - 600.0
+                marker_f.write_text(json.dumps({"start": recent_t, "identity": "video_one"}), encoding="utf-8")
+                t_reuse = prepare.common_job_start("video_one")
+                self.assertAlmostEqual(t_reuse, recent_t, places=1)
+                t_diff = prepare.common_job_start("video_two")
+                self.assertGreater(t_diff, recent_t + 300.0)
+
+    def test_keystore_deduplicates_rerender_checkpoints_of_same_session(self):
+        svc_dir = str(ROOT / "service")
+        if svc_dir not in sys.path:
+            sys.path.insert(0, svc_dir)
+        import keystore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ks = keystore.KeyStore(sqlite_path=str(Path(tmp) / "t.db"))
+            raw_key = ks.create("Balesh P", "balesh@gosupernova.live")
+            kid, _ = ks.lookup(raw_key)
+
+            for turns, cached in ((25, 10_975_124), (40, 18_035_994), (63, 29_658_075)):
+                ks.log_run(
+                    kid,
+                    {
+                        "project": "gdoc_1i0Ppu",
+                        "language": "te",
+                        "agent_name": "Claude Code",
+                        "agent_model": "claude-sonnet-5-5",
+                        "clips_count": 3,
+                        "video_seconds": 86.4,
+                        "agent_in_tokens": 50_000,
+                        "agent_cached_tokens": cached,
+                        "agent_out_tokens": 20_000,
+                        "agent_total_tokens": 70_000,
+                        "grand_total_tokens": cached + 70_000,
+                        "job_report": {"agent": {"turns": turns}, "accounting": {"agent_session_id": "sess-033a8d34"}},
+                    },
+                    editor_name="Balesh P",
+                )
+            runs = ks.usage_runs()
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0]["agent_cached_tokens"], 29_658_075)
+
+            # A brand-new session on the same project records a distinct second run
+            ks.log_run(
+                kid,
+                {
+                    "project": "gdoc_1i0Ppu",
+                    "language": "te",
+                    "agent_name": "Claude Code",
+                    "agent_model": "claude-sonnet-5-5",
+                    "clips_count": 3,
+                    "video_seconds": 86.4,
+                    "agent_in_tokens": 18_000,
+                    "agent_cached_tokens": 12_000,
+                    "agent_out_tokens": 4_000,
+                    "agent_total_tokens": 22_000,
+                    "grand_total_tokens": 34_000,
+                    "job_report": {"agent": {"turns": 1}, "accounting": {"agent_session_id": "sess-fresh-1call"}},
+                },
+                editor_name="Balesh P",
+            )
+            self.assertEqual(len(ks.usage_runs()), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

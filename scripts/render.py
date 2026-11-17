@@ -1716,11 +1716,11 @@ def main() -> None:
         if not ok:
             sys.exit(1)
 
-    # 6b) automatic cleanup of old render cache, no question asked (recorded in the job report)
+    # 6b) automatic cleanup of render cache and transient project scratch, no question asked (recorded in the job report)
     try:
         import clean
         import job_report
-        job_report.record_cleanup(plan_path.parent, clean.cleanup_after_job())
+        job_report.record_cleanup(plan_path.parent, clean.cleanup_after_job(project_dir=plan_path.parent))
     except Exception:
         pass
 
@@ -1752,6 +1752,13 @@ def main() -> None:
             format_learning.observe_job(plan_path, plan, verified=bool(a.verify))
         except Exception:
             pass
+
+    # Close this video's active edit window so the next video starts with a clean timestamp even when render.py was invoked directly
+    try:
+        from common import job_done
+        job_done()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

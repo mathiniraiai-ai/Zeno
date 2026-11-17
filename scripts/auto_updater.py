@@ -370,6 +370,13 @@ def apply_bundle_bytes(blob: bytes, expected_sha256: str = "", version: str = ""
             pass
 
     final_ver = version or get_local_version()
+    clean_res: Dict[str, Any] = {}
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import clean as _clean_mod
+        clean_res = _clean_mod.cleanup_after_update(root=ROOT, version=final_ver)
+    except Exception:
+        clean_res = {}
     _write_json(
         RELEASE_STATE_FILE,
         {
@@ -377,6 +384,7 @@ def apply_bundle_bytes(blob: bytes, expected_sha256: str = "", version: str = ""
             "sha": sha or actual_sha256[:7],
             "bundle_sha256": actual_sha256,
             "files_updated": copied,
+            "cleanup": clean_res,
             "updated_at": dt.datetime.now().isoformat(timespec="seconds"),
         },
     )
@@ -388,6 +396,7 @@ def apply_bundle_bytes(blob: bytes, expected_sha256: str = "", version: str = ""
         "sha": sha or actual_sha256[:7],
         "bundle_sha256": actual_sha256,
         "files_updated": copied,
+        "cleanup": clean_res,
         "message": f"Updated Zeno to v{final_ver} ({copied} files synced from Zeno Cloud).",
     }
 

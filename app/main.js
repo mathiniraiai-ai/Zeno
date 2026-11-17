@@ -378,6 +378,10 @@ async function applyCloudUpdateNative(auth, targetRoot) {
     const rq = path.join(dest, 'requirements.txt');
     const gpuScript = path.join(dest, 'scripts', 'gpu_install.py');
     const newReqSha = fs.existsSync(rq) ? crypto.createHash('sha256').update(fs.readFileSync(rq)).digest('hex') : '';
+    const cleanScript = path.join(dest, 'scripts', 'clean.py');
+    if (hasVenv(dest) && fs.existsSync(cleanScript)) {
+      spawn(venvPythonPath(dest), [cleanScript, '--after-update', '--version', String(installedVer || '')], { cwd: dest, detached: true, stdio: 'ignore' }).unref();
+    }
     if (hasVenv(dest) && fs.existsSync(gpuScript)) {
       if (oldReqSha && newReqSha && oldReqSha !== newReqSha) {
         spawn(venvPythonPath(dest), [gpuScript], { cwd: dest, detached: true, stdio: 'ignore' }).unref();

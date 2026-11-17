@@ -103,34 +103,192 @@ def auto_clean(root: Path = ROOT, min_free_gb: float = None, days: float = 14.0,
     return {"ran": True, "free_gb_before": round(free_gb, 1), "freed_mb": round(freed / 1e6, 1)}
 
 
-def cleanup_after_job(root: Path = ROOT, keep_hours: float = None) -> dict:
-    """Run at the end of every successful render, without asking. Deletes render-cache files (work/_segments) that have not been
-    touched for `keep_hours` (default 24, or ZENO_KEEP_CACHE_HOURS), so a quick fix and re-render stays fast while old jobs do not pile up.
-    Transcripts, alignments, finished videos and raw footage are never touched. ZENO_AUTO_CLEAN=0 turns it off."""
-    if os.environ.get("ZENO_AUTO_CLEAN", "1") == "0":
+TRANSIENT_PROJECT_DIRS = ("_sub_frames", "_page_frames", "_scroll_frames", "_tmp_frames", "_preview_frames")
+TRANSIENT_PROJECT_FILES = ("direct_call_pending.json",)
+
+
+def _prune_work_logs(work: Path, max_age_hours: float = 24.0) -> tuple[int, int]:
+    """Remove old run-*.log files (> max_age_hours) and cap _mcp_start.log to 512 KB when > 2 MB."""
+    freed = files = 0
+    cutoff = time.time() - max_age_hours * 3600.0
+    logs_dir = work / "_logs"
+    if logs_dir.is_dir():
+        for lf in list(logs_dir.iterdir()):
+            try:
+                if lf.is_file() and lf.suffix == ".log" and lf.stat().st_mtime < cutoff:
+                    sz = lf.stat().st_size
+                    lf.unlink()
+                    freed += sz
+                    files += 1
+            except OSError:
+                pass
+    mcp_log = work / "_mcp_start.log"
+    try:
+        if mcp_log.is_file() and mcp_log.stat().st_size > 2_000_000:
+            raw = mcp_log.read_bytes()
+            old_sz = len(raw)
+            tail = raw[-512_000:]
+            mcp_log.write_bytes(tail)
+            freed += max(0, old_sz - len(tail))
+            files += 1
+    except OSError:
+        pass
+    return freed, files
+
+
+def _prune_ota_staging(work: Path) -> tuple[int, int]:
+    freed = files = 0
+    if not work.is_dir():
+        return 0, 0
+    for child in list(work.iterdir()):
+        if child.name.startswith("_ota_stage_"):
+            try:
+                sz = size_of(child)
+                safe_delete(child, work.parent)
+                freed += sz
+                files += 1
+            except Exception:
+                pass
+    return freed, files
+
+
+def cleanup_after_job(root: Path = ROOT, keep_hours: float = None, project_dir: Path = None) -> dict:
+    """Run at the end of every successful render, without asking.
+
+    - Clears finished render-cache segments (`work/_segments`): when `keep_hours` is omitted, defaults to
+      `ZENO_KEEP_CACHE_HOURS` (`0` = immediate cleanup once final MP4s + QC pass).
+    - Prunes transient render scratch inside `project_dir` (`_sub_frames`, `_page_frames`, `*.tmp`, `*.part`),
+      leftover `work/_ota_stage_*`, and `work/_logs/*.log` older than 24h.
+    - Transcripts, alignments (`work/_clips/`), plans, finished videos and raw footage are NEVER touched.
+    - `ZENO_AUTO_CLEAN=0` or `ZENO_CLEAR_AFTER_JOB=0` turns it off.
+    """
+    if os.environ.get("ZENO_AUTO_CLEAN", "1") == "0" or os.environ.get("ZENO_CLEAR_AFTER_JOB", "1") == "0":
         return {"ran": False}
-    hours = float(keep_hours if keep_hours is not None else os.environ.get("ZENO_KEEP_CACHE_HOURS", "24"))
-    seg = root / "work" / "_segments"
+    hours = float(keep_hours if keep_hours is not None else os.environ.get("ZENO_KEEP_CACHE_HOURS", "0"))
+    work = root / "work"
+    seg = work / "_segments"
     freed = kept = files = 0
     cutoff = time.time() - hours * 3600
     try:
         if seg.is_dir():
             for f in list(seg.iterdir()):
                 n = size_of(f)
-                if newest_mtime(f) < cutoff:
+                if hours <= 0 or newest_mtime(f) < cutoff:
                     safe_delete(f, root)
                     freed += n
                     files += 1
                 else:
                     kept += n
+        if project_dir is not None:
+            pdir = Path(project_dir).resolve()
+            work_res = work.resolve()
+            if pdir.is_dir() and (str(pdir).startswith(str(work_res) + "/") or str(pdir).startswith(str(work_res) + "\\")):
+                for dname in TRANSIENT_PROJECT_DIRS:
+                    td = pdir / dname
+                    if td.is_dir():
+                        n = size_of(td)
+                        safe_delete(td, root)
+                        freed += n
+                        files += 1
+                for fname in TRANSIENT_PROJECT_FILES:
+                    tf = pdir / fname
+                    if tf.is_file():
+                        n = tf.stat().st_size
+                        safe_delete(tf, root)
+                        freed += n
+                        files += 1
+                for child in list(pdir.iterdir()):
+                    if child.is_file() and (child.name.endswith(".tmp") or child.name.endswith(".part")):
+                        n = child.stat().st_size
+                        safe_delete(child, root)
+                        freed += n
+                        files += 1
+        f_ota, n_ota = _prune_ota_staging(work)
+        f_log, n_log = _prune_work_logs(work, max_age_hours=24.0)
+        freed += f_ota + f_log
+        files += n_ota + n_log
         return {"ran": True, "freed_mb": round(freed / 1e6, 1), "kept_mb": round(kept / 1e6, 1), "files": files}
     except Exception as exc:   # noqa: BLE001  (tidying must never fail a finished job)
         return {"ran": True, "error": str(exc)[:120], "freed_mb": round(freed / 1e6, 1), "files": files}
 
 
+def cleanup_after_update(root: Path = ROOT, version: str = "") -> dict:
+    """Run automatically whenever an OTA software update finishes installing.
+
+    Clears stale Python `__pycache__` bytecode under `scripts/` & `service/`, old engine render chunks
+    in `work/_segments`, leftover `work/_ota_stage_*`, stale `work/_update_check.json`, stale job-window markers,
+    and old run logs (> 24h), while preserving all measured clips (`work/_clips/`), active project plans,
+    credentials, and finished videos. Disable with `ZENO_AUTO_CLEAN=0` or `ZENO_CLEAR_ON_UPDATE=0`.
+    """
+    if os.environ.get("ZENO_AUTO_CLEAN", "1") == "0" or os.environ.get("ZENO_CLEAR_ON_UPDATE", "1") == "0":
+        return {"ran": False}
+    import json as _json
+    freed = files = 0
+    work = root / "work"
+    try:
+        # 1. Clear stale Python bytecode caches inside scripts/ and service/ so updated .py files take effect immediately
+        for code_sub in ("scripts", "service"):
+            base_d = (root / code_sub).resolve()
+            if base_d.is_dir():
+                for pyc_dir in list(base_d.rglob("__pycache__")):
+                    if pyc_dir.is_dir() and str(pyc_dir.resolve()).startswith(str(base_d)):
+                        sz = size_of(pyc_dir)
+                        shutil.rmtree(pyc_dir, ignore_errors=True)
+                        freed += sz
+                        files += 1
+        # 2. Clear render segment scratch from previous engine version
+        seg = work / "_segments"
+        if seg.is_dir():
+            for f in list(seg.iterdir()):
+                sz = size_of(f)
+                safe_delete(f, root)
+                freed += sz
+                files += 1
+        # 3. Clear OTA staging dirs, stale update-check cache, and old run logs
+        f_ota, n_ota = _prune_ota_staging(work)
+        f_log, n_log = _prune_work_logs(work, max_age_hours=24.0)
+        freed += f_ota + f_log
+        files += n_ota + n_log
+        for stale_f in (work / "_update_check.json", work / ".job_window.json"):
+            if stale_f.is_file():
+                try:
+                    sz = stale_f.stat().st_size
+                    stale_f.unlink()
+                    freed += sz
+                    files += 1
+                except OSError:
+                    pass
+        if root.resolve() == ROOT.resolve():
+            try:
+                import common as _common
+                _common.job_done()
+            except Exception:
+                pass
+        res = {
+            "ran": True,
+            "trigger": "after_update",
+            "version": version,
+            "freed_mb": round(freed / 1e6, 1),
+            "files": files,
+            "cleaned_at": int(time.time()),
+        }
+        try:
+            work.mkdir(parents=True, exist_ok=True)
+            (work / ".last_cleanup_state.json").write_text(_json.dumps(res, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        return res
+    except Exception as exc:   # noqa: BLE001
+        return {"ran": True, "trigger": "after_update", "error": str(exc)[:120], "freed_mb": round(freed / 1e6, 1), "files": files}
+
+
 def main():
     ap = argparse.ArgumentParser(description="Free disk space (dry run unless --apply)")
     ap.add_argument("--apply", action="store_true", help="actually delete")
+    ap.add_argument("--after-job", action="store_true", help="prune finished render/transient scratch safely")
+    ap.add_argument("--after-update", action="store_true", help="prune stale bytecode, segments, and update scratch after OTA update")
+    ap.add_argument("--project", default="", help="optional project folder path for --after-job")
+    ap.add_argument("--version", default="", help="installed version tag for --after-update")
     ap.add_argument("--days", type=float, default=14, help="delete heavy files of projects untouched this long (default 14)")
     ap.add_argument("--purge-days", type=float, default=90, help="delete whole projects untouched this long (default 90)")
     ap.add_argument("--standins", action="store_true", help="also delete input/standins/")
@@ -139,6 +297,15 @@ def main():
     a = ap.parse_args()
 
     root = Path(a.root)
+    if a.after_update:
+        import json as _json
+        print(_json.dumps(cleanup_after_update(root=root, version=a.version)))
+        return
+    if a.after_job:
+        import json as _json
+        pdir = Path(a.project) if a.project else None
+        print(_json.dumps(cleanup_after_job(root=root, project_dir=pdir)))
+        return
     items = plan_cleanup(root, a.days, a.purge_days, a.standins, a.references, time.time())
     totals: dict = {}
     for label, _, n in items:

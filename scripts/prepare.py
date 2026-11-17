@@ -1444,10 +1444,10 @@ def common_unique_output(name: str) -> Path:
     return unique_job_output(name)
 
 
-def common_job_start() -> float:
-    from common import job_start_epoch
+def common_job_start(identity: str = "") -> float:
+    from common import job_begin, job_start_epoch
 
-    return job_start_epoch()
+    return job_begin(reuse_minutes=30.0, identity=identity) if identity else job_start_epoch()
 
 
 def main() -> None:
@@ -1481,7 +1481,6 @@ def main() -> None:
     args = ap.parse_args()
     if args.fresh:
         os.environ["ZENO_FRESH"] = "1"
-    job_start_epoch = common_job_start()
 
     # Auto git pull once per new job (throttled to 15 min so if zeno.py --inspect just pulled, it doesn't repeat)
     try:
@@ -1511,6 +1510,7 @@ def main() -> None:
     meta, script_lines = parse_script_file(script_path)
     from common import resolve_user_project_name, stamp_job_owner
     project_name = args.project or resolve_user_project_name(meta.get("project_name") or script_path.stem)
+    job_start_epoch = common_job_start(project_name)
     lang = args.lang if args.lang != "auto" else meta.get("language", "auto")
 
     clip_entries = discover_clips(args.clips)
