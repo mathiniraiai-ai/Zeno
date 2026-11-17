@@ -1385,7 +1385,10 @@ class TestScriptIsTheTimeline(unittest.TestCase):
         with self._with_words(ws), mock.patch("common.clip_work_dir", return_value=Path("/nonexistent")), \
              mock.patch("prepare.compute_10ms_rms_envelope", return_value=env), mock.patch.object(Path, "is_file", return_value=True):
             script_order.snap_cuts(plan)
+            second_moves = script_order.snap_cuts(plan)
         self.assertGreaterEqual(plan["segments"][0]["start"], 4.9 - script_order.SNAP_REACH_SEC - 1e-6)
+        self.assertEqual(plan["segments"][0]["start"], 4.9)
+        self.assertEqual(second_moves, 0)
 
     def test_banner_stack_sits_below_the_face_and_moves_with_the_zoom(self):
         from unittest import mock

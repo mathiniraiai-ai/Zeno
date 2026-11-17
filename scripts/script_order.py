@@ -1585,9 +1585,19 @@ def style_report(plan: Dict[str, Any], work_dir: Optional[Path] = None) -> List[
 EDGE_GRAZE_MAX_SEC = 0.08  # minor word-edge graze auto-nudged into adjacent silence; deeper mid-word cuts remain blocked
 
 
+def _snap_target(env: List[Tuple[float, float]], lo: float, hi: float, anchor: float) -> Tuple[float, float]:
+    """Return `(best_t, min_db)` in `[lo, hi]`, picking the `-42 dB` noise-floor frame closest to `anchor`."""
+    from prepare import find_rms_minimum
+
+    floor_cands = [(tt, db) for tt, db in env if lo <= tt <= hi and db <= -42.0]
+    if floor_cands:
+        return min(floor_cands, key=lambda x: (abs(x[0] - anchor), x[1]))
+    return find_rms_minimum(env, lo, hi)
+
+
 def snap_cuts(plan: Dict[str, Any]) -> int:
     """Mechanical: a cut in the gap between two words (or grazing <=0.08s into a word edge) moves to the quietest 10 ms of the adjacent gap."""
-    from prepare import compute_10ms_rms_envelope, find_rms_minimum
+    from prepare import compute_10ms_rms_envelope
 
     moved = 0
     for s in plan.get("segments", []):
@@ -1602,14 +1612,20 @@ def snap_cuts(plan: Dict[str, Any]) -> int:
         dur_clip = max((t for t, _ in env), default=float(ws[-1]["end"]) + 0.5)
         for key in ("start", "end"):
             t = float(s[key])
+            local_cands = [db for tt, db in env if t - 0.02 <= tt <= t + 0.02]
+            local_db = max(local_cands) if local_cands else None
             snapped = False
             for w0, w1 in zip(ws, ws[1:]):
                 a, b = float(w0["end"]), float(w1["start"])
                 if a <= t <= b and b - a >= 0.03:
-                    # only a small nudge: in a long gap (or digital silence) the quietest point can be seconds away, which adds dead air
+                    # Idempotent: a boundary already at the noise floor (<= -42 dB) must stay put rather than drifting across checks.
+                    if local_db is not None and local_db <= -42.0:
+                        snapped = True
+                        break
                     lo, hi = max(a, t - SNAP_REACH_SEC), min(b, t + SNAP_REACH_SEC)
-                    new = round(float(find_rms_minimum(env, lo, hi)[0]), 2)
-                    if new != round(t, 2):
+                    new_t, min_db = _snap_target(env, lo, hi, t)
+                    new = round(float(new_t), 2)
+                    if new != round(t, 2) and (local_db is None or min_db < local_db - 2.0):
                         s[key] = new
                         moved += 1
                     snapped = True
@@ -1630,7 +1646,7 @@ def snap_cuts(plan: Dict[str, Any]) -> int:
                     if prev_end <= wa:
                         hi = max(prev_end, wa - 0.01)
                         lo = max(prev_end, wa - SNAP_REACH_SEC)
-                        new = round(float(find_rms_minimum(env, lo, hi)[0]) if env and hi > lo else hi, 2)
+                        new = round(float(_snap_target(env, lo, hi, t)[0]) if env and hi > lo else hi, 2)
                         if (key == "start" and new < other - 0.05) or (key == "end" and new > other + 0.05):
                             if new != round(t, 2):
                                 s[key] = new
@@ -1641,7 +1657,7 @@ def snap_cuts(plan: Dict[str, Any]) -> int:
                     if wb <= next_start:
                         lo = min(next_start, wb + 0.01)
                         hi = min(next_start, wb + SNAP_REACH_SEC)
-                        new = round(float(find_rms_minimum(env, lo, hi)[0]) if env and hi > lo else lo, 2)
+                        new = round(float(_snap_target(env, lo, hi, t)[0]) if env and hi > lo else lo, 2)
                         if (key == "start" and new < other - 0.05) or (key == "end" and new > other + 0.05):
                             if new != round(t, 2):
                                 s[key] = new
