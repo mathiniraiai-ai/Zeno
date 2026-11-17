@@ -139,12 +139,13 @@ def run(project: Path, *, dry_run: bool = False) -> dict:
             if number > 0 and not checkpoint.get("available"):
                 report["stopped"] = "Prior spending has no verified price; resolve accounting before another API call."
                 break
-            reserve = reserve_cost(system, text, images, policy)
+            sheets_for_call = images if number == 0 else []
+            reserve = reserve_cost(system, text, sheets_for_call, policy)
             spent = checkpoint.get("cost", {}).get("inr", 0)
             if not reserve.get("available") or spent + reserve["inr"] > policy["model_budget_inr"]:
                 report["stopped"] = "Next request's conservative reserve exceeds the remaining model budget."
                 break
-            body = payload(system, text, images, policy)
+            body = payload(system, text, sheets_for_call, policy)
             stage = "direct planning" if number == 0 else "direct correction"
             call_id = uuid.uuid4().hex
             _save(pending, {"call_id": call_id, "started": time.time(), "reserve_inr": reserve["inr"], "stage": stage})

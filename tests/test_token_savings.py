@@ -227,5 +227,79 @@ class TestReportIntegration(unittest.TestCase):
                 self.assertEqual(common.job_start_epoch(), 1010)
 
 
+class TestV1018TokenArrestAndNotionQueue(unittest.TestCase):
+    def test_1m_queue_limit_and_notion_meta_preserved_in_launcher(self):
+        import cost_control, launch_edit, tomllib
+        self.assertEqual(cost_control.settings()["new_chat_context_limit"], 1_000_000)
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "config.toml"
+            p.write_text(
+                '[mcp_servers.notion]\ncommand="npx"\n'
+                '[mcp_servers.meta_ads]\ncommand="npx"\n'
+                '[mcp_servers.hostinger-vps]\ncommand="npx"\n'
+                '[plugins."figma@openai"]\nenabled=true\n'
+            )
+            flags = " ".join(launch_edit.codex_overrides([p]))
+            self.assertNotIn("mcp_servers.notion.enabled=false", flags)
+            self.assertNotIn("mcp_servers.meta_ads.enabled=false", flags)
+            self.assertIn("mcp_servers.hostinger-vps.enabled=false", flags)
+            self.assertIn("plugins.figma@openai.enabled=false", flags)
+        repo_codex = ROOT / ".codex" / "config.toml"
+        self.assertTrue(repo_codex.is_file())
+        parsed_codex = tomllib.loads(repo_codex.read_text(encoding="utf-8"))
+        for k in parsed_codex.get("mcp_servers", {}):
+            self.assertNotIn("notion", k.lower())
+            self.assertNotIn("meta", k.lower())
+
+    def test_claude_and_codex_unified_pricing_and_session_routing(self):
+        import cost_control
+        claude_usage = {
+            "token_precision": "exact",
+            "requests": [{
+                "model": "claude-sonnet-5-5",
+                "input_tokens": 20_000,
+                "cached_input_tokens": 0,
+                "cache_write_input_tokens": 19_998,
+                "ephemeral_1h_input_tokens": 19_998,
+                "output_tokens": 3_000,
+                "context": 20_000,
+            }],
+        }
+        est = token_cost.estimate(claude_usage)
+        self.assertTrue(est["available"])
+        self.assertGreater(est["inr"], 0.0)
+        # Non-Codex session_id in token_telemetry.json must NOT trap detect_agent_usage in a 0-step Codex stub
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = Path(tmp)
+            (proj / "token_telemetry.json").write_text(json.dumps({
+                "job_start_epoch": 10.0,
+                "agent_name": "Claude Code",
+                "agent_session_id": "claude-uuid-1234",
+            }))
+            with patch("token_tracker.detect_agent_usage", return_value={
+                "agent_name": "Claude Code", "agent_model": "claude-sonnet-5-5",
+                "token_precision": "exact", "steps_count": 2,
+                "requests": claude_usage["requests"],
+            }) as det:
+                snap = cost_control.snapshot(proj, until=20.0)
+                self.assertIsNone(det.call_args.kwargs.get("session_id"))
+                self.assertTrue(snap["available"])
+                self.assertEqual(snap["requests"], 2)
+
+    def test_split_breath_pause_threshold_and_compound_line_verify(self):
+        import script_order, verify
+        ws = [{"w": "hello", "start": 0.20, "end": 0.60}, {"w": "there", "start": 0.98, "end": 1.40}]  # 0.38s breath
+        with patch.object(script_order, "_words_of", return_value=ws):
+            # 0.38s natural breath in split_v is allowed (< 0.50s), whereas in single monologue (> 0.25s) it warns
+            self.assertEqual(script_order.tight_report({"segments": [{"id": "L1", "src": "a.mp4", "start": 0.1, "end": 1.5, "layout": "split_v"}]}), [])
+            self.assertEqual(len(script_order.tight_report({"segments": [{"id": "L1", "src": "a.mp4", "start": 0.1, "end": 1.5, "layout": "single"}]})), 1)
+        lines = [{"id": "L9", "tokens": ["hello"]}, {"id": "L10", "tokens": ["there"]}]
+        plan_c = {"segments": [{"id": "L9_L10", "src": "a.mp4", "start": 0.1, "end": 1.5, "note": ""}]}
+        with patch.object(verify, "parse_script_file", return_value=({}, lines)), \
+             patch.object(verify, "clip_work_dir", return_value=Path("/nonexistent")):
+            ok, cov, tot, dups = verify.check_script_coverage(plan_c, script_path=Path(__file__))
+        self.assertEqual((ok, cov, tot, dups), (True, 2, 2, 0))
+
+
 if __name__ == "__main__":
     unittest.main()

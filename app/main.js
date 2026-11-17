@@ -605,8 +605,9 @@ app.whenReady().then(() => {
     if (chatProc) return { ok: false, text: 'Claude is still working on the last message.' };
     const send = (evt) => { try { e.sender.send('zeno:chat', evt); } catch (er) { /* window closed */ } };
     const args = ['-p', String(message), '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits',
-      '--allowedTools', 'Bash(python3:*)', 'Bash(python:*)', 'Bash(.venv/bin/python:*)', 'Bash(.venv/Scripts/python.exe:*)', 'Bash(ls:*)', 'Bash(grep:*)', 'Bash(cat:*)', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'mcp__zeno'];
-    args.push('--strict-mcp-config', '--mcp-config', JSON.stringify({ mcpServers: { [ZENO_MCP_NAME]: { command: pythonFor(ROOT), args: [path.join(ROOT, 'scripts', 'zeno_mcp.py')] } } }));
+      '--setting-sources', 'project,local', '--no-chrome',
+      '--allowedTools', 'Bash(python3:*)', 'Bash(python:*)', 'Bash(.venv/bin/python:*)', 'Bash(.venv/Scripts/python.exe:*)', 'Bash(ls:*)', 'Bash(grep:*)', 'Bash(cat:*)', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'mcp__zeno', 'mcp__claude_ai_Notion', 'mcp__claude_ai_Meta_Ads', 'mcp__claude_ai_Metabase', 'mcp__notion', 'mcp__meta'];
+    args.push('--mcp-config', JSON.stringify({ mcpServers: { [ZENO_MCP_NAME]: { command: pythonFor(ROOT), args: [path.join(ROOT, 'scripts', 'zeno_mcp.py')] } } }));
     const o = opts || {};
     if (/^[\w.\-]+$/.test(String(o.model || ''))) args.push('--model', String(o.model));
     if (['low', 'medium', 'high', 'xhigh', 'max'].includes(String(o.effort || ''))) args.push('--effort', String(o.effort));

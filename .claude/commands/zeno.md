@@ -1,19 +1,18 @@
 ---
-description: Edit one script-led video with Zeno's measured facts and verified plan.
+description: Edit one or a queued batch of script-led videos with Zeno's 1-call planner and verified plan.
 argument-hint: "<footage> <script-tab> --name <Notion name>"
 ---
 # /zeno
 
 User inputs: `$ARGUMENTS`
 
-Follow `AGENTS.md` and `agent/DIRECTOR.md`. Use the supplied inputs without asking again.
+Follow `AGENTS.md` and `agent/DIRECTOR.md`. Queue multiple videos back-to-back in one chat (up to `1M` / `1,000,000` context tokens) with Notion and Meta connectors enabled; read the exact Notion name from Notion when a card/queue is shared, and use supplied inputs without asking again. Each `--inspect` opens an isolated per-video `INR 40` / `24`-request cost window.
 
 ## Procedure
-1. Run `<PY> scripts/zeno.py --inspect <footage> --script <script> --name "<name>" --compact`. If inputs are missing, run `--preflight --compact`, show the results, and ask for them. Never skip preflight.
-2. Read `editing_packet.md` and all clip sheets once. It includes the brief and measurements. Check `scripts/cost_control.py <project>` before planning or corrections; honor a spending stop. For one line's evidence use `scripts/edit_packet.py <project> --line L12`.
-3. Write `script_analysis.md`, every plan segment and necessary `decisions.txt` entries. In the same call run `--check-plan`. Fix actual blockers and review every warning.
-4. Show the concrete plan and obtain Yes/No once unless already explicitly authorized.
-5. Run `<PY> scripts/zeno.py --execute <plan> --square --compact`. Keep the process running through completion. Use supported completion notifications or bounded waits. Full output is saved at the printed log path; read it when warnings/failures need investigation. Never pipe to tail in a way that hides the exit status.
-6. Read verification and review sheets, fix failures, and deliver the videos and Premiere files with the saved token report. README and ledger entries are automatic.
+1. Run `<PY> scripts/zeno.py --inspect <footage> --script <script> --name "<name>" --auto-plan --compact` (if inputs are missing, run `--preflight --compact`, show results, and ask for them; never `--skip-preflight`). `--auto-plan` runs live preflight, inspects/reuses clips, runs Zeno's isolated 1-call subscription planner (`claude -p` or `codex exec`, zero connector/history overhead, typically `20k–55k` tokens), runs `--check-plan`, and prints the Pitch Card.
+2. When `--auto-plan` passes `[PLAN PASS]`, do NOT re-open `editing_packet.md`, `line_map.md`, `facts.md`, `EDIT_RULES.md`, or `clip_sheet_*.jpg` in the outer chat. Open `editing_packet.md` and `clip_sheet_*.jpg` once only if manual planning is required, or run `scripts/edit_packet.py <project> --line L12` for targeted revisions (checking `scripts/cost_control.py <project>` before manual rounds and running `--check-plan` with manual `script_analysis.md` / `plan.edl` / `decisions.txt` updates).
+3. Show the concrete plan Pitch Card and obtain Yes/No once, unless the user explicitly pre-authorized queued rendering across a batch of videos.
+4. Run `<PY> scripts/zeno.py --execute <plan> --square --compact` as one single blocking/completion-notified run — never poll `write_stdin` or progress files in a loop, and never pipe to `tail` in a way that hides exit status. Full diagnostics remain at the printed log path.
+5. `verify.py` checks both 9:16 and 1:1 Square framing and builds a single compact `review_sheet.jpg` automatically — never write custom FFmpeg/Python frame-extraction scripts. Inspect `review_sheet.jpg` once (or on failure), fix failed checks, and deliver the MP4s and Premiere files with the saved per-video token report. README and ledger entries are automatic.
 
-For revisions, record feedback first, then read the saved plan and only affected evidence. Reuse measured footage. Preserve all hard editorial and visual rules while reducing unnecessary reading and model calls.
+For revisions, record feedback verbatim first (`--feedback "<words>" --plan <plan>`), then read the saved plan and only affected line evidence (`edit_packet.py`). Reuse measured footage and preserve every visual rule in `AGENTS.md`.

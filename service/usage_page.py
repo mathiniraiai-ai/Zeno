@@ -42,20 +42,57 @@ USAGE_PAGE = """<!doctype html><html lang="en"><head>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
 <script>
-const PRICES = [  // [text found in the model name, USD per million tokens: input, cached input, output] from Anthropic list prices
-  ['opus-5-5', 4, 0.2, 20], ['opus-5', 5, 0.5, 25], ['opus-4', 5, 0.5, 25],
-  ['sonnet-5', 2, 0.2, 10], ['sonnet-4', 3, 0.3, 15],
-  ['haiku-5', 0.1, 0.01, 0.5], ['haiku-4', 1, 0.1, 5], ['fable', 10, 0.25, 50]];
+const PRICES = [  // [model match, USD per million tokens: input, cached read, cache write, output] from OpenAI and Anthropic list prices
+  ['gpt-6.1-sol', 2, 0.1, 2.5, 10], ['gpt-5-codex', 1.25, 0.125, 1.25, 10], ['gpt-5', 1.25, 0.125, 1.25, 10], ['o3', 2, 0.5, 2, 8],
+  ['opus-5-5', 4, 0.2, 5, 20], ['opus-5', 5, 0.5, 6.25, 25], ['opus-4', 15, 1.5, 18.75, 75],
+  ['sonnet-5', 2, 0.2, 2.5, 10], ['sonnet-4', 3, 0.3, 3.75, 15],
+  ['haiku-5', 0.1, 0.01, 0.125, 0.5], ['haiku-4', 1, 0.1, 1.25, 5], ['fable', 10, 0.25, 12.5, 50]];
+function normModel(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
 function priceFor(model) {
-  const m = String(model || '').toLowerCase().replace(/[^a-z0-9]+/g, '-');
-  for (const p of PRICES) if (m.includes(p[0])) return p;
+  const m = normModel(model);
+  if (!m) return null;
+  for (const p of PRICES) {
+    const k = normModel(p[0]);
+    if (k.length <= 2 ? (m === k || m.startsWith(k + '-') || m.endsWith('-' + k) || m.includes('-' + k + '-')) : m.includes(k)) return p;
+  }
   return null;
 }
 function n(v) { return Number(v || 0); }
+function cacheWriteBreakdown(r) {
+  const jr = (r && r.job_report) || {};
+  const acc = jr.accounting || {};
+  const ag = jr.agent || {};
+  const cw = Math.max(0, n(acc.cache_write_tokens ?? acc.agent_cache_write_tokens ?? ag.cache_write_tokens ?? (r && (r.agent_cache_write_tokens ?? r.cache_write_tokens))));
+  const e1h = Math.max(0, n(acc.ephemeral_1h_input_tokens ?? ag.ephemeral_1h_input_tokens ?? (r && r.ephemeral_1h_input_tokens)));
+  const e5m = Math.max(0, n(acc.ephemeral_5m_input_tokens ?? ag.ephemeral_5m_input_tokens));
+  const total = Math.max(cw, e5m + e1h);
+  const w1h = Math.min(total, e1h);
+  return {total, w5m: total - w1h, w1h};
+}
+function cacheWriteTokens(r) { return cacheWriteBreakdown(r).total; }
+function agentCombinedTotal(r) {
+  const acc = ((r && r.job_report) || {}).accounting || {};
+  if (acc.agent_total_including_cache != null && n(acc.agent_total_including_cache) > 0) return n(acc.agent_total_including_cache);
+  const cw = cacheWriteTokens(r);
+  const aIn = n(r.agent_in_tokens), aCached = n(r.agent_cached_tokens), aOut = n(r.agent_out_tokens), aTot = n(r.agent_total_tokens);
+  const writeSeparate = cw > 0 && (aIn < cw || (aTot > 0 && aTot === aIn + cw + aOut));
+  return Math.max(aIn + (writeSeparate ? cw : 0) + aCached + aOut, aTot);
+}
 function costUsd(r) {
-  const p = priceFor(r.agent_model);
+  const p = priceFor(r && r.agent_model);
   if (!p) return null;
-  return (n(r.agent_in_tokens) * p[1] + n(r.agent_cached_tokens) * p[2] + n(r.agent_out_tokens) * p[3]) / 1e6;
+  const aIn = n(r.agent_in_tokens), aCached = n(r.agent_cached_tokens), aOut = n(r.agent_out_tokens), aTot = n(r.agent_total_tokens);
+  const {total: cw, w5m, w1h} = cacheWriteBreakdown(r);
+  if (cw > 0) {
+    const acc = ((r && r.job_report) || {}).accounting || {};
+    const totIncl = n(acc.agent_total_including_cache);
+    const writeSeparate = aIn < cw || (totIncl > 0 && totIncl === aIn + cw + aCached + aOut) || (aTot > 0 && aTot === aIn + cw + aOut);
+    const freshIn = writeSeparate ? aIn : Math.max(0, aIn - cw);
+    return (freshIn * p[1] + aCached * p[2] + w5m * p[3] + w1h * (p[1] * 2) + aOut * p[4]) / 1e6;
+  }
+  return (aIn * p[1] + aCached * p[2] + aOut * p[4]) / 1e6;
 }
 function who(r) { return (r.user_email || r.editor_name || 'unknown').toLowerCase(); }
 function inPeriod(r, days, now) { return !days || (r.created_at >= now - days * 86400); }
@@ -66,16 +103,18 @@ function matches(r, q) {
 }
 function aggregate(runs) {
   const users = new Map();
-  const total = {runs: 0, seconds: 0, ain: 0, cached: 0, aout: 0, atotal: 0, gin: 0, gout: 0, gtotal: 0, usd: 0, unpriced: 0, editors: 0};
+  const total = {runs: 0, seconds: 0, ain: 0, cached: 0, cwrite: 0, aout: 0, atotal: 0, acombined: 0, gin: 0, gout: 0, gtotal: 0, usd: 0, unpriced: 0, editors: 0};
   for (const r of runs) {
     const k = who(r);
     if (!users.has(k)) users.set(k, {key: k, name: r.editor_name || k, email: (r.user_email || '').toLowerCase(), agents: new Set(), models: new Set(),
-      runs: 0, seconds: 0, ain: 0, cached: 0, aout: 0, atotal: 0, gin: 0, gout: 0, gtotal: 0, usd: 0, unpriced: 0, last: 0});
+      runs: 0, seconds: 0, ain: 0, cached: 0, cwrite: 0, aout: 0, atotal: 0, acombined: 0, gin: 0, gout: 0, gtotal: 0, usd: 0, unpriced: 0, last: 0});
     const u = users.get(k);
     const c = costUsd(r);
+    const cw = cacheWriteTokens(r);
+    const comb = agentCombinedTotal(r);
     for (const t of [u, total]) {
       t.runs += 1; t.seconds += n(r.video_seconds); t.ain += n(r.agent_in_tokens); t.cached += n(r.agent_cached_tokens);
-      t.aout += n(r.agent_out_tokens); t.atotal += n(r.agent_total_tokens);
+      t.cwrite += cw; t.aout += n(r.agent_out_tokens); t.atotal += n(r.agent_total_tokens); t.acombined += comb;
       t.gin += n(r.transcribe_in_tokens); t.gout += n(r.transcribe_out_tokens); t.gtotal += n(r.transcribe_total_tokens);
       if (c === null) t.unpriced += 1; else t.usd += c;
     }
@@ -83,7 +122,7 @@ function aggregate(runs) {
     u.last = Math.max(u.last, n(r.created_at));
   }
   total.editors = users.size;
-  return {users: [...users.values()].sort((a, b) => b.atotal - a.atotal), total};
+  return {users: [...users.values()].sort((a, b) => b.acombined - a.acombined || b.atotal - a.atotal), total};
 }
 /*__DOM__*/
 const {useState, useEffect, useRef} = React;
@@ -94,12 +133,12 @@ const fmtDate = t => t ? new Date(t * 1000).toISOString().slice(0, 16).replace('
 const inr = (usd, rate) => '₹' + Math.round(usd * rate).toLocaleString();
 
 function csvOf(runs) {
-  const head = ['when', 'editor', 'email', 'project', 'language', 'agent', 'model', 'clips', 'video_seconds', 'agent_in', 'agent_cached', 'agent_out',
-    'agent_total', 'gemini_in', 'gemini_out', 'gemini_total', 'est_usd'];
+  const head = ['when', 'editor', 'email', 'project', 'language', 'agent', 'model', 'clips', 'video_seconds', 'agent_in', 'agent_cached_read',
+    'agent_cache_write', 'agent_out', 'agent_total', 'agent_combined_total', 'gemini_in', 'gemini_out', 'gemini_total', 'est_usd'];
   const q = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
   return [head.join(',')].concat(runs.map(r => [fmtDate(r.created_at), r.editor_name, r.user_email, r.project, r.language, r.agent_name, r.agent_model,
-    r.clips_count, r.video_seconds, r.agent_in_tokens, r.agent_cached_tokens, r.agent_out_tokens, r.agent_total_tokens,
-    r.transcribe_in_tokens, r.transcribe_out_tokens, r.transcribe_total_tokens, (costUsd(r) ?? '')].map(q).join(','))).join('\\n');
+    r.clips_count, r.video_seconds, r.agent_in_tokens, r.agent_cached_tokens, cacheWriteTokens(r), r.agent_out_tokens, r.agent_total_tokens,
+    agentCombinedTotal(r), r.transcribe_in_tokens, r.transcribe_out_tokens, r.transcribe_total_tokens, (costUsd(r) ?? '')].map(q).join(','))).join('\\n');
 }
 
 function Tags({items}) { return h('span', null, [...items].map(x => h('span', {className: 'tag', key: x}, x))); }
@@ -161,28 +200,30 @@ function Dashboard({data, days, setDays, q, setQ, rate, setRate, showAll, setSho
         }}, 'Download CSV')),
       h('div', {className: 'stats'},
         stat(fmtNum(t.editors), 'editors active'), stat(fmtNum(t.runs), 'videos edited'), stat((t.seconds / 60).toFixed(1), 'video minutes'),
-        stat(fmtNum(t.ain) + ' / ' + fmtNum(t.cached) + ' / ' + fmtNum(t.aout), 'agent tokens: in / cached / out'),
+        stat(fmtNum(t.ain) + ' / ' + fmtNum(t.cached) + ' / ' + fmtNum(t.aout), 'agent tokens: in / cached read / out'),
+        stat(fmtNum(t.acombined), 'combined agent total (incl. cache)'),
         stat(fmtNum(t.gin) + ' / ' + fmtNum(t.gout), 'Gemini tokens: in / out'),
         stat(inr(t.usd, rate) + star, 'estimated agent cost'))),
     h('div', {className: 'card'}, h('h1', null, 'By editor'),
       h('div', {className: 'scroll'}, h('table', null,
         h('thead', null, h('tr', null, h(Th, null, 'Editor'), h(Th, null, 'Email'), h(Th, null, 'Coding agent'), h(Th, null, 'Model'),
-          h(Th, {right: true}, 'Videos'), h(Th, {right: true}, 'Minutes'), h(Th, {right: true}, 'Agent in'), h(Th, {right: true}, 'Cached (all steps)'),
-          h(Th, {right: true}, 'Agent out'), h(Th, {right: true}, 'Agent total'), h(Th, {right: true}, 'Gemini in'), h(Th, {right: true}, 'Gemini out'),
+          h(Th, {right: true}, 'Videos'), h(Th, {right: true}, 'Minutes'), h(Th, {right: true}, 'Input'), h(Th, {right: true}, 'Cached read'),
+          h(Th, {right: true}, 'Output'), h(Th, {right: true}, 'Combined total (incl. cache)'), h(Th, {right: true}, 'Gemini in'), h(Th, {right: true}, 'Gemini out'),
           h(Th, {right: true}, 'Gemini total'), h(Th, {right: true}, 'Est. cost'), h(Th, null, 'Last run'))),
         h('tbody', null,
           users.map(u => h('tr', {key: u.key},
             h('td', null, h('b', null, u.name)), h('td', {className: 'mail'}, u.email),
             h('td', null, h(Tags, {items: u.agents})), h('td', null, h(Tags, {items: u.models})),
             h('td', {className: 'n'}, fmtNum(u.runs)), h('td', {className: 'n'}, (u.seconds / 60).toFixed(1)),
-            h('td', {className: 'n'}, fmtNum(u.ain)), h('td', {className: 'n muted'}, fmtNum(u.cached)), h('td', {className: 'n'}, fmtNum(u.aout)),
-            h('td', {className: 'n'}, h('b', null, fmtNum(u.atotal))),
+            h('td', {className: 'n', title: u.cwrite ? ('Includes ' + fmtNum(u.cwrite) + ' cache write tokens') : ''}, fmtNum(u.ain)),
+            h('td', {className: 'n'}, fmtNum(u.cached)), h('td', {className: 'n'}, fmtNum(u.aout)),
+            h('td', {className: 'n', title: 'Uncached in + out: ' + fmtNum(u.atotal)}, h('b', null, fmtNum(u.acombined))),
             h('td', {className: 'n'}, fmtNum(u.gin)), h('td', {className: 'n'}, fmtNum(u.gout)), h('td', {className: 'n'}, h('b', null, fmtNum(u.gtotal))),
             h('td', {className: 'n'}, (u.usd || !u.unpriced) ? inr(u.usd, rate) + (u.unpriced ? ' *' : '') : '–'),
             h('td', {className: 'muted'}, fmtDate(u.last)))),
           users.length ? h('tr', {className: 'total'}, h('td', null, 'All editors'), h('td', null), h('td', null), h('td', null),
             h('td', {className: 'n'}, fmtNum(t.runs)), h('td', {className: 'n'}, (t.seconds / 60).toFixed(1)),
-            h('td', {className: 'n'}, fmtNum(t.ain)), h('td', {className: 'n'}, fmtNum(t.cached)), h('td', {className: 'n'}, fmtNum(t.aout)), h('td', {className: 'n'}, fmtNum(t.atotal)),
+            h('td', {className: 'n'}, fmtNum(t.ain)), h('td', {className: 'n'}, fmtNum(t.cached)), h('td', {className: 'n'}, fmtNum(t.aout)), h('td', {className: 'n'}, fmtNum(t.acombined)),
             h('td', {className: 'n'}, fmtNum(t.gin)), h('td', {className: 'n'}, fmtNum(t.gout)), h('td', {className: 'n'}, fmtNum(t.gtotal)),
             h('td', {className: 'n'}, inr(t.usd, rate) + star), h('td', null))
             : h('tr', null, h('td', {colSpan: 15}, 'No runs in this period')))))),
@@ -193,15 +234,18 @@ function Dashboard({data, days, setDays, q, setQ, rate, setRate, showAll, setSho
       h('div', {className: 'scroll'}, h('table', null,
         h('thead', null, h('tr', null, h(Th, null, 'When'), h(Th, null, 'Editor'), h(Th, null, 'Email'), h(Th, null, 'Project'), h(Th, null, 'Lang'),
           h(Th, null, 'Coding agent'), h(Th, null, 'Model'), h(Th, {right: true}, 'Clips'), h(Th, {right: true}, 'Seconds'),
-          h(Th, {right: true}, 'Agent in'), h(Th, {right: true}, 'Cached (all steps)'), h(Th, {right: true}, 'Agent out'), h(Th, {right: true}, 'Agent total'),
+          h(Th, {right: true}, 'Input'), h(Th, {right: true}, 'Cached read'), h(Th, {right: true}, 'Output'), h(Th, {right: true}, 'Combined total (incl. cache)'),
           h(Th, {right: true}, 'Gemini in'), h(Th, {right: true}, 'Gemini out'), h(Th, {right: true}, 'Gemini total'), h(Th, {right: true}, 'Est. cost'),
           h(Th, null, 'Video type'), h(Th, null, 'Plan checks'), h(Th, null, 'Failures'), h(Th, {right: true}, 'Cleaned MB'))),
-        h('tbody', null, shown.length ? shown.map(r => { const c = costUsd(r); return h('tr', {key: r.id},
+        h('tbody', null, shown.length ? shown.map(r => {
+          const c = costUsd(r), cw = cacheWriteTokens(r), comb = agentCombinedTotal(r), mixed = ((r.job_report || {}).agent || {}).mixed_with_development;
+          return h('tr', {key: r.id},
           h('td', {className: 'muted'}, fmtDate(r.created_at)), h('td', null, r.editor_name), h('td', {className: 'mail'}, r.user_email), h('td', null, r.project),
           h('td', null, r.language), h('td', null, r.agent_name), h('td', null, r.agent_model),
           h('td', {className: 'n'}, fmtNum(r.clips_count)), h('td', {className: 'n'}, Math.round(n(r.video_seconds))),
-          h('td', {className: 'n'}, fmtNum(r.agent_in_tokens)), h('td', {className: 'n muted'}, fmtNum(r.agent_cached_tokens)), h('td', {className: 'n'}, fmtNum(r.agent_out_tokens)),
-          h('td', {className: 'n', title: ((r.job_report || {}).agent || {}).mixed_with_development ? 'This window also holds work on Zeno code, so it is not the cost of one edit' : ''}, h('b', null, fmtNum(r.agent_total_tokens)), ((r.job_report || {}).agent || {}).mixed_with_development ? ' (mixed with dev work)' : ''),
+          h('td', {className: 'n', title: cw ? ('Uncached input includes ' + fmtNum(cw) + ' cache write tokens') : ''}, fmtNum(r.agent_in_tokens)),
+          h('td', {className: 'n'}, fmtNum(r.agent_cached_tokens)), h('td', {className: 'n'}, fmtNum(r.agent_out_tokens)),
+          h('td', {className: 'n', title: 'Uncached in + out: ' + fmtNum(r.agent_total_tokens) + (cw ? (' · Cache write: ' + fmtNum(cw)) : '') + (mixed ? ' · This window also holds work on Zeno code, so it is not the cost of one edit' : '')}, h('b', null, fmtNum(comb)), mixed ? ' (mixed with dev work)' : ''),
           h('td', {className: 'n'}, fmtNum(r.transcribe_in_tokens)), h('td', {className: 'n'}, fmtNum(r.transcribe_out_tokens)), h('td', {className: 'n'}, fmtNum(r.transcribe_total_tokens)),
           h('td', {className: 'n'}, c === null ? '–' : inr(c, rate)),
           h('td', null, (r.job_report || {}).format || ''),
@@ -211,7 +255,7 @@ function Dashboard({data, days, setDays, q, setQ, rate, setRate, showAll, setSho
           : h('tr', null, h('td', {colSpan: 21}, 'No runs in this period')))))),
     h('p', {className: 'foot'},
       'Numbers are what each editor\\'s Zeno reported after a job (agent tokens from the coding agent\\'s log for that edit, Gemini tokens from transcription). ' +
-      'Cost is an estimate from list prices per million tokens (' + PRICES.map(p => p[0] + ' $' + p[1] + '/$' + p[2] + '/$' + p[3]).join(', ') + ' for in / cached / out). ' +
+      'Cost is an estimate from list prices per million tokens (' + PRICES.map(p => p[0] + ' $' + p[1] + '/$' + p[2] + '/$' + p[3] + '/$' + p[4]).join(', ') + ' for in / cached read / cache write / out). ' +
       (t.unpriced ? '* ' + t.unpriced + ' run(s) use a model with no price here (for example Gemini or Antigravity models) and are left out of the cost. ' : '') +
       'Tokens counted per job are an approximation of what the provider billed.'));
 }

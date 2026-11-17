@@ -46,14 +46,16 @@ def window_usage(items: Iterable[dict], since: float, until: float, root: Path) 
     requests = []
     last_context = 0
     for item in items:
-        if epoch(item.get("timestamp", "")) > until:
-            break
         payload = item.get("payload") or {}
         kind = item.get("type")
         if kind == "session_meta":
             session = str(payload.get("id") or "")
             cwd = payload.get("cwd")
             ours = bool(cwd and Path(cwd).resolve().is_relative_to(root.resolve()))
+            continue
+        stamp = epoch(item.get("timestamp", ""))
+        if stamp > until:
+            continue
         if kind == "turn_context":
             model = payload.get("model") or model
             continue
@@ -64,16 +66,17 @@ def window_usage(items: Iterable[dict], since: float, until: float, root: Path) 
         if not isinstance(total, dict):
             continue
         current = {k: int(total.get(k) or 0) for k in FIELDS}
-        stamp = epoch(item.get("timestamp", ""))
-        if stamp > until:
-            break
-        last = info.get("last_token_usage") or {}
-        last_context = int(last.get("input_tokens") or 0)
+        last_raw = info.get("last_token_usage")
+        last = last_raw if isinstance(last_raw, dict) else {}
         # Cumulative deltas suppress duplicate events and count every request once.
         if previous is None or any(current[k] < previous[k] for k in FIELDS):
-            delta = {k: int(last.get(k) or 0) for k in FIELDS}
+            if previous is None and not last_raw and any(current.values()):
+                delta = dict(current)
+            else:
+                delta = {k: int(last.get(k) or 0) for k in FIELDS}
         else:
             delta = {k: current[k] - previous[k] for k in FIELDS}
+        last_context = int(last.get("input_tokens") or delta["input_tokens"] or 0)
         previous = current
         if since <= stamp <= until and any(delta.values()):
             requests.append({**delta, "model": model, "context": last_context, "timestamp": stamp})
@@ -118,4 +121,7 @@ def detect(since: float, until: float | None = None, root: Path | None = None,
             continue
     if len(candidates) == 1:
         return candidates[0]
+    active = [c for c in candidates if c.get("steps_count", 0) > 0]
+    if len(active) == 1:
+        return active[0]
     return None  # simultaneous chats are ambiguous, never bill the newest by guess

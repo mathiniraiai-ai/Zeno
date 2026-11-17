@@ -16,7 +16,7 @@ import token_cost
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULTS = {"schema": 1, "model_budget_inr": 40.0, "chat_request_limit": 24,
-            "new_chat_context_limit": 100000, "direct_max_calls": 3,
+            "new_chat_context_limit": 1000000, "direct_max_calls": 3,
             "direct_max_output_tokens": 8000, "direct_max_input_bytes": 100000,
             "direct_image_token_reserve": 10000, "direct_reasoning_effort": "medium"}
 
@@ -54,37 +54,101 @@ def rows(path: Path) -> list[dict]:
 
 
 def usage_from_requests(requests: list[dict]) -> dict:
-    inp = sum(r["input_tokens"] for r in requests)
-    cached = sum(r.get("cached_input_tokens", 0) for r in requests)
-    out = sum(r["output_tokens"] for r in requests)
+    inp = sum(int(r.get("input_tokens") or 0) for r in requests)
+    cached = sum(int(r.get("cached_input_tokens") or 0) for r in requests)
+    uncached = max(0, inp - cached)
+    out = sum(int(r.get("output_tokens") or 0) for r in requests)
     return {"token_precision": "exact" if requests else "unavailable", "requests": requests,
-            "input_tokens": inp - cached, "cached_tokens": cached, "output_tokens": out,
-            "cache_write_tokens": sum(r.get("cache_write_input_tokens", 0) for r in requests),
-            "reasoning_tokens": sum(r.get("reasoning_output_tokens", 0) for r in requests),
-            "total_tokens": inp - cached + out, "total_tokens_including_cache": inp + out,
-            "steps_count": len(requests)}
+            "input_tokens": uncached, "cached_tokens": cached, "output_tokens": out,
+            "cache_write_tokens": sum(int(r.get("cache_write_input_tokens") or 0) for r in requests),
+            "reasoning_tokens": sum(int(r.get("reasoning_output_tokens") or 0) for r in requests),
+            "total_tokens": uncached + out, "total_tokens_including_cache": uncached + cached + out,
+            "context_start": int(requests[0].get("context", 0) or 0) if requests else 0,
+            "context_end": int(requests[-1].get("context", 0) or 0) if requests else 0,
+            "steps_count": len(requests), "turns": len(requests)}
+
+
+def _is_usage_known(r: dict) -> bool:
+    if "usage_known" in r:
+        return bool(r.get("usage_known"))
+    return isinstance(r.get("input_tokens"), int) and r.get("input_tokens", -1) >= 0
+
+
+def _normalize_direct_row(r: dict) -> dict:
+    inp = int(r.get("input_tokens") or 0)
+    cached = int(r.get("cached_input_tokens", r.get("cache_read_input_tokens", 0)) or 0)
+    write = int(r.get("cache_write_input_tokens", r.get("cache_creation_input_tokens", 0)) or 0)
+    return {
+        **r,
+        "model": str(r.get("model") or "unknown"),
+        "input_tokens": inp,
+        "cached_input_tokens": cached,
+        "cache_write_input_tokens": write,
+        "ephemeral_1h_input_tokens": int(r.get("ephemeral_1h_input_tokens") or 0),
+        "output_tokens": int(r.get("output_tokens") or 0),
+        "reasoning_output_tokens": int(r.get("reasoning_output_tokens", r.get("thinking_tokens", 0)) or 0),
+        "context": int(r.get("context", inp) or 0),
+    }
 
 
 def direct_requests(project: Path, since: float, until: float) -> list[dict]:
     unique = {}
-    for r in rows(project / "direct_usage.jsonl"):
-        if since <= r.get("timestamp", 0) <= until and r.get("usage_known"):
-            unique[r["call_id"]] = r
+    for idx, r in enumerate(rows(project / "direct_usage.jsonl")):
+        if since <= r.get("timestamp", 0) <= until and _is_usage_known(r):
+            key = r.get("call_id") or f"row-{idx}"
+            unique[key] = _normalize_direct_row(r)
     return list(unique.values())
+
+
+def _direct_agent_label(direct: list[dict]) -> str:
+    for r in direct:
+        explicit = str(r.get("agent_name") or "").strip()
+        if explicit:
+            return explicit
+    providers = {str(r.get("provider") or "").strip().lower() for r in direct if r.get("provider")}
+    models = [str(r.get("model") or "").strip().lower() for r in direct]
+    if "claude" in providers or any(
+        m.startswith("claude") or m in {"sonnet", "opus", "haiku"} or any(k in m for k in ("sonnet", "opus", "haiku", "fable"))
+        for m in models
+    ):
+        return "Claude Direct"
+    if "codex" in providers or any("codex" in m for m in models):
+        return "Codex Direct"
+    if "openai" in providers or any(m.startswith("gpt-6.1-sol") and str(r.get("stage") or "").startswith("direct ") for m, r in zip(models, direct)):
+        return "OpenAI Direct"
+    return "Codex Direct"
 
 
 def combine(agent: dict, project: Path, since: float, until: float) -> dict:
     direct = direct_requests(project, since, until)
     if not direct:
         return agent
-    if agent.get("token_precision") != "exact" and agent.get("total_tokens_including_cache", 0):
+    direct_sids = {str(r["session_id"]) for r in direct if r.get("session_id") and r.get("session_id") not in ("local", "unknown")}
+    same_subprocess_session = bool(agent.get("session_id")) and str(agent.get("session_id")) in direct_sids
+    if not same_subprocess_session and agent.get("token_precision") != "exact" and (
+        agent.get("total_tokens_including_cache", 0) or agent.get("total_tokens", 0)
+    ):
         # Never overwrite unmeasured host usage with a deceptively exact direct-only total.
         return {**agent, "direct_usage_unmerged": True}
-    requests = list(agent.get("requests") or []) + direct
+    host_reqs = [] if same_subprocess_session else list(agent.get("requests") or [])
+    host_name = str(agent.get("agent_name") or "").strip()
+    no_host = same_subprocess_session or (not host_reqs and host_name.lower() in {"", "unknown", "local", "cli", "local / cli"})
+    requests = sorted(host_reqs + direct, key=lambda r: r.get("timestamp", 0))
     combined = {**agent, **usage_from_requests(requests)}
-    combined["agent_name"] = (agent.get("agent_name", "Host") + " + OpenAI direct")
-    combined["agent_model"] = ", ".join(sorted({r["model"] for r in requests}))
-    combined["host_usage_unknown"] = agent.get("token_precision") != "exact"
+    direct_label = _direct_agent_label(direct)
+    if no_host:
+        combined["agent_name"] = direct_label
+        combined["host_usage_unknown"] = False
+        if combined.get("session_id") in (None, "", "local", "unknown"):
+            combined["session_id"] = next(
+                (str(r.get("session_id") or r.get("call_id")) for r in direct if r.get("session_id") or r.get("call_id")),
+                "direct",
+            )
+    else:
+        base_host = host_name or "Host"
+        combined["agent_name"] = direct_label if base_host == direct_label else f"{base_host} + {direct_label}"
+        combined["host_usage_unknown"] = agent.get("token_precision") != "exact"
+    combined["agent_model"] = ", ".join(sorted({r["model"] for r in requests if r.get("model")})) or "unknown"
     return combined
 
 
@@ -114,14 +178,15 @@ def snapshot(project: Path, until: float | None = None) -> dict:
     if not since:
         return {"available": False, "blocked": True, "reason": "No edit start recorded; run --inspect first."}
     end = until or meta.get("job_end_epoch") or time.time()
+    codex_sid = meta.get("agent_session_id") if str(meta.get("agent_name", "")).startswith("Codex") else None
     agent = detect_agent_usage(since_epoch=since, until_epoch=end,
-                               session_id=meta.get("agent_session_id"))
+                               session_id=codex_sid)
     agent = combine(agent, project, since, end)
     cost = token_cost.estimate(agent)
     policy = settings()
     count = agent.get("steps_count", 0)
     unknown_calls = [r for r in rows(project / "direct_usage.jsonl")
-                     if since <= r.get("timestamp", 0) <= end and not r.get("usage_known")]
+                     if since <= r.get("timestamp", 0) <= end and not _is_usage_known(r)]
     reached = cost.get("available") and cost["inr"] >= policy["model_budget_inr"]
     pending = (project / "direct_call_pending.json").exists()
     blocked = bool(reached or count >= policy["chat_request_limit"] or unknown_calls or pending)

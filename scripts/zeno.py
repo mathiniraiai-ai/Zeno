@@ -252,8 +252,8 @@ def _archive_blocked(stage: str, reason: str, script_arg: str = "", inputs: Opti
         pass
 
 
-SESSION_LIMIT = 100_000     # conservative default; config/cost_controls.json owns the normal limit
-SESSION_WARN = 150_000
+SESSION_LIMIT = 1_000_000   # multi-video queued chats up to 1M tokens; config/cost_controls.json owns policy
+SESSION_WARN = 750_000
 
 
 def session_gate(stage: str, block: bool, project_hint: str = "", script_arg: str = "", inputs: Optional[List[str]] = None) -> None:
@@ -711,15 +711,93 @@ def finish_job_folder(plan_path: pathlib.Path) -> Optional[pathlib.Path]:
     return folder
 
 
+def _venv_py_cmd() -> str:
+    return r".venv\Scripts\python.exe" if common.IS_WIN else ".venv/bin/python"
+
+
 def print_next_step(plan_path: pathlib.Path) -> None:
     rel = plan_path.relative_to(ROOT)
+    py_cmd = _venv_py_cmd()
     print("\n[NEXT STEP] Zeno has measured the footage and decided nothing. The Director now:")
     d = plan_path.parent.relative_to(ROOT)
     print(f"  1. reads {d}/editing_packet.md and ALL clip_sheet_*.jpg in ONE batch; detailed files stay on disk")
     print(f"  2. writes every segment of {rel}")
-    print(f"  3. runs: python3 scripts/zeno.py --check-plan {rel}")
+    print(f"  3. runs: {py_cmd} scripts/zeno.py --check-plan {rel} --compact")
     print("  4. asks the user Yes/No once, then runs:")
-    print(f"     python3 scripts/zeno.py --execute {rel} --square")
+    print(f"     {py_cmd} scripts/zeno.py --execute {rel} --square --compact")
+
+
+def run_auto_plan(plan_path: pathlib.Path, planner: str = "auto") -> int:
+    """Run Zeno's isolated 1-call planner on `plan_path.parent`, verify `--check-plan`, and print the pitch card."""
+    import cost_control
+    import direct_mode
+
+    plan_path = plan_path.resolve()
+    work_dir = plan_path.parent
+    rel = plan_path.relative_to(ROOT) if str(plan_path).startswith(str(ROOT)) else plan_path
+    py_cmd = _venv_py_cmd()
+
+    try:
+        if planner == "openai":
+            import sol_direct
+            used_provider = "openai"
+            r = sol_direct.run(work_dir, dry_run=False)
+        else:
+            used_provider = direct_mode.resolve_provider(planner)
+            if used_provider == "codex":
+                r = direct_mode.run_codex(work_dir)
+            else:
+                r = direct_mode.run(work_dir)
+    except Exception as exc:
+        print(f"[BLOCKED] Isolated planner could not run ({planner}): {exc}", flush=True)
+        return 2
+
+    used_model = r.get("model", used_provider)
+    n_calls = len(r.get("calls") or [])
+    tot = (r.get("tokens") or {}).get("total", 0)
+    secs = r.get("seconds") or round(max(0.0, float(r.get("ended", 0)) - float(r.get("started", 0))), 1)
+
+    if not r.get("passed"):
+        reason = str(r.get("error") or r.get("stopped") or "plan check did not pass")
+        print(f"[DIRECT] Auto-plan stopped ({used_provider}/{used_model}, {n_calls} call(s)): {reason}", flush=True)
+        print(f"[BLOCKED] Isolated planner did not pass --check-plan: {reason}", flush=True)
+        cost_control.print_checkpoint(work_dir)
+        try:
+            import job_archive
+            job_archive.snapshot_plan(plan_path, "check", f"auto-plan blocked: {reason}"[:1500])
+            job_archive.event(work_dir, "check", result="blocked", note=f"auto-plan ({used_provider}): {reason}"[:1500])
+            job_archive.send_in_background(plan_path, "checking")
+        except Exception:
+            pass
+        return 2
+
+    tok_note = f", {tot:,} tokens" if tot else ""
+    print(f"[DIRECT] Planned via {used_provider} ({used_model}) in {n_calls} call(s){tok_note} ({secs}s)", flush=True)
+
+    # build_editorial_pitch_card runs order_gate once and prints any [VOICE] / [TIGHT] / [STYLE] lines.
+    pitch = build_editorial_pitch_card(work_dir, plan_path)
+    if "CRITICAL: [BLOCKED]" in pitch or "CRITICAL: [ORDER BLOCKED]" in pitch:
+        msg = order_gate(load_edl(plan_path), plan_path)
+        print(msg or "[BLOCKED] Plan check failed after auto-plan.", flush=True)
+        cost_control.print_checkpoint(work_dir)
+        return 2
+
+    print("[PLAN PASS] Every line present, once, in script order; no cut inside a word; voices match.", flush=True)
+    print(pitch, flush=True)
+    notes = " ".join(str(r.get("notes") or "").split())
+    if notes:
+        print(f"[REVIEW] Director notes: {notes[:260]}{'...' if len(notes) > 260 else ''}", flush=True)
+    session_gate("check", block=False, project_hint=str(rel))
+    cost_control.print_checkpoint(work_dir)
+    try:
+        import job_archive
+        job_archive.snapshot_plan(plan_path, "check", "PLAN PASS")
+        job_archive.event(work_dir, "check", result="passed", note=f"auto-plan ({used_provider}) PLAN PASS")
+        job_archive.send_in_background(plan_path, "checking")
+    except Exception:
+        pass
+    print(f"[NEXT STEP] Plan verified. Ask the user Yes/No once, then run: {py_cmd} scripts/zeno.py --execute {rel} --square --compact", flush=True)
+    return 0
 
 
 def run_execute(
@@ -973,6 +1051,17 @@ def main() -> None:
     ap.add_argument("--style", default="", help="Style this job follows (a folder under styles/, for example micronarrative); written into the plan so the job counts toward that style")
     ap.add_argument("--fresh", action="store_true", help="Rebuild every cached transcript and alignment for these clips (rarely needed: caches refresh themselves when the code changes)")
     ap.add_argument("--skip-preflight", action="store_true", help="Development only: skip the pre-job gate. Agents must never use this.")
+    ap.add_argument(
+        "--auto-plan",
+        action="store_true",
+        help="Run Zeno's isolated 1-call subscription planner immediately after inspect (or on an existing work/<project>) and run --check-plan",
+    )
+    ap.add_argument(
+        "--planner",
+        choices=("auto", "claude", "codex", "openai"),
+        default="auto",
+        help="Isolated planner provider for --auto-plan (default: auto)",
+    )
     ap.add_argument("--yes", "-y", action="store_true", help="Auto-confirm the Stage 3 Yes/No gate in standalone mode")
     args = ap.parse_args()
     if args.fresh:
@@ -982,7 +1071,7 @@ def main() -> None:
         import auto_updater
         res = auto_updater.remove_daily_scheduler()
         print("  [Auto-Update] Daily schedule removed. Updates now come from the Zeno app popup.")
-        if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.inputs:
+        if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.auto_plan and not args.inputs:
             sys.exit(0)
 
     if args.update:
@@ -1003,7 +1092,7 @@ def main() -> None:
             print(f"  [ZENO CLOUD] Signed in as: {who} (source={info.get('source')}) -> {info.get('cloud_url')}")
         else:
             print("  [ZENO CLOUD] Not signed in. Run: python3 scripts/zeno.py --login")
-        if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.inputs:
+        if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.auto_plan and not args.inputs:
             sys.exit(0)
 
     if args.sync_learnings:
@@ -1012,7 +1101,7 @@ def main() -> None:
         print(f"  [BRAIN MEMORY SYNC] {res.get('message')}")
         import format_library
         print(f"  [FORMAT LIBRARY SYNC] {format_library.sync_team()['message']}")
-        if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.inputs:
+        if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.auto_plan and not args.inputs:
             sys.exit(0)
 
     if args.remember:
@@ -1023,14 +1112,14 @@ def main() -> None:
             brain_memory.sync_brain_memory_with_cloud("micronarrative")
         except Exception:
             pass
-        if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.inputs:
+        if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.auto_plan and not args.inputs:
             sys.exit(0)
 
     if args.list_memory:
         import brain_memory
         for line in brain_memory.format_brain_memory_for_brief("micronarrative"):
             print(line)
-        if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.inputs:
+        if not args.inspect and not args.execute and not args.pitch and not args.check_plan and not args.auto_plan and not args.inputs:
             sys.exit(0)
 
     if args.error_sfx and not args.pitch and not args.execute:
@@ -1040,7 +1129,7 @@ def main() -> None:
             spec_data.setdefault("tuning", {})["wrong_sfx_primary"] = args.error_sfx
             spec_p.write_text(json.dumps(spec_data, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
             print(f"  [SFX UPDATED] styles/micronarrative/spec.json -> wrong_sfx_primary = {args.error_sfx}")
-        if not args.inspect and not args.inputs:
+        if not args.inspect and not args.auto_plan and not args.inputs:
             sys.exit(0)
 
     if args.inspect or (args.inputs and args.script):
@@ -1062,7 +1151,7 @@ def main() -> None:
             passed = not res["errors"]
         sys.exit(0 if passed else 1)
 
-    if args.check and not args.inspect and not args.execute and not args.pitch and not args.inputs:
+    if args.check and not args.inspect and not args.execute and not args.pitch and not args.auto_plan and not args.inputs:
         try:
             import auto_updater
             auto_updater.ensure_latest_update(force=False, min_interval_hours=12.0, quiet=False)
@@ -1173,6 +1262,8 @@ def main() -> None:
             style=args.style,
             name=args.name,
         )
+        if args.auto_plan:
+            sys.exit(run_auto_plan(plan_path, planner=args.planner))
         print_next_step(plan_path)
         sys.exit(0)
 
@@ -1187,8 +1278,21 @@ def main() -> None:
             style=args.style,
             name=args.name,
         )
+        if args.auto_plan:
+            sys.exit(run_auto_plan(plan_path, planner=args.planner))
         print_next_step(plan_path)
         sys.exit(0)
+
+    if args.auto_plan:
+        target = args.plan or (args.inputs[0] if args.inputs else "")
+        if not target:
+            ap.error("--auto-plan requires --inspect <footage> --script <script>, or --plan work/<project>/plan.edl (or positional work/<project>)")
+        cand = common.resolve(target)
+        plan_path = (cand / "plan.edl") if cand.is_dir() else cand
+        if not plan_path.is_file():
+            print(f"[BLOCKED] Edit plan not found: {target} (run zeno.py --inspect first)", flush=True)
+            sys.exit(2)
+        sys.exit(run_auto_plan(plan_path, planner=args.planner))
 
     ap.print_help()
 

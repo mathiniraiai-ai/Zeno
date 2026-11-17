@@ -4,7 +4,18 @@
       "Read(./.env)",
       "Read(./.env.*.local)",
       "Read(./**/.env)",
-      "Edit(./.env)"
+      "Edit(./.env)",
+      "Read(./.zeno_session.json)",
+      "Read(./.zeno_owner_session.json)",
+      "Edit(./.zeno_session.json)",
+      "Edit(./.zeno_owner_session.json)",
+      "Read(./work/_clips/**)",
+      "Read(./work/_segments/**)",
+      "Read(./work/_logs/**)",
+      "Read(./work/*/events.jsonl)",
+      "Read(./work/*/_conversation.json)",
+      "Read(./styles/*/map.json)",
+      "Read(./styles/*/refs/**)"
     ],
     "allow": [
       "Read(./.env.example)"

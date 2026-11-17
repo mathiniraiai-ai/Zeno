@@ -1,10 +1,12 @@
 @echo off
-REM Start a lean Zeno edit session (Windows): Claude Code in this folder with the claude.ai connectors and extra MCP servers off.
-REM Measured: it starts the session about 7.5k tokens smaller. Double-click, then answer what /zeno asks.
+REM Start a lean Zeno edit session (Windows): Claude Code in this folder with Notion and Meta connectors kept enabled,
+REM while global ~/.claude/skills/synced bloat and Chrome browser tools are stripped.
+REM Double-click, then answer what /zeno asks or queue multiple edits (up to 1M context).
 cd /d "%~dp0"
 if not exist ".venv\Scripts\python.exe" (
   echo First-time setup: installing Zeno Python 3.12 environment, FFmpeg, and GPU tools...
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install_windows.ps1"
+  if errorlevel 1 exit /b 1
 )
 where claude >nul 2>nul
 if errorlevel 1 (
@@ -12,6 +14,5 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-set ENABLE_CLAUDEAI_MCP_SERVERS=false
-echo Starting a lean Zeno edit session (new session, connectors off)...
-claude --strict-mcp-config "/zeno"
+echo Starting a lean Zeno edit session (Notion and Meta connectors active; global skill/Chrome bloat off)...
+claude --setting-sources project,local --no-chrome %* "/zeno"

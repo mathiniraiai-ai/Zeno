@@ -1,0 +1,98 @@
+# Repo-scoped Codex configuration for Zeno video editing (CLI & Desktop GUI).
+# Secret-free: keeps Notion (*notion*), Meta (*meta*), and Zeno (*zeno*) connectors enabled
+# while disabling unrelated MCP servers, non-editing plugins, and built-in web search bloat.
+
+[features]
+web_search_request = false
+
+# Non-essential stdio MCP servers disabled for Zeno sessions (`command = "true"` satisfies
+# Codex's transport schema check even on client machines where these MCPs are not installed).
+[mcp_servers.hostinger-agency-hosting]
+command = "true"
+enabled = false
+
+[mcp_servers.hostinger-billing]
+command = "true"
+enabled = false
+
+[mcp_servers.hostinger-dns]
+command = "true"
+enabled = false
+
+[mcp_servers.hostinger-domains]
+command = "true"
+enabled = false
+
+[mcp_servers.hostinger-hosting]
+command = "true"
+enabled = false
+
+[mcp_servers.hostinger-reach]
+command = "true"
+enabled = false
+
+[mcp_servers.hostinger-vps]
+command = "true"
+enabled = false
+
+[mcp_servers.hostinger-wordpress]
+command = "true"
+enabled = false
+
+[mcp_servers.hostinger-wordpress-sites]
+command = "true"
+enabled = false
+
+[mcp_servers.node_repl]
+command = "true"
+enabled = false
+
+# Non-editing bundled, runtime, and remote plugins disabled for Zeno sessions.
+# Notion and Meta connectors are intentionally NEVER disabled here.
+[plugins."browser@openai-bundled"]
+enabled = false
+
+[plugins."chrome@openai-bundled"]
+enabled = false
+
+[plugins."computer-use@openai-bundled"]
+enabled = false
+
+[plugins."unified-computer-use@openai-bundled"]
+enabled = false
+
+[plugins."visualize@openai-bundled"]
+enabled = false
+
+[plugins."documents@openai-primary-runtime"]
+enabled = false
+
+[plugins."pdf@openai-primary-runtime"]
+enabled = false
+
+[plugins."presentations@openai-primary-runtime"]
+enabled = false
+
+[plugins."spreadsheets@openai-primary-runtime"]
+enabled = false
+
+[plugins."template-creator@openai-primary-runtime"]
+enabled = false
+
+[plugins."figma@openai-curated-remote"]
+enabled = false
+
+[plugins."work-pets@openai-curated-remote"]
+enabled = false
+
+[plugins."pages@openai-curated-remote"]
+enabled = false
+
+[plugins."sites@openai-curated-remote"]
+enabled = false
+
+[plugins."openai-templates@openai-curated-remote"]
+enabled = false
+
+[plugins."visualize@openai-curated-remote"]
+enabled = false

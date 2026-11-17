@@ -19,7 +19,7 @@ def read(path: Path) -> str:
 
 
 def compact_facts(text: str) -> str:
-    redundant = ("speech (voice detector", "voiced (real sound")
+    redundant = ("speech (voice detector", "voiced (real sound") + (("pauses:",) if "speech gaps" in text else ())
     return "\n".join(line for line in text.splitlines()
                      if not line.lstrip().startswith(redundant)).strip()
 

@@ -56,6 +56,7 @@ BUNDLE_DIRS = (
     "config",
     ".agent",
     ".claude",
+    ".codex",
     "agent",
     "scripts",
     "styles",

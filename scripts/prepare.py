@@ -288,6 +288,20 @@ _SETUP_HEAD_RE = re.compile(r"^(?:set\s*-?\s*up|production\s+notes?)\s*:?\s*$", 
 _NUMBERED_NOTE_RE = re.compile(r"^\d{1,2}[.)]\s+\S")
 _BULLET_RE = re.compile(r"^[*•●▪◦]\s+")   # Google Doc bullets exported as "* text"
 _CHAR_DEF_RE = re.compile(r"^Character\s*\d*\s*[-–—]\s*(.+)$", re.I)
+_SPEAKER_BIO_RE = re.compile(
+    r"^([A-Za-z](?:[A-Za-z0-9_ .']|(?<=\w)-(?=\w)){0,28}?)\s+[-–—]\s+(.+)$"
+)
+
+
+def _split_speaker_bio(text: str) -> Tuple[str, str]:
+    """Split 'Wife - Early 30s, wearing a sari...' (spaced dash + descriptive bio > 12 chars) without touching 'Co-worker 3'."""
+    m = _SPEAKER_BIO_RE.match((text or "").strip())
+    if not m:
+        return "", ""
+    cname, cdesc = m.group(1).strip(), m.group(2).strip()
+    if len(cdesc) <= 12 or cname.lower().startswith(("http", "concept", "visual", "scene", "character", "ref", "back to", "cut to", "flashback")):
+        return "", ""
+    return cname, cdesc
 # "Scene changes: ...", "Scene changes - ...", "Back to the site, ...", "Cut to ...", "Flashback ..."
 _SCENE_DIR_RE = re.compile(r"^(?:scene\s+chang(?:e|es|ed)|flash\s*back|(?:back|cut)\s+to)\b[\s:,\-–—]*(.*)$", re.I)
 _LAYOUT_CUE_RE = re.compile(r"^(?:rectangle\s+overlay|floating\s+window|(?:(?:horizontal|vertical)\s+)?split[\s-]*screen|picture[\s-]*in[\s-]*picture)\b", re.I)
@@ -474,9 +488,13 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             in_characters_block = True
             continue
         if (in_characters_block and not s.startswith("--") and not _CHAR_DEF_RE.match(s)
-                and not re.match(r"^Scene\s+\d+", s, re.I) and not _SCENE_DIR_RE.match(s)):   # "Lady 1: A lady in her 60s ..." or just "Female Humanoid Robot"
-            cname, _, cdesc = s.partition(":")
-            meta["characters"][cname.strip()[:40]] = cdesc.strip()
+                and not re.match(r"^Scene\s+\d+", s, re.I) and not _SCENE_DIR_RE.match(s)):   # "Lady 1: A lady in her 60s ..." or "Wife - Early 30s..."
+            b_name, b_desc = _split_speaker_bio(s)
+            if b_name:
+                meta["characters"][b_name[:40]] = b_desc
+            else:
+                cname, _, cdesc = s.partition(":")
+                meta["characters"][cname.strip()[:40]] = cdesc.strip()
             continue
         m_char = re.match(r"^--\s*([^-]+?)\s*--\s*(.+)$", s)
         if m_char:
@@ -540,13 +558,22 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
                 meta["scenes"].append({"scene": current_scene, "visual": current_visual})
             continue
 
-        # 5. Standalone speaker line (e.g. "Miss Nova:" or "Ravi (He's speaking in pauses...):")
+        # 5. Standalone speaker line (e.g. "Miss Nova:" or "Ravi (He's speaking in pauses...):" or "Wife - Early 30s, wearing a sari:")
         m_standalone_spk = re.match(r"^([A-Za-z](?:[A-Za-z0-9_ .']|(?<=\w)-(?=\w)){0,24}?)\s*(?:\(([^)]*)\))?\s*:\s*$", s)
         if m_standalone_spk:
             in_characters_block = False
             pending_speaker = m_standalone_spk.group(1).strip()
             pending_note = (m_standalone_spk.group(2) or "").strip()
             continue
+        m_standalone_bio = re.match(r"^(.+?)\s*(?:\(([^)]*)\))?\s*:\s*$", s)
+        if m_standalone_bio:
+            sb_name, sb_desc = _split_speaker_bio(m_standalone_bio.group(1))
+            if sb_name:
+                in_characters_block = False
+                pending_speaker = sb_name
+                pending_note = (m_standalone_bio.group(2) or "").strip()
+                meta["characters"].setdefault(sb_name, sb_desc)
+                continue
 
         in_characters_block = False
 
@@ -610,10 +637,17 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             text = note
         else:
             m_spk = re.match(r"^([A-Za-z](?:[A-Za-z0-9_ .']|(?<=\w)-(?=\w)){0,22}?)\s*(?:\(([^)]*)\))?\s*:\s*(.+)$", rest)
+            m_bio_spk = None if m_spk else re.match(r"^([^:\n]{16,140}?)\s*(?:\(([^)]*)\))?\s*:\s*(.+)$", rest)
+            b_spk_name, b_spk_desc = _split_speaker_bio(m_bio_spk.group(1)) if m_bio_spk else ("", "")
             if m_spk and not m_spk.group(1).lower().startswith(("http", "concept", "visual", "scene")):
                 speaker = m_spk.group(1).strip()
                 note = (m_spk.group(2) or note or "").strip()
                 text = m_spk.group(3).strip().lstrip(":").strip()
+            elif b_spk_name and m_bio_spk:
+                speaker = b_spk_name
+                meta["characters"].setdefault(b_spk_name, b_spk_desc)
+                note = (m_bio_spk.group(2) or note or "").strip()
+                text = m_bio_spk.group(3).strip().lstrip(":").strip()
             else:
                 text = rest
             # Extract inline stage directions like "(laughing)" after speaker colon into note
@@ -991,6 +1025,31 @@ def silent_word_runs(words: List[Dict[str, Any]], flagged: List[Dict[str, Any]])
     return lines
 
 
+def no_speech_word_runs(words: List[Dict[str, Any]], flagged: List[Dict[str, Any]]) -> List[str]:
+    """Group consecutive words outside VAD speech spans into one summary warning per unbroken run."""
+    bad = {id(w) for w in flagged}
+    lines: List[str] = []
+    run: List[Dict[str, Any]] = []
+    for w in list(words) + [None]:
+        if w is not None and id(w) in bad:
+            run.append(w)
+            continue
+        if run:
+            a, b = run[0], run[-1]
+            if len(run) == 1:
+                lines.append(
+                    f"  ! NO SPEECH under '{a['w']}' ({float(a['start']):.2f}-{float(a['end']):.2f}): "
+                    "likely a transcription ghost or a mistimed word; do not build a cut on it"
+                )
+            else:
+                lines.append(
+                    f"  ! NO SPEECH under {len(run)} words from '{a['w']}' ({float(a['start']):.2f}) to "
+                    f"'{b['w']}' ({float(b['end']):.2f}): likely transcription ghosts or mistimed words; do not build a cut on them"
+                )
+            run = []
+    return lines
+
+
 def words_in_silence(words: List[Dict[str, Any]], rms_env: List[Tuple[float, float]], floor_db: float = -55.0) -> List[Dict[str, Any]]:
     """Words whose aligned time holds no sound at all: the aligner put them in the wrong place."""
     out = []
@@ -1163,41 +1222,56 @@ def format_facts(clips_data: List[Dict[str, Any]], script_lines: Optional[List[D
             out.append("  faces x " + ", ".join(f"{a:.2f}-{b:.2f}" for a, b in spans) + " | zoom that keeps every face in frame: " + "; ".join(parts))
         phrase: List[str] = []
         ws = c.get("hq_words") or []
-        for i, w in enumerate(ws):
-            phrase.append(f"{float(w['start']):.2f} {w['w']}")
-            if i + 1 == len(ws) or float(ws[i + 1]["start"]) - float(w["end"]) >= 0.2:
-                out.append("  " + " ".join(phrase) + f" |{float(w['end']):.2f}")
-                phrase = []
-        pauses = [f"{float(s['start']):.2f}-{float(s['end']):.2f}" for s in c.get("macro_silences") or []]
-        if pauses:
-            out.append("  pauses: " + " ".join(pauses))
-        spoken = _speech_spans_of(c)
-        if spoken:
-            out.append("  speech (voice detector, works over noise): " + " ".join(f"{a:.2f}-{b:.2f}" for a, b in spoken))
-            gaps = [(spoken[i][1], spoken[i + 1][0]) for i in range(len(spoken) - 1) if spoken[i + 1][0] - spoken[i][1] >= 0.25]
-            if gaps:
-                out.append("  speech gaps (pauses a cut can remove, also in noisy clips): " + " ".join(f"{a:.2f}-{b:.2f}({b - a:.2f}s)" for a, b in gaps))
-            for w in ws:
-                mid = (float(w["start"]) + float(w["end"])) / 2
-                if not any(a - 0.08 <= mid <= b + 0.08 for a, b in spoken):
-                    out.append(f"  ! NO SPEECH under '{w['w']}' ({float(w['start']):.2f}-{float(w['end']):.2f}): likely a transcription ghost or a mistimed word; do not build a cut on it")
         env = c.get("rms_env") or []
-        stress = emphasis_words(env, ws) if env else []
-        if stress:
-            out.append("  emphasis (louder than this speaker's usual; put a rapid zoom or an effect on these words): " + " ".join(f"'{x['w']}'@{x['start']:.2f}(+{x['delta_db']}dB)" for x in stress))
-        if env:
-            out.append("  voiced (real sound, measured from the audio): " + " ".join(f"{a:.2f}-{b:.2f}" for a, b in voiced_spans(env)))
-            silent_flagged = words_in_silence(ws, env)
-            out.extend(silent_word_runs(ws, silent_flagged))
+        spoken = _speech_spans_of(c)
+        is_sil = clip_is_silent(c)
+        silent_flagged = words_in_silence(ws, env) if env else []
+        no_speech_flagged = [
+            w for w in ws
+            if not any(a - 0.08 <= 0.5 * (float(w["start"]) + float(w["end"])) <= b + 0.08 for a, b in spoken)
+        ] if spoken else []
+        bad_ids = {id(w) for w in silent_flagged} | {id(w) for w in no_speech_flagged}
+        dbs = sorted(db for _, db in env)
+        stationary_noise = bool(dbs) and (
+            (dbs[min(len(dbs) - 1, int(len(dbs) * 0.90))] - dbs[len(dbs) // 2]) <= 4.2
+            and sum(1 for db in dbs if db > -28.0) / len(dbs) >= 0.90
+        )
+        suppress_hallucinated = bool(ws) and (
+            stationary_noise
+            or (len(ws) >= 8 and len(bad_ids) >= 0.80 * len(ws))
+            or (is_sil and (len(ws) >= 8 or (bad_ids and len(bad_ids) == len(ws))))
+        )
+        if suppress_hallucinated or (is_sil and not ws):
+            out.append("  ! SILENT / AMBIENT CLIP — use only as silent listener footage")
+            pauses = [f"{float(s['start']):.2f}-{float(s['end']):.2f}" for s in c.get("macro_silences") or []]
+            if pauses:
+                out.append("  pauses: " + " ".join(pauses))
         else:
-            silent_flagged = []
-        bad_ids = {id(w) for w in silent_flagged}
-        if spoken:
-            for w in ws:
-                mid_w = (float(w["start"]) + float(w["end"])) / 2.0
-                if not any(a - 0.08 <= mid_w <= b + 0.08 for a, b in spoken):
-                    bad_ids.add(id(w))
-        live_ws = [w for w in ws if id(w) not in bad_ids and not w.get("no_sound")]
+            for i, w in enumerate(ws):
+                w_txt = str(w.get("w") or "")
+                w_end = float(w["end"])
+                phrase.append(f"{float(w['start']):.2f} {w_txt}")
+                core_txt = w_txt.rstrip('"\'”’)]}')
+                has_punct = bool(core_txt) and core_txt[-1] in ".?!।,;:"
+                if i + 1 == len(ws) or float(ws[i + 1]["start"]) - w_end >= 0.12 or has_punct:
+                    out.append("  " + " ".join(phrase) + f" |{w_end:.2f}")
+                    phrase = []
+            pauses = [f"{float(s['start']):.2f}-{float(s['end']):.2f}" for s in c.get("macro_silences") or []]
+            if pauses:
+                out.append("  pauses: " + " ".join(pauses))
+            if spoken:
+                out.append("  speech (voice detector, works over noise): " + " ".join(f"{a:.2f}-{b:.2f}" for a, b in spoken))
+                gaps = [(spoken[i][1], spoken[i + 1][0]) for i in range(len(spoken) - 1) if spoken[i + 1][0] - spoken[i][1] >= 0.25]
+                if gaps:
+                    out.append("  speech gaps: " + " ".join(f"{a:.2f}-{b:.2f}({b - a:.2f}s)" for a, b in gaps))
+                out.extend(no_speech_word_runs(ws, no_speech_flagged))
+            stress = emphasis_words(env, ws) if env else []
+            if stress:
+                out.append("  emphasis: " + " ".join(f"'{x['w']}'@{x['start']:.2f}(+{x['delta_db']}dB)" for x in stress))
+            if env:
+                out.append("  voiced (real sound, measured from the audio): " + " ".join(f"{a:.2f}-{b:.2f}" for a, b in voiced_spans(env)))
+                out.extend(silent_word_runs(ws, silent_flagged))
+        live_ws = [] if suppress_hallucinated else [w for w in ws if id(w) not in bad_ids and not w.get("no_sound")]
         if len(live_ws) >= 2:
             allowed_script_text = ""
             if script_lines:
@@ -1270,6 +1344,85 @@ def discover_clips(raw_args: List[str]) -> List[Tuple[str, str, Path]]:
         seen[stem] = seen.get(stem, 0) + 1
         unique.append((stem if seen[stem] == 1 else f"{stem}_{seen[stem]}", src_str, wdir))
     return unique
+
+
+def annotate_clip_voice_hints(clips_data: List[Dict[str, Any]], script_lines: List[Dict[str, Any]]) -> None:
+    """Fast O(N) pre-inspect voice clustering (<0.3s CPU) so `build_line_map` tags each candidate with `[voice=...]`."""
+    from collections import Counter
+    import script_order
+    import speaker_check
+
+    speaking = [c for c in clips_data if not c.get("is_listening") and not c.get("dropped_take") and (c.get("hq_words") or [])]
+    if len(speaking) < 2 or not script_lines:
+        return
+    speakers_named = {str(l.get("speaker") or "").strip() for l in script_lines if l.get("speaker") and " / " not in str(l.get("speaker"))}
+    if len(speakers_named) < 2:
+        return
+
+    items: List[Dict[str, Any]] = []
+    for min_toks in (4, 2):
+        line_sets = [
+            (str(l["speaker"]).strip(), set(l["tokens"]), len(l["tokens"]))
+            for l in script_lines
+            if l.get("speaker") and " / " not in str(l.get("speaker")) and len(l.get("tokens") or []) >= min_toks
+        ]
+        if not line_sets:
+            continue
+        cand_items: List[Dict[str, Any]] = []
+        for idx_c, c in enumerate(speaking):
+            ws = script_order._filter_live_clip_words(c)
+            wav = Path(c.get("work_dir") or "") / "audio16k.wav"
+            if not ws or not wav.is_file():
+                continue
+            turns = speaker_check.build_units(ws, [None] * len(ws))
+            exp: List[Optional[str]] = [None] * len(ws)
+            for a, b in turns:
+                utoks = [_clean_token(t) for k in range(a, b + 1) for t in str(ws[k].get("w") or "").split() if _clean_token(t)]
+                if len(utoks) < min(3, min_toks):
+                    continue
+                uset = set(utoks)
+                best_sp, best_sc = None, 0.0
+                for sp, lset, _llen in line_sets:
+                    inter = len(uset & lset)
+                    if not inter:
+                        continue
+                    rec = inter / len(lset)
+                    prec = inter / len(uset)
+                    f1 = 2.0 * rec * prec / (rec + prec)
+                    if f1 > best_sc and f1 >= 0.40:
+                        best_sc, best_sp = f1, sp
+                if best_sp:
+                    for k in range(a, b + 1):
+                        exp[k] = best_sp
+            anchored = Counter(s for s in exp if s)
+            if anchored:
+                dom, cnt = anchored.most_common(1)[0]
+                if cnt / sum(anchored.values()) >= 0.75:
+                    exp = [s if (s and anchored[s] >= 2) else dom for s in exp]
+                cand_items.append({"id": idx_c, "clip": c, "wav": wav, "words": ws, "expected": exp, "rms_env": c.get("rms_env") or []})
+        if len({sp for it in cand_items for sp in it["expected"] if sp}) >= 2:
+            items = cand_items
+            break
+    if not items:
+        return
+    res = speaker_check.analyze(items)
+    if not res.get("ok"):
+        return
+    for it in items:
+        c = it["clip"]
+        ws = it["words"]
+        exp = list(it["expected"])
+        bad_spans = ((res.get("clips") or {}).get(it["id"]) or {}).get("spans") or []
+        word_voices: List[Tuple[Optional[str], bool]] = [(sp, False) for sp in exp]
+        for sp_info in bad_spans:
+            for k in range(int(sp_info["first"]), min(len(ws), int(sp_info["last"]) + 1)):
+                word_voices[k] = (str(sp_info.get("heard") or ""), True)
+        counts = Counter(h for h, _ in word_voices if h)
+        dom_heard = counts.most_common(1)[0][0] if counts else ""
+        c["clip_voice_hint"] = {
+            "speaker": dom_heard,
+            "spans": [(float(ws[k]["start"]), float(ws[k]["end"]), h, dis) for k, (h, dis) in enumerate(word_voices) if h],
+        }
 
 
 def common_unique_output(name: str) -> Path:
@@ -1480,6 +1633,10 @@ def main() -> None:
 
     facts = format_facts(clips_data, script_lines)
     (proj_dir / "facts.md").write_text(facts, encoding="utf-8")
+    try:
+        annotate_clip_voice_hints(clips_data, script_lines)
+    except Exception:
+        pass
     import edit_packet
     edit_packet.refresh_line_map(proj_dir, script_order.build_line_map(script_lines, clips_data))
     try:   # the job's rules, cut from agent/EDIT_RULES.md + FORMATS.md (the style's learned rules go here, not in line_map.md)

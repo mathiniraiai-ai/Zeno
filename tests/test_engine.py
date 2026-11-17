@@ -2687,7 +2687,7 @@ class TestNewChatGate(unittest.TestCase):
         import tempfile
         import chat_guard
         with tempfile.TemporaryDirectory() as td:
-            self._log(Path(td), str(ROOT), [60_000, 480_000])
+            self._log(Path(td), str(ROOT), [60_000, 1_200_000])
             path = str(Path(td) / ".claude" / "projects" / "-zeno" / "sess1.jsonl")
             new = "/zeno ~/RAW https://docs.google.com/document/d/abc/edit?tab=t.1"
             self.assertIn("/clear", chat_guard.decide({"prompt": new, "transcript_path": path}))
@@ -2695,15 +2695,16 @@ class TestNewChatGate(unittest.TestCase):
             self.assertEqual(chat_guard.decide({"prompt": "continue the edit in work/x/plan.edl: louder", "transcript_path": path}), "")
             self.assertEqual(chat_guard.decide({"prompt": "make the subtitle smaller", "transcript_path": path}), "")
             self.assertEqual(chat_guard.decide({"prompt": new, "transcript_path": str(Path(td) / "missing.jsonl")}), "")
-            self._log(Path(td), str(ROOT), [60_000])
-            self.assertEqual(chat_guard.decide({"prompt": new, "transcript_path": path}), "")   # a new chat goes through
+            # Multi-video queued chats (e.g. 480k) and Windows Claude Desktop fresh chats (~115k) are allowed under 1M limit
+            self._log(Path(td), str(ROOT), [115_000, 480_000])
+            self.assertEqual(chat_guard.decide({"prompt": new, "transcript_path": path}), "")
 
     def test_gate_blocks_big_chat_and_lets_small_or_unknown_pass(self):
         import io
         from unittest.mock import patch
         import agent_log
         import zeno
-        big = {"tokens": 480_000, "steps": 40, "session": "s", "file": "f"}
+        big = {"tokens": 1_200_000, "steps": 60, "session": "s", "file": "f"}
         with patch.object(agent_log, "session_size", return_value=big), patch.object(zeno, "_archive_blocked") as arch, \
                 patch("sys.stdout", new_callable=io.StringIO) as out:
             with self.assertRaises(SystemExit) as cm:
@@ -2711,13 +2712,17 @@ class TestNewChatGate(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
         self.assertIn("NEW CHAT NEEDED", out.getvalue())
         self.assertEqual(arch.call_args[0][0], "fresh_session")
-        for size in (None, {"tokens": 70_000, "steps": 3, "session": "s", "file": "f"}):
+        for size in (
+            None,
+            {"tokens": 115_000, "steps": 3, "session": "s", "file": "f"},   # Windows Claude Desktop fresh chat
+            {"tokens": 480_000, "steps": 25, "session": "s", "file": "f"},  # Multi-video queued chat (< 1M)
+        ):
             with patch.object(agent_log, "session_size", return_value=size), patch("sys.stdout", new_callable=io.StringIO) as out:
                 zeno.session_gate("inspect", block=True)   # no exit
             self.assertNotIn("BLOCKED", out.getvalue())
-        with patch.object(agent_log, "session_size", return_value={"tokens": 400_000, "steps": 30, "session": "s", "file": "f"}), \
+        with patch.object(agent_log, "session_size", return_value={"tokens": 800_000, "steps": 45, "session": "s", "file": "f"}), \
                 patch("sys.stdout", new_callable=io.StringIO) as out:
-            zeno.session_gate("render", block=False, project_hint="work/x/plan.edl")   # later steps only warn
+            zeno.session_gate("render", block=False, project_hint="work/x/plan.edl")   # later steps only warn (> 750k)
         self.assertIn("[TOKENS]", out.getvalue())
         self.assertIn("work/x/plan.edl", out.getvalue())
 

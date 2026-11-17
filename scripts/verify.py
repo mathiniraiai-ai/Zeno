@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import array
 import json
+import math
 import re
 import subprocess
 import sys
@@ -36,6 +37,7 @@ from common import (  # noqa: E402
     probe,
     read_json,
     resolve,
+    square_job_output,
     tc,
     write_json,
 )
@@ -431,7 +433,39 @@ def check_script_coverage(
             return False
         if ref_text in accepted:
             return True
-        return any(re.search(rf"\b{re.escape(k)}[a-z]?\b", ref_text) for k in accepted)
+        norm_ref = ref_text.replace("_", " ")
+        return any(
+            re.search(rf"\b{re.escape(k)}(?:[a-z]\d*)?\b", ref_text)
+            or re.search(rf"\b{re.escape(k)}(?:[a-z]\d*)?\b", norm_ref)
+            for k in accepted
+        )
+
+    def _extract_explicit_line_ids(text: str, valid_ids: Optional[set[str]] = None) -> List[str]:
+        if not text:
+            return []
+        out_ids: List[str] = []
+
+        def _add(lid_cand: str) -> None:
+            if lid_cand and (not valid_ids or lid_cand in valid_ids) and lid_cand not in out_ids:
+                out_ids.append(lid_cand)
+
+        for m_rng in re.finditer(
+            r"(?<![A-Za-z0-9_-])L(\d+)(?:[a-z]\d*)?[_-]L(\d+)(?:[a-z]\d*)?(?![A-Za-z0-9_-])",
+            text,
+        ):
+            a_num, b_num = int(m_rng.group(1)), int(m_rng.group(2))
+            if 0 < b_num - a_num <= 6:
+                for n_lid in range(a_num, b_num + 1):
+                    _add(f"L{n_lid}")
+
+        if _so is not None and hasattr(_so, "_line_ids_of"):
+            for m_lid in _so._line_ids_of(text):
+                _add(m_lid)
+
+        for m_lid in re.findall(r"\b(L\d+)(?:[a-z]\d*)?\b", text.replace("_", " ")):
+            _add(m_lid)
+
+        return out_ids
 
     segs = plan.get("segments", [])
     seg_word_slices: List[List[str]] = []
@@ -471,13 +505,13 @@ def check_script_coverage(
     line_by_id: Dict[str, Dict[str, Any]] = {
         str(sl.get("id", "")): sl for sl in script_lines if sl.get("id")
     }
+    valid_lids = set(line_by_id) if line_by_id else None
+    explicit_by_seg: List[List[str]] = []
     seg_line_ids: List[List[str]] = []
     for idx, s in enumerate(segs):
         sid_note = f"{s.get('id', '')} {s.get('note', '')}"
-        explicit_lids: List[str] = []
-        for m_lid in re.findall(r"\b(L\d+)[a-z]?\b", sid_note):
-            if (not line_by_id or m_lid in line_by_id) and m_lid not in explicit_lids:
-                explicit_lids.append(m_lid)
+        explicit_lids = _extract_explicit_line_ids(sid_note, valid_ids=valid_lids)
+        explicit_by_seg.append(list(explicit_lids))
         if not explicit_lids and script_lines and seg_word_slices[idx]:
             best_lid, best_score = None, 0.0
             for sl in script_lines:
@@ -659,6 +693,8 @@ def check_script_coverage(
 
     all_kept_tokens = [tok for sl in seg_word_slices for tok in sl]
     all_notes = " ".join(str(s.get("id", "")) + " " + str(s.get("note", "")) for s in segs)
+    all_notes_norm = all_notes.replace("_", " ")
+    all_explicit_lids = {lid_item for grp in explicit_by_seg for lid_item in grp}
 
     covered = 0
     last_seg_idx = 0
@@ -673,7 +709,8 @@ def check_script_coverage(
         for idx in range(last_seg_idx, len(segs)):
             sid_str = str(segs[idx].get("id", ""))
             note_str = str(segs[idx].get("note", ""))
-            if re.search(rf"\b{re.escape(lid)}[a-z]?\b", sid_str + " " + note_str):
+            sid_note_norm = (sid_str + " " + note_str).replace("_", " ")
+            if lid in explicit_by_seg[idx] or re.search(rf"\b{re.escape(lid)}(?:[a-z]\d*)?\b", sid_note_norm):
                 matched_seg = idx
                 break
             stoks_seg = seg_word_slices[idx]
@@ -687,7 +724,11 @@ def check_script_coverage(
             last_seg_idx = matched_seg
         elif stokens and all_kept_tokens:
             hits = sum(1.0 for st in stokens if max((_word_similarity(st, ct) for ct in all_kept_tokens), default=0.0) >= 0.64)
-            if hits / len(stokens) >= 0.35 or re.search(rf"\b{re.escape(lid)}[a-z]?\b", all_notes):
+            if (
+                hits / len(stokens) >= 0.35
+                or lid in all_explicit_lids
+                or re.search(rf"\b{re.escape(lid)}(?:[a-z]\d*)?\b", all_notes_norm)
+            ):
                 covered += 1
 
     total_lines = len(script_lines)
@@ -697,7 +738,14 @@ def check_script_coverage(
 
         rep = script_order.check_order([(str(s.get("id", "")), seg_word_slices[i]) for i, s in enumerate(segs)], script_lines)
         accepted_ord = script_order.read_accepted(Path(plan["_plan_dir"])) if plan.get("_plan_dir") else {}
-        wrong = [m for m in rep["out_of_order"] + rep["repeated"] if not any(re.search(rf"\b{re.escape(k)}[a-z]?\b", m) for k in accepted_ord)]
+        wrong = [
+            m for m in rep["out_of_order"] + rep["repeated"]
+            if not any(
+                re.search(rf"\b{re.escape(k)}(?:[a-z]\d*)?\b", m)
+                or re.search(rf"\b{re.escape(k)}(?:[a-z]\d*)?\b", m.replace("_", " "))
+                for k in accepted_ord
+            )
+        ]
         if wrong:
             passed = False
             print("[ORDER FAIL] " + "; ".join(wrong))
@@ -817,8 +865,10 @@ def verify_marks_and_build_contact_sheet(
     if not sample_events:
         sample_events.append((0.5, "FRAME@00:00.50"))
 
-    # Build one single contact sheet strip (<80 KB) using FFmpeg tile filter
+    # Build one single 2D contact sheet (max side <= 1024 px) using FFmpeg tile filter
     n_tiles = len(sample_events)
+    cols = min(max(1, n_tiles), 6)
+    rows = math.ceil(max(1, n_tiles) / cols)
     tile_w = 180
     tile_h = int(round(tile_w * H / max(1, W) / 2)) * 2
     inputs: List[str] = []
@@ -828,12 +878,17 @@ def verify_marks_and_build_contact_sheet(
         fc_parts.append(f"[{idx}:v]trim=end_frame=1,setpts=PTS-STARTPTS,scale={tile_w}:{tile_h},setsar=1[v{idx}]")
 
     concat_in = "".join(f"[v{idx}]" for idx in range(n_tiles))
+    grid_w = cols * tile_w + max(0, cols - 1) * 4 + 8
+    grid_h = rows * tile_h + max(0, rows - 1) * 4 + 8
+    scale_tail = ""
+    if grid_w > 1024 or grid_h > 1024:
+        scale_tail = ",scale='min(1024,iw)':-2" if grid_w >= grid_h else ",scale=-2:'min(1024,ih)'"
     fc_parts.append(
-        f"{concat_in}concat=n={n_tiles}:v=1:a=0,tile={n_tiles}x1:padding=4:margin=4:color=0x141414[out]"
+        f"{concat_in}concat=n={n_tiles}:v=1:a=0,"
+        f"tile={cols}x{rows}:padding=4:margin=4:color=0x141414{scale_tail}[out]"
     )
 
     contact_sheet_path.parent.mkdir(parents=True, exist_ok=True)
-    # Encode with q:v 8 (and tighten if needed to guarantee <80 KB)
     for qv in ("8", "12", "16", "22", "28"):
         cmd_sheet = [
             str(FFMPEG),
@@ -853,11 +908,12 @@ def verify_marks_and_build_contact_sheet(
             str(contact_sheet_path),
         ]
         subprocess.run(cmd_sheet, check=False, capture_output=True)
-        if contact_sheet_path.is_file() and contact_sheet_path.stat().st_size < 75 * 1024:
+        if contact_sheet_path.is_file() and contact_sheet_path.stat().st_size < 95 * 1024:
             break
 
-    sheet_kb = int(round(contact_sheet_path.stat().st_size / 1024.0)) if contact_sheet_path.is_file() else 0
-    all_marks_ok = (passed_marks == len(marks)) and (sheet_kb > 0 and sheet_kb <= 120)
+    sheet_exists = contact_sheet_path.is_file() and contact_sheet_path.stat().st_size > 0
+    sheet_kb = max(1, int(round(contact_sheet_path.stat().st_size / 1024.0))) if sheet_exists else 0
+    all_marks_ok = (passed_marks == len(marks)) and sheet_exists
     return all_marks_ok, passed_marks, len(marks), mark_results, sheet_kb
 
 
@@ -1172,9 +1228,78 @@ def check_subtitles_srt(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, str
     return True, f"{len(cue_matches)} monotonic non-overlapping cue(s) -> {srt_path.name}"
 
 
-def build_review_sheet(plan: Dict[str, Any], mp4_path: Path, out_path: Path, tile_w: int = 104) -> Optional[Path]:
+REVIEW_MAX_SIDE = 1024
+
+
+def check_square_output(sq_path: Path, sample_count: int = 5) -> Tuple[bool, str]:
+    """Lightweight 1:1 resolution (W == H) and black-frame check on 4-6 sampled frames of SQ_<name>.mp4."""
+    if not sq_path.is_file():
+        return False, f"missing {sq_path.name}"
+    info = probe(sq_path)
+    sq_w = int(info.get("width") or 0)
+    sq_h = int(info.get("height") or 0)
+    sq_dur = float(info.get("duration") or 0.0)
+    try:
+        import cv2
+    except Exception:
+        ok_dim = sq_w > 0 and sq_w == sq_h
+        return ok_dim, f"1:1 {sq_w}x{sq_h}, {tc(sq_dur)} -> {sq_path.name}"
+
+    cap = cv2.VideoCapture(str(sq_path))
+    if not cap.isOpened():
+        return False, f"could not open {sq_path.name}"
+    if sq_w <= 0 or sq_h <= 0:
+        sq_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        sq_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or info.get("fps") or 30.0) or 30.0
+    n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if sq_dur <= 0.0 and n_frames > 0:
+        sq_dur = n_frames / fps
+
+    n_samples = max(4, min(6, int(sample_count)))
+    spots = [round(0.10 + 0.80 * k / max(1, n_samples - 1), 3) for k in range(n_samples)]
+    checked = 0
+    black_spots: List[str] = []
+    for frac in spots:
+        t_sec = max(0.0, sq_dur * frac) if sq_dur > 0 else 0.0
+        cap.set(cv2.CAP_PROP_POS_MSEC, t_sec * 1000.0)
+        ok_fr, fr = cap.read()
+        if not ok_fr or fr is None:
+            continue
+        checked += 1
+        gray = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+        if float(gray.mean()) < BLACK_MEAN:
+            alt_t = min(max(0.0, sq_dur - 0.05), t_sec + 0.18) if sq_dur > 0.25 else t_sec
+            if abs(alt_t - t_sec) > 0.04:
+                cap.set(cv2.CAP_PROP_POS_MSEC, alt_t * 1000.0)
+                ok_alt, fr_alt = cap.read()
+                if ok_alt and fr_alt is not None and float(cv2.cvtColor(fr_alt, cv2.COLOR_BGR2GRAY).mean()) >= BLACK_MEAN:
+                    continue
+            black_spots.append(f"{t_sec:.1f}s")
+    cap.release()
+
+    issues: List[str] = []
+    if sq_w <= 0 or sq_h <= 0 or sq_w != sq_h:
+        issues.append(f"non-square {sq_w}x{sq_h}")
+    if checked == 0:
+        issues.append("0 readable frames")
+    if black_spots:
+        issues.append(f"black frames @ {', '.join(black_spots)}")
+    ok = len(issues) == 0
+    if ok:
+        return True, f"1:1 {sq_w}x{sq_h}, {checked} sampled frames clean -> {sq_path.name}"
+    return False, f"1:1 {sq_w}x{sq_h}, {'; '.join(issues)} -> {sq_path.name}"
+
+
+def build_review_sheet(
+    plan: Dict[str, Any],
+    mp4_path: Path,
+    out_path: Path,
+    tile_w: int = 104,
+    sq_path: Optional[Path] = None,
+) -> Optional[Path]:
     """One small picture of the whole finished video for the Director: 3 frames per cut (just after it starts, middle, just before it
-    ends), shrunk and labelled with the cut id and time. About 1k tokens to read, so nothing needs to be extracted by hand."""
+    ends), shrunk and labelled with the cut id and time, plus a 4-frame 1:1 square strip when SQ_<name>.mp4 exists."""
     try:
         import cv2
         import numpy as np
@@ -1187,8 +1312,10 @@ def build_review_sheet(plan: Dict[str, Any], mp4_path: Path, out_path: Path, til
     tile_h = int(tile_w * 16 / 9)
     cols_per_cut, label_h = 3, 14
     cuts, t0 = [], 0.0
+    seg_mids: List[float] = []
     for seg in plan.get("segments", []):
         dur = round((float(seg["end"]) - float(seg["start"])) * fps) / fps
+        seg_mids.append(t0 + dur / 2.0)
         row = []
         for k, frac_t in enumerate((min(0.25, dur * 0.3), dur / 2, max(dur - 0.25, dur * 0.7))):
             cap.set(cv2.CAP_PROP_POS_MSEC, (t0 + frac_t) * 1000.0)
@@ -1211,9 +1338,72 @@ def build_review_sheet(plan: Dict[str, Any], mp4_path: Path, out_path: Path, til
             group.append(np.full_like(cuts[0], 255))
         rows.append(np.hstack(group))
     sheet = np.vstack(rows)
-    k = 1560.0 / max(sheet.shape[:2])
+
+    cand_sq = sq_path if sq_path is not None else square_job_output(mp4_path)
+    if cand_sq.is_file() and cand_sq.resolve() != mp4_path.resolve():
+        sq_cap = cv2.VideoCapture(str(cand_sq))
+        if sq_cap.isOpened():
+            sq_fps = float(sq_cap.get(cv2.CAP_PROP_FPS) or fps or 30.0) or 30.0
+            sq_frames = int(sq_cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            sq_w_raw = int(sq_cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            sq_h_raw = int(sq_cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            sq_dur = (sq_frames / sq_fps) if sq_frames > 0 else t0
+            if len(seg_mids) >= 4:
+                idxs = [int(round(m_idx * (len(seg_mids) - 1) / 3.0)) for m_idx in range(4)]
+                sample_ts = [min(max(0.0, sq_dur - 0.05), seg_mids[idx]) if sq_dur > 0 else seg_mids[idx] for idx in idxs]
+            else:
+                sample_ts = [max(0.0, sq_dur * frac) for frac in (0.12, 0.37, 0.63, 0.88)]
+
+            sq_side = min(220, max(120, (sheet.shape[1] - 24) // 4))
+            sq_tiles = []
+            for idx_sq, t_sq in enumerate(sample_ts):
+                sq_cap.set(cv2.CAP_PROP_POS_MSEC, t_sq * 1000.0)
+                ok_sq, fr_sq = sq_cap.read()
+                tile_sq = (
+                    cv2.resize(fr_sq, (sq_side, sq_side), interpolation=cv2.INTER_AREA)
+                    if ok_sq and fr_sq is not None
+                    else np.zeros((sq_side, sq_side, 3), np.uint8)
+                )
+                bordered_sq = cv2.copyMakeBorder(tile_sq, 1, 1, 2, 2, cv2.BORDER_CONSTANT, value=(220, 220, 220))
+                lbl_sq = np.full((label_h, bordered_sq.shape[1], 3), 235, np.uint8)
+                cv2.putText(
+                    lbl_sq,
+                    f"1:1 #{idx_sq + 1} @{t_sq:.1f}s",
+                    (3, 11),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35,
+                    (20, 20, 20),
+                    1,
+                    cv2.LINE_AA,
+                )
+                sq_tiles.append(np.vstack([lbl_sq, bordered_sq]))
+            sq_cap.release()
+
+            sq_row = np.hstack(sq_tiles)
+            target_w = max(sheet.shape[1], sq_row.shape[1])
+            if sheet.shape[1] < target_w:
+                sheet = cv2.copyMakeBorder(sheet, 0, 0, 0, target_w - sheet.shape[1], cv2.BORDER_CONSTANT, value=(255, 255, 255))
+            if sq_row.shape[1] < target_w:
+                sq_row = cv2.copyMakeBorder(sq_row, 0, 0, 0, target_w - sq_row.shape[1], cv2.BORDER_CONSTANT, value=(255, 255, 255))
+            hdr = np.full((18, target_w, 3), 36, np.uint8)
+            cv2.putText(
+                hdr,
+                f"1:1 SQUARE ({sq_w_raw}x{sq_h_raw}): {cand_sq.name[:48]}",
+                (6, 13),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.40,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+            sheet = np.vstack([sheet, hdr, sq_row])
+
+    h_sh, w_sh = sheet.shape[:2]
+    k = float(REVIEW_MAX_SIDE) / max(h_sh, w_sh)
     if k < 1.0:
-        sheet = cv2.resize(sheet, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+        nw = max(1, min(REVIEW_MAX_SIDE, int(round(w_sh * k))))
+        nh = max(1, min(REVIEW_MAX_SIDE, int(round(h_sh * k))))
+        sheet = cv2.resize(sheet, (nw, nh), interpolation=cv2.INTER_AREA)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(out_path), sheet, [cv2.IMWRITE_JPEG_QUALITY, 70])
     return out_path
@@ -1267,7 +1457,15 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
     split_hook_ok, split_hook_summary = check_split_and_hook_rules(plan)
     subs_ok, subs_summary = check_subtitles_srt(plan, out_mp4)
     pic_ok, pic_bad, pic_n = check_picture_timeline(plan, out_mp4)
-    review = build_review_sheet(plan, out_mp4, p_file.parent / "review_sheet.jpg")
+    sq_mp4 = square_job_output(out_mp4)
+    has_square = sq_mp4.is_file() and sq_mp4.resolve() != out_mp4.resolve()
+    sq_ok, sq_summary = check_square_output(sq_mp4) if has_square else (True, "")
+    review = build_review_sheet(
+        plan,
+        out_mp4,
+        p_file.parent / "review_sheet.jpg",
+        sq_path=sq_mp4 if has_square else None,
+    )
     frames = check_frames(plan, out_mp4)
     alt_proj_dir = WORK / out_mp4.stem
     if alt_proj_dir.is_dir() and alt_proj_dir.resolve() != p_file.parent.resolve() and sheet_path.is_file():
@@ -1302,12 +1500,15 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
     print(f"[SPLIT  {'PASS' if split_hook_ok else 'FAIL'}] {split_hook_summary}")
     if is_subs_enabled(plan) or not subs_ok:
         print(f"[SUBS   {'PASS' if subs_ok else 'FAIL'}] {subs_summary}")
+    if has_square:
+        print(f"[SQUARE] {'PASS' if sq_ok else 'FAIL'} ({sq_summary})")
     if review:
         try:
             rel_review = review.relative_to(ROOT)
         except ValueError:
             rel_review = review
-        print(f"[REVIEW] one picture of the whole video (3 frames per cut, about 1k tokens to read): {rel_review}")
+        sq_note = " + 4-frame 1:1 square strip" if has_square else ""
+        print(f"[REVIEW] one picture of the whole video (3 frames per cut{sq_note}, <=1024px, ~750 tokens): {rel_review}")
     detail = f"{frames['frames']} frames: {len(frames['black'])} black, {len(frames['banner_on_face'])} banner-on-face, {len(frames['no_face'])} panel(s) with missing faces"
     print(f"[FRAMES {'PASS' if frames['ok'] else 'FAIL'}] {frames['note'] or detail}")
     for kind, lines in (("BLACK", frames["black"]), ("BANNER ON FACE", frames["banner_on_face"]), ("NO FACE (warning)", frames["no_face"])):
@@ -1328,13 +1529,15 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
         ]
         if is_subs_enabled(plan) or not subs_ok:
             ev_list.append(("Subtitles", subs_ok, subs_summary))
+        if has_square:
+            ev_list.append(("Square 1:1", sq_ok, sq_summary))
         for _tag, _ok, _txt in ev_list:
             events.emit("verify", f"{_tag}: {'pass' if _ok else 'FAIL'}, {_txt}", ok=bool(_ok), tag=_tag)
     except Exception:
         pass
     print(f"[PICTURE {'PASS' if pic_ok else 'FAIL'}] {pic_n} cuts: the picture at the middle of each cut matches the plan" + ("" if pic_ok else ": " + "; ".join(pic_bad)))
 
-    return bool(video_ok and audio_ok and cuts_ok and script_ok and marks_ok and split_hook_ok and subs_ok and pic_ok and frames['ok'])
+    return bool(video_ok and audio_ok and cuts_ok and script_ok and marks_ok and split_hook_ok and subs_ok and pic_ok and frames['ok'] and sq_ok)
 
 
 def main() -> None:

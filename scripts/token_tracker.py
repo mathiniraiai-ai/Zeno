@@ -58,7 +58,7 @@ def claude_window_usage(lines: List[str], cutoff: float, ceiling: float) -> Opti
     window holds work on Zeno's own code, in which case the number is not the cost of one edit."""
     # Claude Code writes one log line per content block of a response (each parallel tool call is its own line) and every line repeats that response's
     # usage, so lines are grouped by message id and each response is counted once, taking the largest value of each field.
-    by_id: Dict[str, Tuple[float, Dict[str, int]]] = {}
+    by_id: Dict[str, List[Any]] = {}
     order: List[str] = []
     code_edits = 0
     model_name = "unknown"
@@ -78,16 +78,34 @@ def claude_window_usage(lines: List[str], cutoff: float, ceiling: float) -> Opti
         ts = _iso_to_epoch(str(d.get("timestamp") or ""))
         if not (cutoff <= ts <= ceiling):
             continue
-        if msg.get("model"):
-            model_name = str(msg["model"])
+        raw_model = str(msg.get("model") or "").strip()
+        if raw_model and not raw_model.startswith("<"):
+            model_name = raw_model
+            turn_model = raw_model
+        else:
+            turn_model = model_name
+        out_details = u.get("output_tokens_details")
+        think_val = int((out_details if isinstance(out_details, dict) else {}).get("thinking_tokens") or 0)
+        cc_details = u.get("cache_creation")
+        eph1h_val = int((cc_details if isinstance(cc_details, dict) else {}).get("ephemeral_1h_input_tokens") or 0)
+        row_usage = {
+            "input_tokens": int(u.get("input_tokens") or 0),
+            "cache_creation_input_tokens": int(u.get("cache_creation_input_tokens") or 0),
+            "cache_read_input_tokens": int(u.get("cache_read_input_tokens") or 0),
+            "output_tokens": int(u.get("output_tokens") or 0),
+            "thinking_tokens": think_val,
+            "ephemeral_1h_input_tokens": eph1h_val,
+        }
         mid = str(msg.get("id") or f"line{n}")
         cur = by_id.get(mid)
         if cur is None:
-            by_id[mid] = (ts, {k: int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")})
+            by_id[mid] = [ts, row_usage, turn_model]
             order.append(mid)
         else:
-            for k in cur[1]:
-                cur[1][k] = max(cur[1][k], int(u.get(k) or 0))
+            for k, val in row_usage.items():
+                cur[1][k] = max(cur[1][k], val)
+            if turn_model != "unknown":
+                cur[2] = turn_model
         for blk in msg.get("content") or []:
             if isinstance(blk, dict) and blk.get("type") == "tool_use" and blk.get("name") in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
                 path = str((blk.get("input") or {}).get("file_path") or "").replace("\\", "/")
@@ -97,16 +115,37 @@ def claude_window_usage(lines: List[str], cutoff: float, ceiling: float) -> Opti
                 cmd = str((blk.get("input") or {}).get("command") or "").replace("scripts/zeno.py", "")      # running Zeno is the edit; changing code through the shell (a commit, a push, an in-place edit, a script that writes files) is development
                 if any(w in cmd for w in ("git commit", "git push", "sed -i", ".write_text(", "unittest")) and (any(h in cmd for h in CODE_PATH_HINTS) or ".py" in cmd):
                     code_edits += 1
-    turns = [by_id[m] for m in order]
+    turns = sorted((by_id[m] for m in order), key=lambda item: item[0])
     if not turns:
         return None
     g = lambda u, k: int(u.get(k) or 0)   # noqa: E731
-    fresh = sum(g(u, "input_tokens") for _, u in turns)
-    write = sum(g(u, "cache_creation_input_tokens") for _, u in turns)
-    read = sum(g(u, "cache_read_input_tokens") for _, u in turns)
-    out = sum(g(u, "output_tokens") for _, u in turns)
+    fresh = sum(g(u, "input_tokens") for _, u, _ in turns)
+    write = sum(g(u, "cache_creation_input_tokens") for _, u, _ in turns)
+    read = sum(g(u, "cache_read_input_tokens") for _, u, _ in turns)
+    out = sum(g(u, "output_tokens") for _, u, _ in turns)
+    sum_thinking = sum(g(u, "thinking_tokens") for _, u, _ in turns)
     first, last = turns[0][1], turns[-1][1]
     ctx = lambda u: g(u, "input_tokens") + g(u, "cache_creation_input_tokens") + g(u, "cache_read_input_tokens")   # noqa: E731
+    requests = []
+    for ts_epoch, u_dict, t_model in turns:
+        fresh_i = g(u_dict, "input_tokens")
+        write_i = g(u_dict, "cache_creation_input_tokens")
+        read_i = g(u_dict, "cache_read_input_tokens")
+        eph1h_i = g(u_dict, "ephemeral_1h_input_tokens")
+        out_i = g(u_dict, "output_tokens")
+        think_i = g(u_dict, "thinking_tokens")
+        ctx_i = fresh_i + read_i + write_i
+        requests.append({
+            "timestamp": ts_epoch,
+            "model": t_model if t_model != "unknown" else model_name,
+            "input_tokens": ctx_i,
+            "cached_input_tokens": read_i,
+            "cache_write_input_tokens": write_i,
+            "ephemeral_1h_input_tokens": eph1h_i,
+            "output_tokens": out_i,
+            "reasoning_output_tokens": think_i,
+            "context": ctx_i,
+        })
     return {
         "agent_name": "Claude Code",
         "agent_model": model_name,
@@ -118,8 +157,11 @@ def claude_window_usage(lines: List[str], cutoff: float, ceiling: float) -> Opti
         "cache_write_tokens": write,
         "cached_tokens": read,
         "output_tokens": out,
+        "reasoning_tokens": sum_thinking,
         "total_tokens": fresh + write + out,
-        "token_precision": "exact",
+        "total_tokens_including_cache": fresh + write + read + out,
+        "token_precision": "exact" if requests else "unavailable",
+        "requests": requests,
         "code_edits": code_edits,
         "window_minutes": round((turns[-1][0] - turns[0][0]) / 60.0, 1),
         "mixed_with_development": code_edits > 0,
@@ -139,15 +181,17 @@ def detect_agent_usage(
     ceiling = until_epoch if (until_epoch and until_epoch > 0) else (now + 60.0)
 
     import codex_usage
-    use_codex = bool(session_id or not os.getenv("CLAUDECODE"))
-    codex = codex_usage.detect(cutoff, ceiling, ROOT, session_id=session_id) if use_codex else None
+    codex_thread = os.getenv("CODEX_THREAD_ID", "").strip()
+    clean_sid = session_id if (session_id and session_id not in ("local", "unknown")) else None
+    use_codex = bool(clean_sid or not os.getenv("CLAUDECODE"))
+    codex = codex_usage.detect(cutoff, ceiling, ROOT, session_id=clean_sid) if use_codex else None
     if codex is not None:
         return codex
-    if use_codex and (session_id or os.getenv("CODEX_THREAD_ID")):
+    if codex_thread and not os.getenv("CLAUDECODE"):
         return {"agent_name": "Codex", "agent_model": os.getenv("ZENO_MODEL", "unknown"),
-                "input_tokens": 0, "cached_tokens": 0, "output_tokens": 0,
+                "steps_count": 0, "input_tokens": 0, "cached_tokens": 0, "output_tokens": 0,
                 "total_tokens": 0, "token_precision": "unavailable",
-                "session_id": session_id or os.getenv("CODEX_THREAD_ID")}
+                "session_id": clean_sid or codex_thread}
 
     candidates: List[Tuple[float, Dict[str, Any]]] = []
 
@@ -589,11 +633,16 @@ def finalize_job_telemetry(
     snap_path = proj_dir / "token_telemetry.json"
     snap: Dict[str, Any] = read_json(snap_path) if snap_path.is_file() else {}
 
-    job_start = float(snap.get("job_start_epoch") or (time.time() - 900.0))
+    import cost_control
+    if snap.get("job_start_epoch"):
+        job_start = float(snap["job_start_epoch"])
+    else:
+        direct_rows = cost_control.rows(proj_dir / "direct_usage.jsonl")
+        earliest_direct = min((float(r["timestamp"]) for r in direct_rows if r.get("timestamp")), default=0.0)
+        job_start = min(time.time() - 900.0, earliest_direct) if earliest_direct > 0 else (time.time() - 900.0)
     job_end = float(completed_at if completed_at is not None else snap.get("job_end_epoch") or time.time())
     agent = detect_agent_usage(since_epoch=job_start, until_epoch=job_end,
                                session_id=snap.get("agent_session_id") if str(snap.get("agent_name", "")).startswith("Codex") else None)
-    import cost_control
     agent = cost_control.combine(agent, proj_dir, job_start, job_end)
 
     clips: List[Dict[str, Any]] = snap.get("clips") or []

@@ -22,7 +22,7 @@ CLIPS_PER_SHEET = 30
 FRAME_H = 170
 FRAME_W = 96
 LABEL_H = 22
-MAX_SIDE = 1560        # keeps one sheet near 2k tokens
+MAX_SIDE = 1024        # keeps one sheet <= 2x2 OpenAI 512px tiles (<= 765 vision tokens)
 
 
 def _grab(path: str, spots: Sequence[float] = (0.12, 0.5, 0.88)) -> tuple:
@@ -78,9 +78,12 @@ def build(out_dir: Path, clips: List[str]) -> List[Path]:
                 row.append(np.zeros_like(tiles[0]))
             rows.append(np.hstack(row))
         sheet = np.vstack(rows)
-        k = MAX_SIDE / max(sheet.shape[:2])
+        h_sh, w_sh = sheet.shape[:2]
+        k = MAX_SIDE / max(h_sh, w_sh)
         if k < 1.0:
-            sheet = cv2.resize(sheet, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+            nw = max(1, min(MAX_SIDE, int(round(w_sh * k))))
+            nh = max(1, min(MAX_SIDE, int(round(h_sh * k))))
+            sheet = cv2.resize(sheet, (nw, nh), interpolation=cv2.INTER_AREA)
         path = out_dir / f"clip_sheet_{len(made) + 1}.jpg"
         cv2.imwrite(str(path), sheet, [cv2.IMWRITE_JPEG_QUALITY, 72])
         made.append(path)

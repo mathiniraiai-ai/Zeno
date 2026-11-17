@@ -821,6 +821,16 @@ def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path, plan_path:
     prev_wd = _ACTIVE_WORK_DIR
     _ACTIVE_WORK_DIR = Path(work_dir) if work_dir is not None else prev_wd
     try:
+        unread = unread_plan_lines(plan, plan_path) if plan_path else []
+        if plan.get("segments") and not unread:
+            try:
+                moved = snap_cuts(plan)
+                if moved and plan_path and Path(plan_path).is_file():
+                    import edl_parser
+
+                    Path(plan_path).write_text(edl_parser.format_edl(plan), encoding="utf-8")
+            except Exception:
+                pass
         g = gate(plan, script_path, work_dir)
         ok = g["accepted"]
 
@@ -838,7 +848,6 @@ def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path, plan_path:
 
         if not plan.get("segments"):
             g["problems"] = {"EMPTY PLAN": ["no segments yet"]}
-        unread = unread_plan_lines(plan, plan_path) if plan_path else []
         if unread:
             g["problems"] = {"PLAN LINES NOT READ (fix these first; the other messages may be a result of them)": unread, **g["problems"]}
         cuts = still_open(cut_problems(plan))
@@ -1061,7 +1070,7 @@ def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], lim
         prep.append((c, ws, [t for w in ws for t in clean(str(w.get("w") or w.get("word") or "").split())]))
     named: set = set()
     out = ["# LINE MAP: the script is the timeline. CAND = a clip stretch that says this line; `heard` = share of the line's words found there.",
-           "# Zeno chose nothing. Pick from these, check the words in facts.md, and write plan.edl."]
+           "# Zeno chose nothing. Pick from these, check the measured words below, and write plan.edl."]
     if style:
         import brain_memory
 
@@ -1084,14 +1093,18 @@ def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], lim
         for idx_c, (c, ws, toks) in enumerate(prep):
             if not ws:
                 continue
+            wtoks_c = [clean(str(w.get("w") or w.get("word") or "").split()) for w in ws]
             win_list = _candidate_windows(ws, lt, ref_text=ref_line, fallback_toks=toks)
             for r, i, j, reps in win_list:
                 if r >= 0.5:
+                    j_clamped = min(j, len(ws) - 1)
                     w_start = float(ws[i]["start"])
-                    w_end = float(ws[min(j, len(ws) - 1)]["end"])
+                    w_end = float(ws[j_clamped]["end"])
                     rep_pen = (0.06 + 0.02 * (len(reps) - 1)) if reps else 0.0
+                    stoks = [t for k in range(i, j_clamped + 1) for t in wtoks_c[k]]
+                    f_sc = fit(stoks, lt)
                     cands.append((
-                        (round(r - rep_pen, 2), len(reps) == 0, round(r, 2), idx_c, w_start),
+                        (round(r - rep_pen, 2), len(reps) == 0, round(f_sc, 2), round(r, 2), idx_c, w_start),
                         r,
                         Path(str(c["src"])).name,
                         w_start,
@@ -1099,7 +1112,7 @@ def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], lim
                         reps,
                         c,
                     ))
-        cands.sort(key=lambda x: (-x[0][0], not x[0][1], -x[0][2], x[0][3], -x[0][4]))
+        cands.sort(key=lambda x: (-x[0][0], not x[0][1], -x[0][2], -x[0][3], x[0][4], -x[0][5]))
         for _sk, r, name, a, b, _reps, c in cands:
             named.add(id(c))
         # Text similarity cannot identify the speaker. Show each source's best
@@ -1111,7 +1124,32 @@ def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], lim
                 seen_sources.add(candidate[2])
         selected = diverse + [c for c in cands if c not in diverse]
         shown = selected[:max(limit, len(diverse))]
-        for _sk, r, name, a, b, reps, _ in shown:
+        for _sk, r, name, a, b, reps, c_obj in shown:
+            voice_note = ""
+            vh = c_obj.get("clip_voice_hint") if isinstance(c_obj, dict) else None
+            if isinstance(vh, dict):
+                ov = [
+                    (heard, dis)
+                    for ws0, ws1, heard, dis in (vh.get("spans") or [])
+                    if min(ws1, float(b)) > max(ws0, float(a)) - 0.02
+                ]
+                if ov:
+                    from collections import Counter
+
+                    cand_voice = Counter(h for h, _ in ov).most_common(1)[0][0]
+                    has_dis = any(dis for _, dis in ov)
+                else:
+                    cand_voice = str(vh.get("speaker") or "")
+                    has_dis = False
+                if cand_voice:
+                    line_spk = str(l.get("speaker") or "").strip()
+                    dur_cand = float(b) - float(a)
+                    if has_dis and dur_cand < 2.5 and vh.get("speaker") == line_spk:
+                        voice_note = f" [voice={line_spk}? SHORT_VOICE]"
+                    elif line_spk and cand_voice != line_spk and dur_cand < 2.5 and vh.get("speaker") != cand_voice:
+                        voice_note = f" [voice={cand_voice} SHORT_VOICE]"
+                    else:
+                        voice_note = f" [voice={cand_voice}]"
             rep_note = ""
             if reps:
                 rp0 = reps[0]
@@ -1119,11 +1157,11 @@ def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], lim
                     f"  [REPEAT @ {rp0['first_start']:.2f}s — split cut around stumble "
                     f"('{rp0['phrase']}' {rp0['first_start']:.2f}-{rp0['first_end']:.2f} & {rp0['second_start']:.2f}-{rp0['second_end']:.2f})]"
                 )
-            out.append(f"  CAND {name} {float(a):.2f}-{float(b):.2f} heard={r:.2f}{rep_note}")
+            out.append(f"  CAND {name} {float(a):.2f}-{float(b):.2f} heard={r:.2f}{voice_note}{rep_note}")
         if len(cands) > len(shown):
-            out.append(f"  +{len(cands) - len(shown)} alternate candidates (more takes of the sources above; see facts.md)")
+            out.append(f"  +{len(cands) - len(shown)} alternate candidates (more takes; use edit_packet.py --line {l['id']})")
         if not cands:
-            out.append("  NO CLIP says this line (check facts.md, then tell the user to reshoot or accept the gap)")
+            out.append("  NO CLIP says this line (check measured footage, then tell the user to reshoot or accept the gap)")
     spare = [(c, ws) for c, ws, _ in prep if id(c) not in named and ws and not c.get("is_listening")]
     if spare:
         out += ["", "## SPEECH THAT FITS NO LINE (slate, ad-lib or a bad transcript: look at it)"]
@@ -1160,17 +1198,33 @@ def voice_problems(plan: Dict[str, Any]) -> Tuple[List[str], str]:
     by_id = {i["id"]: i for i in items}
     src_of = {n: str(plan["segments"][n].get("src")) for n in ids}
     disagree = {n for n, info in res.get("clips", {}).items() if info.get("spans")}
+    long_disagree = {
+        n for n, info in res.get("clips", {}).items()
+        for sp_item in (info.get("spans") or [])
+        if by_id.get(n)
+        and by_id[n]["words"][sp_item["first"]: sp_item["last"] + 1]
+        and (float(by_id[n]["words"][sp_item["last"]]["end"]) - float(by_id[n]["words"][sp_item["first"]]["start"])) >= 2.5
+    }
     out, doubts = [], []
     for n, info in res.get("clips", {}).items():
         for sp in info.get("spans", []):
             ws = by_id[n]["words"][sp["first"]: sp["last"] + 1]
             span_sec = (float(ws[-1]["end"]) - float(ws[0]["start"])) if ws else 0.0
             same_file = [m for m in ids if m != n and src_of[m] == src_of[n]]
+            agreed_same = [m for m in same_file if m not in disagree and by_id[m]["expected"][0] == sp.get("expected")]
             msg = f"{ids.get(n, n)} is labelled {sp.get('expected')}, but the voice is {sp.get('heard', 'someone else')}"
-            # A very short span is too little to tell voices apart. If every other turn from the same file agrees with its label,
-            # it is far more likely a miss of the measurement than a wrong person: say so, but do not block.
-            if span_sec < 2.5 and same_file and not any(m in disagree for m in same_file):
-                doubts.append(f"{msg} (only {span_sec:.1f}s of speech; the file's other {len(same_file)} turn(s) match: check by ear)")
+            # A very short span (<2.5s) is too little to tell voices apart reliably (especially short English drills inside an Indic take).
+            # When the file has matching turns (>=50% of its other turns) and zero >=2.5s disagreements, disclose as a non-blocking doubt.
+            if (
+                span_sec < 2.5
+                and agreed_same
+                and len(agreed_same) * 2 >= len(same_file)
+                and not any(m in long_disagree for m in same_file)
+            ):
+                if len(agreed_same) == len(same_file):
+                    doubts.append(f"{msg} (only {span_sec:.1f}s of speech; the file's other {len(same_file)} turn(s) match: check by ear)")
+                else:
+                    doubts.append(f"{msg} (only {span_sec:.1f}s of speech; {len(agreed_same)} of {len(same_file)} other turn(s) in this file match: check by ear)")
             else:
                 if span_sec < 2.5:
                     out.append(f"{ids.get(n, n)} [SHORT VOICE REVIEW] {span_sec:.2f}s: expected "
@@ -1216,11 +1270,19 @@ def _speech_spans_for(seg: Dict[str, Any]) -> List[Tuple[float, float]]:
 
 def cut_problems(plan: Dict[str, Any]) -> List[str]:
     """Cuts that land inside a spoken word. A word counts only where there is real sound: an aligner time that sits in silence is wrong."""
+    from prepare import words_in_silence
+
     out = []
     for s in plan.get("segments", []):
+        ws = _words_of(s)
+        if not ws:
+            continue
         env = None
+        ghost_ids: Optional[set] = None
         spoken = _speech_spans_for(s)
-        for w in _words_of(s):
+        for w in ws:
+            if w.get("no_sound"):
+                continue
             a, b = float(w["start"]), float(w["end"])
             for name, t in (("start", float(s["start"])), ("end", float(s["end"]))):
                 if a + 0.05 < t < b - 0.05:
@@ -1228,6 +1290,9 @@ def cut_problems(plan: Dict[str, Any]) -> List[str]:
                         continue      # the voice detector hears no speech at this moment: a word the transcript put here is a ghost
                     if env is None:
                         env = _env_of(s)
+                        ghost_ids = {id(gw) for gw in words_in_silence(ws, env)} if env else set()
+                    if ghost_ids and id(w) in ghost_ids:
+                        continue      # word itself is a `! NO SPEECH` transcription ghost
                     loud = max((db for tt, db in env if t - 0.03 <= tt <= t + 0.03), default=-140.0)
                     if env and loud < -50.0:
                         continue      # the cut lands in silence: no sound is cut
@@ -1274,9 +1339,11 @@ def tight_report(plan: Dict[str, Any]) -> List[str]:
             if tail_free + nxt_lead > TIGHT_JOIN_SEC:
                 out.append(f"{sid} -> {nxt[0].get('id')}: {tail_free + nxt_lead:.2f}s of silence at the join (tail {tail_free:.2f}s + lead {nxt_lead:.2f}s): "
                            f"end {sid} at {en - max(0.0, tail_free - 0.06):.2f} or start {nxt[0].get('id')} later")
+        lay = str(s.get("layout") or plan.get("preset") or "single").split(":")[0].strip().lower()
+        pause_lim = 0.50 if (lay in ("split_h", "split_v", "top_pip") or plan.get("page")) else TIGHT_PAUSE_SEC
         for w0, w1 in zip(ws, ws[1:]):
             gap = float(w1["start"]) - float(w0["end"])
-            if gap > TIGHT_PAUSE_SEC:
+            if gap > pause_lim:
                 out.append(f"{sid}: {gap:.2f}s pause between '{w0.get('w')}' and '{w1.get('w')}' at {float(w0['end']):.2f}-{float(w1['start']):.2f}: cut it (split the cut) or accept it as a breath")
         if k == 0 and lead > 0.20:
             out.append(f"{sid}: starts {lead:.2f}s before the first word")
@@ -1515,19 +1582,27 @@ def style_report(plan: Dict[str, Any], work_dir: Optional[Path] = None) -> List[
     return out
 
 
+EDGE_GRAZE_MAX_SEC = 0.08  # minor word-edge graze auto-nudged into adjacent silence; deeper mid-word cuts remain blocked
+
+
 def snap_cuts(plan: Dict[str, Any]) -> int:
-    """Mechanical: a cut in the gap between two words moves to the quietest 10 ms of that gap, so it cannot click. Keeps the Director's words."""
+    """Mechanical: a cut in the gap between two words (or grazing <=0.08s into a word edge) moves to the quietest 10 ms of the adjacent gap."""
     from prepare import compute_10ms_rms_envelope, find_rms_minimum
 
     moved = 0
     for s in plan.get("segments", []):
+        if not isinstance(s, dict) or "start" not in s or "end" not in s:
+            continue
         ws = _words_of(s)
         wav = _resolve_clip_cache_dir(s.get("src", "")) / "audio16k.wav"
-        if len(ws) < 2 or not wav.is_file():
+        if not ws or not wav.is_file():
             continue
         env = compute_10ms_rms_envelope(wav)
+        spoken = _speech_spans_for(s)
+        dur_clip = max((t for t, _ in env), default=float(ws[-1]["end"]) + 0.5)
         for key in ("start", "end"):
             t = float(s[key])
+            snapped = False
             for w0, w1 in zip(ws, ws[1:]):
                 a, b = float(w0["end"]), float(w1["start"])
                 if a <= t <= b and b - a >= 0.03:
@@ -1537,6 +1612,40 @@ def snap_cuts(plan: Dict[str, Any]) -> int:
                     if new != round(t, 2):
                         s[key] = new
                         moved += 1
+                    snapped = True
+                    break
+            if snapped:
+                continue
+            for idx_w, w in enumerate(ws):
+                wa, wb = float(w["start"]), float(w["end"])
+                if not (wa < t < wb) or (wb - wa) <= 2 * EDGE_GRAZE_MAX_SEC:
+                    continue
+                if spoken and not any(x0 - 0.03 <= t <= x1 + 0.03 for x0, x1 in spoken):
+                    continue  # ghost word where VAD hears no speech: leave deliberate cut untouched
+                if env and max((db for tt, db in env if t - 0.03 <= tt <= t + 0.03), default=-140.0) < -50.0:
+                    continue  # already in silence
+                other = float(s["end"]) if key == "start" else float(s["start"])
+                if t - wa <= EDGE_GRAZE_MAX_SEC:
+                    prev_end = float(ws[idx_w - 1]["end"]) if idx_w > 0 else 0.0
+                    if prev_end <= wa:
+                        hi = max(prev_end, wa - 0.01)
+                        lo = max(prev_end, wa - SNAP_REACH_SEC)
+                        new = round(float(find_rms_minimum(env, lo, hi)[0]) if env and hi > lo else hi, 2)
+                        if (key == "start" and new < other - 0.05) or (key == "end" and new > other + 0.05):
+                            if new != round(t, 2):
+                                s[key] = new
+                                moved += 1
+                    break
+                if wb - t <= EDGE_GRAZE_MAX_SEC:
+                    next_start = float(ws[idx_w + 1]["start"]) if idx_w + 1 < len(ws) else dur_clip
+                    if wb <= next_start:
+                        lo = min(next_start, wb + 0.01)
+                        hi = min(next_start, wb + SNAP_REACH_SEC)
+                        new = round(float(find_rms_minimum(env, lo, hi)[0]) if env and hi > lo else lo, 2)
+                        if (key == "start" and new < other - 0.05) or (key == "end" and new > other + 0.05):
+                            if new != round(t, 2):
+                                s[key] = new
+                                moved += 1
                     break
     return moved
 

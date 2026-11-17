@@ -381,12 +381,16 @@ class KeyStore:
         clips = payload.get("clips") if isinstance(payload.get("clips"), list) else []
         t_in = int(payload.get("transcribe_in_tokens") or 0)
         t_out = int(payload.get("transcribe_out_tokens") or 0)
-        t_tot = int(payload.get("transcribe_total_tokens") or (t_in + t_out))
+        raw_t_tot = int(payload.get("transcribe_total_tokens") or 0)
+        t_tot = raw_t_tot if raw_t_tot > 0 else (t_in + t_out)
         a_in = int(payload.get("agent_in_tokens") or 0)
         a_cache = int(payload.get("agent_cached_tokens") or 0)
         a_out = int(payload.get("agent_out_tokens") or 0)
-        a_tot = int(payload.get("agent_total_tokens") or (a_in + a_cache + a_out))
-        grand = int(payload.get("grand_total_tokens") or (t_tot + a_tot))
+        raw_a_tot = int(payload.get("agent_total_tokens") or 0)
+        a_tot = raw_a_tot if raw_a_tot > 0 else (a_in + a_out)
+        raw_grand = int(payload.get("grand_total_tokens") or 0)
+        agent_with_cache = (a_in + a_out + a_cache) if (a_in or a_out) else (a_tot + a_cache)
+        grand = raw_grand if raw_grand > 0 else (agent_with_cache + t_tot)
 
         initial_edl = str(payload.get("initial_edl") or "")
         final_edl = str(payload.get("final_edl") or "")
@@ -410,8 +414,21 @@ class KeyStore:
         assets_raw = payload.get("assets_used") if "assets_used" in payload else payload.get("assets_used_json")
         assets_used_json = self._to_json_str(assets_raw, "{}")
 
-        jr = payload.get("job_report")
-        job_report_json = json.dumps(jr, ensure_ascii=False)[:20000] if isinstance(jr, dict) else "{}"
+        jr_raw = payload.get("job_report")
+        if isinstance(jr_raw, dict):
+            jr = dict(jr_raw)
+            cw_top = int(payload.get("agent_cache_write_tokens") or payload.get("cache_write_tokens") or 0)
+            e1h_top = int(payload.get("ephemeral_1h_input_tokens") or 0)
+            if cw_top > 0 or e1h_top > 0:
+                acc = dict(jr.get("accounting") or {}) if isinstance(jr.get("accounting"), dict) else {}
+                if cw_top > 0 and "cache_write_tokens" not in acc:
+                    acc["cache_write_tokens"] = cw_top
+                if e1h_top > 0 and "ephemeral_1h_input_tokens" not in acc:
+                    acc["ephemeral_1h_input_tokens"] = e1h_top
+                jr["accounting"] = acc
+            job_report_json = json.dumps(jr, ensure_ascii=False)[:20000]
+        else:
+            job_report_json = "{}"
 
         now = time.time()
         self._run(
