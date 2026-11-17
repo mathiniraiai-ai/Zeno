@@ -715,16 +715,94 @@ def _venv_py_cmd() -> str:
     return r".venv\Scripts\python.exe" if common.IS_WIN else ".venv/bin/python"
 
 
-def print_next_step(plan_path: pathlib.Path) -> None:
-    rel = plan_path.relative_to(ROOT)
+def _rel_workspace_path(path: pathlib.Path) -> str:
+    """Return a workspace-relative POSIX path when inside ROOT, else the POSIX path string."""
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(ROOT.resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _batch_file_list(proj_dir: Path) -> List[str]:
+    """Return ordered packet file(s) and clip sheet filename(s) inside `proj_dir`."""
+    proj = Path(proj_dir)
+    packets: List[str] = []
+    manifest_path = proj / "editing_packet.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {}
+        if isinstance(manifest, dict):
+            raw_parts = manifest.get("parts")
+            if isinstance(raw_parts, list):
+                for item in raw_parts:
+                    cand = ""
+                    if isinstance(item, str):
+                        cand = item.strip()
+                    elif isinstance(item, dict):
+                        val = item.get("file") or item.get("path") or item.get("name")
+                        if isinstance(val, str):
+                            cand = val.strip()
+                    if not cand:
+                        continue
+                    name = cand if (proj / cand).is_file() else Path(cand).name
+                    if name and name not in packets:
+                        packets.append(name)
+    if not packets:
+        part_files = sorted(
+            (p.name for p in proj.glob("editing_packet_p*.md")),
+            key=lambda name: (int(m.group(1)), name) if (m := re.fullmatch(r"editing_packet_p(\d+)\.md", name)) else (10**9, name),
+        )
+        packets = part_files if part_files else ["editing_packet.md"]
+    sheets = sorted(p.name for p in proj.glob("clip_sheet_*.jpg"))
+    return [*packets, *sheets]
+
+
+def _batch_playbook_lines(plan_path: pathlib.Path) -> List[str]:
+    """Build workspace-relative Turn 2–5 parallel batch playbook lines for `plan_path`."""
+    proj_dir = plan_path.parent
+    rel_dir = _rel_workspace_path(proj_dir)
+    rel_plan = _rel_workspace_path(plan_path)
+    rel_review = f"{rel_dir}/review_sheet.jpg"
     py_cmd = _venv_py_cmd()
-    print("\n[NEXT STEP] Zeno has measured the footage and decided nothing. The Director now:")
-    d = plan_path.parent.relative_to(ROOT)
-    print(f"  1. reads {d}/editing_packet.md and ALL clip_sheet_*.jpg in ONE batch; detailed files stay on disk")
-    print(f"  2. writes every segment of {rel}")
-    print(f"  3. runs: {py_cmd} scripts/zeno.py --check-plan {rel} --compact")
-    print("  4. immediately renders without asking Yes/No:")
-    print(f"     {py_cmd} scripts/zeno.py --execute {rel} --square --compact")
+    read_paths = [
+        name if (name.startswith(rel_dir + "/") or Path(name).is_absolute()) else f"{rel_dir}/{name}"
+        for name in _batch_file_list(proj_dir)
+    ]
+    return [
+        f"[BATCH PLAYBOOK] {rel_dir} (1 read batch -> 1 write batch -> 1 execute -> 1 review)",
+        f"[TURN 2] Parallel batch READ (all in 1 turn): {', '.join(read_paths)}",
+        (
+            f"[TURN 3] Parallel batch WRITE (all in 1 turn): "
+            f"{rel_dir}/script_analysis.md, {rel_plan} (+ {rel_dir}/decisions.txt if needed)"
+        ),
+        (
+            f"[TURN 4] Single command: {py_cmd} scripts/zeno.py --execute {rel_plan} --square --compact "
+            f"(runs plan check + 9:16 & 1:1 render + verify + {rel_review}; "
+            "if backgrounded, END TURN and wait for wakeup — NEVER poll manage_task/write_stdin/logs!)"
+        ),
+        f"[TURN 5] Read {rel_review} ONCE and present deliverables.",
+        (
+            "[DO NOT] Never read agent/REFERENCE.md, CONCEPT.md, EDIT_RULES.md, FORMATS.md, "
+            "scripts/*.py, facts.md, line_map.md, clip_caches.json, ffprobe, or dir."
+        ),
+    ]
+
+
+def print_next_step(plan_path: pathlib.Path, fallback_reason: str = "") -> None:
+    if fallback_reason:
+        clean_reason = " ".join(str(fallback_reason).split())[:220]
+        print(
+            f"\n[MANUAL_FALLBACK_PACK] Auto-plan unavailable ({clean_reason}); "
+            "END TURN if backgrounded; NEVER poll manage_task/logs — follow this batch playbook:",
+            flush=True,
+        )
+    else:
+        print("\n[NEXT STEP] Zeno has measured the footage and decided nothing. The Director now:", flush=True)
+    for line in _batch_playbook_lines(plan_path):
+        print(line, flush=True)
 
 
 def _execute_and_finalize(
@@ -739,14 +817,8 @@ def _execute_and_finalize(
 ) -> int:
     """Run Stage 4–5 render, QC verification, archive upload, post-job cleanup, and job-folder assembly."""
     p_path = common.resolve(str(plan_path))
-    session_gate("render", block=False, project_hint=str(p_path.relative_to(ROOT)) if str(p_path).startswith(str(ROOT)) else str(p_path))
+    session_gate("render", block=False, project_hint=_rel_workspace_path(p_path))
     apply_stage3_tweaks(p_path, swap_layout=swap_layout, swap_takes=swap_takes, error_sfx=error_sfx)
-    try:
-        import job_archive
-        job_archive.snapshot_plan(p_path, "render")
-        job_archive.event(p_path.parent, "render_start", square=bool(square), draft=bool(draft))
-    except Exception:
-        pass
     import time as _time
     t_render = _time.time()
     rc = run_execute(
@@ -800,7 +872,7 @@ def run_auto_plan(
 
     plan_path = plan_path.resolve()
     work_dir = plan_path.parent
-    rel = plan_path.relative_to(ROOT) if str(plan_path).startswith(str(ROOT)) else plan_path
+    rel = _rel_workspace_path(plan_path)
     py_cmd = _venv_py_cmd()
 
     try:
@@ -815,7 +887,9 @@ def run_auto_plan(
             else:
                 r = direct_mode.run(work_dir)
     except Exception as exc:
-        print(f"[BLOCKED] Isolated planner could not run ({planner}): {exc}", flush=True)
+        reason = str(exc) or type(exc).__name__
+        print(f"[BLOCKED] Isolated planner could not run ({planner}): {reason}", flush=True)
+        print_next_step(plan_path, fallback_reason=reason)
         return 2
 
     used_model = r.get("model", used_provider)
@@ -835,6 +909,7 @@ def run_auto_plan(
             job_archive.send_in_background(plan_path, "checking")
         except Exception:
             pass
+        print_next_step(plan_path, fallback_reason=reason)
         return 2
 
     tok_note = f", {tot:,} tokens" if tot else ""
@@ -846,6 +921,7 @@ def run_auto_plan(
         msg = order_gate(load_edl(plan_path), plan_path)
         print(msg or "[BLOCKED] Plan check failed after auto-plan.", flush=True)
         cost_control.print_checkpoint(work_dir)
+        print_next_step(plan_path, fallback_reason="post-plan check failed")
         return 2
 
     print("[PLAN PASS] Every line present, once, in script order; no cut inside a word; voices match.", flush=True)
@@ -889,8 +965,24 @@ def run_execute(
     blocked = order_gate(plan, plan_path)
     if blocked:
         print(blocked)
+        try:
+            import job_archive
+            job_archive.snapshot_plan(plan_path, "check", blocked)
+            job_archive.event(work_dir, "check", result="blocked", note=blocked[:1500])
+        except Exception:
+            pass
         print("\n[BLOCKED] Nothing was rendered. The Director fixes plan.edl (see line_map.md), then runs --execute again.")
         return 2
+
+    print("[PLAN PASS] Every line present, once, in script order; no cut inside a word; voices match.", flush=True)
+    try:
+        import job_archive
+        job_archive.snapshot_plan(plan_path, "check", "PLAN PASS")
+        job_archive.event(work_dir, "check", result="passed", note="PLAN PASS")
+        job_archive.snapshot_plan(plan_path, "render")
+        job_archive.event(work_dir, "render_start", square=bool(square), draft=bool(draft))
+    except Exception:
+        pass
 
     import script_order
 
@@ -1060,9 +1152,10 @@ def main() -> None:
     )
     ap.add_argument(
         "--execute",
+        "--check-and-execute",
         metavar="PLAN_EDL",
         default=None,
-        help="Stages 4–5: Render MP4, 1:1 Square, Premiere .prproj/.xml & run Deep QC on plan.edl",
+        help="Stages 4–5: Check plan order/cuts/voices, then render MP4, 1:1 Square, Premiere .prproj/.xml & run Deep QC on plan.edl",
     )
     ap.add_argument("--feedback", default=None, metavar="TEXT", help="Record what the editor said about an edit (what was wrong, what changed, what they liked) in the team's job archive")
     ap.add_argument("--plan", default=None, metavar="PLAN_EDL", help="With --feedback: which job (default: the most recent one)")

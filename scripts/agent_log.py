@@ -35,6 +35,16 @@ _SECRET = re.compile(
 )
 _WRAPPERS = re.compile(
     r"<(system-reminder|local-command-caveat|local-command-stdout|command-message|ide_selection|ide_opened_file)>.*?</\1>", re.S)
+_AGY_MODEL_RE = re.compile(
+    r"setting `Model Selection` from [^\n]+? to ([A-Za-z0-9 ._-]+?)(?:\s*\(|\.\s|\.\n)"
+)
+
+
+def _mtime(path: str) -> float:
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0
 
 
 def redact(text: str) -> str:
@@ -91,10 +101,17 @@ def _claude_text(content: Any) -> str:
     return ""
 
 
+def _safe_int(val: Any) -> int:
+    try:
+        return int(val or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _claude_lines(since: float, until: float, root: Path) -> Iterable[Dict[str, Any]]:
     root_s = str(root.resolve())
     files = [f for f in glob.glob(os.path.expanduser("~/.claude/projects/**/*.jsonl"), recursive=True)
-             if os.path.getmtime(f) >= since - 60]
+             if _mtime(f) >= since - 60]
     rows = []
     for f in files:
         try:
@@ -127,6 +144,7 @@ def _from_claude(since: float, until: float, root: Path) -> Optional[Dict[str, A
     models: Dict[str, int] = {}
     sessions: List[str] = []
     seen = set()
+    assistant_turns = set()
     for d in rows:
         if d["_session"] not in sessions:
             sessions.append(d["_session"])
@@ -150,6 +168,7 @@ def _from_claude(since: float, until: float, root: Path) -> Optional[Dict[str, A
                 prompts.append({"at": at, "text": _cut(text, MAX_PROMPT_CHARS)})
                 steps.append({"at": at, "kind": "prompt", "text": _cut(text, 300)})
         elif d.get("type") == "assistant":
+            assistant_turns.add(msg.get("id") or uid or f"row{len(steps)}")
             if msg.get("model") and not str(msg["model"]).startswith("<"):
                 models[msg["model"]] = models.get(msg["model"], 0) + 1
             for b in msg.get("content") or []:
@@ -160,26 +179,184 @@ def _from_claude(since: float, until: float, root: Path) -> Optional[Dict[str, A
                 elif b.get("type") == "tool_use":
                     steps.append({"at": at, "kind": "tool", "tool": str(b.get("name") or "")[:80],
                                   "input": _tool_summary(str(b.get("name") or ""), b.get("input"))})
-    return {"agent": "Claude Code", "models": models, "sessions": sessions, "prompts": prompts, "steps": steps}
+    return {
+        "agent": "Claude Code",
+        "models": models,
+        "sessions": sessions,
+        "prompts": prompts,
+        "steps": steps,
+        "turns": len(assistant_turns) if assistant_turns else None,
+    }
 
 
 # ---------------------------------------------------------------- Antigravity
+def _is_zeno_transcript(tail: str, root: Path = ROOT) -> bool:
+    marker = root.name
+    return (
+        marker in tail
+        or "zeno.py" in tail
+        or (marker == "Zeno" and "Claude Editor" in tail)
+    )
+
+
+def antigravity_window_usage(
+    lines: Iterable[str],
+    cutoff: float,
+    ceiling: float,
+    session_id: str = "unknown",
+) -> Optional[Dict[str, Any]]:
+    """Parse Antigravity transcript lines inside [cutoff, ceiling] for token usage and planner turn count."""
+    try:
+        model_name = "unknown"
+        window_count = 0
+        in_chars = 0
+        out_chars = 0
+        seen_turns = set()
+        planner_usage: Dict[Any, List[int]] = {}
+
+        for n, line in enumerate(lines):
+            if not line or not line.strip():
+                continue
+            try:
+                d = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(d, dict):
+                continue
+
+            if "USER_SETTINGS_CHANGE" in line and "Model Selection" in line:
+                content_str = str(d.get("content") or "")
+                m = _AGY_MODEL_RE.search(content_str)
+                if m:
+                    cand_model = m.group(1).strip()
+                    if len(cand_model) >= 4:
+                        model_name = cand_model
+
+            step_ts = _epoch(d.get("created_at"))
+            if not (cutoff <= step_ts <= ceiling):
+                continue
+
+            window_count += 1
+            st = str(d.get("type") or "")
+            if st in ("USER_INPUT", "GENERIC", "SYSTEM_MESSAGE", "TOOL_RESPONSE", "SYSTEM"):
+                in_chars += len(str(d.get("content") or ""))
+            elif st == "PLANNER_RESPONSE":
+                step_idx = d.get("step_index")
+                turn_key = ("step", step_idx) if isinstance(step_idx, (int, str)) else ("line", n)
+                if turn_key not in seen_turns:
+                    seen_turns.add(turn_key)
+                    out_chars += (
+                        len(str(d.get("content") or ""))
+                        + len(str(d.get("thinking") or ""))
+                        + len(json.dumps(d.get("tool_calls") or [], ensure_ascii=False))
+                    )
+                in_tok = _safe_int(d.get("input_tokens"))
+                cache_tok = _safe_int(d.get("cache_read_tokens"))
+                out_tok = _safe_int(d.get("output_tokens"))
+                if in_tok or out_tok:
+                    prev = planner_usage.get(turn_key)
+                    if prev is None:
+                        planner_usage[turn_key] = [in_tok, cache_tok, out_tok]
+                    else:
+                        prev[0] = max(prev[0], in_tok)
+                        prev[1] = max(prev[1], cache_tok)
+                        prev[2] = max(prev[2], out_tok)
+
+        if not window_count:
+            return None
+
+        usage_rows = list(planner_usage.values())
+        turns = len(seen_turns) if seen_turns else None
+        if usage_rows:
+            edit_in_tok = sum(r[0] for r in usage_rows)
+            cached_in = sum(r[1] for r in usage_rows)
+            edit_out_tok = sum(r[2] for r in usage_rows)
+            first_ctx = usage_rows[0][0] + usage_rows[0][1]
+            last_ctx = usage_rows[-1][0] + usage_rows[-1][1]
+        else:
+            edit_in_tok = max(1, in_chars // 4)
+            cached_in = 0
+            edit_out_tok = max(1, out_chars // 4)
+            first_ctx = 0
+            last_ctx = 0
+
+        return {
+            "agent_name": "Antigravity",
+            "agent_model": model_name,
+            "steps_count": len(usage_rows) or (turns if turns is not None else window_count),
+            "turns": turns,
+            "context_start": first_ctx,
+            "context_end": last_ctx,
+            "input_tokens": edit_in_tok,
+            "cached_tokens": cached_in,
+            "output_tokens": edit_out_tok,
+            "total_tokens": edit_in_tok + edit_out_tok,
+            "token_precision": "exact" if usage_rows else "est",
+            "session_id": session_id,
+        }
+    except Exception:
+        return None
+
+
+def antigravity_turns(since: float, until: Optional[float] = None, root: Path = ROOT) -> Optional[int]:
+    """Count PLANNER_RESPONSE turns for the active Antigravity run in [since, until]. None when unavailable."""
+    try:
+        if not since or since <= 0:
+            return None
+        until = until or time.time() + 60
+        now = time.time()
+        pattern = os.path.expanduser("~/.gemini/antigravity/brain/*/.system_generated/logs/transcript.jsonl")
+        files = sorted(glob.glob(pattern), key=_mtime, reverse=True)
+        if not files:
+            return None
+        fallback: Optional[int] = None
+        for path_str in files[:6]:
+            mtime = _mtime(path_str)
+            if mtime < since - 60:
+                continue
+            try:
+                lines = Path(path_str).read_text(encoding="utf-8", errors="ignore").splitlines()
+            except Exception:
+                continue
+            if not lines:
+                continue
+            tail = "\n".join(lines[-200:])
+            is_ours = _is_zeno_transcript(tail, root)
+            if len(files) > 1 and not is_ours and (now - mtime > 300):
+                continue
+            sess_id = Path(path_str).parts[-4] if len(Path(path_str).parts) >= 4 else "unknown"
+            usage = antigravity_window_usage(lines, since, until, session_id=sess_id)
+            if usage is None:
+                continue
+            turns = usage.get("turns")
+            if is_ours or len(files) == 1:
+                return turns
+            if fallback is None and turns is not None:
+                fallback = turns
+        return fallback
+    except Exception:
+        return None
+
+
 def _from_antigravity(since: float, until: float, root: Path) -> Optional[Dict[str, Any]]:
     files = [f for f in glob.glob(os.path.expanduser("~/.gemini/antigravity/brain/*/.system_generated/logs/transcript.jsonl"))
-             if os.path.getmtime(f) >= since - 60]
+             if _mtime(f) >= since - 60]
     prompts: List[Dict[str, Any]] = []
     steps: List[Dict[str, Any]] = []
     sessions: List[str] = []
-    marker = root.name
+    turn_keys = set()
     for f in files:
         try:
             lines = Path(f).read_text(encoding="utf-8", errors="ignore").splitlines()
         except Exception:
             continue
-        if marker not in "\n".join(lines[-200:]) and "zeno.py" not in "\n".join(lines[-200:]):
+        if not _is_zeno_transcript("\n".join(lines[-200:]), root):
             continue
-        sessions.append(Path(f).parts[-4] if len(Path(f).parts) >= 4 else Path(f).stem)
-        for line in lines:
+        sess = Path(f).parts[-4] if len(Path(f).parts) >= 4 else Path(f).stem
+        sessions.append(sess)
+        for idx, line in enumerate(lines):
+            if not line.strip():
+                continue
             try:
                 d = json.loads(line)
             except Exception:
@@ -194,6 +371,9 @@ def _from_antigravity(since: float, until: float, root: Path) -> Optional[Dict[s
                 prompts.append({"at": at, "text": _cut(content, MAX_PROMPT_CHARS)})
                 steps.append({"at": at, "kind": "prompt", "text": _cut(content, 300)})
             elif kind == "PLANNER_RESPONSE":
+                step_idx = d.get("step_index")
+                turn_key = (sess, "step", step_idx) if isinstance(step_idx, (int, str)) else (sess, "line", idx)
+                turn_keys.add(turn_key)
                 if content.strip():
                     steps.append({"at": at, "kind": "say", "text": _cut(content, MAX_SAY_CHARS)})
                 for call in d.get("tool_calls") or []:
@@ -208,10 +388,17 @@ def _from_antigravity(since: float, until: float, root: Path) -> Optional[Dict[s
                         steps.append({"at": at, "kind": "tool", "tool": name[:80], "input": _tool_summary(name, args)})
             elif kind == "TOOL_RESPONSE" and re.search(r"(?i)\b(error|traceback|exit code [1-9]|failed)\b", content[:2000]):
                 steps.append({"at": at, "kind": "error", "text": _cut(content, MAX_ERROR_CHARS)})
-    if not prompts and not steps:
+    if not prompts and not steps and not turn_keys:
         return None
     steps.sort(key=lambda s: s["at"])
-    return {"agent": "Antigravity", "models": {}, "sessions": sessions, "prompts": prompts, "steps": steps}
+    return {
+        "agent": "Antigravity",
+        "models": {},
+        "sessions": sessions,
+        "prompts": prompts,
+        "steps": steps,
+        "turns": len(turn_keys) if turn_keys else None,
+    }
 
 
 # ---------------------------------------------------------------- entry point
@@ -229,8 +416,13 @@ def collect(since: float, until: Optional[float] = None, root: Path = ROOT) -> D
         truncated = len(prompts) > MAX_PROMPTS or len(steps) > MAX_STEPS
         prompts = prompts[:5] + prompts[5:][-(MAX_PROMPTS - 5):] if len(prompts) > MAX_PROMPTS else prompts
         steps = steps[:50] + steps[50:][-(MAX_STEPS - 50):] if len(steps) > MAX_STEPS else steps
+        turns = best.get("turns")
+        counts = _counts(best["prompts"], best["steps"])
+        if turns is not None:
+            counts["turns"] = turns
         return {"agent": best["agent"], "models": best["models"], "sessions": best["sessions"][:10],
-                "window": [round(since, 1), round(until, 1)], "counts": _counts(best["prompts"], best["steps"]),
+                "window": [round(since, 1), round(until, 1)], "counts": counts,
+                "turns": turns,
                 "prompts": prompts, "steps": steps, "truncated": truncated}
     except Exception:
         return {}

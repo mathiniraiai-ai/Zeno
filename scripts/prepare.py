@@ -1684,6 +1684,9 @@ def main() -> None:
 
     import edit_packet
     print(f"[PACKET] {edit_packet.write(proj_dir)}")
+    parts = edit_packet.packet_parts(proj_dir)
+    if len(parts) > 1:
+        print(f"[PACKET_PARTS] {' '.join(p.name for p in parts)}")
 
     segments: List[Dict[str, Any]] = []
     marks: List[Dict[str, Any]] = []

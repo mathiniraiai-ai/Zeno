@@ -1,21 +1,22 @@
 # Zeno — agent instructions
 
-Zeno edits script-led videos. The agent makes editorial decisions in `plan.edl`; Python transcribes, measures, renders and checks. Start with `agent/DIRECTOR.md`. For code development read `DEVELOPING.md` instead of the editing references.
+Zeno edits script-led videos (`plan.edl` by agent; Python measures/renders/checks). Start: `agent/DIRECTOR.md` (`DEVELOPING.md` for code work).
 
 ## Working boundaries
-- Work inside this Zeno repository. Raw footage may be read from the user's chosen local folder. Deliverables go to `~/Downloads/Zeno Outputs/<Notion name>/`. Other projects are off-limits.
-- Use `.venv/bin/python` on Mac/Linux or `.venv\Scripts\python.exe` on Windows, never bare Python. If missing, run `bash install.command` or `scripts/install_windows.ps1` once.
-- Never open or print `.env`, `.zeno_session.json`, `.zeno_owner_session.json` or credentials. Use `<PY> scripts/setup.py --smoke` / `--whoami` for safe checks.
-- Preserve existing local work. Never clear caches manually. They invalidate themselves. Use `--fresh` only for a proven cache defect. Disk cleanup requires a dry run and approval.
+- Stay in this Zeno repo (footage from user's folder; outputs to `~/Downloads/Zeno Outputs/<Notion name>/`). Other projects off-limits.
+- Run `.venv/bin/python` (Mac/Linux) or `.venv\Scripts\python.exe` (Windows), never bare Python (`bash install.command` / `scripts/install_windows.ps1` once).
+- Never open/print `.env`, `.zeno_session.json`, `.zeno_owner_session.json`, or creds (`<PY> scripts/setup.py --smoke` / `--whoami`).
+- Preserve local work; never clear caches (`--fresh` only for proven cache bugs). Cleanup needs dry-run approval.
 
 ## Video workflow
-- Queue multiple videos back-to-back in one chat (up to `1M` / `1,000,000` context tokens) with Notion and Meta connectors enabled; each `--inspect` starts an isolated per-video cost window. Revisions use the saved plan and brief. Never re-ask supplied inputs.
-- Require Google Doc `?tab=...` or local script, local footage and exact Notion name (read from Notion if a card/queue was shared). Never invent a name or read another tab.
-- Missing inputs: run `<PY> scripts/zeno.py --preflight --compact`, show results, then ask. With inputs: run `<PY> scripts/zeno.py --inspect <footage> --script <script> --name "<name>" --auto-plan --compact` (live preflight, clip reuse, isolated 1-call `claude -p` / `codex exec` subscription planner in `20k–55k` tokens, `--check-plan`, Pitch Card, and automatic 9:16 + 1:1 Square render without asking Yes/No). Never `--skip-preflight`.
-- When `--auto-plan` passes `[PLAN PASS]`, do NOT re-open `editing_packet.md`, `line_map.md`, `facts.md`, `agent/EDIT_RULES.md` or `clip_sheet_*.jpg`. Open `editing_packet.md` + `clip_sheet_*.jpg` once only for manual planning or targeted fixes (`<PY> scripts/edit_packet.py <project> --line L12`). Skip Python sources and raw JSON unless isolating a bug.
-- Manual plans/fixes write `script_analysis.md` and `plan.edl`, then `--check-plan`. Script is timeline: every line once, in order, no repeats/stumbles. Choose takes from measured words/pictures; every cut needs `sp="Name"`. Wrong voice needs another take/reshoot; disclose unchecked voices.
-- Never pause to ask Yes/No before rendering (unless the user explicitly asked for plan-only review / `--no-auto-render`). `--auto-plan` renders automatically; after manual `--check-plan`, immediately run `<PY> scripts/zeno.py --execute <plan> --square --compact` as one blocking/completion-notified run — never poll `write_stdin` or progress files. Full logs stay on disk.
-- `verify.py` checks 9:16 + 1:1 Square framing and builds `review_sheet.jpg` automatically; never write custom FFmpeg/Python frame scripts. Inspect `review_sheet.jpg` once (or on failure) and fix failed checks. Log feedback verbatim first (`--feedback "<words>" --plan <plan>`).
+- Queue videos back-to-back (up to `1M` / `1,000,000` context tokens) with Notion & Meta connectors on; each `--inspect` isolates a cost window. Require `?tab=...` or local script, local footage, exact Notion name (read from Notion if shared; never invent name/tab). Never re-ask inputs.
+- **Turn 1 (Primary 1-call)**: Missing inputs -> `<PY> scripts/zeno.py --preflight --compact`, show results, ask. Else run `<PY> scripts/zeno.py --inspect <footage> --script <script> --name "<name>" --auto-plan --compact` (never `--skip-preflight`): preflight, clip reuse, 1-call planner (`20k–55k`), `--check-plan`, Pitch Card, auto 9:16 + 1:1 render without Yes/No. If `[PLAN PASS]`, do NOT open packets/sheets/rules; deliver outputs + token report.
+- **Manual / Fallback Cap (4–5 turns max, NEVER 40+)**:
+  - **Turn 2**: Read `editing_packet_p*.md` (or `editing_packet.md`) + ALL `clip_sheet_*.jpg` in ONE parallel batch.
+  - **Turn 3**: Write `script_analysis.md` and `plan.edl` (plus `decisions.txt` if needed) in ONE parallel batch. Script is timeline (every line once, ordered, no repeats/stumbles); pick takes from words/pictures; every cut needs `sp="Name"`; wrong voice needs reshoot/take (disclose unchecked voices).
+  - **Turn 4**: Never ask Yes/No (unless `--no-auto-render`/plan-only). Run ONE combined check+render: `<PY> scripts/zeno.py --execute <plan> --square --compact` (no separate `cost_control.py` + `--check-plan` + `--execute` roundtrips unless `--check-plan` needed/plan fails). If backgrounded, **END TURN immediately** and wait for completion — NEVER poll `manage_task`, `write_stdin`, `send_input`, or progress/log files.
+  - **Turn 5**: `verify.py` checks 9:16 + 1:1 and builds `review_sheet.jpg` (no custom frame scripts). Read `review_sheet.jpg` ONCE (unless verify fails) and present deliverables + token report. Log feedback verbatim (`--feedback "<words>" --plan <plan>`); fixes use `<PY> scripts/edit_packet.py <project> --line L12` + `--check-plan`.
+- **[DO NOT] during edits**: NEVER open `agent/REFERENCE.md`, `CONCEPT.md`, `agent/EDIT_RULES.md`, `agent/FORMATS.md`, `scripts/*.py`, `clip_caches.json`, `facts.md`, `line_map.md`, `ffprobe`, or `dir`/`Get-ChildItem`/`ls` (`editing_packet.md` already holds syntax card, raw footage inventory, unmatched line diagnostics, and all words/candidates/rules).
 
 ## Owner's visual rules
 - All split screens, including baked splits, stay at `z=1` in fixed frames with 14% headroom. Characters keep their panels; the other character listens silently. Advance listener footage across turns and disclose fallback/loops.
@@ -24,8 +25,8 @@ Zeno edits script-led videos. The agent makes editorial decisions in `plan.edl`;
 - Transitions follow changes in place, time or layout. Never inside splits or continuous same-shot dialogue. Marks and banners follow the script. SFX normally -4 to 0 dB; mark exceptions are defined in the brief.
 
 ## Reporting and diagnostics
-- `config/cost_controls.json`: INR 40 model estimate and 24 requests isolated per video, `1M` (`1,000,000` tokens) intake context limit. Run `<PY> scripts/cost_control.py <project>` before manual planning/corrections; stop model work if blocked, save plan and explain. Approved local renders can finish. Unknown usage is not zero.
-- Opt-in direct API: `<PY> scripts/direct_mode.py <project> --provider openai --dry-run` first (max 3 Sol calls, conservative reserves, separate API billing; never use Codex credentials, switch silently or retry unresolved charges). Read `LOW_COST_WORKFLOW.md` only for this path.
-- Target `< 1,00,000` total tokens/video (`20k–55k` typical with `--auto-plan`), never a quality ceiling. Cut repeated context/calls; keep editorial judgment and checks.
-- Read the saved token report: show uncached input, cached input, output, combined total, new vs reused transcription and unknowns. Cost is a dated API-equivalent estimate, never a subscription invoice. README and TOKEN_LEDGER update automatically.
-- `<PY> scripts/zeno.py --check` checks dependencies. GPU and low-priority execution are automatic. Debug code under `DEVELOPING.md` without discarding edits or caches.
+- `config/cost_controls.json`: INR 40 / 24 reqs/video, `1M` (`1,000,000` tokens) limit. Run `<PY> scripts/cost_control.py <project>` if retries repeat; if blocked, stop model work, save plan, explain (approved renders finish; unknown != 0).
+- Direct API (opt-in): `<PY> scripts/direct_mode.py <project> --provider openai --dry-run` first (max 3 Sol calls, separate billing; never use Codex creds, switch silently, or retry unresolved charges; `LOW_COST_WORKFLOW.md` only here).
+- Target `< 1,00,000` tokens/video (`20k–55k` via `--auto-plan`), never a quality ceiling; cut repeated calls.
+- Report saved tokens: uncached/cached input, output, total, new vs reused transcription, unknowns (API estimate, not invoice). README & TOKEN_LEDGER auto-update.
+- `<PY> scripts/zeno.py --check` verifies deps (GPU/low-priority auto). Debug via `DEVELOPING.md`; keep edits/caches.

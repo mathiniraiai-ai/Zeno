@@ -18,14 +18,25 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 ESSENTIAL_MCP_KEYWORDS = ("notion", "meta", "zeno")
+OPTION_B_NOTES = (
+    "Option B manual/Antigravity fallback (only if --auto-plan cannot run): "
+    "(1) 1 parallel batch read of editing_packet_p*.md (or editing_packet.md) + all clip_sheet_*.jpg listed by --inspect; "
+    "(2) 1 parallel batch write of script_analysis.md + plan.edl; "
+    "(3) 1 combined finish command `<PY> scripts/zeno.py --execute <plan> --square --compact`. "
+    "Never poll background tasks/logs (end turn & wait for async wakeup), never pause to ask Yes/No before rendering, "
+    "and never open agent/REFERENCE.md, CONCEPT.md, EDIT_RULES.md, FORMATS.md, scripts/*.py, facts.md, line_map.md, "
+    "clip_caches.json, ffprobe, or dir."
+)
 PROMPT = (
-    "Start a Zeno video edit session using the low-cost workflow in AGENTS.md and agent/DIRECTOR.md "
-    "(Notion and Meta connectors remain enabled; supports queued multi-video chats up to 1M context tokens "
-    "with isolated per-video cost windows). With inputs, run `.venv/bin/python scripts/zeno.py --inspect "
-    "<footage> --script <script> --name \"<name>\" --auto-plan --compact` (or `.venv\\Scripts\\python.exe` on "
-    "Windows) for 1-call isolated planning, preserve caches, keep render/progress/checks in Python, and honor "
-    "config/cost_controls.json checkpoints. Report measured cached input and cost separately. "
-    "Ask only for missing script tab, local footage and Notion name. No development work in this edit."
+    "Start a Zeno video edit session using AGENTS.md and agent/DIRECTOR.md "
+    "(Notion, Meta, and Zeno connectors stay enabled; supports queued multi-video chats up to 1M context tokens "
+    "with isolated per-video cost windows). With inputs, run `<PY> scripts/zeno.py --inspect <footage> --script <script> "
+    "--name \"<name>\" --auto-plan --compact` (`.venv/bin/python` on Mac/Linux or `.venv\\Scripts\\python.exe` on Windows) "
+    "for 1-call isolated planning + automatic 9:16 & 1:1 Square render without asking Yes/No. "
+    f"{OPTION_B_NOTES} "
+    "Preserve caches, keep render/progress/checks in Python, honor config/cost_controls.json checkpoints, "
+    "and report measured cached input and cost separately. "
+    "Ask only for missing script tab, local footage, and Notion name. No development work in this edit."
 )
 
 
@@ -124,7 +135,11 @@ def main() -> int:
         prompt = PROMPT + ("\n\n" + supplied if supplied else "")
         command = [binary, "--model", "gpt-6.1-sol", "-c", "features.web_search_request=false", *overrides, prompt]
     else:
-        claude_prompt = "/zeno" + ("\n\n" + supplied if supplied else "")
+        claude_parts = ["/zeno"]
+        if supplied:
+            claude_parts.append(supplied)
+        claude_parts.append(OPTION_B_NOTES)
+        claude_prompt = "\n\n".join(claude_parts)
         command = [binary, "--setting-sources", "project,local", "--no-chrome"]
         if args.no_cloud_connectors:
             env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"

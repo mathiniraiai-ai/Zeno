@@ -35,6 +35,35 @@ _FORMAT_MENU = "\n".join([
     "8. `3d_to_2d` — Generation look only; name underlying sub-format (`skit (3D to 2D)`)",
 ])
 
+_DO_NOT_READ = (
+    "[DO NOT READ DURING EDIT] Everything needed is in `editing_packet_p*.md` (or `editing_packet.md`), "
+    "`clip_sheet_*.jpg`, and this brief (1-line check: `<PY> scripts/edit_packet.py <project> --line L12`). "
+    "Do NOT open `agent/REFERENCE.md`, `CONCEPT.md`, `agent/EDIT_RULES.md`, `agent/FORMATS.md`, "
+    "`scripts/*.py`, `clip_caches.json`, `facts.md`, `line_map.md`, or run `ffprobe`, `dir`, `ls`, `Get-ChildItem`."
+)
+
+_QUICK_CARD = "\n".join([
+    "# EDL & Visual Syntax Quick Card",
+    "- **Headers** (keep Zeno's `#output`, `#script`, `#src_dir`, `#canvas`, `#speakers`): "
+    "`#subs auto y=68` (`adapt=on`, `size=54`; `#subs off`; `split_v` locks captions to divider `y=50`), "
+    "`#style <name>`, `#mark_pack flash|vignette|default|glossy`, `#sfx_pack <name>`, "
+    "`#audio loudness=-11.5 [music=path.mp3] [music_gain_db=-18]` (note: no `#music`/`#marks`/`#sfx` header directives).",
+    "- **Cut line** (space-delimited tokens, NOT `|` pipes): "
+    "`<id> <clip> <start>-<end> layout=... z=... sp=\"Name\" [focus=x,y] [slot=top|bottom|left|right] "
+    "[peer=\"Name:clip.mp4\"@start-end@slot] [tr=name@dur] [vol=+3dB] [# cut note]`",
+    "  - Single ex: `L1 clip.mp4 0.00-3.20 layout=single z=sudden_in:1.08@0.50 sp=\"Name\" # hook`",
+    "  - Split ex: `L2 clip.mp4 0.02-3.40 layout=split_h z=1 sp=\"Name\" slot=left peer=\"Peer:clip2.mp4\"@1.00-4.38@right tr=split_reveal@0.40`",
+    "- **Inline effects** (times relative to cut start): "
+    "`mark:wrong@t/0.48@style=flash` or `mark:right@t/0.48@style=flash` (optional `@pos=top-right`, `@size=0.22`, `@sfx=...`, `@gain=+1.0`), "
+    "`banner:\"text\"@t`, `chat:sp@\"text\"@t[@status]`, `sfx:pop.wav@t/-3` "
+    "(SFX -4..0 dB: `pop.wav`, `click.wav`, `whoosh.wav`, `sn_swish_1.wav`, `sn_punch_1.wav`, `sn_riser_1.wav`, `sn_wrong.wav`, `correct_ding.wav`). "
+    "Standalone `# MARKS:` / `# SFX:` pipe rows are also valid (`wrong | L2 | 3.35 | 0.48 | top-right | 0.22 | sn_wrong.wav | +1.0`).",
+    "- **Layouts & motion**: `single` (full frame, or baked split + `slot=... z=1`), `split_h` (`z=1`, left/right), `split_v` (`z=1`, top/bottom), "
+    "`top_pip` (`z=1`, `750x420` top-center window), `video_call` (speaker + PiP), `chat_bar` / `chat_bar:docked`. "
+    "Zoom (`single` only): `1.0`, `1.0->1.06`, `sudden_in:1.08@t`, `sudden_out:1.08@t`, `flash_zoom:1.12@t`. "
+    "Transitions (`tr=`, boundaries only): `whip_left@0.34`, `whip_right@0.34`, `slide_up@0.36`, `split_reveal@0.40`, `dip_to_black@0.40`, `dissolve@0.40`.",
+])
+
 _MICRONARRATIVE_STYLE_RULES = "\n".join([
     "# STYLE: micronarrative (non-duplicate style specifics; do not reopen styles/micronarrative/SKILL.md)",
     "- **Footage modes**: (A) Baked Flow split -> `layout=single slot=top|bottom|left|right z=1` (never double-composite); "
@@ -154,6 +183,29 @@ def _style_section(style: str) -> str:
     return f"# STYLE: {style}\n\n" + "\n\n".join(kept).strip()
 
 
+def _clean_picked_rules(text: str, page: bool) -> str:
+    """Keep brief rules self-contained and strip non-applicable syntax/doc pointers."""
+    text = text.replace(
+        "Read `line_map.md`, `facts.md` and all clip sheets completely.",
+        "Read `editing_packet.md` and all clip sheets once (do not reopen `line_map.md` or `facts.md` separately).",
+    )
+    if page:
+        return (
+            text.replace(" [tr=name@duration]", "")
+            .replace(
+                ' Extra forms are `mark:wrong@t/0.48@style=flash`, `banner:"text"@t`, `sfx:pop.wav@t/-3`, `vol=+3dB`. Effect times are relative to the cut start.',
+                "",
+            )
+        )
+    return (
+        text.replace("For detailed motion choices see `agent/REFERENCE.md` only if needed. ", "")
+        .replace(
+            "Additional layout, mark pack and SFX syntax is in `agent/REFERENCE.md` when required.",
+            "See `# EDL & Visual Syntax Quick Card` below.",
+        )
+    )
+
+
 def build(meta: Dict[str, Any], plan: Dict[str, Any], style: str = "") -> str:
     """The brief for this job, from the script's meta, the plan header Zeno wrote and the style."""
     meta = meta or {}
@@ -163,7 +215,12 @@ def build(meta: Dict[str, Any], plan: Dict[str, Any], style: str = "") -> str:
     rules = EDIT_RULES.read_text(encoding="utf-8") if EDIT_RULES.is_file() else ""
     formats = FORMATS.read_text(encoding="utf-8") if FORMATS.is_file() else ""
 
-    out = ["# EDIT BRIEF for this job: read this instead of agent/EDIT_RULES.md and agent/FORMATS.md (it is cut from them).", ""]
+    out = [
+        "# EDIT BRIEF for this job (replaces `agent/EDIT_RULES.md` and `agent/FORMATS.md`).",
+        "",
+        _DO_NOT_READ,
+        "",
+    ]
     cb = str(meta.get("concept_brief") or "").strip()
     if cb:
         out.append(f"Script brief: {cb}")
@@ -185,14 +242,14 @@ def build(meta: Dict[str, Any], plan: Dict[str, Any], style: str = "") -> str:
             pass
 
     keep = _ALWAYS + (_PAGE if page else _MOTION)
-    picked_rules = _pick(rules, keep).replace(
-        "Read `line_map.md`, `facts.md` and all clip sheets completely.",
-        "Read `editing_packet.md` and all clip sheets once (do not reopen `line_map.md` or `facts.md` separately).",
-    )
-    out.append(picked_rules)
+    out.append(_clean_picked_rules(_pick(rules, keep), page))
 
     if page:
-        fmt = "\n\n".join(body for head, body in _sections(formats, "##") if head.lower().startswith("4. scrolling text"))
+        out += [
+            "",
+            "# FORMAT: `Format: scrolling_text (4.2 Two people)` on line 1 of `script_analysis.md` "
+            "(`#page scroll`, `split_h z=1`). **One person is not built**: tell the user.",
+        ]
     else:
         fmt_parts = [_FORMAT_MENU]
         cand_prefixes = _candidate_format_prefixes(meta, plan, style)
@@ -210,12 +267,13 @@ def build(meta: Dict[str, Any], plan: Dict[str, Any], style: str = "") -> str:
                 lines_ex = [ln for ln in body.splitlines() if not ln.strip().startswith("- The cards show lengths")]
                 fmt_parts.append("\n".join(lines_ex).strip())
         fmt = "\n\n".join(p for p in fmt_parts if p)
-    if fmt:
-        out += ["", "# FORMATS (name the format on line 1 of script_analysis.md as `Format: <id> (<name>)`)", "", fmt]
-    if style and not page:
-        s_sec = _style_section(style)
-        if s_sec:
-            out += ["", s_sec]
+        if fmt:
+            out += ["", "# FORMATS (name the format on line 1 of script_analysis.md as `Format: <id> (<name>)`)", "", fmt]
+        if style:
+            s_sec = _style_section(style)
+            if s_sec:
+                out += ["", s_sec]
+        out += ["", _QUICK_CARD]
     return "\n".join(out).rstrip() + "\n"
 
 

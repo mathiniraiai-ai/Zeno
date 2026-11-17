@@ -198,98 +198,31 @@ def detect_agent_usage(
     # 1. Check Antigravity transcripts (~/.gemini/antigravity/brain/*/.system_generated/logs/transcript.jsonl)
     agy_pattern = os.path.expanduser("~/.gemini/antigravity/brain/*/.system_generated/logs/transcript.jsonl")
     agy_files = [] if os.getenv("CLAUDECODE") else sorted(glob.glob(agy_pattern), key=os.path.getmtime, reverse=True)
-    for path_str in agy_files[:3]:
+    fallback_agy: Optional[Tuple[float, Dict[str, Any]]] = None
+    for path_str in agy_files[:6]:
         try:
             mtime = os.path.getmtime(path_str)
             lines = Path(path_str).read_text(encoding="utf-8", errors="ignore").splitlines()
             if not lines:
                 continue
-            raw_sample = "\n".join(lines[-40:])
-            if len(agy_files) > 1 and ("Zeno" not in raw_sample and "Claude Editor" not in raw_sample) and (now - mtime > 300):
+            raw_sample = "\n".join(lines[-200:])
+            is_zeno = "Zeno" in raw_sample or "Claude Editor" in raw_sample or "zeno.py" in raw_sample
+            if len(agy_files) > 1 and not is_zeno and (now - mtime > 300):
                 continue
 
-            # Parse exact model name from Antigravity's <USER_SETTINGS_CHANGE> blocks
-            model_name = "unknown"
-            for line in lines:
-                if "USER_SETTINGS_CHANGE" in line and "Model Selection" in line:
-                    try:
-                        obj = json.loads(line)
-                        content_str = str(obj.get("content") or "")
-                        m = re.search(
-                            r"setting `Model Selection` from [^\n]+? to ([A-Za-z0-9 ._-]+?)(?:\s*\(|\.\s|\.\n)",
-                            content_str,
-                        )
-                        if m:
-                            cand_model = m.group(1).strip()
-                            if len(cand_model) >= 4:
-                                model_name = cand_model
-                    except Exception:
-                        pass
-
-            # Collect steps strictly inside the video edit window [cutoff, ceiling]
-            window_steps = []
-            all_parsed = []
-            for line in lines:
-                if not line.strip():
-                    continue
-                d = json.loads(line)
-                step_ts = _iso_to_epoch(str(d.get("created_at") or ""))
-                all_parsed.append((step_ts, d))
-                if cutoff <= step_ts <= ceiling:
-                    window_steps.append(d)
-
-
-            if window_steps:
-                in_chars = 0
-                out_chars = 0
-                planner_steps = []
-                for s in window_steps:
-                    st = str(s.get("type") or "")
-                    if st in ("USER_INPUT", "GENERIC", "SYSTEM_MESSAGE", "TOOL_RESPONSE", "SYSTEM"):
-                        in_chars += len(str(s.get("content") or ""))
-                    elif st == "PLANNER_RESPONSE":
-                        out_chars += (
-                            len(str(s.get("content") or ""))
-                            + len(str(s.get("thinking") or ""))
-                            + len(json.dumps(s.get("tool_calls") or [], ensure_ascii=False))
-                        )
-                        if s.get("input_tokens") or s.get("output_tokens"):
-                            planner_steps.append(s)
-
-                edit_in_tok = max(1, in_chars // 4)
-                edit_out_tok = max(1, out_chars // 4)
-                first_ctx = (
-                    int(planner_steps[0].get("input_tokens") or 0) + int(planner_steps[0].get("cache_read_tokens") or 0)
-                    if planner_steps else 0
-                )
-                last_ctx = (
-                    int(planner_steps[-1].get("input_tokens") or 0) + int(planner_steps[-1].get("cache_read_tokens") or 0)
-                    if planner_steps else 0
-                )
-                cached_in = sum(int(step.get("cache_read_tokens") or 0) for step in planner_steps)
-                if planner_steps:
-                    edit_in_tok = sum(int(step.get("input_tokens") or 0) for step in planner_steps)
-                    edit_out_tok = sum(int(step.get("output_tokens") or 0) for step in planner_steps)
-
-                candidates.append((
-                    mtime,
-                    {
-                        "agent_name": "Antigravity",
-                        "agent_model": model_name,
-                        "steps_count": len(planner_steps) or len(window_steps),
-                        "context_start": first_ctx,
-                        "context_end": last_ctx,
-                        "input_tokens": edit_in_tok,
-                        "cached_tokens": cached_in,
-                        "output_tokens": edit_out_tok,
-                        "total_tokens": edit_in_tok + edit_out_tok,
-                        "token_precision": "exact" if planner_steps else "est",
-                        "session_id": Path(path_str).parts[-4] if len(Path(path_str).parts) >= 4 else "unknown",
-                    },
-                ))
-                break
+            import agent_log
+            sess_id = Path(path_str).parts[-4] if len(Path(path_str).parts) >= 4 else "unknown"
+            got = agent_log.antigravity_window_usage(lines, cutoff, ceiling, session_id=sess_id)
+            if got is not None:
+                if is_zeno or len(agy_files) == 1:
+                    candidates.append((mtime, got))
+                    break
+                if fallback_agy is None:
+                    fallback_agy = (mtime, got)
         except Exception:
             continue
+    if fallback_agy is not None and not any(c[1].get("agent_name") == "Antigravity" for c in candidates):
+        candidates.append(fallback_agy)
 
     # 2. Check Claude Code transcripts (~/.claude/projects/**/*.jsonl)
     claude_sid = os.getenv("CLAUDE_CODE_SESSION_ID", "") if os.getenv("CLAUDECODE") else ""
@@ -784,7 +717,11 @@ def finalize_job_telemetry(
     try:
         import job_report
         record["job_report"] = job_report.final_report(proj_dir, plan)
-        record["job_report"]["agent"] = {k: agent.get(k) for k in ("turns", "cache_write_tokens", "code_edits", "window_minutes", "mixed_with_development") if k in agent}
+        record["job_report"]["agent"] = {
+            k: agent.get(k)
+            for k in ("turns", "cache_write_tokens", "code_edits", "window_minutes", "mixed_with_development")
+            if k in agent and agent.get(k) is not None
+        }
         record["job_report"]["accounting"] = {k: record[k] for k in (
             "agent_session_id", "agent_token_precision", "agent_total_including_cache",
             "agent_reasoning_tokens", "transcribe_new_total_tokens", "transcribe_reused_total_tokens",

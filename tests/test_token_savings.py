@@ -706,5 +706,132 @@ class CacheCleanupAndMcpIsolationTests(unittest.TestCase):
                 self.assertEqual(mock_exec.call_count, 0)
 
 
+class OptionBBatchedWorkflowTests(unittest.TestCase):
+    def test_edit_brief_includes_syntax_card_and_keeps_page_brief_compact(self):
+        import edit_brief
+
+        page_brief = edit_brief.build({}, {"page": {"mode": "scroll"}})
+        self.assertIn("[DO NOT READ DURING EDIT]", page_brief)
+        self.assertLess(len(page_brief.encode("utf-8")), 7200)
+        self.assertNotIn("# EDL & Visual Syntax Quick Card", page_brief)
+        self.assertNotIn("## Zoom", page_brief)
+
+        full_brief = edit_brief.build({}, {})
+        self.assertIn("[DO NOT READ DURING EDIT]", full_brief)
+        self.assertIn("# EDL & Visual Syntax Quick Card", full_brief)
+        self.assertIn("mark:wrong@t", full_brief)
+        self.assertIn("#subs auto y=68", full_brief)
+
+    def test_edit_packet_inventory_chunking_and_stale_cleanup(self):
+        import edit_packet
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tpath = Path(tmp)
+            src_dir = tpath / "raw"
+            src_dir.mkdir()
+            (src_dir / "music.mp3").write_bytes(b"mp3data")
+
+            proj = tpath / "work" / "proj"
+            proj.mkdir(parents=True)
+            clips_root = tpath / "work" / "_clips"
+            (clips_root / "C1").mkdir(parents=True)
+            (clips_root / "C1" / "info.json").write_text(
+                json.dumps({"width": 1080, "height": 1920, "duration": 4.2, "path": str(src_dir / "C1.mp4")}),
+                encoding="utf-8",
+            )
+            (clips_root / "C1" / "speech_spans.json").write_text("[]", encoding="utf-8")
+            (proj / "clip_caches.json").write_text(
+                json.dumps({"C1.mp4": "C1"}),
+                encoding="utf-8",
+            )
+            (proj / "brief.md").write_text("## Rules\nsplits z=1\n", encoding="utf-8")
+            (proj / "plan.edl").write_text(
+                f"#output out.mp4\n#src_dir {src_dir}\nL1 C1.mp4 0.00-1.00 sp=\"A\"\n",
+                encoding="utf-8",
+            )
+            (proj / "line_map.md").write_text(
+                "L1 | Hello\n  CAND C1.mp4 0.00-1.00\n\nL2 | Missing line\n  MISSING: no match in footage\n",
+                encoding="utf-8",
+            )
+            # Exceed _CHUNK_TRIGGER_BYTES so write() emits parallel editing_packet_p*.md parts.
+            big_words = "\n".join(f"  {i:04d}.00 word{i} (0.20s)" for i in range(1800))
+            (proj / "facts.md").write_text("## C1.mp4 (1080x1920, 4.20s)\n" + big_words + "\n", encoding="utf-8")
+
+            out_path = edit_packet.write(proj)
+            full_text = out_path.read_text(encoding="utf-8")
+            self.assertIn("# Batch Playbook", full_text)
+            self.assertIn("--execute", full_text)
+            self.assertIn("## Raw Footage Inventory & Diagnostics", full_text)
+            self.assertIn("music.mp3", full_text)
+            self.assertIn("Unmatched/missing lines (0 candidates): L2", full_text)
+            self.assertIn("SILENT/zero words", full_text)
+
+            parts = edit_packet.packet_parts(proj)
+            self.assertGreater(len(parts), 1)
+            for p in parts:
+                txt = p.read_text(encoding="utf-8")
+                self.assertLessEqual(len(txt.encode("utf-8")), edit_packet.CHUNK_MAX_BYTES)
+                self.assertLessEqual(len(txt.splitlines()), edit_packet.CHUNK_MAX_LINES)
+
+            manifest = json.loads((proj / "editing_packet.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["parts"], [p.name for p in parts])
+
+            # Shrinking under chunk trigger removes stale editing_packet_p*.md files.
+            (proj / "facts.md").write_text("## C1.mp4 (1080x1920, 4.20s)\n  0.10 Hello\n", encoding="utf-8")
+            edit_packet.write(proj)
+            self.assertEqual(list(proj.glob("editing_packet_p*.md")), [])
+            self.assertEqual(edit_packet.packet_parts(proj), [proj / "editing_packet.md"])
+
+    def test_zeno_manual_fallback_pack_and_compact_regex(self):
+        import contextlib
+        import io
+        import compact_run
+        import zeno
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pdir = Path(tmp) / "proj_fb"
+            pdir.mkdir()
+            for i in (1, 2, 10):
+                (pdir / f"editing_packet_p{i}.md").write_text("part\n", encoding="utf-8")
+            (pdir / "clip_sheet_01.jpg").write_bytes(b"jpg")
+            plan_p = pdir / "plan.edl"
+            plan_p.write_text("#output out.mp4\n", encoding="utf-8")
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                zeno.print_next_step(plan_p, fallback_reason="Not logged in")
+            out = buf.getvalue()
+            self.assertIn("[MANUAL_FALLBACK_PACK]", out)
+            self.assertIn("[BATCH PLAYBOOK]", out)
+            self.assertIn("editing_packet_p1.md", out)
+            self.assertLess(out.index("editing_packet_p2.md"), out.index("editing_packet_p10.md"))
+            self.assertIn("clip_sheet_01.jpg", out)
+            self.assertIn("--execute", out)
+            self.assertIn("[DO NOT]", out)
+            self.assertIn("NEVER poll", out)
+
+            for tag in ("[PACKET_PARTS] p1 p2", "[MANUAL_FALLBACK_PACK] fallback", "[BATCH PLAYBOOK] ok", "[TURN 2] read", "[DO NOT] stop"):
+                self.assertIsNotNone(compact_run.IMPORTANT.search(tag), f"compact_run missed: {tag}")
+
+    def test_antigravity_turns_and_1m_limit_preserved(self):
+        import agent_log
+        import cost_control
+
+        lines = [
+            json.dumps({"type": "USER_INPUT", "created_at": "2026-11-17T10:00:01Z", "content": "edit"}),
+            json.dumps({"type": "PLANNER_RESPONSE", "step_index": 2, "created_at": "2026-11-17T10:00:05Z", "input_tokens": 1000, "cache_read_tokens": 500, "output_tokens": 100}),
+            json.dumps({"type": "PLANNER_RESPONSE", "step_index": 2, "created_at": "2026-11-17T10:00:06Z", "input_tokens": 1000, "cache_read_tokens": 500, "output_tokens": 120}),
+            json.dumps({"type": "PLANNER_RESPONSE", "step_index": 4, "created_at": "2026-11-17T10:00:12Z", "input_tokens": 1200, "cache_read_tokens": 800, "output_tokens": 150}),
+            "{bad-json",
+            json.dumps({"type": "PLANNER_RESPONSE", "step_index": 9, "created_at": "2026-11-17T10:05:00Z", "input_tokens": 900, "output_tokens": 50}),
+        ]
+        cutoff = agent_log._epoch("2026-11-17T10:00:00Z")
+        ceiling = agent_log._epoch("2026-11-17T10:01:00Z")
+        usage = agent_log.antigravity_window_usage(lines, cutoff, ceiling, session_id="agy-test")
+        self.assertIsNotNone(usage)
+        self.assertEqual(usage["turns"], 2)
+        self.assertEqual(cost_control.settings()["new_chat_context_limit"], 1_000_000)
+
+
 if __name__ == "__main__":
     unittest.main()
