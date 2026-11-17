@@ -3,6 +3,7 @@
   "productName": "Zeno",
   "version": "1.0.19",
   "description": "Zeno desktop app: watch every edit, step by step",
+  "author": "Supernova AI",
   "main": "main.js",
   "private": true,
   "license": "UNLICENSED",

@@ -10,12 +10,15 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             script: dist:mac
+            artifact: app/dist/*.dmg
           - os: windows-latest
             script: dist:win
+            artifact: app/dist/*.exe
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -30,6 +33,4 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: zeno-${{ matrix.os }}
-          path: |
-            app/dist/*.dmg
-            app/dist/*.exe
+          path: ${{ matrix.artifact }}
