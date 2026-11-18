@@ -333,6 +333,7 @@ def build_record(
         "plan_versions": files,
         "plan_final": _read(plan_path, 150_000),
         "job_report": _json("job_report.json"),
+        "progress": _json("progress.json"),
         "verify": _json("verify_report.json"),
         "render_notes": _json("render_notes.json"),
         "page_meta": _json("_page/page_meta.json"),
@@ -362,6 +363,40 @@ def build_record(
 
 
 # ---------------------------------------------------------------- sending
+def publish_progress(proj: Path, snapshot: Dict[str, Any]) -> bool:
+    """A small heartbeat, separate from scripts/plans and from paid model requests."""
+    if not enabled():
+        return False
+    cloud = _cloud()
+    if cloud is None:
+        return False
+    # Never send owner addresses, file paths, script text or raw checker diagnostics to the viewer feed.
+    safe = {k: snapshot.get(k) for k in (
+        "project", "video_name", "stage", "total_stages", "stage_name", "completed", "total", "pct",
+        "elapsed_sec", "state", "started_at", "stage_started_at", "last_progress_at", "updated_at",
+        "stale_after_sec", "delay_after_sec",
+    )}
+    safe["detail"] = {
+        "blocked": "Editing stopped: review the flagged voices or source footage with the editor.",
+        "failed": "This stage failed. Review the saved check results.",
+        "error": "This stage failed. Review the saved check results.",
+        "measured": "Footage measured; waiting for the editing plan.",
+        "plan_ready": "Plan checked; ready to render.",
+        "completed": "Editing and quality checks completed.",
+    }.get(str(snapshot.get("state")), str(snapshot.get("stage_name") or "Working"))
+    body = json.dumps({"progress_uid": job_uid(proj), "progress": safe}).encode("utf-8")
+    try:
+        import urllib.request
+        request = urllib.request.Request(cloud["url"] + "/v1/jobs/progress", data=body, headers={
+            "Authorization": f"Bearer {cloud['token']}", "Content-Type": "application/json",
+            "X-Zeno-Version": _version(),
+        }, method="POST")
+        with urllib.request.urlopen(request, timeout=3.0) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
 def _cloud() -> Optional[Dict[str, str]]:
     try:
         import auth_session

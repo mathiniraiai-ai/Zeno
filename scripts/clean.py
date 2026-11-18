@@ -212,22 +212,242 @@ def cleanup_after_job(root: Path = ROOT, keep_hours: float = None, project_dir: 
         return {"ran": True, "error": str(exc)[:120], "freed_mb": round(freed / 1e6, 1), "files": files}
 
 
-def cleanup_after_update(root: Path = ROOT, version: str = "") -> dict:
+OTA_MANIFEST_NAME = "_zeno_manifest.json"
+OTA_PROTECTED_REL = {
+    ".env",
+    ".zeno_session.json",
+    ".zeno_owner_session.json",
+    ".zeno-dev",
+}
+OTA_PROTECTED_PREFIXES = (
+    ".git/",
+    ".venv/",
+    "models/",
+    "tools/",
+    "work/",
+    "input/",
+    "output/",
+    "scratch/",
+    "service/",
+)
+OTA_RUNTIME_SKIP_DIRS = {"node_modules", "__pycache__", ".git", ".venv", "dist"}
+OTA_WORK_PRESERVE = {
+    ".gitkeep",
+    ".last_auto_update.json",
+    ".cloud_release_state.json",
+    "_update_state.json",
+    ".last_cleanup_state.json",
+    ".last_ota_manifest.json",
+    "_clips",
+    "_job_outbox",
+    "_knowledge",
+    "zeno_telemetry.db",
+    "token_telemetry.json",
+    "auto_update.log",
+}
+
+
+def _major_ver(ver: str) -> int:
+    import re
+    m = re.match(r"^v?(\d+)\.", str(ver or "").strip())
+    return int(m.group(1)) if m else 0
+
+
+def _is_ota_protected(rel_posix: str) -> bool:
+    clean = rel_posix.replace("\\", "/").lstrip("/")
+    if not clean or ".." in clean.split("/"):
+        return True
+    if clean in OTA_PROTECTED_REL:
+        return True
+    if any(clean.startswith(pfx) or clean == pfx.rstrip("/") for pfx in OTA_PROTECTED_PREFIXES):
+        return True
+    parts = clean.split("/")
+    if any(part in OTA_RUNTIME_SKIP_DIRS for part in parts):
+        return True
+    return False
+
+
+def _read_prev_version_for_cleanup(work: Path) -> str:
+    import json as _json
+    for fname, key in (
+        (".last_cleanup_state.json", "version"),
+        (".cloud_release_state.json", "version"),
+        ("_update_state.json", "installed_version"),
+        (".last_auto_update.json", "before_version"),
+    ):
+        fp = work / fname
+        if fp.is_file():
+            try:
+                data = _json.loads(fp.read_text(encoding="utf-8"))
+                val = str(data.get(key) or "").strip()
+                if val:
+                    return val
+            except Exception:
+                pass
+    return ""
+
+
+def _prune_from_manifest(root: Path, version: str = "", prev_version: str = "") -> tuple[int, int, int, bool]:
+    """Remove obsolete files/empty dirs left inside managed dirs when upgrading via OTA (strictly preserving user data)."""
+    import json as _json
+    man_path = root / OTA_MANIFEST_NAME
+    if not man_path.is_file():
+        return 0, 0, 0, False
+    dev_guard = (root / ".zeno-dev").exists() and os.environ.get("ZENO_ALLOW_DEV_OTA_PRUNE", "").strip() != "1"
+    if dev_guard:
+        try:
+            man_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return 0, 0, 0, False
+
+    try:
+        manifest = _json.loads(man_path.read_text(encoding="utf-8"))
+    except Exception:
+        return 0, 0, 0, False
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), list):
+        return 0, 0, 0, False
+
+    root_res = root.resolve()
+    keep_files = {str(p).replace("\\", "/").lstrip("/") for p in manifest.get("files") or [] if str(p).strip()}
+    managed_dirs = [str(d).replace("\\", "/").strip("/") for d in manifest.get("managed_dirs") or [] if str(d).strip()]
+    managed_top = [str(f).replace("\\", "/").lstrip("/") for f in manifest.get("managed_top_files") or [] if str(f).strip()]
+    obsolete = [str(p).replace("\\", "/").lstrip("/") for p in manifest.get("obsolete_paths") or [] if str(p).strip()]
+    clear_work = bool(manifest.get("clear_work_projects")) or (
+        bool(prev_version and version) and _major_ver(version) > _major_ver(prev_version) > 0
+    )
+
+    freed = pruned_files = pruned_dirs = 0
+
+    for mdir in managed_dirs:
+        if _is_ota_protected(mdir + "/"):
+            continue
+        base = (root / mdir).resolve()
+        if not base.is_dir() or not str(base).startswith(str(root_res) + os.sep):
+            continue
+        for cur, dirs, fnames in os.walk(base, topdown=True, followlinks=False):
+            dirs[:] = [d for d in dirs if d not in OTA_RUNTIME_SKIP_DIRS]
+            cur_path = Path(cur)
+            for fn in fnames:
+                fp = cur_path / fn
+                if fn == ".DS_Store" or fp.is_symlink():
+                    continue
+                try:
+                    rel_posix = fp.resolve().relative_to(root_res).as_posix()
+                except Exception:
+                    continue
+                if rel_posix == OTA_MANIFEST_NAME or _is_ota_protected(rel_posix):
+                    continue
+                if rel_posix not in keep_files:
+                    try:
+                        sz = fp.stat().st_size
+                        fp.unlink()
+                        freed += sz
+                        pruned_files += 1
+                    except OSError:
+                        pass
+        for cur, dirs, fnames in os.walk(base, topdown=False, followlinks=False):
+            cur_path = Path(cur)
+            if cur_path.name in OTA_RUNTIME_SKIP_DIRS:
+                continue
+            try:
+                if not any(cur_path.iterdir()):
+                    cur_path.rmdir()
+                    pruned_dirs += 1
+            except OSError:
+                pass
+
+    for rel in sorted(set(managed_top) | set(obsolete)):
+        if not rel or rel == OTA_MANIFEST_NAME or _is_ota_protected(rel):
+            continue
+        if rel in keep_files:
+            continue
+        cand = (root / rel)
+        try:
+            cand_res = cand.resolve()
+        except OSError:
+            continue
+        if not str(cand_res).startswith(str(root_res) + os.sep):
+            continue
+        if cand.is_file() or cand.is_symlink():
+            try:
+                sz = cand.stat().st_size if cand.is_file() else 0
+                cand.unlink()
+                freed += sz
+                pruned_files += 1
+            except OSError:
+                pass
+        elif cand.is_dir() and rel in obsolete:
+            try:
+                sz = size_of(cand)
+                shutil.rmtree(cand)
+                freed += sz
+                pruned_dirs += 1
+            except OSError:
+                pass
+
+    try:
+        work = root / "work"
+        work.mkdir(parents=True, exist_ok=True)
+        (work / ".last_ota_manifest.json").write_text(
+            _json.dumps({
+                "version": version or str(manifest.get("version") or ""),
+                "prev_version": prev_version,
+                "tracked_files": len(keep_files),
+                "pruned_files": pruned_files,
+                "pruned_dirs": pruned_dirs,
+                "clear_work_projects": clear_work,
+                "applied_at": int(time.time()),
+            }, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    try:
+        man_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return freed, pruned_files, pruned_dirs, clear_work
+
+
+def cleanup_after_update(root: Path = ROOT, version: str = "", prev_version: str = "") -> dict:
     """Run automatically whenever an OTA software update finishes installing.
 
-    Clears stale Python `__pycache__` bytecode under `scripts/` & `service/`, old engine render chunks
+    Clears stale Python `__pycache__` bytecode under `scripts/`, `service/`, & `tests/`, old engine render chunks
     in `work/_segments`, leftover `work/_ota_stage_*`, stale `work/_update_check.json`, stale job-window markers,
-    and old run logs (> 24h), while preserving all measured clips (`work/_clips/`), active project plans,
-    credentials, and finished videos. Disable with `ZENO_AUTO_CLEAN=0` or `ZENO_CLEAR_ON_UPDATE=0`.
+    and prunes obsolete managed files using `_zeno_manifest.json`, while preserving all measured clips (`work/_clips/`),
+    credentials, `.venv/`, `models/`, `tools/`, `input/`, and finished videos.
+    On major version upgrades (e.g., `1.x -> 2.0.0`) or `clear_work_projects`, also resets old `1.x` `work/` project caches
+    while preserving `work/_clips/` and updater/telemetry state.
+    Disable with `ZENO_AUTO_CLEAN=0` or `ZENO_CLEAR_ON_UPDATE=0`.
     """
     if os.environ.get("ZENO_AUTO_CLEAN", "1") == "0" or os.environ.get("ZENO_CLEAR_ON_UPDATE", "1") == "0":
         return {"ran": False}
     import json as _json
-    freed = files = 0
+    freed = files = pruned_files = pruned_dirs = 0
     work = root / "work"
+    resolved_prev = (prev_version or _read_prev_version_for_cleanup(work)).strip()
     try:
-        # 1. Clear stale Python bytecode caches inside scripts/ and service/ so updated .py files take effect immediately
-        for code_sub in ("scripts", "service"):
+        # 0. Prune obsolete files/empty dirs left behind in managed folders when upgrading via OTA
+        m_freed, pruned_files, pruned_dirs, clear_work = _prune_from_manifest(root, version=version, prev_version=resolved_prev)
+        freed += m_freed
+        files += pruned_files + pruned_dirs
+        if not clear_work and (work / ".last_ota_manifest.json").is_file():
+            try:
+                last_man = _json.loads((work / ".last_ota_manifest.json").read_text(encoding="utf-8"))
+                if (
+                    isinstance(last_man, dict)
+                    and str(last_man.get("version") or "") == str(version or "")
+                    and bool(last_man.get("clear_work_projects"))
+                ):
+                    clear_work = True
+            except Exception:
+                pass
+        if not clear_work and resolved_prev and version and _major_ver(version) > _major_ver(resolved_prev) > 0:
+            clear_work = True
+
+        # 1. Clear stale Python bytecode caches inside scripts/, service/, and tests/ so updated .py files take effect immediately
+        for code_sub in ("scripts", "service", "tests"):
             base_d = (root / code_sub).resolve()
             if base_d.is_dir():
                 for pyc_dir in list(base_d.rglob("__pycache__")):
@@ -244,6 +464,19 @@ def cleanup_after_update(root: Path = ROOT, version: str = "") -> dict:
                 safe_delete(f, root)
                 freed += sz
                 files += 1
+        # 2b. On major upgrades (1.x -> 2.0.0) or explicit manifest flag, clear stale project packets/caches while keeping work/_clips/
+        if clear_work and work.is_dir():
+            for child in list(work.iterdir()):
+                if child.name in OTA_WORK_PRESERVE or child.name.startswith("_clips"):
+                    continue
+                if child.is_dir() or child.name.startswith(("_subs", "_job_marker")) or child.suffix == ".log":
+                    try:
+                        sz = size_of(child)
+                        safe_delete(child, root)
+                        freed += sz
+                        files += 1
+                    except Exception:
+                        pass
         # 3. Clear OTA staging dirs, stale update-check cache, and old run logs
         f_ota, n_ota = _prune_ota_staging(work)
         f_log, n_log = _prune_work_logs(work, max_age_hours=24.0)
@@ -268,6 +501,10 @@ def cleanup_after_update(root: Path = ROOT, version: str = "") -> dict:
             "ran": True,
             "trigger": "after_update",
             "version": version,
+            "prev_version": resolved_prev,
+            "pruned_files": pruned_files,
+            "pruned_dirs": pruned_dirs,
+            "clear_work_projects": clear_work,
             "freed_mb": round(freed / 1e6, 1),
             "files": files,
             "cleaned_at": int(time.time()),
@@ -289,6 +526,7 @@ def main():
     ap.add_argument("--after-update", action="store_true", help="prune stale bytecode, segments, and update scratch after OTA update")
     ap.add_argument("--project", default="", help="optional project folder path for --after-job")
     ap.add_argument("--version", default="", help="installed version tag for --after-update")
+    ap.add_argument("--prev-version", default="", help="previous version tag before OTA update for --after-update")
     ap.add_argument("--days", type=float, default=14, help="delete heavy files of projects untouched this long (default 14)")
     ap.add_argument("--purge-days", type=float, default=90, help="delete whole projects untouched this long (default 90)")
     ap.add_argument("--standins", action="store_true", help="also delete input/standins/")
@@ -299,7 +537,7 @@ def main():
     root = Path(a.root)
     if a.after_update:
         import json as _json
-        print(_json.dumps(cleanup_after_update(root=root, version=a.version)))
+        print(_json.dumps(cleanup_after_update(root=root, version=a.version, prev_version=a.prev_version)))
         return
     if a.after_job:
         import json as _json

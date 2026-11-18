@@ -73,21 +73,21 @@ TOOLS: List[Dict[str, Any]] = [
                                                        "style": {"type": "string"}, "lang": {"type": "string"},
                                                        "wait_seconds": {"type": "integer", "description": "leave unset: the call waits until the video is rendered (up to 90 min)"}},
                      "required": ["script", "footage", "name"]}},
-    {"name": "zeno_start_edit", "description": "Run Zeno's 1-call inspect + isolated auto-planner + automatic 9:16 & 1:1 Square render (--inspect --auto-plan --compact) end-to-end without asking Yes/No. Returns the Pitch Card, verification result, output MP4 paths, and token report directly; do NOT read line_map.md, facts.md, editing_packet.md, or clip_sheet_*.jpg unless manual fallback is returned.",
+    {"name": "zeno_start_edit", "description": "Inspect, run the bounded isolated planner, and render 9:16 + 1:1 Square. Returns the Pitch Card, verification, MP4 paths and token report. Do not reread planning packets after success or retry a stopped planner in the chat.",
      "inputSchema": {"type": "object", "properties": {"script": {"type": "string", "description": "Google Doc tab link (must end in ?tab=...) or a script file"},
                                                        "footage": {"type": "string", "description": "local folder with the raw clips"},
                                                        "name": {"type": "string", "description": "the Notion name of the video"},
                                                        "style": {"type": "string"}, "lang": {"type": "string"},
                                                        "wait_seconds": {"type": "integer", "description": "leave unset: the call waits until the video is rendered (up to 90 min)"}},
                      "required": ["script", "footage", "name"]}},
-    {"name": "zeno_edit", "description": "Run Zeno's 1-call auto-planner + automatic 9:16 & 1:1 Square render without asking Yes/No; on manual fallback returns Option B JSON (packet_parts, clip_sheets, execute_command, review_sheet, workflow_hint).",
+    {"name": "zeno_edit", "description": "Run the bounded planner and automatic 9:16 + 1:1 Square render for an existing or new edit. Report planner stops; do not retry in the chat.",
      "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "Notion name or existing work folder name"},
                                                        "script": {"type": "string", "description": "Google Doc tab link (must end in ?tab=...) or a script file (required for new edit)"},
                                                        "footage": {"type": "string", "description": "local folder with the raw clips (required for new edit)"},
                                                        "style": {"type": "string"}, "lang": {"type": "string"},
                                                        "wait_seconds": {"type": "integer", "description": "leave unset: the call waits until the video is rendered (up to 90 min)"}},
                      "required": ["name"]}},
-    {"name": "zeno_auto_plan", "description": "Run Zeno's isolated 1-call planner + automatic render (--auto-plan --compact) on an already-inspected edit without asking Yes/No.",
+    {"name": "zeno_auto_plan", "description": "Run the bounded isolated planner and automatic render on an already-inspected edit.",
      "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "work folder name from zeno_jobs"}}, "required": ["name"]}},
     {"name": "zeno_check_plan", "description": "Run the plan check on a job's plan and return its verdict and advice lines.",
      "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
@@ -285,8 +285,6 @@ def _find_job_dir(title: str, output_text: str = "", jobs_mod: Any = None) -> Op
 def _is_manual_fallback(rc: int, tail: str, d: Optional[Path]) -> bool:
     if not _has_packet(d):
         return False
-    if rc != 0:
-        return True
     lowered = (tail or "").lower()
     if "[plan pass]" in lowered or "[auto-render]" in lowered:
         return False
@@ -294,7 +292,7 @@ def _is_manual_fallback(rc: int, tail: str, d: Optional[Path]) -> bool:
         "[manual" in lowered
         or "manual fallback" in lowered
         or "manual planning" in lowered
-        or (d is not None and not (d / "pitch_card.md").is_file() and "[plan ready]" not in lowered)
+        or (rc == 0 and d is not None and not (d / "pitch_card.md").is_file() and "[plan ready]" not in lowered)
     )
 
 
@@ -317,7 +315,7 @@ def _finish_auto_edit(
     proj_dir = d or _find_job_dir(title, tail, jobs_mod=jobs_mod)
     if "[PLANNER STOPPED]" in (tail or ""):
         return _text(
-            (tail or "") + "\n\n[ZENO 2-CALL RULE] The planner reached its call limit. Do NOT plan by hand, do NOT open "
+            (tail or "") + "\n\n[ZENO REQUEST LIMIT] Automatic planning stopped. Do NOT plan by hand, do NOT open "
             "editing_packet*.md, line_map.md, facts.md or clip_sheet_*.jpg, and do NOT call this tool again for this "
             "video. Report the [BLOCKED] lines to the editor and ask how to go on.",
             True,
@@ -328,7 +326,8 @@ def _finish_auto_edit(
     if rc != 0:
         return _text(tail or f"{tool_name} exited with code {rc}", True)
     rule = (
-        "\n\n[ZENO 1-CALL RULE] Auto-render completed above (no Yes/No needed). Deliver the Pitch Card summary, "
+        "\n\n[ZENO DELIVERY] Auto-render completed above (no Yes/No needed). Review saved verification and "
+        "review_sheet.jpg once before delivery. A plan pass alone is not visual approval. Deliver the Pitch Card summary, "
         "output MP4 paths, and saved token report directly — do NOT open editing_packet.md, editing_packet_p*.md, "
         "line_map.md, facts.md, EDIT_RULES.md, FORMATS.md, agent/REFERENCE.md, CONCEPT.md, scripts/*.py, or clip_sheet_*.jpg."
     )

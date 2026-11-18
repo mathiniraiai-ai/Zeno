@@ -256,7 +256,8 @@ SESSION_LIMIT = 1_000_000   # multi-video queued chats up to 1M tokens; config/c
 SESSION_WARN = 750_000
 
 
-def session_gate(stage: str, block: bool, project_hint: str = "", script_arg: str = "", inputs: Optional[List[str]] = None) -> None:
+def session_gate(stage: str, block: bool, project_hint: str = "", script_arg: str = "", inputs: Optional[List[str]] = None,
+                 isolated_planner: bool = False) -> None:
     """Every step the agent takes re-reads the whole chat, so an edit started in a chat that already holds earlier work
     costs several times more (16 Nov: chats of 450-600k made each job re-read 5-10M tokens instead of about 1M).
     At the start of a job (block=True) a chat over SESSION_LIMIT stops the job and asks for a new chat; later
@@ -275,6 +276,10 @@ def session_gate(stage: str, block: bool, project_hint: str = "", script_arg: st
         print("[COST] Chat context could not be measured. Use a fresh edit chat; unknown usage is not zero.")
         return
     k = s["tokens"] // 1000
+    if block and isolated_planner and s["tokens"] > limit:
+        print(f"[COST] Shared chat holds {k}k tokens. Automatic planning uses isolated requests; "
+              "do not open the planning packet or retry manually in this chat. Host usage still counts.")
+        return
     if block and s["tokens"] > limit:
         print(f"\n[BLOCKED] NEW CHAT NEEDED. This chat already holds {k}k input tokens."
               "\n  Open a fresh editing chat with the same script, footage and Notion name."
@@ -287,14 +292,15 @@ def session_gate(stage: str, block: bool, project_hint: str = "", script_arg: st
               f"\n  changes in a new chat: say 'continue the edit{where}: <the change>'.")
 
 
-def job_gate(raw_inputs: List[str], script_arg: str, skip: bool = False, style: str = "") -> None:
+def job_gate(raw_inputs: List[str], script_arg: str, skip: bool = False, style: str = "",
+             isolated_planner: bool = False) -> None:
     """Nothing starts until the live checks pass and the script and footage the user gave have been checked."""
     import preflight
 
     if skip:
         print("\n[WARN] --skip-preflight: live checks and input validation skipped (development only).")
         return
-    session_gate("inspect", block=True, script_arg=script_arg, inputs=raw_inputs)
+    session_gate("inspect", block=True, script_arg=script_arg, inputs=raw_inputs, isolated_planner=isolated_planner)
     print("\n== Pre-job gate: live checks ==")
     checks = preflight.run_system_checks()
     preflight.print_checks(checks)
@@ -521,7 +527,7 @@ def run_inspect(
     except Exception:
         pass
 
-    tracker = ProgressTracker(work_dir=work_dir, project_name=project_name, heartbeat_sec=48.0)
+    tracker = ProgressTracker(work_dir=work_dir, project_name=project_name, heartbeat_sec=48.0, video_name=name)
     tracker.start_heartbeat()
 
     try:
@@ -767,6 +773,7 @@ def _batch_playbook_lines(plan_path: pathlib.Path) -> List[str]:
     rel_plan = _rel_workspace_path(plan_path)
     rel_review = f"{rel_dir}/review_sheet.jpg"
     py_cmd = _venv_py_cmd()
+
     read_paths = [
         name if (name.startswith(rel_dir + "/") or Path(name).is_absolute()) else f"{rel_dir}/{name}"
         for name in _batch_file_list(proj_dir)
@@ -806,17 +813,13 @@ def print_next_step(plan_path: pathlib.Path, fallback_reason: str = "") -> None:
 
 
 def print_planner_stop(plan_path: pathlib.Path, reason: str, n_calls: int) -> None:
-    """The isolated planner used its calls and the plan still does not pass: stop here. Planning by hand in the chat
-    is what re-read millions of tokens (17 Nov usage page), so it needs the owner's ZENO_MANUAL_FALLBACK=1."""
-    if os.environ.get("ZENO_MANUAL_FALLBACK", "").strip() == "1":
-        print_next_step(plan_path, fallback_reason=reason)
-        return
+    """Never turn an isolated-planner failure into an unmetered outer-chat retry."""
     clean_reason = " ".join(str(reason).split())[:220]
     print(
-        f"\n[PLANNER STOPPED] The planner used {n_calls} model call(s), the limit for one edit, and the plan still "
-        f"does not pass ({clean_reason}). Do NOT plan by hand in this chat, do NOT read the packet, line_map.md, "
+        f"\n[PLANNER STOPPED] Automatic planning stopped after {n_calls} completed model call(s) in this invocation "
+        f"({clean_reason}). Do NOT plan by hand in this chat, do NOT read the packet, line_map.md, "
         "facts.md or clip sheets, and do NOT run the planner again. Tell the editor the [BLOCKED] lines above, "
-        f"exactly as printed, and ask how to go on (reshoot, change the script, or a new chat). Saved: {_rel_workspace_path(plan_path)}",
+        f"exactly as printed. A new chat or inspect does not reset the managed request budget. Saved: {_rel_workspace_path(plan_path)}",
         flush=True,
     )
 
@@ -891,6 +894,10 @@ def run_auto_plan(
     rel = _rel_workspace_path(plan_path)
     py_cmd = _venv_py_cmd()
 
+    tracker = ProgressTracker(work_dir=work_dir, project_name=work_dir.name, resume=True)
+    tracker.start_heartbeat()
+    tracker.update(stage=3, detail="Building the editing plan and checking script order and voices", pct=60)
+
     try:
         if planner == "openai":
             import sol_direct
@@ -905,7 +912,8 @@ def run_auto_plan(
     except Exception as exc:
         reason = str(exc) or type(exc).__name__
         print(f"[BLOCKED] Isolated planner could not run ({planner}): {reason}", flush=True)
-        print_next_step(plan_path, fallback_reason=reason)
+        print_planner_stop(plan_path, reason, 0)
+        tracker.stop_heartbeat(final_state="blocked", final_detail=reason)
         return 2
 
     used_model = r.get("model", used_provider)
@@ -915,6 +923,7 @@ def run_auto_plan(
 
     if not r.get("passed"):
         reason = str(r.get("error") or r.get("stopped") or "plan check did not pass")
+        tracker.stop_heartbeat(final_state="blocked", final_detail=reason)
         print(f"[DIRECT] Auto-plan stopped ({used_provider}/{used_model}, {n_calls} call(s)): {reason}", flush=True)
         print(f"[BLOCKED] Isolated planner did not pass --check-plan: {reason}", flush=True)
         cost_control.print_checkpoint(work_dir)
@@ -925,13 +934,11 @@ def run_auto_plan(
             job_archive.send_in_background(plan_path, "checking")
         except Exception:
             pass
-        if n_calls:
-            print_planner_stop(plan_path, reason, n_calls)
-        else:   # the planner never answered (not installed, not signed in): the batch playbook is the only way left
-            print_next_step(plan_path, fallback_reason=reason)
+        print_planner_stop(plan_path, reason, n_calls)
         return 2
 
     tok_note = f", {tot:,} tokens" if tot else ""
+    tracker.update(stage=3, detail="Checking the final plan and preparing the edit", pct=60)
     print(f"[DIRECT] Planned via {used_provider} ({used_model}) in {n_calls} call(s){tok_note} ({secs}s)", flush=True)
 
     # build_editorial_pitch_card runs order_gate once and prints any [VOICE] / [TIGHT] / [STYLE] lines.
@@ -941,6 +948,7 @@ def run_auto_plan(
         print(msg or "[BLOCKED] Plan check failed after auto-plan.", flush=True)
         cost_control.print_checkpoint(work_dir)
         print_planner_stop(plan_path, "post-plan check failed", n_calls)
+        tracker.stop_heartbeat(final_state="blocked", final_detail="Final plan check failed; editor review required")
         return 2
 
     print("[PLAN PASS] Every line present, once, in script order; no cut inside a word; voices match.", flush=True)
@@ -958,6 +966,7 @@ def run_auto_plan(
     except Exception:
         pass
     do_render = bool(auto_render) and os.environ.get("ZENO_NO_AUTO_RENDER", "").strip() != "1"
+    tracker.stop_heartbeat(final_state="plan_ready", final_detail="Plan checked; ready to render")
     if not do_render:
         print(f"[PLAN READY] Plan-only mode requested. To render: {py_cmd} scripts/zeno.py --execute {rel} --square --compact", flush=True)
         return 0
@@ -1010,7 +1019,7 @@ def run_execute(
         plan_path.write_text(edl_parser.format_edl(plan), encoding="utf-8")
         print(f"[SNAP] {moved} cut(s) moved to the quietest point of their gap")
 
-    tracker = ProgressTracker(work_dir=work_dir, project_name=work_dir.name, heartbeat_sec=48.0)
+    tracker = ProgressTracker(work_dir=work_dir, project_name=work_dir.name, heartbeat_sec=48.0, resume=True)
     tracker.start_heartbeat()
 
     try:
@@ -1408,7 +1417,7 @@ def main() -> None:
     if args.inspect:
         if not args.inputs or not args.script:
             ap.error("--inspect requires <raw_dir_or_clips> and --script <path_or_gdoc_url>")
-        job_gate(args.inputs, args.script, skip=args.skip_preflight, style=args.style)
+        job_gate(args.inputs, args.script, skip=args.skip_preflight, style=args.style, isolated_planner=bool(args.auto_plan))
         plan_path = run_inspect(
             raw_inputs=args.inputs,
             script_arg=args.script,
@@ -1434,7 +1443,7 @@ def main() -> None:
         sys.exit(0)
 
     if args.inputs and args.script:     # same as --inspect: without a Director there is no plan to render
-        job_gate(args.inputs, args.script, skip=args.skip_preflight, style=args.style)
+        job_gate(args.inputs, args.script, skip=args.skip_preflight, style=args.style, isolated_planner=bool(args.auto_plan))
         plan_path = run_inspect(
             raw_inputs=args.inputs,
             script_arg=args.script,

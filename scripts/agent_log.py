@@ -213,6 +213,7 @@ def antigravity_window_usage(
         out_chars = 0
         seen_turns = set()
         planner_usage: Dict[Any, List[int]] = {}
+        planner_meta: Dict[Any, Dict[str, Any]] = {}
 
         for n, line in enumerate(lines):
             if not line or not line.strip():
@@ -247,16 +248,16 @@ def antigravity_window_usage(
                     seen_turns.add(turn_key)
                     out_chars += (
                         len(str(d.get("content") or ""))
-                        + len(str(d.get("thinking") or ""))
                         + len(json.dumps(d.get("tool_calls") or [], ensure_ascii=False))
                     )
                 in_tok = _safe_int(d.get("input_tokens"))
                 cache_tok = _safe_int(d.get("cache_read_tokens"))
                 out_tok = _safe_int(d.get("output_tokens"))
-                if in_tok or out_tok:
+                if "input_tokens" in d and "output_tokens" in d:
                     prev = planner_usage.get(turn_key)
                     if prev is None:
                         planner_usage[turn_key] = [in_tok, cache_tok, out_tok]
+                        planner_meta[turn_key] = {"timestamp": step_ts, "model": model_name}
                     else:
                         prev[0] = max(prev[0], in_tok)
                         prev[1] = max(prev[1], cache_tok)
@@ -267,6 +268,14 @@ def antigravity_window_usage(
 
         usage_rows = list(planner_usage.values())
         turns = len(seen_turns) if seen_turns else None
+        unknown_requests = len(seen_turns - planner_usage.keys())
+        requests = [
+            {**planner_meta[key], "request_id": str(key[1]),
+             "input_tokens": row[0] + row[1], "cached_input_tokens": row[1],
+             "cache_write_input_tokens": 0, "output_tokens": row[2],
+             "context": row[0] + row[1]}
+            for key, row in planner_usage.items()
+        ]
         if usage_rows:
             edit_in_tok = sum(r[0] for r in usage_rows)
             cached_in = sum(r[1] for r in usage_rows)
@@ -283,7 +292,7 @@ def antigravity_window_usage(
         return {
             "agent_name": "Antigravity",
             "agent_model": model_name,
-            "steps_count": len(usage_rows) or (turns if turns is not None else window_count),
+            "steps_count": turns if turns is not None else window_count,
             "turns": turns,
             "context_start": first_ctx,
             "context_end": last_ctx,
@@ -291,7 +300,11 @@ def antigravity_window_usage(
             "cached_tokens": cached_in,
             "output_tokens": edit_out_tok,
             "total_tokens": edit_in_tok + edit_out_tok,
-            "token_precision": "exact" if usage_rows else "est",
+            "total_tokens_including_cache": edit_in_tok + cached_in + edit_out_tok,
+            "token_precision": ("partial" if unknown_requests else "exact") if usage_rows else "est",
+            "host_usage_unknown": bool(unknown_requests or not usage_rows),
+            "unknown_request_count": unknown_requests,
+            "requests": requests,
             "session_id": session_id,
         }
     except Exception:

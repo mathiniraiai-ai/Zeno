@@ -20,12 +20,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 LIMIT = 1_000_000
 _NEW_EDIT = re.compile(r"(?is)^\s*/(zeno|edit)\b|docs\.google\.com/document/")
 _CONTINUE = re.compile(r"(?i)\bcontinue the edit\b")
+_ISOLATED = re.compile(r"(?i)^\s*/zeno\b|(?<!\S)--auto-plan\b")
 
 
 def decide(event: dict) -> str:
     """The message to show when the prompt must be blocked, or '' to let it through."""
     prompt = str(event.get("prompt") or "")
     if not _NEW_EDIT.search(prompt) or _CONTINUE.search(prompt):
+        return ""
+    # /zeno always uses the isolated automatic planner. The execution gate still
+    # rejects a manual --inspect in a large chat, and dispatch budgets still apply.
+    if _ISOLATED.search(prompt):
         return ""
     path = str(event.get("transcript_path") or "")
     if not path or not os.path.exists(path):

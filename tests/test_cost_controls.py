@@ -137,6 +137,28 @@ class TestWarningRegressions(WorkspaceTest):
 
 
 class TestBudget(WorkspaceTest):
+    def test_editor_checkpoint_approval_is_project_scoped(self):
+        approval = self.project / "checkpoint_approval.json"
+        approval.write_text(json.dumps({"approved_by_editor": True,
+            "model_budget_inr": 100.0, "chat_request_limit": 50}))
+        policy = cost_control.settings(self.project)
+        self.assertEqual((policy["model_budget_inr"], policy["chat_request_limit"]), (100, 50))
+        self.assertEqual(cost_control.settings()["model_budget_inr"], 40)
+        self.assertEqual(policy["managed_max_calls"], 8)
+        self.assertEqual(policy["planner_full_context_max_calls"], 2)
+
+    def test_checkpoint_approval_cannot_change_managed_limits(self):
+        approval = self.project / "checkpoint_approval.json"
+        approval.write_text(json.dumps({"approved_by_editor": True, "managed_max_calls": 100}))
+        with self.assertRaises(ValueError):
+            cost_control.settings(self.project)
+
+    def test_project_checkpoint_still_rejects_invalid_values(self):
+        approval = self.project / "checkpoint_approval.json"
+        approval.write_text(json.dumps({"approved_by_editor": True, "chat_request_limit": -1}))
+        with self.assertRaises(ValueError):
+            cost_control.settings(self.project)
+
     def test_invalid_policy_cannot_bypass_intake_guard(self):
         import zeno
         with patch.dict(os.environ, {"ZENO_MODEL_BUDGET_INR": "nan", "ZENO_SESSION_LIMIT": "100000"}), \
@@ -240,11 +262,17 @@ class TestDirectPlanner(WorkspaceTest):
             self.assertEqual(len(body["input"]), 1)
             self.assertNotIn("previous_response_id", body)
             self.assertFalse(body["store"])
+        correction = send.call_args_list[1].args[0]
+        self.assertNotIn("CURRENT CANDIDATE", correction["input"][0]["content"][0]["text"])
+        self.assertIn("Editable lines: L1", correction["input"][0]["content"][0]["text"])
+        import request_budget
+        self.assertEqual(request_budget.status(p)["full_context_requests"], 1)
+        self.assertEqual(request_budget.status(p)["requests"], 2)
 
     def test_same_failure_stops_and_restores_original(self):
         p = self.fixture()
         original = (p / "plan.edl").read_text()
-        with self.mocked([self.response(), self.response()], [(False, "same blocker"), (False, "same blocker")]) as (send, _):
+        with self.mocked([self.response(), self.response()], [(False, "same blocker L1"), (False, "same blocker L1")]) as (send, _):
             result = sol_direct.run(p)
         self.assertFalse(result["passed"])
         self.assertEqual(send.call_count, 2)
@@ -286,6 +314,16 @@ class TestDirectPlanner(WorkspaceTest):
         self.assertFalse(result["passed"])
         self.assertEqual(send.call_count, 1)
         check.assert_not_called()
+
+    def test_malformed_usage_remains_unknown(self):
+        for usage in ({"input_tokens": True, "output_tokens": 10},
+                      {"input_tokens": 10, "output_tokens": 5, "input_tokens_details": {"cached_tokens": 11}},
+                      {"input_tokens": 10, "output_tokens": 5, "input_tokens_details": {"cached_tokens": "3"}},
+                      {"input_tokens": 10, "output_tokens": 5, "output_tokens_details": {"reasoning_tokens": 6}},
+                      {"input_tokens": 10, "output_tokens": 5, "input_tokens_details": [1]}):
+            with self.subTest(usage=usage):
+                row = sol_direct.measured_usage({"usage": usage}, "x", "test", 1)
+                self.assertFalse(row["usage_known"])
 
     def test_budget_reserves_before_sending(self):
         p = self.fixture()

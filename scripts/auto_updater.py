@@ -45,6 +45,7 @@ LAUNCHD_LABEL = "live.gosupernova.zeno.autoupdate"
 PROTECTED_PREFIXES = (
     ".env",
     ".zeno_session.json",
+    ".zeno_owner_session.json",
     ".zeno-dev",
     ".git/",
     ".venv/",
@@ -54,6 +55,7 @@ PROTECTED_PREFIXES = (
     "input/",
     "output/",
     "scratch/",
+    "service/",
 )
 
 
@@ -296,6 +298,7 @@ def apply_bundle_bytes(blob: bytes, expected_sha256: str = "", version: str = ""
     if expected_sha256 and actual_sha256.lower() != expected_sha256.strip().lower():
         return {"ok": False, "status": "checksum_mismatch", "updated": False, "message": "Downloaded bundle checksum mismatch."}
 
+    before_ver = get_local_version()
     req_path = ROOT / "requirements.txt"
     old_req_hash = hashlib.sha256(req_path.read_bytes()).hexdigest() if req_path.is_file() else ""
 
@@ -374,7 +377,7 @@ def apply_bundle_bytes(blob: bytes, expected_sha256: str = "", version: str = ""
     try:
         sys.path.insert(0, str(ROOT / "scripts"))
         import clean as _clean_mod
-        clean_res = _clean_mod.cleanup_after_update(root=ROOT, version=final_ver)
+        clean_res = _clean_mod.cleanup_after_update(root=ROOT, version=final_ver, prev_version=before_ver)
     except Exception:
         clean_res = {}
     _write_json(

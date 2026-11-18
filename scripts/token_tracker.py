@@ -191,6 +191,7 @@ def detect_agent_usage(
         return {"agent_name": "Codex", "agent_model": os.getenv("ZENO_MODEL", "unknown"),
                 "steps_count": 0, "input_tokens": 0, "cached_tokens": 0, "output_tokens": 0,
                 "total_tokens": 0, "token_precision": "unavailable",
+                "host_usage_unknown": True,
                 "session_id": clean_sid or codex_thread}
 
     candidates: List[Tuple[float, Dict[str, Any]]] = []
@@ -256,6 +257,7 @@ def detect_agent_usage(
             "output_tokens": 0,
             "total_tokens": 0,
             "token_precision": "unavailable",
+            "host_usage_unknown": True,
             "session_id": "local",
         }
 

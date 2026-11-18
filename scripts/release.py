@@ -40,6 +40,7 @@ TOP_FILES = (
     "LICENSE",
     "LICENSES.md",
     ".env.example",
+    ".mcp.json",
     "install.command",
     "install.bat",
     "update.command",
@@ -48,6 +49,8 @@ TOP_FILES = (
     "edit.bat",
     "edit-codex.command",
     "edit-codex.bat",
+    "edit-7k.command",
+    "edit-7k.bat",
     "DEVELOPING.md",
     "LOW_COST_WORKFLOW.md",
 )
@@ -60,6 +63,7 @@ BUNDLE_DIRS = (
     "agent",
     "scripts",
     "styles",
+    "formats",
     "subtitles",
     "assets",
     "tests",
@@ -117,6 +121,16 @@ def write_version(ver: str) -> None:
             pkg.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         except Exception:
             pass
+    lock = ROOT / "app" / "package-lock.json"
+    if lock.is_file():
+        try:
+            ldata = json.loads(lock.read_text(encoding="utf-8"))
+            ldata["version"] = ver
+            if isinstance(ldata.get("packages"), dict) and isinstance(ldata["packages"].get(""), dict):
+                ldata["packages"][""]["version"] = ver
+            lock.write_text(json.dumps(ldata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        except Exception:
+            pass
 
 
 def git_short_sha() -> str:
@@ -145,8 +159,13 @@ def _should_skip(rel_posix: str, name: str) -> bool:
     return False
 
 
-def build_bundle_bytes() -> Tuple[bytes, int, str]:
-    """Pack Zeno runtime, agent instructions, styles, assets, and desktop renderer into a deterministic ZIP."""
+MANIFEST_NAME = "_zeno_manifest.json"
+# Root paths removed cleanly if omitted by a future bundle
+OBSOLETE_PATHS: Tuple[str, ...] = ()
+
+
+def build_bundle_bytes(version: str = "", clear_work_projects: bool = False) -> Tuple[bytes, int, str]:
+    """Pack Zeno runtime, agent instructions, styles/formats, assets, desktop renderer, and _zeno_manifest.json."""
     entries: List[Tuple[str, Path]] = []
 
     for rel in TOP_FILES:
@@ -175,9 +194,21 @@ def build_bundle_bytes() -> Tuple[bytes, int, str]:
     seen = set()
     unique_entries: List[Tuple[str, Path]] = []
     for rel_posix, fp in sorted(entries, key=lambda x: x[0]):
-        if rel_posix not in seen:
+        if rel_posix not in seen and rel_posix != MANIFEST_NAME:
             seen.add(rel_posix)
             unique_entries.append((rel_posix, fp))
+
+    ver = (version or read_version()).strip()
+    manifest_payload = {
+        "schema": 1,
+        "version": ver,
+        "managed_dirs": list(BUNDLE_DIRS),
+        "managed_top_files": sorted(set(TOP_FILES) | set(APP_TOP_FILES)),
+        "obsolete_paths": list(OBSOLETE_PATHS),
+        "clear_work_projects": bool(clear_work_projects),
+        "files": [rel_posix for rel_posix, _ in unique_entries],
+    }
+    manifest_bytes = (json.dumps(manifest_payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
@@ -187,10 +218,14 @@ def build_bundle_bytes() -> Tuple[bytes, int, str]:
             is_exec = rel_posix.endswith((".command", ".sh")) or os.access(fp, os.X_OK)
             zi.external_attr = (0o100755 if is_exec else 0o100644) << 16
             zf.writestr(zi, fp.read_bytes())
+        zi_man = zipfile.ZipInfo(MANIFEST_NAME, date_time=(2026, 1, 1, 0, 0, 0))
+        zi_man.compress_type = zipfile.ZIP_DEFLATED
+        zi_man.external_attr = 0o100644 << 16
+        zf.writestr(zi_man, manifest_bytes)
 
     blob = buf.getvalue()
     sha256 = hashlib.sha256(blob).hexdigest()
-    return blob, len(unique_entries), sha256
+    return blob, len(unique_entries) + 1, sha256
 
 
 OWNER_SESSION_FILE = ROOT / ".zeno_owner_session.json"
@@ -301,6 +336,7 @@ def main() -> int:
     ap.add_argument("--exe-url", default="", help="Optional download URL if a new Windows .exe shell is needed")
     ap.add_argument("--admin-password", default="", help="Optional ZENO_ADMIN_PASSWORD override")
     ap.add_argument("--dry-run", action="store_true", help="Build the release bundle locally without uploading")
+    ap.add_argument("--clear-work", action="store_true", help="Instruct client updaters to also clear old work/ project caches on install (preserving work/_clips)")
     ap.add_argument("--status", action="store_true", help="Check the currently published version on Zeno Cloud")
     args = ap.parse_args()
 
@@ -320,7 +356,7 @@ def main() -> int:
     if target_ver != cur_ver and not args.dry_run:
         write_version(target_ver)
 
-    blob, file_count, sha256 = build_bundle_bytes()
+    blob, file_count, sha256 = build_bundle_bytes(version=target_ver, clear_work_projects=args.clear_work)
     short_sha = git_short_sha() or sha256[:7]
     mb = len(blob) / (1024 * 1024)
 

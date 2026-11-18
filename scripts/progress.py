@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime
 import json
 import pathlib
+import queue
 import sys
 import threading
 import time
@@ -53,6 +54,8 @@ class ProgressTracker:
         project_name: str = "zeno_job",
         heartbeat_sec: float = 48.0,
         total_stages: int = 5,
+        video_name: str = "",
+        resume: bool = False,
     ):
         self.repo_root = pathlib.Path(__file__).resolve().parent.parent
         self.work_root = self.repo_root / "work"
@@ -71,6 +74,15 @@ class ProgressTracker:
         self._start_ts = time.monotonic()
         self._stop_evt = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        previous = read_latest_progress(self.work_dir) if resume else None
+        self.started_at = float((previous or {}).get("started_at") or time.time())
+        self.video_name = video_name or str((previous or {}).get("video_name") or "")
+        self.stage_started_at = time.time()
+        self.last_progress_at = self.stage_started_at
+        self._publish_queue = queue.Queue(maxsize=1)
+        self._publisher = None
+        self._last_publish = 0.0
+        self._published_stage = None
 
         self.stage = 1
         self.stage_name = STAGE_NAMES.get(1, "Mapping")
@@ -97,12 +109,18 @@ class ProgressTracker:
         if self._thread is not None and self._thread.is_alive():
             return self
         self._stop_evt.clear()
+        try:
+            import job_archive
+            if job_archive.enabled():
+                self._publisher = threading.Thread(target=self._publish_loop, name="zeno-progress-cloud", daemon=True)
+                self._publisher.start()
+        except Exception:
+            pass
         self._thread = threading.Thread(target=self._heartbeat_loop, name="zeno-heartbeat", daemon=True)
         self._thread.start()
         return self
 
     def stop_heartbeat(self, final_state: str = "completed", final_detail: Optional[str] = None) -> None:
-        self._stop_evt.set()
         with self._lock:
             self.state = final_state
             if final_detail:
@@ -110,8 +128,11 @@ class ProgressTracker:
             if final_state == "completed":
                 self.pct = 100
             self._write_snapshot_unlocked()
+        self._stop_evt.set()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=1.0)
+        if self._publisher is not None:
+            self._publisher.join(timeout=4.0)
 
     def update(
         self,
@@ -124,6 +145,9 @@ class ProgressTracker:
     ) -> None:
         with self._lock:
             if stage is not None:
+                if self.stage != int(stage):
+                    self.stage_started_at = time.time()
+                    self.completed = self.total = 0
                 self.stage = int(stage)
                 self.stage_name = STAGE_NAMES.get(self.stage, f"Stage {self.stage}")
             if detail is not None:
@@ -138,6 +162,7 @@ class ProgressTracker:
                 stage_base = max(0, (self.stage - 1) * 20)
                 stage_span = int(round(20.0 * min(1.0, self.completed / max(1, self.total))))
                 self.pct = min(99, stage_base + stage_span)
+            self.last_progress_at = time.time()
             self._write_snapshot_unlocked()
             if emit_now:
                 self._print_line_unlocked(prefix="STAGE")
@@ -150,7 +175,7 @@ class ProgressTracker:
                     pass
 
     def _snapshot_dict_unlocked(self) -> dict:
-        elapsed = round(time.monotonic() - self._start_ts, 1)
+        elapsed = round(max(0, time.time() - self.started_at), 1)
         owner_email = ""
         try:
             import common
@@ -160,6 +185,7 @@ class ProgressTracker:
             pass
         return {
             "project": self.project_name,
+            "video_name": self.video_name,
             "owner_email": owner_email,
             "stage": self.stage,
             "total_stages": self.total_stages,
@@ -171,6 +197,11 @@ class ProgressTracker:
             "elapsed_sec": elapsed,
             "elapsed_mmss": _fmt_mmss(elapsed),
             "state": self.state,
+            "started_at": self.started_at,
+            "stage_started_at": self.stage_started_at,
+            "last_progress_at": self.last_progress_at,
+            "stale_after_sec": 240,
+            "delay_after_sec": 600,
             "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
 
@@ -194,6 +225,33 @@ class ProgressTracker:
                 tmp.replace(out)
             except Exception:
                 pass
+        if self._publisher is not None and (
+            self.state != "running" or self.stage != self._published_stage or time.monotonic() - self._last_publish >= 15
+        ):
+            self._last_publish = time.monotonic()
+            self._published_stage = self.stage
+            try:
+                self._publish_queue.get_nowait()
+            except queue.Empty:
+                pass
+            self._publish_queue.put_nowait(snap)
+
+    def _publish_loop(self) -> None:
+        """Send small status snapshots off the edit thread; never dispatch a model call."""
+        while True:
+            try:
+                snap = self._publish_queue.get(timeout=0.2)
+            except queue.Empty:
+                if self._stop_evt.is_set():
+                    return
+                continue
+            try:
+                import job_archive
+                job_archive.publish_progress(self.work_dir, snap)
+            except Exception:
+                pass
+            if self._stop_evt.is_set() and self._publish_queue.empty():
+                return
 
     def _print_line_unlocked(self, prefix: str = "HEARTBEAT") -> None:
         elapsed = time.monotonic() - self._start_ts
@@ -219,7 +277,8 @@ def read_latest_progress(work_dir: Optional[pathlib.Path] = None) -> Optional[di
     candidates = []
     if work_dir:
         candidates.append(pathlib.Path(work_dir) / "progress.json")
-    candidates.append(repo_root / "work" / "latest_progress.json")
+    else:
+        candidates.append(repo_root / "work" / "latest_progress.json")
     for c in candidates:
         if c.is_file():
             try:

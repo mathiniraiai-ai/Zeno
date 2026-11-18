@@ -2693,13 +2693,15 @@ class TestNewChatGate(unittest.TestCase):
             self._log(Path(td), str(ROOT), [60_000, 1_200_000])
             path = str(Path(td) / ".claude" / "projects" / "-zeno" / "sess1.jsonl")
             new = "/zeno ~/RAW https://docs.google.com/document/d/abc/edit?tab=t.1"
-            self.assertIn("/clear", chat_guard.decide({"prompt": new, "transcript_path": path}))
+            self.assertEqual(chat_guard.decide({"prompt": new, "transcript_path": path}), "")
             self.assertIn("/clear", chat_guard.decide({"prompt": "script: https://docs.google.com/document/d/abc", "transcript_path": path}))
             self.assertEqual(chat_guard.decide({"prompt": "continue the edit in work/x/plan.edl: louder", "transcript_path": path}), "")
             self.assertEqual(chat_guard.decide({"prompt": "make the subtitle smaller", "transcript_path": path}), "")
             self.assertEqual(chat_guard.decide({"prompt": new, "transcript_path": str(Path(td) / "missing.jsonl")}), "")
-            # Multi-video queued chats (e.g. 480k) and Windows Claude Desktop fresh chats (~115k) are allowed under 1M limit
+            # Large outer chats must not enter a new edit even if the planner is isolated.
             self._log(Path(td), str(ROOT), [115_000, 480_000])
+            self.assertEqual(chat_guard.decide({"prompt": new, "transcript_path": path}), "")
+            self._log(Path(td), str(ROOT), [20_000, 50_000])
             self.assertEqual(chat_guard.decide({"prompt": new, "transcript_path": path}), "")
 
     def test_gate_blocks_big_chat_and_lets_small_or_unknown_pass(self):
@@ -2717,8 +2719,8 @@ class TestNewChatGate(unittest.TestCase):
         self.assertEqual(arch.call_args[0][0], "fresh_session")
         for size in (
             None,
-            {"tokens": 115_000, "steps": 3, "session": "s", "file": "f"},   # Windows Claude Desktop fresh chat
-            {"tokens": 480_000, "steps": 25, "session": "s", "file": "f"},  # Multi-video queued chat (< 1M)
+            {"tokens": 25_000, "steps": 3, "session": "s", "file": "f"},
+            {"tokens": 99_000, "steps": 5, "session": "s", "file": "f"},
         ):
             with patch.object(agent_log, "session_size", return_value=size), patch("sys.stdout", new_callable=io.StringIO) as out:
                 zeno.session_gate("inspect", block=True)   # no exit
@@ -2737,13 +2739,21 @@ class TestDirectMode(unittest.TestCase):
               "L1 S1.mp4 0.10-2.00 z=1.08 sp=Lady  # hook\nL2 S2.mp4 0.20-3.00 z=1 sp=Man\n```\n\n```decisions\naccept L3 scene cue\n```\n\n"
               "NOTES:\nUsed S1 for the hook.")
 
+    def setUp(self):
+        from unittest.mock import patch
+        checkpoint = patch("cost_control.snapshot", return_value={"blocked": False})
+        checkpoint.start()
+        self.addCleanup(checkpoint.stop)
+
     def _proj(self, td: str) -> Path:
         proj = Path(td) / "proj"
         proj.mkdir()
         (proj / "plan.edl").write_text("#output \"/out/x.mp4\"\n#script input/script/x.txt\n#style micronarrative\n#canvas 1080x1920@30\n",
                                        encoding="utf-8")
-        (proj / "line_map.md").write_text("L1 hook ...", encoding="utf-8")
-        (proj / "facts.md").write_text("S1 words ...", encoding="utf-8")
+        (proj / "decisions.txt").write_text("accept L3 scene cue\n", encoding="utf-8")
+        (proj / "brief.md").write_text("Editing rules", encoding="utf-8")
+        (proj / "line_map.md").write_text("L1 [Lady] hook\nL2 [Man] reply\n", encoding="utf-8")
+        (proj / "facts.md").write_text("## S1.mp4 (4.00s)\n  0.10 hook |2.00\n## S2.mp4 (4.00s)\n  0.20 reply |3.00\n", encoding="utf-8")
         return proj
 
     def test_parse_and_merge_keep_zenos_header(self):
@@ -2764,20 +2774,22 @@ class TestDirectMode(unittest.TestCase):
         calls = []
 
         def fake_call(system, text, images, model, session):
-            calls.append((text[:40], len(images), session))
-            return {"text": self.ANSWER, "session": "sess-1", "error": "", "seconds": 1.0,
+            calls.append((text, len(images), session))
+            answer = self.ANSWER if len(calls) == 1 else "```analysis\nTrim L2.\n```\n```plan\nL2 S2.mp4 0.25-3.00 z=1 sp=Man\n```\n```decisions\n\n```"
+            return {"text": answer, "session": "sess-1", "error": "", "seconds": 1.0,
                     "usage": {"input": 10, "cache_write": 1000, "cache_read": 2000 * len(calls), "output": 500, "total": 3510 + 2000 * len(calls)}}
-        checks = iter([(False, "[ORDER BLOCKED] WRONG VOICE: L2"), (True, "[PLAN PASS]"), (True, "[PLAN PASS]"), (True, "[PLAN PASS]")])
+        checks = iter([(False, "[ORDER BLOCKED] pause: L2"), (True, "[PLAN PASS]"), (True, "[PLAN PASS]"), (True, "[PLAN PASS]")])
         with tempfile.TemporaryDirectory() as td:
             proj = self._proj(td)
             with patch.object(direct_mode, "call_claude", side_effect=fake_call), \
-                    patch.object(direct_mode, "run_check", side_effect=lambda p: next(checks)), patch("sys.stdout"):
+                    patch.object(direct_mode, "run_check", side_effect=lambda p: next(checks)), patch("sys.stdout"), patch.object(direct_mode.shutil, "which", return_value="/mock/claude"), \
+                    patch.object(direct_mode, "find_codex_binary", return_value="/mock/codex"):
                 r = direct_mode.run(proj, polish=False)
             self.assertTrue(r["passed"])
             self.assertEqual(len(calls), 2)                   # the plan, then one fix
-            self.assertEqual(calls[1][2], "sess-1")           # the fix continues the same conversation
+            self.assertIsNone(calls[1][2])                    # no retained conversation
             self.assertEqual(calls[1][1], 0)                  # pictures are sent once
-            self.assertIn("WRONG VOICE", calls[1][0] + "WRONG VOICE")
+            self.assertIn("Editable lines: L2", calls[1][0])
             self.assertEqual(r["tokens"]["total"], sum(c["total"] for c in r["calls"]))
             self.assertIn('#output "/out/x.mp4"', (proj / "plan.edl").read_text())
             self.assertEqual((proj / "decisions.txt").read_text().strip(), "accept L3 scene cue")
@@ -2797,8 +2809,9 @@ class TestDirectMode(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             proj = self._proj(td)
             with patch.object(direct_mode, "call_claude", side_effect=fake), patch.object(direct_mode, "run_check", side_effect=check), \
-                    patch("sys.stdout"):
-                r = direct_mode.run(proj, max_fixes=1)
+                    patch("sys.stdout"), patch.object(direct_mode.shutil, "which", return_value="/mock/claude"), \
+                    patch.object(direct_mode, "find_codex_binary", return_value="/mock/codex"):
+                r = direct_mode.run(proj, max_fixes=1, polish=True)
             self.assertTrue(r["passed"])
             self.assertIn("S2.mp4", (proj / "plan.edl").read_text())
 
@@ -2814,7 +2827,9 @@ class TestDirectMode(unittest.TestCase):
             with tempfile.TemporaryDirectory() as td:
                 proj = self._proj(td)
                 with patch.object(direct_mode, target, side_effect=fake), patch("sys.stdout"), \
-                        patch.object(direct_mode, "run_check", side_effect=lambda p: (False, f"[ORDER BLOCKED] MISSING L{next(n)}")):
+                        patch.object(direct_mode.shutil, "which", return_value="/mock/claude"), \
+                        patch.object(direct_mode, "find_codex_binary", return_value="/mock/codex"), \
+                        patch.object(direct_mode, "run_check", side_effect=lambda p: (False, f"[ORDER BLOCKED] L2 pause {next(n)}")):
                     r = runner(proj, max_fixes=9, polish=True)
                 self.assertFalse(r["passed"])
                 self.assertEqual(len(r["calls"]), 2, target)

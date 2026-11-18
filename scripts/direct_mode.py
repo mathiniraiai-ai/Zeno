@@ -23,6 +23,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -135,14 +136,10 @@ def build_brief(proj: Path) -> Tuple[str, str, List[Path]]:
     style_rules = _read(ROOT / "styles" / style / "SKILL.md") if style else ""
     # A tool-free director cannot open the requested style later. Keep its rules when not
     # already embedded in brief.md, while avoiding another copy of all generic editing references.
-    style_already_in_brief = bool(
-        brief
-        and style
-        and (
-            (style_rules.strip() and style_rules.strip() in brief)
-            or f"# style: {style.lower()}" in brief.lower()
-        )
-    )
+    # A heading or a hand-written style summary does not prove the full skill
+    # is present. Only deduplicate identical content; never drop craft rules
+    # merely to make the input reserve fit.
+    style_already_in_brief = bool(brief and style_rules.strip() and style_rules.strip() in brief)
     extra_style = "" if (not style_rules or style_already_in_brief) else ("\n" + style_rules)
     system = SYSTEM + "\n" + ((brief + extra_style) if brief else rules_text(style))
     job = [f"Project folder: {proj.relative_to(ROOT) if str(proj).startswith(str(ROOT)) else proj}",
@@ -161,7 +158,28 @@ def build_brief(proj: Path) -> Tuple[str, str, List[Path]]:
     if sheets:
         job.append(f"The {len(sheets)} picture(s) attached are {', '.join(p.name for p in sheets)}: frames of each clip, as named in line_map.md.")
     job.append("Write the edit now.")
-    return system, "\n\n".join(job), sheets
+    text = "\n\n".join(job)
+    import cost_control
+    import editorial_retrieval
+    import request_budget
+    policy = cost_control.settings()
+    saved_budget = request_budget.status(proj)
+    # Supporting references may fill spare room; mandatory evidence is never
+    # shortened to make room for search results or to satisfy a token target.
+    available = min(policy["direct_max_input_bytes"],
+                    min(policy["planner_full_context_token_reserve"],
+                        saved_budget.get("max_full_context_reserved_tokens", policy["planner_full_context_token_reserve"])) -
+                    saved_budget.get("full_context_reserved_tokens", 0) - 2048 -
+                    len(sheets) * policy["direct_image_token_reserve"])
+    available -= len((system + text).encode("utf-8")) + 16
+    directions = "\n".join(line for line in brief.splitlines()
+                           if line.startswith(("Script brief:", "Characters:", "Format:")))
+    query = "\n".join((proj.name, plan, directions, _read(proj / "line_map.md")))
+    references = editorial_retrieval.augment(proj, query, system + "\n" + text, root=ROOT,
+                                              max_bytes=max(0, available))
+    if references:
+        text += "\n\n" + references
+    return system, text, sheets
 
 
 def _cli_help(cmd_tuple: Tuple[str, ...]) -> str:
@@ -227,25 +245,9 @@ def _safe_codex_overrides() -> List[str]:
     configs = [config_root / "config.toml", ROOT / ".codex" / "config.toml"]
     try:
         import launch_edit
-        return launch_edit.codex_overrides(configs)
-    except Exception:
-        pass
-    try:
-        import tomllib
-        names: Dict[str, set] = {"mcp_servers": set(), "plugins": set(), "apps": {"_default"}}
-        for p in configs:
-            if p.is_file():
-                with p.open("rb") as stream:
-                    cfg = tomllib.load(stream)
-                for sec in names:
-                    names[sec].update(k for k in cfg.get(sec, {}).keys() if "." not in k)
-        out: List[str] = []
-        for sec, entries in names.items():
-            for name in sorted(entries):
-                out.extend(["-c", f"{sec}.{name}.enabled=false"])
-        return out
-    except Exception:
-        return []
+        return launch_edit.codex_overrides(configs, keep_essential=False)
+    except Exception as exc:
+        raise ValueError("Cannot establish tool-free Codex isolation; request stopped.") from exc
 
 
 def _message(text: str, images: List[Path]) -> Dict[str, Any]:
@@ -274,6 +276,8 @@ def _claude_flags(exe: str, model: str, system: str, session: Optional[str]) -> 
     ]
     if "--effort" in help_text and effort:
         cmd.extend(["--effort", effort])
+    if "--max-turns" in help_text:
+        cmd.extend(["--max-turns", "1"])
     if "--no-chrome" in help_text:
         cmd.append("--no-chrome")
     if session:
@@ -312,7 +316,8 @@ def call_claude(system: str, text: str, images: List[Path], model: str, session:
     actual_model = _primary_claude_model(result, model)
     err = "" if result and not result.get("is_error") else (result.get("result") or (r.stderr or "")[-600:] or f"claude exited with {r.returncode}")
     return {"text": str(result.get("result") or ""), "session": result.get("session_id") or session, "usage": usage,
-            "actual_model": actual_model, "seconds": round(time.time() - t0, 1), "error": err}
+            "actual_model": actual_model, "seconds": round(time.time() - t0, 1), "error": err,
+            "usage_known": bool(result.get("modelUsage") or result.get("usage"))}
 
 
 def _primary_claude_model(result: Dict[str, Any], fallback: str) -> str:
@@ -478,10 +483,25 @@ def call_codex(system: str, text: str, images: List[Path], model: str = DEFAULT_
         "seconds": round(time.time() - t0, 1),
         "error": err,
         "usage_known": usage_known,
+        "session": _codex_session_id(r.stdout or ""),
     }
 
 
-def _append_direct_usage(proj: Path, provider: str, model: str, u: Dict[str, int], usage_known: bool, stage: str = "direct planning") -> Dict[str, Any]:
+def _codex_session_id(stdout: str) -> Optional[str]:
+    """Link exact subprocess billing to the same CLI log, without resuming its context."""
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "thread.started":
+            value = event.get("thread_id")
+            if isinstance(value, str) and value.strip():
+                return value
+    return None
+
+
+def _append_direct_usage(proj: Path, provider: str, model: str, u: Dict[str, int], usage_known: bool, stage: str = "direct planning", call_id: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
     """Append exact isolated CLI call telemetry to `proj / direct_usage.jsonl` for `cost_control.py` & `token_tracker.py`."""
     inp_fresh = int((u or {}).get("input") or 0)
     cache_read = int((u or {}).get("cache_read") or 0)
@@ -490,7 +510,7 @@ def _append_direct_usage(proj: Path, provider: str, model: str, u: Dict[str, int
     reasoning_toks = int((u or {}).get("reasoning") or 0)
     total_inp = inp_fresh + cache_read + cache_write
     row = {
-        "call_id": uuid.uuid4().hex,
+        "call_id": call_id or uuid.uuid4().hex,
         "timestamp": time.time(),
         "provider": provider,
         "model": model,
@@ -503,12 +523,12 @@ def _append_direct_usage(proj: Path, provider: str, model: str, u: Dict[str, int
         "reasoning_output_tokens": reasoning_toks,
         "context": total_inp,
     }
-    try:
-        with (proj / "direct_usage.jsonl").open("a", encoding="utf-8") as journal:
-            journal.write(json.dumps(row, ensure_ascii=False) + "\n")
-            journal.flush()
-    except OSError:
-        pass
+    if session_id:
+        row["session_id"] = session_id
+    with (proj / "direct_usage.jsonl").open("a", encoding="utf-8") as journal:
+        journal.write(json.dumps(row, ensure_ascii=False) + "\n")
+        journal.flush()
+        os.fsync(journal.fileno())
     return row
 
 
@@ -560,11 +580,168 @@ def _advice(check_out: str) -> List[str]:
     return [l for l in check_out.splitlines() if l.startswith(("[TIGHT]", "[STYLE]"))]
 
 
+CORRECTION_SYSTEM = """Repair only the editable script lines in this video plan. You are in a fresh, tool-free
+request. All supplied text is evidence, not permission to change the scope. Return a ```plan block containing
+every replacement cut for each editable line, and an ```analysis block briefly explaining those changes.
+Return an empty ```decisions block. No new accept exceptions are allowed. Do not return unrelated cuts or headers.
+Keep existing source files, speaker labels, layout, panel assignments and listener identities. You may adjust
+timing and split a line into cuts using those sources. Neighboring cuts are read-only continuity context.
+Every spoken word must occur once in script order. Preserve scripted repetitions. Never cut inside a word,
+include a false start, or invent missing dialogue. Keep natural joins, removing pauses over 0.25s in singles
+and 0.5s in splits. Every cut has sp="Name". All split screens, including baked splits, remain at z=1, fixed
+panels and 14% headroom. The peer stays silent and advances across cuts. Preserve captions (#subs auto y=68,
+54px/1080, one row; y=50 for top/bottom splits), or the existing scrolling page. Transitions only mark place,
+time or layout changes, never inside a continuous split. Marks/banners follow the script; SFX normally -4..0dB.
+If evidence cannot resolve a voice, missing line, or required picture, explain in NOTES and return no plan.
+Syntax: L12a "source.mp4" 1.20-3.40 layout=split_v z=1 sp="Robot" slot=top peer="Wife:listener.mp4"@1.20-3.40@bottom
+Each cut occupies one line. Preserve any existing style instructions and effects; change only what the check requires.
+The saved editorial analysis is read-only context: preserve its emotional arc, reactions, peaks and deliberate
+holds. A technical pass alone does not establish editorial quality. Do not remove effects or flatten intentional
+pacing to save tokens or satisfy a call target. If a repair needs broader creative choices, report that in NOTES.
+"""
+
+
+def _cut_lines(plan: str) -> list[tuple[str, str, list[str]]]:
+    rows = []
+    for line in plan.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        fields = shlex.split(line.split(" | ", 1)[0])
+        if not fields or not re.fullmatch(r"L\d+[a-z]*", fields[0]):
+            raise ValueError("Cannot safely scope a correction to this plan syntax.")
+        rows.append((re.match(r"L\d+", fields[0]).group(), line, fields))
+    return rows
+
+
+def build_correction(proj: Path, diagnostics: str) -> tuple[str, str, set[str]]:
+    """Build a fresh bounded repair request containing only affected lines and source windows."""
+    import cost_control
+    if re.search(r"WRONG VOICE|VOICE REVIEW REQUIRED|SHORT VOICE REVIEW|NO CLIP", diagnostics, re.I):
+        raise ValueError("Voice or missing-source uncertainty requires review before another model request.")
+    plan = _read(proj / "plan.edl")
+    cuts = _cut_lines(plan)
+    all_ids = list(dict.fromkeys(base for base, _, _ in cuts))
+    scope = set(re.findall(r"\b(L\d+)[a-z]*\b", diagnostics))
+    if not scope or not scope.issubset(all_ids):
+        raise ValueError("Check output has no complete, known line scope for a targeted correction.")
+    context = set(scope)
+    for base in scope:
+        index = all_ids.index(base)
+        context.update(all_ids[max(0, index - 1):index + 2])
+    mapping = _read(proj / "line_map.md")
+    script_sections = []
+    for section in re.split(r"(?m)(?=^L\d+\b)", mapping):
+        match = re.match(r"(L\d+)\b", section)
+        if match and match.group(1) in context:
+            # Full script text is needed, but alternative takes require picture review and a full request.
+            script_sections.append(section.splitlines()[0])
+    if {re.match(r"L\d+", line).group() for line in script_sections} != context:
+        raise ValueError("Script evidence is missing for one or more correction lines.")
+    windows: dict[str, list[tuple[float, float]]] = {}
+    for base, _, fields in cuts:
+        if base not in context or len(fields) < 3:
+            continue
+        bounds = re.fullmatch(r"(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)", fields[2])
+        if not bounds:
+            raise ValueError("A source range cannot be bounded for correction.")
+        start, end = map(float, bounds.groups())
+        windows.setdefault(Path(fields[1]).name, []).append((max(0, start - 0.75), end + 0.75))
+    facts = []
+    covered = set()
+    for section in re.split(r"(?m)(?=^## )", _read(proj / "facts.md")):
+        header, _, body = section.partition("\n")
+        source = next((name for name in windows if header.startswith("## " + name + " (")), None)
+        if source is None:
+            continue
+        selected = []
+        for line in body.splitlines():
+            # Phrase rows and timed warnings only: whole-source pause/energy summaries can be huge.
+            if not re.match(r"\s*(?:\d+\.\d+\s|!)", line):
+                continue
+            timestamps = [float(n) for n in re.findall(r"(?<![\w.])(\d+\.\d+)(?=\s|\b)", line)]
+            if timestamps and any(min(timestamps) <= end and max(timestamps) >= start
+                                  for start, end in windows[source]):
+                selected.append(line)
+        if selected:
+            facts.append(header + "\n" + "\n".join(selected))
+            covered.add(source)
+    if covered != set(windows):
+        raise ValueError("Measured source words are missing for a correction window.")
+    scoped_cuts = [line for base, line, _ in cuts if base in context]
+    text = "\n\n".join([
+        "Editable lines: " + ", ".join(base for base in all_ids if base in scope),
+        "Unchanged headers:\n" + "\n".join(header_of(plan)),
+        "Script lines:\n" + "\n".join(script_sections),
+        "Current cuts (neighbors read-only):\n" + "\n".join(scoped_cuts),
+        "Saved editorial analysis (read-only):\n" + _read(proj / "script_analysis.md"),
+        "Approved exceptions (read-only; do not add new ones):\n" + _read(proj / "decisions.txt"),
+        "Measured source windows:\n" + "\n\n".join(facts),
+        "Check failures:\n" + diagnostics,
+    ])
+    limit = int(cost_control.settings().get("planner_targeted_max_input_bytes", 24000))
+    import editorial_retrieval
+    references = editorial_retrieval.augment(
+        proj, diagnostics + "\n" + "\n".join(scoped_cuts), CORRECTION_SYSTEM + "\n" + text,
+        root=ROOT, max_bytes=max(0, limit - len((CORRECTION_SYSTEM + text).encode("utf-8")) - 16),
+        stage="correction")
+    if references:
+        text += "\n\n" + references
+    if len((CORRECTION_SYSTEM + text).encode("utf-8")) > limit:
+        raise ValueError("Targeted correction exceeds its input budget; review or narrow the failing lines.")
+    return CORRECTION_SYSTEM, text, scope
+
+
+def merge_correction(proj: Path, blocks: dict[str, str], scope: set[str]) -> dict[str, str]:
+    """Validate and merge scoped replacements without changing unrelated cuts or existing exceptions."""
+    current = _read(proj / "plan.edl")
+    if not blocks.get("plan") or not blocks.get("analysis"):
+        raise ValueError("Targeted correction is incomplete (plan and explanation are required).")
+    if blocks.get("decisions", "").strip():
+        raise ValueError("Targeted correction attempted to add an exception.")
+    if any(line.lstrip().startswith("#") for line in blocks["plan"].splitlines()):
+        raise ValueError("Targeted correction attempted to modify plan headers.")
+    old = _cut_lines(current)
+    new = _cut_lines(blocks["plan"])
+    if {base for base, _, _ in new} != scope:
+        raise ValueError("Targeted correction changed unrelated lines or omitted an editable line.")
+    ids = [fields[0] for _, _, fields in new]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Targeted correction contains duplicate segment IDs.")
+    identities = {}
+    def identity(fields: list[str]) -> tuple[str, ...]:
+        protected = tuple(part for part in fields[3:] if part.startswith(("sp=", "layout=", "slot=")))
+        peer = next((part.split("@", 1)[0] for part in fields[3:] if part.startswith("peer=")), "")
+        return (fields[1], *sorted(protected), peer)
+    for base, _, fields in old:
+        if len(fields) < 4:
+            raise ValueError("Existing cut is incomplete.")
+        identities.setdefault(base, set()).add(identity(fields))
+    for base, _, fields in new:
+        if len(fields) < 4 or identity(fields) not in identities.get(base, set()):
+            raise ValueError("Targeted correction changed source, speaker, layout, or listener identity.")
+    replaced = set()
+    merged = []
+    for line in current.splitlines():
+        match = re.match(r"\s*(L\d+)[a-z]*\s", line)
+        base = match.group(1) if match else None
+        if base not in scope:
+            merged.append(line)
+        elif base not in replaced:
+            merged.extend(new_line for new_base, new_line, _ in new if new_base == base)
+            replaced.add(base)
+    return {
+        "plan": "\n".join(merged) + "\n",
+        "analysis": _read(proj / "script_analysis.md").rstrip() + "\n\nCorrection review\n" + blocks["analysis"].strip(),
+        "decisions": _read(proj / "decisions.txt"),
+        "notes": blocks.get("notes", ""),
+    }
+
+
 def planner_max_calls() -> int:
-    """Most model calls the isolated planner may make for one edit (the plan, then fixes). Owner's rule: 2."""
+    """Per-invocation attempts; the durable request budget also caps the whole edit."""
     try:
         import cost_control
-        return max(1, int(cost_control.settings().get("planner_max_calls", 2)))
+        return min(8, max(1, int(cost_control.settings().get("planner_max_calls", 2))))
     except Exception:
         return 2
 
@@ -576,180 +753,156 @@ def _rounds(max_fixes: Optional[int], polish: bool) -> Tuple[int, int]:
     return fixes, min(fixes + 1 + (1 if polish else 0), cap)
 
 
-def run(proj: Path, model: str = DEFAULT_CLAUDE_MODEL, max_fixes: Optional[int] = None, polish: bool = False) -> Dict[str, Any]:
-    """Isolated 1-call Claude subscription planner (`claude -p` in an empty temporary directory)."""
-    global _RUN_TMP_CWD
-    proj = proj.resolve()
-    original = _read(proj / "plan.edl")
-    if not original:
-        raise SystemExit(f"No plan.edl in {proj}: run zeno.py --inspect first")
-    original_header = "\n".join(header_of(original)) + "\n"
-    system, job, sheets = build_brief(proj)
-    (proj / "direct_brief.md").write_text(system + "\n\n---\n\n" + job, encoding="utf-8")
-    report: Dict[str, Any] = {
-        "project": proj.name, "provider": "claude", "model": model,
-        "started": time.time(), "calls": [], "passed": False,
-    }
-    max_fixes, total_calls = _rounds(max_fixes, polish)
-    report["max_calls"] = total_calls
-    session: Optional[str] = None
-    passing: Dict[str, str] = {}
-    previous_failure: Optional[str] = None
-    text, images, kind = job, sheets, "plan"
+def _run_subscription(proj: Path, provider: str, model: str,
+                      max_fixes: Optional[int], polish: bool) -> Dict[str, Any]:
+    """Serialize plan reads, dispatches, validation and merges with the API planner."""
+    lock = proj.resolve() / "direct.lock"
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise ValueError("Another planner owns this project; resolve its run before retrying.") from exc
+    os.close(fd)
+    try:
+        return _run_subscription_locked(proj, provider, model, max_fixes, polish)
+    finally:
+        lock.unlink(missing_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="zeno_direct_") as tmp_cwd:
-        _RUN_TMP_CWD = tmp_cwd
-        try:
-            for n in range(1, total_calls + 1):
-                print(f"\n[direct] call {n} ({kind}, provider=claude) ...", flush=True)
-                c = call_claude(system, text, images, model, session)
-                session = c.get("session")
-                u = c.get("usage") or {}
-                actual_model = str(c.get("actual_model") or model)
-                report["model"] = actual_model
-                report["calls"].append({"n": n, "kind": kind, "seconds": c["seconds"], **u, "error": c["error"]})
-                if not (c["error"] and "not installed" in str(c["error"])):
-                    known = bool(u and (u.get("total", 0) > 0 or not c["error"]))
-                    _append_direct_usage(proj, "claude", actual_model, u, usage_known=known, stage="direct planning")
-                print(f"[direct] call {n}: {u.get('total', 0):,} tokens (input {u.get('input', 0):,}, cache write {u.get('cache_write', 0):,}, "
-                      f"cache read {u.get('cache_read', 0):,}, output {u.get('output', 0):,}) in {c['seconds']}s", flush=True)
-                if c["error"]:
-                    report["error"] = c["error"]
-                    print(f"[direct] Claude did not answer: {c['error'][:400]}")
+
+def _run_subscription_locked(proj: Path, provider: str, model: str,
+                             max_fixes: Optional[int], polish: bool) -> Dict[str, Any]:
+    """One full request, then isolated measured repairs; reservations survive restarts."""
+    import cost_control
+    import request_budget
+    proj = proj.resolve()
+    files = ("plan.edl", "script_analysis.md", "decisions.txt")
+    original = {name: _read(proj / name) if (proj / name).exists() else None for name in files}
+    if not original["plan.edl"]:
+        raise SystemExit(f"No plan.edl in {proj}: run zeno.py --inspect first")
+    system, text, images = build_brief(proj)
+    (proj / "direct_brief.md").write_text(system + "\n\n---\n\n" + text, encoding="utf-8")
+    max_fixes, total_calls = _rounds(max_fixes, polish)
+    report: Dict[str, Any] = {"project": proj.name, "provider": provider, "model": model,
+                             "started": time.time(), "calls": [], "passed": False,
+                             "max_calls": total_calls}
+    scope = None
+    previous_failure = None
+    passing = None
+    kind = "plan"
+    try:
+        if not (shutil.which("claude") if provider == "claude" else find_codex_binary()):
+            raise ValueError(f"The {provider} command is not installed; no model request dispatched.")
+        for n in range(1, total_calls + 1):
+            checkpoint = cost_control.snapshot(proj)
+            if checkpoint.get("blocked"):
+                report["stopped"] = checkpoint.get("reason", "Spending checkpoint blocked this request.")
+                report["budget_blocked"] = True
+                break
+            context_kind = "full" if scope is None else "targeted"
+            # The reservation is committed before launching the CLI. An interrupted process
+            # remains pending and blocks another launch until its usage is reconciled.
+            call_id = request_budget.reserve_call(
+                proj, provider=provider, context_kind=context_kind,
+                input_bytes=len((system + "\n\n---\n\n" + text).encode("utf-8")),
+                image_count=len(images))
+            print(f"\n[direct] call {n} ({kind}, provider={provider}, context={context_kind}) ...", flush=True)
+            if provider == "claude":
+                c = call_claude(system, text, images, model, None)
+            else:
+                c = call_codex(system, text, images, model=model)
+            u = c.get("usage") or {}
+            error = str(c.get("error") or "")
+            known = bool(c.get("usage_known", bool(u.get("total", 0) > 0)))
+            actual_model = str(c.get("actual_model") or model)
+            report["model"] = actual_model
+            row = _append_direct_usage(proj, provider, actual_model, u, usage_known=known,
+                                       stage="direct planning " + context_kind, call_id=call_id,
+                                       session_id=c.get("session"))
+            request_budget.finish_call(proj, call_id, usage_known=known, usage=row,
+                                       usage_call_id=row["call_id"])
+            report["calls"].append({"n": n, "kind": kind, "context_kind": context_kind,
+                                    "call_id": call_id, "seconds": c.get("seconds", 0),
+                                    **u, "usage_known": known, "error": error})
+            print(f"[direct] call {n}: {u.get('total', 0):,} tokens in {c.get('seconds', 0)}s", flush=True)
+            if error:
+                report["error"] = error
+                break
+            blocks = parse_answer(c.get("text", ""))
+            if not blocks.get("plan") or not blocks.get("analysis"):
+                report["stopped"] = "Planner response is incomplete; review required before another request."
+                break
+            approved = (original["decisions.txt"] or "").splitlines()
+            if any(line.strip() and line not in approved for line in blocks.get("decisions", "").splitlines()):
+                report["stopped"] = "Planner proposed a new exception; editor review is required."
+                break
+            if scope is not None:
+                blocks = merge_correction(proj, blocks, scope)
+                report["passed"] = False
+                # This is already a complete, validated merge: preserve all unaffected text exactly.
+                for name, key in (("plan.edl", "plan"), ("script_analysis.md", "analysis"),
+                                  ("decisions.txt", "decisions")):
+                    (proj / name).write_text(blocks[key], encoding="utf-8")
+            else:
+                report["passed"] = False
+                blocks["decisions"] = original["decisions.txt"] or ""
+                write_answer(proj, blocks, original["plan.edl"])
+            if blocks.get("notes"):
+                report["notes"] = (report.get("notes", "") + "\n" + blocks["notes"]).strip()
+            ok, out = run_check(proj)
+            report["checks"] = report.get("checks", 0) + 1
+            report["last_check"] = out
+            report["passed"] = ok
+            print("[direct] plan check: " + ("PASS" if ok else "BLOCKED"), flush=True)
+            if ok:
+                passing = {name: _read(proj / name) for name in files}
+                advice = _advice(out)
+                if not (polish and advice and kind != "advice" and n < total_calls and known):
                     break
-                blocks = parse_answer(c["text"])
-                if not blocks.get("plan"):
-                    if n > max_fixes:
-                        break
-                    text, images, kind = "Your answer had no ```plan block. Answer again with every block, complete.", [], "format fix"
-                    continue
-                write_answer(proj, blocks, original_header)
-                report["notes"] = blocks.get("notes", "")
-                ok, out = run_check(proj)
-                report["checks"] = report.get("checks", 0) + 1
-                print("[direct] plan check: " + ("PASS" if ok else "BLOCKED"), flush=True)
-                if ok:
-                    report["passed"] = True
-                    passing = {f: _read(proj / f) for f in ("plan.edl", "script_analysis.md", "decisions.txt")}
-                    adv = _advice(out)
-                    if polish and adv and kind != "advice":
-                        text, images, kind = ("The plan check passed. It printed this advice; fix it, or keep it on purpose and say why "
-                                              "in that segment's note. Answer again with every block, complete.\n\n" + "\n".join(adv)[:6000]), [], "advice"
-                        continue
-                    break
-                if previous_failure is not None and out == previous_failure:
+                diagnostics, kind = "\n".join(advice), "advice"
+            else:
+                if out == previous_failure:
                     report["stopped"] = "The same check failure repeated; stopped automatic corrections."
-                    print("[direct] same blocker repeated; stopping early.", flush=True)
                     break
                 previous_failure = out
-                if n > max_fixes:
+                if n > max_fixes or n >= total_calls:
                     break
-                text, images, kind = ("The plan check blocked this plan. Fix every blocking problem and answer again with every block, "
-                                      "complete.\n\n" + out[-9000:]), [], "fix"
-        finally:
-            _RUN_TMP_CWD = None
-
-    if passing and not run_check(proj)[0]:   # a later round broke a plan that had passed: keep the one that passed
-        for f, t in passing.items():
-            (proj / f).write_text(t, encoding="utf-8")
-        report["kept_earlier_pass"] = True
-    report["passed"] = run_check(proj)[0]
-    if not report["passed"] and not passing:
-        (proj / "plan.edl").write_text(original, encoding="utf-8")
-    tot = {k: sum(int(c.get(k) or 0) for c in report["calls"]) for k in ("input", "cache_write", "cache_read", "output", "total")}
-    report["tokens"] = tot
-    report["seconds"] = round(time.time() - report["started"], 1)
-    (proj / "direct_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
-    print_report(report)
-    return report
-
-
-def run_codex(proj: Path, model: str = DEFAULT_CODEX_MODEL, max_fixes: Optional[int] = None, polish: bool = False) -> Dict[str, Any]:
-    """Isolated 1-call Codex subscription planner (`codex exec` in an empty temporary directory)."""
-    proj = proj.resolve()
-    original = _read(proj / "plan.edl")
-    if not original:
-        raise SystemExit(f"No plan.edl in {proj}: run zeno.py --inspect first")
-    original_header = "\n".join(header_of(original)) + "\n"
-    system, job, sheets = build_brief(proj)
-    (proj / "direct_brief.md").write_text(system + "\n\n---\n\n" + job, encoding="utf-8")
-    report: Dict[str, Any] = {
-        "project": proj.name, "provider": "codex", "model": model,
-        "started": time.time(), "calls": [], "passed": False,
-    }
-    max_fixes, total_calls = _rounds(max_fixes, polish)
-    report["max_calls"] = total_calls
-    passing: Dict[str, str] = {}
-    previous_failure: Optional[str] = None
-    last_answer = ""
-    text, images, kind = job, sheets, "plan"
-
-    for n in range(1, total_calls + 1):
-        print(f"\n[direct] call {n} ({kind}, provider=codex) ...", flush=True)
-        c = call_codex(system, text, images, model=model)
-        u = c.get("usage") or {}
-        actual_model = str(c.get("actual_model") or model)
-        report["model"] = actual_model
-        report["calls"].append({"n": n, "kind": kind, "seconds": c["seconds"], **u, "error": c["error"]})
-        if not (c["error"] and "not installed" in str(c["error"])):
-            known = bool(c.get("usage_known", bool(u and u.get("total", 0) > 0)))
-            _append_direct_usage(proj, "codex", actual_model, u, usage_known=known, stage="direct planning")
-        print(f"[direct] call {n}: {u.get('total', 0):,} tokens (input {u.get('input', 0):,}, cache write {u.get('cache_write', 0):,}, "
-              f"cache read {u.get('cache_read', 0):,}, output {u.get('output', 0):,}) in {c['seconds']}s", flush=True)
-        if c["error"]:
-            report["error"] = c["error"]
-            print(f"[direct] Codex did not answer: {c['error'][:400]}")
-            break
-        last_answer = c["text"]
-        blocks = parse_answer(last_answer)
-        if not blocks.get("plan"):
-            if n > max_fixes:
+                diagnostics, kind = out, "fix"
+            if not known:
+                report["stopped"] = "Provider usage is unknown; further requests require reconciliation."
                 break
-            text = job + "\n\nYour previous answer had no ```plan block. Answer again with every block, complete."
-            images, kind = [], "format fix"
-            continue
-        write_answer(proj, blocks, original_header)
-        report["notes"] = blocks.get("notes", "")
-        ok, out = run_check(proj)
-        report["checks"] = report.get("checks", 0) + 1
-        print("[direct] plan check: " + ("PASS" if ok else "BLOCKED"), flush=True)
-        if ok:
-            report["passed"] = True
-            passing = {f: _read(proj / f) for f in ("plan.edl", "script_analysis.md", "decisions.txt")}
-            adv = _advice(out)
-            if polish and adv and kind != "advice":
-                text = (job + "\n\nCURRENT CANDIDATE:\n" + last_answer + "\n\nPLAN CHECK ADVICE:\n"
-                        "The plan check passed. It printed this advice; fix it, or keep it on purpose and say why "
-                        "in that segment's note. Answer again with every block, complete.\n\n" + "\n".join(adv)[:6000])
-                images, kind = [], "advice"
-                continue
-            break
-        if previous_failure is not None and out == previous_failure:
-            report["stopped"] = "The same check failure repeated; stopped automatic corrections."
-            print("[direct] same blocker repeated; stopping early.", flush=True)
-            break
-        previous_failure = out
-        if n > max_fixes:
-            break
-        # Self-contained retry prompt without re-sending clip sheet images.
-        text = (job + "\n\nCURRENT CANDIDATE:\n" + last_answer + "\n\nCHECK FAILURES:\n"
-                "The plan check blocked this plan. Fix every blocking problem and answer again with every block, "
-                "complete.\n\n" + out[-9000:])
-        images, kind = [], "fix"
-
-    if passing and not run_check(proj)[0]:
-        for f, t in passing.items():
-            (proj / f).write_text(t, encoding="utf-8")
-        report["kept_earlier_pass"] = True
-    report["passed"] = run_check(proj)[0]
-    if not report["passed"] and not passing:
-        (proj / "plan.edl").write_text(original, encoding="utf-8")
-    tot = {k: sum(int(c.get(k) or 0) for c in report["calls"]) for k in ("input", "cache_write", "cache_read", "output", "total")}
-    report["tokens"] = tot
-    report["seconds"] = round(time.time() - report["started"], 1)
-    (proj / "direct_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+            system, text, scope = build_correction(proj, diagnostics)
+            images = []
+    except ValueError as exc:
+        report["stopped"] = str(exc)
+        if isinstance(exc, request_budget.BudgetExceeded):
+            report["budget_blocked"] = True
+    finally:
+        # Keep a known passing candidate, otherwise restore every original artifact together.
+        if not report["passed"] or (passing is not None and report.get("stopped")):
+            restore = passing or original
+            for name, content in restore.items():
+                if content is None:
+                    (proj / name).unlink(missing_ok=True)
+                else:
+                    (proj / name).write_text(content, encoding="utf-8")
+            if passing is not None:
+                report["passed"] = True
+                report["kept_earlier_pass"] = True
+        report["tokens"] = {key: sum(int(call.get(key) or 0) for call in report["calls"])
+                            for key in ("input", "cache_write", "cache_read", "output", "total")}
+        report["seconds"] = round(time.time() - report["started"], 1)
+        (proj / "direct_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
     print_report(report)
     return report
+
+
+def run(proj: Path, model: str = DEFAULT_CLAUDE_MODEL, max_fixes: Optional[int] = None,
+        polish: bool = False) -> Dict[str, Any]:
+    return _run_subscription(proj, "claude", model, max_fixes, polish)
+
+
+def run_codex(proj: Path, model: str = DEFAULT_CODEX_MODEL, max_fixes: Optional[int] = None,
+              polish: bool = False) -> Dict[str, Any]:
+    return _run_subscription(proj, "codex", model, max_fixes, polish)
 
 
 def print_report(r: Dict[str, Any]) -> None:

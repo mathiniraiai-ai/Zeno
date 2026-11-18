@@ -95,6 +95,7 @@ def window_usage(items: Iterable[dict], since: float, until: float, root: Path) 
         "context_start": requests[0]["context"] if requests else 0,
         "context_end": last_context, "steps_count": len(requests), "turns": len(requests),
         "token_precision": "exact" if requests else "unavailable",
+        "host_usage_unknown": not bool(requests),
         "requests": requests,
     }
 

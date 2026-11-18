@@ -219,8 +219,103 @@ function clearRootAuth(root) {
 }
 
 // ---------------------------------------------------------------- Pure Node.js Cloud OTA Bundle Extractor & Updater
-const PRESERVE_REL = new Set(['.env', '.zeno_session.json', '.zeno-dev']);
-const PRESERVE_PREFIX = ['.git/', '.venv/', 'models/', 'tools/', 'work/'];
+const PRESERVE_REL = new Set(['.env', '.zeno_session.json', '.zeno_owner_session.json', '.zeno-dev']);
+const PRESERVE_PREFIX = ['.git/', '.venv/', 'models/', 'tools/', 'work/', 'input/', 'output/', 'scratch/', 'service/'];
+const OTA_MANIFEST_NAME = '_zeno_manifest.json';
+const OTA_RUNTIME_SKIP = new Set(['node_modules', '__pycache__', '.git', '.venv', 'dist']);
+
+function isPreservedRel(cleanRel) {
+  const rel = String(cleanRel || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!rel || rel.split('/').includes('..')) return true;
+  if (PRESERVE_REL.has(rel)) return true;
+  if (PRESERVE_PREFIX.some((pfx) => rel === pfx.replace(/\/$/, '') || rel.startsWith(pfx))) return true;
+  if (rel.split('/').some((seg) => OTA_RUNTIME_SKIP.has(seg))) return true;
+  return false;
+}
+
+function pruneFromManifest(destDir, installedVer = '', prevVer = '') {
+  const manPath = path.join(destDir, OTA_MANIFEST_NAME);
+  if (!fs.existsSync(manPath)) return { pruned: 0, dirs: 0 };
+  if (fs.existsSync(path.join(destDir, '.zeno-dev'))) {
+    try { fs.unlinkSync(manPath); } catch (e) { /* ignore */ }
+    return { pruned: 0, dirs: 0 };
+  }
+  let manifest = null;
+  try { manifest = JSON.parse(fs.readFileSync(manPath, 'utf8')); } catch (e) { manifest = null; }
+  if (!manifest || !Array.isArray(manifest.files)) return { pruned: 0, dirs: 0 };
+
+  const keep = new Set(manifest.files.map((f) => String(f || '').replace(/\\/g, '/').replace(/^\/+/, '')));
+  const managedDirs = Array.isArray(manifest.managed_dirs) ? manifest.managed_dirs : [];
+  const managedTop = Array.isArray(manifest.managed_top_files) ? manifest.managed_top_files : [];
+  const obsolete = Array.isArray(manifest.obsolete_paths) ? manifest.obsolete_paths : [];
+  let pruned = 0;
+  let dirsRemoved = 0;
+
+  const walkPruneDir = (absDir, relPrefix) => {
+    let entries = [];
+    try { entries = fs.readdirSync(absDir, { withFileTypes: true }); } catch (e) { return; }
+    for (const ent of entries) {
+      if (OTA_RUNTIME_SKIP.has(ent.name) || ent.name === '.DS_Store') continue;
+      const absChild = path.join(absDir, ent.name);
+      const relChild = relPrefix ? `${relPrefix}/${ent.name}` : ent.name;
+      if (isPreservedRel(relChild)) continue;
+      if (ent.isSymbolicLink()) continue;
+      if (ent.isDirectory()) {
+        walkPruneDir(absChild, relChild);
+        try {
+          if (fs.readdirSync(absChild).length === 0) {
+            fs.rmdirSync(absChild);
+            dirsRemoved++;
+          }
+        } catch (e) { /* ignore */ }
+      } else if (ent.isFile() && relChild !== OTA_MANIFEST_NAME && !keep.has(relChild)) {
+        try { fs.unlinkSync(absChild); pruned++; } catch (e) { /* ignore */ }
+      }
+    }
+  };
+
+  for (const mdirRaw of managedDirs) {
+    const mdir = String(mdirRaw || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    if (!mdir || isPreservedRel(mdir + '/')) continue;
+    const absBase = path.join(destDir, ...mdir.split('/'));
+    if (fs.existsSync(absBase)) {
+      walkPruneDir(absBase, mdir);
+      try {
+        if (fs.readdirSync(absBase).length === 0) {
+          fs.rmdirSync(absBase);
+          dirsRemoved++;
+        }
+      } catch (e) { /* ignore */ }
+    }
+  }
+
+  for (const topRaw of new Set([...managedTop, ...obsolete])) {
+    const rel = String(topRaw || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    if (!rel || rel === OTA_MANIFEST_NAME || keep.has(rel) || isPreservedRel(rel)) continue;
+    const cand = path.join(destDir, ...rel.split('/'));
+    try {
+      const st = fs.lstatSync(cand);
+      if (st.isFile() || st.isSymbolicLink()) { fs.unlinkSync(cand); pruned++; }
+      else if (st.isDirectory() && obsolete.includes(rel)) { fs.rmSync(cand, { recursive: true, force: true }); dirsRemoved++; }
+    } catch (e) { /* not present */ }
+  }
+
+  try {
+    const workDir = path.join(destDir, 'work');
+    fs.mkdirSync(workDir, { recursive: true });
+    fs.writeFileSync(path.join(workDir, '.last_ota_manifest.json'), JSON.stringify({
+      version: installedVer || String(manifest.version || ''),
+      prev_version: prevVer || '',
+      tracked_files: keep.size,
+      pruned_files: pruned,
+      pruned_dirs: dirsRemoved,
+      clear_work_projects: !!manifest.clear_work_projects,
+      applied_at: Math.floor(Date.now() / 1000),
+    }, null, 2) + '\n', 'utf8');
+  } catch (e) { /* ignore */ }
+  try { fs.unlinkSync(manPath); } catch (e) { /* ignore */ }
+  return { pruned, dirs: dirsRemoved };
+}
 
 function extractZipBuffer(buf, destDir) {
   let eocd = -1;
@@ -361,8 +456,10 @@ async function applyCloudUpdateNative(auth, targetRoot) {
     return { ok: false, text: 'Downloaded bundle checksum mismatch. Please retry.' };
   }
 
+  const prevVer = localVersion(dest);
   const count = extractZipBuffer(buf, dest);
   const installedVer = headerVer || localVersion(dest);
+  pruneFromManifest(dest, installedVer, prevVer);
   writeUpdateState(dest, {
     installed_version: installedVer,
     last_bundle_sha256: actualSha,
@@ -380,7 +477,7 @@ async function applyCloudUpdateNative(auth, targetRoot) {
     const newReqSha = fs.existsSync(rq) ? crypto.createHash('sha256').update(fs.readFileSync(rq)).digest('hex') : '';
     const cleanScript = path.join(dest, 'scripts', 'clean.py');
     if (hasVenv(dest) && fs.existsSync(cleanScript)) {
-      spawn(venvPythonPath(dest), [cleanScript, '--after-update', '--version', String(installedVer || '')], { cwd: dest, detached: true, stdio: 'ignore' }).unref();
+      spawn(venvPythonPath(dest), [cleanScript, '--after-update', '--version', String(installedVer || ''), '--prev-version', String(prevVer || '')], { cwd: dest, detached: true, stdio: 'ignore' }).unref();
     }
     if (hasVenv(dest) && fs.existsSync(gpuScript)) {
       if (oldReqSha && newReqSha && oldReqSha !== newReqSha) {

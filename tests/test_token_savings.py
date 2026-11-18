@@ -114,6 +114,13 @@ class TestLeanWorkflow(unittest.TestCase):
                 self.assertEqual(system.count("Selected job rules"), 1)
                 self.assertIn("Requested style rules", system)
                 fallback.assert_not_called()
+                # A generated heading/summary is not the actual style skill.
+                (project / "brief.md").write_text("# STYLE: test-style\nShort summary only")
+                system, _, _ = direct_mode.build_brief(project)
+                self.assertIn("Requested style rules", system)
+                (project / "brief.md").write_text("# STYLE: test-style\nRequested style rules")
+                system, _, _ = direct_mode.build_brief(project)
+                self.assertEqual(system.count("Requested style rules"), 1)
 
     def test_compact_success_is_bounded_and_log_complete(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as output:
@@ -228,9 +235,9 @@ class TestReportIntegration(unittest.TestCase):
 
 
 class TestV1018TokenArrestAndNotionQueue(unittest.TestCase):
-    def test_1m_queue_limit_and_notion_meta_preserved_in_launcher(self):
+    def test_100k_intake_limit_and_notion_meta_preserved_in_launcher(self):
         import cost_control, launch_edit, tomllib
-        self.assertEqual(cost_control.settings()["new_chat_context_limit"], 1_000_000)
+        self.assertEqual(cost_control.settings()["new_chat_context_limit"], 100_000)
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "config.toml"
             p.write_text(
@@ -556,7 +563,7 @@ class CacheCleanupAndMcpIsolationTests(unittest.TestCase):
             self.assertFalse(res["isError"])
             self.assertIn("--auto-plan", captured["cmd"])
             self.assertIn("--compact", captured["cmd"])
-            self.assertIn("[ZENO 1-CALL RULE]", res["content"][0]["text"])
+            self.assertIn("[ZENO DELIVERY]", res["content"][0]["text"])
             self.assertNotIn("read line_map.md, facts.md", res["content"][0]["text"])
 
     def test_cleanup_after_job_and_after_update_clear_transient_bloat_and_preserve_clips(self):
@@ -799,14 +806,15 @@ class OptionBBatchedWorkflowTests(unittest.TestCase):
                 zeno.print_planner_stop(plan_p, "plan check did not pass", 2)
             out = buf.getvalue()
             self.assertIn("[PLANNER STOPPED]", out)
-            self.assertIn("2 model call(s)", out)
+            self.assertIn("2 completed model call(s)", out)
             self.assertNotIn("[MANUAL_FALLBACK_PACK]", out)
             self.assertNotIn("[TURN 2]", out)
             self.assertTrue(compact_run.IMPORTANT.match("[PLANNER STOPPED] The planner used 2"))
             buf = io.StringIO()
             with patch.dict(os.environ, {"ZENO_MANUAL_FALLBACK": "1"}), contextlib.redirect_stdout(buf):
                 zeno.print_planner_stop(plan_p, "plan check did not pass", 2)
-            self.assertIn("[MANUAL_FALLBACK_PACK]", buf.getvalue())   # the owner's switch brings the old path back
+            self.assertNotIn("[MANUAL_FALLBACK_PACK]", buf.getvalue())
+            self.assertIn("[PLANNER STOPPED]", buf.getvalue())  # legacy switch cannot bypass the durable budget
 
     def test_zeno_manual_fallback_pack_and_compact_regex(self):
         import contextlib
@@ -839,7 +847,7 @@ class OptionBBatchedWorkflowTests(unittest.TestCase):
             for tag in ("[PACKET_PARTS] p1 p2", "[MANUAL_FALLBACK_PACK] fallback", "[BATCH PLAYBOOK] ok", "[TURN 2] read", "[DO NOT] stop"):
                 self.assertIsNotNone(compact_run.IMPORTANT.search(tag), f"compact_run missed: {tag}")
 
-    def test_antigravity_turns_and_1m_limit_preserved(self):
+    def test_antigravity_turns_and_100k_intake_limit(self):
         import agent_log
         import cost_control
 
@@ -856,7 +864,7 @@ class OptionBBatchedWorkflowTests(unittest.TestCase):
         usage = agent_log.antigravity_window_usage(lines, cutoff, ceiling, session_id="agy-test")
         self.assertIsNotNone(usage)
         self.assertEqual(usage["turns"], 2)
-        self.assertEqual(cost_control.settings()["new_chat_context_limit"], 1_000_000)
+        self.assertEqual(cost_control.settings()["new_chat_context_limit"], 100_000)
 
 
 if __name__ == "__main__":

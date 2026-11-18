@@ -16,6 +16,7 @@ import urllib.request
 import uuid
 
 import cost_control
+import request_budget
 import token_cost
 
 MODEL = "gpt-6.1-sol"
@@ -70,15 +71,24 @@ def response_text(response: dict) -> str:
 
 def measured_usage(response: dict, call_id: str, stage: str, stamp: float) -> dict:
     usage = response.get("usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
     inp, out = usage.get("input_tokens"), usage.get("output_tokens")
-    valid = isinstance(inp, int) and isinstance(out, int) and inp >= 0 and out >= 0
     detail = usage.get("input_tokens_details") or {}
-    cached = int(detail.get("cached_tokens") or 0)
-    writes = int(detail.get("cache_creation_tokens") or detail.get("cache_write_tokens") or 0)
+    output_detail = usage.get("output_tokens_details") or {}
+    details_valid = isinstance(detail, dict) and isinstance(output_detail, dict)
+    detail = detail if isinstance(detail, dict) else {}
+    output_detail = output_detail if isinstance(output_detail, dict) else {}
+    cached = detail.get("cached_tokens", 0)
+    writes = detail.get("cache_creation_tokens", detail.get("cache_write_tokens", 0))
+    reasoning = output_detail.get("reasoning_tokens", 0)
+    valid = details_valid and all(isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                                  for value in (inp, out, cached, writes, reasoning))
+    valid = valid and cached + writes <= inp and reasoning <= out
     return {"call_id": call_id, "stage": stage, "timestamp": stamp, "model": response.get("model", MODEL),
             "usage_known": valid, "input_tokens": inp if valid else 0, "output_tokens": out if valid else 0,
-            "cached_input_tokens": cached, "cache_write_input_tokens": writes,
-            "reasoning_output_tokens": int((usage.get("output_tokens_details") or {}).get("reasoning_tokens") or 0),
+            "cached_input_tokens": cached if valid else 0, "cache_write_input_tokens": writes if valid else 0,
+            "reasoning_output_tokens": reasoning if valid else 0,
             "context": inp if valid else 0}
 
 
@@ -94,6 +104,7 @@ def run(project: Path, *, dry_run: bool = False) -> dict:
     if not project.is_relative_to(cost_control.ROOT / "work"):
         raise ValueError("Direct planning requires a project inside Zeno/work.")
     policy = cost_control.settings()
+    max_calls = min(policy["direct_max_calls"], direct_mode.planner_max_calls())
     system, job, images = direct_mode.build_brief(project)
     # Extra policy is explicit even when an old saved brief contains outdated advice.
     system += ("\nAll split and baked-split zooms are z=1. Captions are fixed, single-row. "
@@ -105,7 +116,7 @@ def run(project: Path, *, dry_run: bool = False) -> dict:
     if dry_run:
         return {"dry_run": True, "model": MODEL, "input_bytes": len((system + job).encode()),
                 "images": len(images), "first_call_reserve_inr": reserve["inr"],
-                "budget_inr": policy["model_budget_inr"], "max_calls": policy["direct_max_calls"],
+                "budget_inr": policy["model_budget_inr"], "max_calls": max_calls,
                 "api_configured": bool(os.environ.get("OPENAI_API_KEY")), "paid_calls": 0}
     if not os.environ.get("OPENAI_API_KEY"):
         raise ValueError("OPENAI_API_KEY is unavailable. Use the fresh-chat path; no API request was made.")
@@ -130,8 +141,11 @@ def run(project: Path, *, dry_run: bool = False) -> dict:
         since = meta["job_start_epoch"]
         prior = [r for r in cost_control.rows(project / "direct_usage.jsonl") if r.get("timestamp", 0) >= since]
         text = job
+        call_system = system
+        context_kind = "full"
+        correction_scope = None
         previous_failure = None
-        for number in range(len(prior), policy["direct_max_calls"]):
+        for number in range(len(prior), max_calls):
             checkpoint = cost_control.snapshot(project)
             if checkpoint.get("blocked"):
                 report["stopped"] = checkpoint["reason"]
@@ -139,17 +153,25 @@ def run(project: Path, *, dry_run: bool = False) -> dict:
             if number > 0 and not checkpoint.get("available"):
                 report["stopped"] = "Prior spending has no verified price; resolve accounting before another API call."
                 break
-            sheets_for_call = images if number == 0 else []
-            reserve = reserve_cost(system, text, sheets_for_call, policy)
+            sheets_for_call = images if context_kind == "full" else []
+            reserve = reserve_cost(call_system, text, sheets_for_call, policy)
             spent = checkpoint.get("cost", {}).get("inr", 0)
             if not reserve.get("available") or spent + reserve["inr"] > policy["model_budget_inr"]:
                 report["stopped"] = "Next request's conservative reserve exceeds the remaining model budget."
                 break
-            body = payload(system, text, sheets_for_call, policy)
-            stage = "direct planning" if number == 0 else "direct correction"
+            body = payload(call_system, text, sheets_for_call, policy)
+            stage = "direct planning" if correction_scope is None else "direct correction"
             call_id = uuid.uuid4().hex
+            try:
+                reservation_id = request_budget.reserve_call(
+                    project, provider="openai", context_kind=context_kind,
+                    input_bytes=len((call_system + text).encode()), image_count=len(sheets_for_call), scope="planner")
+            except ValueError as exc:
+                report["stopped"] = str(exc)
+                report["budget_blocked"] = True
+                break
             _save(pending, {"call_id": call_id, "started": time.time(), "reserve_inr": reserve["inr"], "stage": stage})
-            print(f"[DIRECT] {stage}; request {number + 1}/{policy['direct_max_calls']}; "
+            print(f"[DIRECT] {stage}; request {number + 1}/{max_calls}; "
                   f"reserve INR {reserve['inr']:.2f}", flush=True)
             try:
                 response = send(body)
@@ -163,6 +185,8 @@ def run(project: Path, *, dry_run: bool = False) -> dict:
                 journal.flush()
                 os.fsync(journal.fileno())
             report["calls"].append(usage)
+            request_budget.finish_call(project, reservation_id, usage_known=usage["usage_known"],
+                                       usage=usage, usage_call_id=call_id)
             if not usage["usage_known"]:
                 report["stopped"] = "API response did not include usage; stop before further spending."
                 break
@@ -173,6 +197,12 @@ def run(project: Path, *, dry_run: bool = False) -> dict:
             answer = response_text(response)
             (project / "direct_candidate.txt").write_text(answer, encoding="utf-8")
             blocks = direct_mode.parse_answer(answer)
+            if correction_scope is not None:
+                try:
+                    blocks = direct_mode.merge_correction(project, blocks, correction_scope)
+                except ValueError as exc:
+                    report["stopped"] = "Correction needs review: " + str(exc)
+                    break
             if not blocks.get("plan") or not blocks.get("analysis"):
                 report["stopped"] = "Incomplete plan format; candidate saved for review."
                 break
@@ -183,7 +213,12 @@ def run(project: Path, *, dry_run: bool = False) -> dict:
                 break
             # Never discard an approved exception or silently accept a new one.
             blocks["decisions"] = originals["decisions.txt"] or ""
-            direct_mode.write_answer(project, blocks, originals["plan.edl"] or "")
+            if correction_scope is None:
+                direct_mode.write_answer(project, blocks, originals["plan.edl"] or "")
+            else:
+                for name, key in (("plan.edl", "plan"), ("script_analysis.md", "analysis"),
+                                  ("decisions.txt", "decisions")):
+                    (project / name).write_text(blocks[key], encoding="utf-8")
             ok, diagnostics = direct_mode.run_check(project)
             report["checks"] += 1
             (project / f"direct_check_{number + 1}.log").write_text(diagnostics, encoding="utf-8")
@@ -199,8 +234,14 @@ def run(project: Path, *, dry_run: bool = False) -> dict:
                 report["stopped"] = "The same check failure repeated; stopped automatic corrections."
                 break
             previous_failure = diagnostics
-            # Bounded, self-contained correction: no accumulated chat/tool history.
-            text = job + "\nCURRENT CANDIDATE:\n" + answer + "\nCHECK FAILURES:\n" + diagnostics[-12000:]
+            # Fresh request with only the failed lines and their measured evidence.
+            # No conversation handle, full packet, prior answer or images are replayed.
+            try:
+                call_system, text, correction_scope = direct_mode.build_correction(project, diagnostics)
+            except ValueError as exc:
+                report["stopped"] = "Correction needs review: " + str(exc)
+                break
+            context_kind = "targeted"
         if not report["passed"] and "stopped" not in report:
             report["stopped"] = "Maximum model calls reached."
     finally:

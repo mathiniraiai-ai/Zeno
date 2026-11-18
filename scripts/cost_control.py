@@ -15,17 +15,29 @@ import time
 import token_cost
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULTS = {"schema": 1, "model_budget_inr": 40.0, "chat_request_limit": 24,
-            "new_chat_context_limit": 1000000, "direct_max_calls": 2, "planner_max_calls": 2,
+DEFAULTS = {"schema": 1, "model_budget_inr": 40.0, "chat_request_limit": 8,
+            "new_chat_context_limit": 100000, "direct_max_calls": 2, "planner_max_calls": 2,
+            "managed_max_calls": 8, "planner_full_context_max_calls": 2,
+            "planner_full_context_token_reserve": 100000, "planner_targeted_max_input_bytes": 24000,
             "direct_max_output_tokens": 8000, "direct_max_input_bytes": 100000,
             "direct_image_token_reserve": 10000, "direct_reasoning_effort": "medium"}
 
 
-def settings() -> dict:
+def settings(project: Path | None = None) -> dict:
     result = dict(DEFAULTS)
     path = ROOT / "config" / "cost_controls.json"
     if path.is_file():
         result.update(json.loads(path.read_text()))
+    if project is not None:
+        approval = Path(project) / "checkpoint_approval.json"
+        if approval.is_file():
+            override = json.loads(approval.read_text())
+            if not isinstance(override, dict) or not override.get("approved_by_editor"):
+                raise ValueError("Project checkpoint change requires recorded editor approval")
+            allowed = {"model_budget_inr", "chat_request_limit", "approved_by_editor", "approval_text"}
+            if set(override) - allowed:
+                raise ValueError("Project approval may change only the cost and chat request checkpoints")
+            result.update({key: override[key] for key in ("model_budget_inr", "chat_request_limit") if key in override})
     if "ZENO_MODEL_BUDGET_INR" in os.environ:
         result["model_budget_inr"] = float(os.environ["ZENO_MODEL_BUDGET_INR"])
     for key, value in result.items():
@@ -125,16 +137,20 @@ def combine(agent: dict, project: Path, since: float, until: float) -> dict:
         return agent
     direct_sids = {str(r["session_id"]) for r in direct if r.get("session_id") and r.get("session_id") not in ("local", "unknown")}
     same_subprocess_session = bool(agent.get("session_id")) and str(agent.get("session_id")) in direct_sids
-    if not same_subprocess_session and agent.get("token_precision") != "exact" and (
+    if not same_subprocess_session and not agent.get("requests") and agent.get("token_precision") != "exact" and (
         agent.get("total_tokens_including_cache", 0) or agent.get("total_tokens", 0)
     ):
         # Never overwrite unmeasured host usage with a deceptively exact direct-only total.
-        return {**agent, "direct_usage_unmerged": True}
+        return {**agent, "direct_usage_unmerged": True, "host_usage_unknown": True}
     host_reqs = [] if same_subprocess_session else list(agent.get("requests") or [])
     host_name = str(agent.get("agent_name") or "").strip()
-    no_host = same_subprocess_session or (not host_reqs and host_name.lower() in {"", "unknown", "local", "cli", "local / cli"})
+    no_host = same_subprocess_session or agent.get("host_usage_absent") is True
     requests = sorted(host_reqs + direct, key=lambda r: r.get("timestamp", 0))
     combined = {**agent, **usage_from_requests(requests)}
+    if not same_subprocess_session:
+        missing_host_requests = max(0, int(agent.get("steps_count", 0) or 0) - len(host_reqs))
+        combined["steps_count"] += missing_host_requests
+        combined["turns"] += missing_host_requests
     direct_label = _direct_agent_label(direct)
     if no_host:
         combined["agent_name"] = direct_label
@@ -147,7 +163,7 @@ def combine(agent: dict, project: Path, since: float, until: float) -> dict:
     else:
         base_host = host_name or "Host"
         combined["agent_name"] = direct_label if base_host == direct_label else f"{base_host} + {direct_label}"
-        combined["host_usage_unknown"] = agent.get("token_precision") != "exact"
+        combined["host_usage_unknown"] = bool(agent.get("host_usage_unknown")) or agent.get("token_precision") != "exact"
     combined["agent_model"] = ", ".join(sorted({r["model"] for r in requests if r.get("model")})) or "unknown"
     return combined
 
@@ -183,20 +199,24 @@ def snapshot(project: Path, until: float | None = None) -> dict:
                                session_id=codex_sid)
     agent = combine(agent, project, since, end)
     cost = token_cost.estimate(agent)
-    policy = settings()
+    policy = settings(project)
     count = agent.get("steps_count", 0)
     unknown_calls = [r for r in rows(project / "direct_usage.jsonl")
                      if since <= r.get("timestamp", 0) <= end and not _is_usage_known(r)]
     reached = cost.get("available") and cost["inr"] >= policy["model_budget_inr"]
     pending = (project / "direct_call_pending.json").exists()
-    blocked = bool(reached or count >= policy["chat_request_limit"] or unknown_calls or pending)
+    import request_budget
+    managed = request_budget.status(project)
+    blocked = bool(reached or count >= policy["chat_request_limit"] or unknown_calls or pending or managed["blocked"])
     return {"available": cost.get("available", False), "blocked": blocked,
-            "reason": "Model spending checkpoint reached; save work and review before further model calls." if blocked else
+            "reason": managed["reason"] if managed["blocked"] else
+                      "Model spending checkpoint reached; save work and review before further model calls." if blocked else
                       "Usage unavailable; this is not zero cost." if not cost.get("available") else "Within checkpoint",
             "cost": cost, "requests": count, "limit_inr": policy["model_budget_inr"],
             "unknown_direct_calls": len(unknown_calls),
             "pending_direct_call": pending,
-            "host_usage_unknown": agent.get("host_usage_unknown", False),
+            "host_usage_unknown": agent.get("host_usage_unknown", agent.get("token_precision") != "exact"),
+            "managed_budget": managed,
             "stages": stage_report(project, agent, since, end)}
 
 
