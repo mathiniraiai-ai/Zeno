@@ -237,7 +237,8 @@ function buildEdits(jobs, runs) {  // one video edit = one editor + one script; 
     e.result = !ok.length ? 'open' : e.nJobs === 1 ? 'one' : 'rework';
     const mine = (runs || []).filter(r => String(r.editor_name || '').toLowerCase() === String(e.editor || '').toLowerCase() && r.project === e.project);
     const kept = clusterRuns(mine);
-    e.tok = aggregate(kept).total; e.raw = mine.length; e.kept = kept.length;
+    e.q = kept.length ? kept.map(dataQuality).sort((a, b) => QRANK[a[0]] - QRANK[b[0]])[0] : null; e.tok = aggregate(kept).total; e.raw = mine.length; e.kept = kept.length;
+    e.calls = kept.some(r => ((r.job_report || {}).agent || {}).turns != null) ? kept.reduce((a, r) => a + n(((r.job_report || {}).agent || {}).turns), 0) : null;
     e.warn = [];
     if (e.nJobs > 1) e.warn.push(e.nJobs + ' jobs');
     if (e.feedback) e.warn.push(e.feedback + (e.feedback === 1 ? ' feedback' : ' feedbacks'));
@@ -245,7 +246,7 @@ function buildEdits(jobs, runs) {  // one video edit = one editor + one script; 
     if (!ok.length) e.warn.push('not finished');
     edits.push(e);
   }
-  edits.sort((a, b) => b.start - a.start);
+  edits.sort((a, b) => b.last - a.last);
   return {edits, loose, jobs: edits.flatMap(e => e.jobs).concat(loose)};
 }
 function verParts(v) { return String(v || '').replace(/^v/i, '').split('.').map(x => parseInt(x, 10) || 0); }
@@ -300,11 +301,12 @@ function aggregate(runs) {
 /*__DOM__*/
 const {useState, useEffect, useRef} = React;
 const h = React.createElement;
-const TOKEN_KEY = 'zeno_usage_jwt';
+const TOKEN_KEY = 'zeno_usage_session';
 const fmtNum = x => Number(x || 0).toLocaleString();
 const fmtBig = x => { x = Number(x || 0); return x >= 1e9 ? (x / 1e9).toFixed(2) + 'B' : x >= 1e6 ? (x / 1e6).toFixed(1) + 'M' : x >= 1e4 ? Math.round(x / 1e3) + 'k' : fmtNum(x); };
 const pad2 = x => String(x).padStart(2, '0');
-const fmtDate = t => { if (!t) return ''; const d = new Date(t * 1000); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()); };
+const clock12 = d => { const h12 = d.getHours() % 12 || 12; return h12 + ':' + pad2(d.getMinutes()) + ' ' + (d.getHours() < 12 ? 'AM' : 'PM'); };
+const fmtDate = t => { if (!t) return ''; const d = new Date(t * 1000); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + clock12(d); };
 const inr = (usd, rate) => '₹' + Math.round(usd * rate).toLocaleString();
 
 function csvOf(runs) {
@@ -355,7 +357,17 @@ const sumNew = t => t.ain + t.aout;
 const tokHead = () => [['i', 'Input'], ['cw', 'of which cache write'], ['cr', 'Re-read (cache read)'], ['o', 'Output'], ['gi', 'Gemini in'], ['go', 'Gemini out'], ['gt', 'Gemini total']]
   .map(([k, label]) => h(Th, {right: true, key: k}, label));
 const tokCells = u => ['ain', 'cwrite', 'cached', 'aout', 'gin', 'gout', 'gtotal'].map(k => h('td', {className: 'n' + (k === 'cwrite' ? ' muted' : ''), key: k}, fmtNum(u[k])));
-const money = (t, rate) => inr(t.usd, rate) + (t.unpriced ? ' *' : '');
+const money = (t, rate) => (!t.usd && t.unpriced) ? 'No price' : inr(t.usd, rate) + (t.unpriced ? ' *' : '');
+function dataQuality(r) {  // how far the numbers of one render can be trusted
+  const jr = r.job_report || {}, ag = jr.agent || {}, acc = jr.accounting || {};
+  if (!n(r.agent_total_tokens) && !n(r.agent_cached_tokens)) return ['red', 'No agent tokens', 'Zeno reported no agent tokens for this render'];
+  if (!r.job_report || !Object.keys(jr).length) return ['gray', 'Old Zeno', 'No job report: this Zeno version does not send calls, window or precision'];
+  if (ag.mixed_with_development) return ['gray', 'Mixed', 'The chat also held work on Zeno code, so tokens are more than one edit'];
+  if (acc.agent_token_precision === 'exact') return ['ok', 'Exact', 'Tokens read exactly from the agent log'];
+  return ['amber', 'Estimated', 'Tokens are an approximation'];
+}
+const QRANK = {red: 0, gray: 1, amber: 2, ok: 3};
+const qPill = q => h('span', {className: 'pill ' + (q[0] === 'ok' ? 'ok2' : q[0]), title: q[2]}, q[1]);
 
 function Daily({runs, rate}) {
   const {users, total: t} = aggregate(runs);
@@ -390,26 +402,50 @@ function Daily({runs, rate}) {
     t.unpriced ? h('p', {className: 'foot'}, '* ' + t.unpriced + ' video(s) use a model with no price here and are left out of the cost.') : null);
 }
 
-function Videos({runs, rate, showAll, setShowAll}) {
+function Videos({runs, rate, showAll, setShowAll, jobs, data}) {
   const shown = showAll ? runs : runs.slice(0, 100);
+  const names = new Map();
+  for (const j of jobs || []) { if (j.project && j.video_name) names.set(String(j.editor_name || '').toLowerCase() + '|' + j.project, notionName(j.video_name)); }
+  const jobCount = new Map();
+  for (const j of jobs || []) { if (j.project) { const k = String(j.editor_name || '').toLowerCase() + '|' + j.project; jobCount.set(k, (jobCount.get(k) || 0) + 1); } }
+  const tev = data.transcriptions || [];
+  const keyVer = new Map();
+  for (const k of data.keys || []) { if (k.zeno_version && !k.revoked_at) { const id = String(k.name || '').toLowerCase(); if (!keyVer.has(id) || verCmp(k.zeno_version, keyVer.get(id)) > 0) keyVer.set(id, k.zeno_version); } }
+  const verOf = r => {  // version seen on that editor's Gemini call closest to this render; else the newest version their key reports now
+    const me = String(r.editor_name || '').toLowerCase();
+    let best = null, gap = 6 * 3600;
+    for (const e of tev) { if (String(e.user_name || '').toLowerCase() === me && e.zeno_version) { const d = Math.abs(n(e.created_at) - n(r.created_at)); if (d < gap) { gap = d; best = e.zeno_version; } } }
+    return best ? {v: best, exact: true} : keyVer.has(me) ? {v: keyVer.get(me), exact: false} : null;
+  };
+  const gcalls = r => {  // Gemini requests this editor made while this render's chat ran
+    const w = n(((r.job_report || {}).agent || {}).window_minutes);
+    if (!w) return null;
+    const lo = n(r.created_at) - w * 60 - 60, hi = n(r.created_at) + 60, me = String(r.editor_name || '').toLowerCase();
+    const ev = tev.filter(e => String(e.user_name || '').toLowerCase() === me && n(e.created_at) >= lo && n(e.created_at) <= hi);
+    return {all: ev.length, bad: ev.filter(e => e.status !== 'ok').length, hit: ev.filter(e => n(e.cached) > 0).length};
+  };
   return h('div', null,
-    h('p', {className: 'sub', style: {marginTop: 14}}, 'One row per finished render, newest first. A video rendered again appears again. The Video edits tab counts each video once.'),
+    h('p', {className: 'sub', style: {marginTop: 14}}, 'One row per finished render, newest first. A video rendered again appears again. Zeno version * = not seen on a request near that render, so it is the newest version their key reports now. The Video edits tab counts each video once.'),
     h('div', {className: 'scroll'}, h('table', null,
-      h('thead', null, h('tr', null, h(Th, null, 'When'), h(Th, null, 'Editor'), h(Th, null, 'Project'), h(Th, null, 'Language'), h(Th, {right: true}, 'Clips'), h(Th, {right: true}, 'Seconds'),
-        tokHead(), h(Th, {right: true}, 'Agent steps'), h(Th, {right: true}, 'Window (min)'), h(Th, {right: true}, 'Est. cost'), h(Th, null, 'Notes'))),
+      h('thead', null, h('tr', null, h(Th, null, 'When'), h(Th, null, 'Editor'), h(Th, null, 'Notion name'), h(Th, null, 'Model'), h(Th, null, 'Zeno version'), h(Th, null, 'Language'), h(Th, {right: true}, 'Clips'), h(Th, {right: true}, 'Seconds'),
+        tokHead(), h(Th, {right: true}, 'Agent calls'), h(Th, {right: true}, 'Cache re-read calls'), h(Th, {right: true}, 'Re-read per call'), h(Th, {right: true}, 'Gemini calls'), h(Th, {right: true}, 'Window (min)'), h(Th, {right: true}, 'Est. cost'), h(Th, null, 'Data'), h(Th, null, 'Notes'))),
       h('tbody', null, shown.length ? shown.map(r => {
         const c = costUsd(r), ag = (r.job_report || {}).agent || {}, fails = ((r.job_report || {}).failures || []).length;
         const u = {ain: n(r.agent_in_tokens), cwrite: cacheWriteTokens(r), cached: n(r.agent_cached_tokens), aout: n(r.agent_out_tokens), gin: n(r.transcribe_in_tokens), gout: n(r.transcribe_out_tokens), gtotal: n(r.transcribe_total_tokens)};
         return h('tr', {key: r.id},
-          h('td', {className: 'muted'}, fmtDate(r.created_at)), h('td', null, h('b', null, r.editor_name)), h('td', {title: r.project}, short(r.project)), h('td', null, r.language),
+          h('td', {className: 'muted'}, fmtDate(r.created_at)), h('td', null, h('b', null, r.editor_name)), h('td', {title: r.project, style: {maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis'}}, names.get(String(r.editor_name || '').toLowerCase() + '|' + r.project) || short(r.project)), h('td', {className: 'muted'}, r.agent_model && r.agent_model !== 'unknown' ? r.agent_model : '–'), (() => { const v = verOf(r); return h('td', {className: 'muted', title: v && !v.exact ? 'No Gemini call near this render; this is the newest version their key reports now' : 'Version seen on the request closest to this render'}, v ? 'v' + String(v.v).replace(/^v/i, '') + (v.exact ? '' : ' *') : '–'); })(), h('td', null, r.language),
           h('td', {className: 'n'}, fmtNum(r.clips_count)), h('td', {className: 'n'}, Math.round(n(r.video_seconds))), tokCells(u),
-          h('td', {className: 'n muted'}, ag.turns != null ? fmtNum(ag.turns) : '–'), h('td', {className: 'n muted'}, ag.window_minutes != null ? ag.window_minutes : '–'),
+          h('td', {className: 'n muted'}, ag.turns != null ? fmtNum(ag.turns) : '–'), h('td', {className: 'n muted', title: 'Every agent call after the first re-reads the cached chat'}, ag.turns != null ? (n(r.agent_cached_tokens) ? fmtNum(ag.turns) : 0) : '–'),
+          h('td', {className: 'n muted'}, ag.turns && n(r.agent_cached_tokens) ? fmtNum(Math.round(n(r.agent_cached_tokens) / ag.turns)) : '–'),
+          (() => { const g = gcalls(r); return h('td', {className: 'n muted'}, g ? fmtNum(g.all) + (g.bad ? ' · ' + g.bad + ' failed' : '') + (g.hit ? ' · ' + g.hit + ' reused' : '') : '–'); })(), h('td', {className: 'n muted'}, ag.window_minutes != null ? ag.window_minutes : '–'),
           h('td', {className: 'n'}, c === null ? '–' : inr(c, rate)),
-          h('td', null, n(r.agent_cached_tokens) >= HEAVY_CACHE ? h('span', {className: 'pill amber', style: {marginRight: 4}}, 'Long chat') : null,
+          h('td', null, qPill(dataQuality(r))),
+          h('td', null, (() => { const c = jobCount.get(String(r.editor_name || '').toLowerCase() + '|' + r.project); return h('span', {className: 'pill ok2', style: {marginRight: 4}, title: 'This render finished and the video went to the output folder'}, c == null ? 'Done' : c === 1 ? 'Done in 1 job' : 'Done after ' + c + ' jobs'); })(),
+            n(r.agent_cached_tokens) >= HEAVY_CACHE ? h('span', {className: 'pill amber', style: {marginRight: 4}}, 'Long chat') : null,
             !n(r.agent_total_tokens) && !n(r.agent_cached_tokens) ? h('span', {className: 'pill red', style: {marginRight: 4}}, 'No agent tokens') : null,
             ag.mixed_with_development ? h('span', {className: 'pill gray', style: {marginRight: 4}, title: 'This window also holds work on Zeno code, so it is not the cost of one edit'}, 'Mixed with dev work') : null,
             fails ? h('span', {className: 'pill red'}, fails + (fails === 1 ? ' failure' : ' failures')) : null));
-      }) : h('tr', null, h('td', {colSpan: 19}, 'No videos in this period'))))),
+      }) : h('tr', null, h('td', {colSpan: 25}, 'No videos in this period'))))),
     runs.length > 100 ? h('p', {className: 'note', style: {marginTop: 10}}, h('a', {href: '#', onClick: e => { e.preventDefault(); setShowAll(!showAll); }}, showAll ? 'Show latest 100' : 'Show all ' + runs.length)) : null);
 }
 
@@ -510,7 +546,7 @@ function Timeline({jobs, day, setDay, days}) {
   const by = new Map();
   list.forEach(j => { const k = j.editor_name || '?'; if (!by.has(k)) by.set(k, []); by.get(k).push(j); });
   const rows = [...by.entries()].sort((a, b) => Math.min(...a[1].map(j => n(j.created_at))) - Math.min(...b[1].map(j => n(j.created_at))));
-  const hhmm = t => { const d = new Date(t * 1000); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); };
+  const hhmm = t => { const d = new Date(t * 1000); return clock12(d); };
   const kindText = {render: 'finished', feedback: 'feedback job', render_failed: 'render failed', blocked: 'blocked at the check', inspected: 'started, not finished', checking: 'started, not finished'};
   return h('div', null,
     h('div', {className: 'bar', style: {margin: '0 0 8px'}}, h('span', {className: 'note', style: {margin: 0}}, 'Day'),
@@ -520,7 +556,7 @@ function Timeline({jobs, day, setDay, days}) {
         h('div', {className: 'gtrack', style: {'--hw': hw}}, js.map(j => h('div', {key: j.id, className: 'gb ' + jobOutcome(j) + (isLong(j) ? ' long' : ''),
           style: {left: pos(n(j.created_at)) + '%', width: Math.max(0.3, pos(Math.max(n(j.updated_at), n(j.created_at))) - pos(n(j.created_at))) + '%'},
           title: (notionName(j.video_name) || j.project || 'No video yet') + '\\n' + (kindText[j.kind] || j.kind) + (j.idx > 0 ? ' (job ' + (j.idx + 1) + ', rework)' : '') + '\\n' + hhmm(n(j.created_at)) + ' to ' + hhmm(n(j.updated_at)) + (isLong(j) ? '\\nThis record stayed open for ' + Math.round((n(j.updated_at) - n(j.created_at)) / hr) + ' h, so the real working time is unknown' : '')}))))),
-      h('div', {className: 'gaxis'}, h('div', null), h('div', {className: 'gticks'}, hours.map((t, i) => i % step === 0 ? h('span', {key: t, style: {left: pos(t) + '%'}}, hhmm(t)) : null))),
+      h('div', {className: 'gaxis'}, h('div', null), h('div', {className: 'gticks'}, hours.map((t, i) => i % step === 0 ? h('span', {key: t, style: {left: pos(t) + '%'}}, hhmm(t).replace(':00 ', ' ')) : null))),
       h('div', {className: 'legend'},
         h('span', null, h('i', {style: {background: '#3d9a6b'}}), 'Finished in the first job'), h('span', null, h('i', {style: {background: '#d9a441'}}), 'Rework: a second or later job on the same video'),
         h('span', null, h('i', {style: {background: '#d4574b'}}), 'Failed render or blocked at the check'), h('span', null, h('i', {style: {background: '#6b7480'}}), 'Started, never finished'),
@@ -549,7 +585,7 @@ function EditsView({data, jobs, jobsMsg, rg, q, rate, day, setDay}) {
   }).sort((a, b) => b.n - a.n);
   const tot = score.reduce((x, r) => ({n: x.n + r.n, one: x.one + r.one, re: x.re + r.re, open: x.open + r.open, failed: x.failed + r.failed, blocked: x.blocked + r.blocked}), {n: 0, one: 0, re: 0, open: 0, failed: 0, blocked: 0});
   const rate1 = (a, b) => b ? Math.round(100 * a / b) + '%' : '–';
-  const resultPill = e => e.result === 'one' ? h('span', {className: 'pill ok2'}, 'Finished in 1 job') : e.result === 'rework' ? h('span', {className: 'pill amber'}, 'Finished after ' + e.nJobs + ' jobs') : h('span', {className: 'pill red'}, 'Not finished');
+  const resultPill = e => e.result === 'one' ? h('span', {className: 'pill ok2'}, 'Finished in 1 job') : e.result === 'rework' ? h('span', {className: 'pill amber'}, 'Finished after ' + e.nJobs + ' jobs') : (n(data.now) - e.last < 1800 ? h('span', {className: 'pill gray'}, 'In progress') : h('span', {className: 'pill red'}, 'Not finished'));
   const span = e => { const end = e.finished || e.last; const m = Math.max(0, Math.round((end - e.start) / 60)); return m >= 60 ? Math.floor(m / 60) + ' h ' + (m % 60) + ' min' : m + ' min'; };
   return h('div', null,
     h('p', {className: 'sub', style: {marginTop: 14}}, edits.length ? fmtNum(edits.length) + ' video edits by ' + names.length + ' editors: ' + tot.one + ' finished in one job, ' + tot.re + ' needed more than one job, ' + tot.open + ' not finished' : 'No video edits in this range.'),
@@ -575,17 +611,18 @@ function EditsView({data, jobs, jobsMsg, rg, q, rate, day, setDay}) {
         names.length ? h('tr', {className: 'total'}, h('td', null, 'All editors'), h('td', {className: 'n'}, tot.n), h('td', {className: 'n'}, tot.one), h('td', {className: 'n'}, tot.re), h('td', {className: 'n'}, tot.open),
           h('td', {className: 'n'}, rate1(tot.one, tot.n)), h('td', {className: 'n'}, tot.failed), h('td', {className: 'n'}, tot.blocked), h('td', null), h('td', null)) : null))),
     h('h2', null, 'Every video edit'),
-    h('p', {className: 'note'}, 'One row per video. Tokens count each video once: renders that share the same job start are not added together.'),
+    h('p', {className: 'note'}, 'One row per video, newest activity first (a video still being edited shows as In progress and has no tokens until it renders). Tokens count each video once: renders that share the same job start are not added together. Agent calls = model requests the editor chat made (each one re-sends the chat, so each one is a cache re-read); – means that Zeno version did not report it.'),
     h('div', {className: 'scroll'}, h('table', null,
       h('thead', null, h('tr', null, h(Th, null, 'Started'), h(Th, null, 'Finished'), h(Th, null, 'Time taken'), h(Th, null, 'Editor'), h(Th, null, 'Notion name'), h(Th, {right: true}, 'Jobs'), h(Th, null, 'Result'),
-        h(Th, {right: true}, 'Input'), h(Th, {right: true}, 'Output'), h(Th, {right: true}, 'Re-read'), h(Th, {right: true}, 'Gemini in'), h(Th, {right: true}, 'Gemini out'), h(Th, {right: true}, 'Est. cost'), h(Th, null, 'Warnings'))),
+        h(Th, {right: true}, 'Agent calls'), h(Th, {right: true}, 'Input'), h(Th, {right: true}, 'Output'), h(Th, {right: true}, 'Re-read'), h(Th, {right: true}, 'Re-read per call'), h(Th, {right: true}, 'Gemini in'), h(Th, {right: true}, 'Gemini out'), h(Th, {right: true}, 'Est. cost'), h(Th, null, 'Data'), h(Th, null, 'Warnings'))),
       h('tbody', null, edits.length ? edits.map(e => h('tr', {key: e.key},
         h('td', {className: 'muted'}, fmtDate(e.start)), h('td', {className: 'muted'}, e.finished ? fmtDate(e.finished) : '–'), h('td', {className: 'muted'}, span(e)),
         h('td', null, h('b', null, e.editor)), h('td', {title: e.name + '  (' + e.project + ')', style: {maxWidth: 440, overflow: 'hidden', textOverflow: 'ellipsis'}}, e.name), h('td', {className: 'n'}, e.nJobs), h('td', null, resultPill(e)),
-        h('td', {className: 'n'}, e.kept ? fmtNum(e.tok.ain) : '–'), h('td', {className: 'n'}, e.kept ? fmtNum(e.tok.aout) : '–'), h('td', {className: 'n'}, e.kept ? fmtNum(e.tok.cached) : '–'),
+        h('td', {className: 'n'}, e.calls ? fmtNum(e.calls) : '–'), h('td', {className: 'n'}, e.kept ? fmtNum(e.tok.ain) : '–'), h('td', {className: 'n'}, e.kept ? fmtNum(e.tok.aout) : '–'), h('td', {className: 'n'}, e.kept ? fmtNum(e.tok.cached) : '–'), h('td', {className: 'n'}, e.calls && e.tok.cached ? fmtNum(Math.round(e.tok.cached / e.calls)) : '–'),
         h('td', {className: 'n'}, e.kept ? fmtNum(e.tok.gin) : '–'), h('td', {className: 'n'}, e.kept ? fmtNum(e.tok.gout) : '–'), h('td', {className: 'n'}, e.kept ? money(e.tok, rate) : '–'),
+        h('td', null, e.q ? qPill(e.q) : '–'),
         h('td', null, e.warn.map(w => h('span', {className: 'pill amber', key: w, style: {marginRight: 4}}, w)))))
-        : h('tr', null, h('td', {colSpan: 14}, 'No video edits in this range'))))));
+        : h('tr', null, h('td', {colSpan: 17}, 'No video edits in this range'))))));
 }
 
 const TABS = [['edits', 'Video edits'], ['daily', 'Daily'], ['videos', 'Renders'], ['editors', 'Editors'], ['problems', 'Problems'], ['health', 'Health'], ['notes', 'How it is recorded']];
@@ -609,7 +646,7 @@ function Dashboard({data, period, setPeriod, q, setQ, rate, setRate, showAll, se
       }}, 'Download CSV')),
     cur === 'edits' ? h(EditsView, {data, jobs, jobsMsg, rg: cutoff, q, rate, day, setDay})
       : cur === 'daily' ? h(Daily, {runs, rate})
-      : cur === 'videos' ? h(Videos, {runs, rate, showAll, setShowAll})
+      : cur === 'videos' ? h(Videos, {runs, rate, showAll, setShowAll, jobs, data})
       : cur === 'editors' ? h(Editors, {runs, rate, vers})
       : cur === 'problems' ? h(Problems, {data, runs, cutoff})
       : cur === 'health' ? h(Health, {health, vers})
@@ -644,7 +681,7 @@ function SignIn({message, onToken}) {
 }
 
 function App() {
-  const read = k => { try { return sessionStorage.getItem(k) || ''; } catch (e) { return ''; } };
+  const read = k => { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } };
   const [token, setToken] = useState(read(TOKEN_KEY));
   const [data, setData] = useState(null);
   const [health, setHealth] = useState(null);
@@ -664,20 +701,27 @@ function App() {
   useEffect(() => { fetch('/health').then(r => r.json()).then(setHealth).catch(() => setHealth({ok: false})); }, []);
   useEffect(() => {
     if (!token) { setData(null); return; }
-    fetch('/api/usage', {headers: {Authorization: 'Bearer ' + token}}).then(async r => {
+    const hdr = {headers: {Authorization: 'Bearer ' + token}};
+    const jobsReq = fetch('/api/jobs', hdr);   // asked at the same time as the usage numbers
+    fetch('/api/usage', hdr).then(async r => {
       if (r.status === 401 || r.status === 403) {
-        try { sessionStorage.removeItem(TOKEN_KEY); } catch (e) {}
+        try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
         setMsg(r.status === 403 ? 'That account is not allowed. Use your company Google account.' : 'Please sign in again.');
         setToken(''); return;
       }
       if (!r.ok) throw new Error('Could not load (' + r.status + ').');
       setData(await r.json()); setMsg('');
-      fetch('/api/jobs', {headers: {Authorization: 'Bearer ' + token}}).then(async j => {
+      jobsReq.then(async j => {
         if (j.ok) setJobs((await j.json()).jobs || []); else setJobsMsg('The job log is not available on this server yet (status ' + j.status + ').');
       }).catch(e => setJobsMsg('Could not load the job log: ' + e.message));
     }).catch(e => setMsg(e.message));
   }, [token]);
-  const onToken = t => { try { sessionStorage.setItem(TOKEN_KEY, t); } catch (e) {} setToken(t); };
+  const onToken = async t => {  // trade the one-hour Google sign-in for a 30-day session
+    let keep = t;
+    try { const r = await fetch('/api/usage/session', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({credential: t})}); if (r.ok) keep = (await r.json()).token || t; } catch (e) {}
+    try { localStorage.setItem(TOKEN_KEY, keep); } catch (e) {}
+    setToken(keep);
+  };
   return h('main', null,
     h('div', {className: 'top'},
       h('div', {className: 'brand'}, 'Zeno Video AI'),

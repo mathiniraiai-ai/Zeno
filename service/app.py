@@ -1457,9 +1457,53 @@ def usage_page() -> HTMLResponse:
     return HTMLResponse(USAGE_PAGE, headers=NO_STORE)
 
 
+SESSION_DAYS = 30
+
+
+def _session_secret() -> bytes:
+    """Signs the 30-day usage-page session. Set ZENO_SESSION_SECRET to rotate it; otherwise it is derived from private server settings."""
+    seed = os.getenv("ZENO_SESSION_SECRET") or ("zeno-session|" + (os.getenv("DATABASE_URL") or "") + "|" + (os.getenv("ZENO_GOOGLE_CLIENT_SECRET") or os.getenv("GOOGLE_CLIENT_SECRET") or "") + "|" + (os.getenv("ZENO_ADMIN_PASSWORD") or ""))
+    return hashlib.sha256(seed.encode()).digest()
+
+
+def _mint_session(email: str, name: str) -> Tuple[str, float]:
+    exp = time.time() + SESSION_DAYS * 86400
+    body = base64.urlsafe_b64encode(json.dumps({"e": email, "n": name, "x": int(exp)}, separators=(",", ":")).encode()).decode().rstrip("=")
+    sig = hmac.new(_session_secret(), body.encode(), hashlib.sha256).hexdigest()[:43]
+    return "zs-" + body + "-" + sig, exp
+
+
+def _read_session(token: str) -> Optional[Dict[str, str]]:
+    if not token.startswith("zs-"):
+        return None
+    try:
+        body, sig = token[3:].rsplit("-", 1)   # the body is base64url and may itself contain "-"; the hex signature never does
+        good = hmac.new(_session_secret(), body.encode(), hashlib.sha256).hexdigest()[:43]
+        if not hmac.compare_digest(sig, good):
+            return None
+        data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        if float(data.get("x", 0)) < time.time() or not _is_allowed_email(str(data.get("e") or "")):
+            return None
+        return {"name": str(data.get("n") or ""), "email": str(data["e"]), "via": "session"}
+    except Exception:
+        return None
+
+
+@app.post("/api/usage/session")
+def usage_session(body: GoogleAuthBody) -> JSONResponse:
+    """Trade one company Google sign-in for a 30-day session so the usage page does not ask again every hour."""
+    profile = _verify_google_identity(body)
+    token, exp = _mint_session(profile["email"], profile["name"])
+    return JSONResponse({"token": token, "expires": exp, "name": profile["name"]}, headers=NO_STORE)
+
+
 def _check_viewer(authorization: Optional[str], x_admin_password: Optional[str] = None) -> Dict[str, str]:
     """Anyone with a company account may READ the usage log: no admin list, no password. Admins (password or listed) pass as before.
     Revoking keys and approving recipes still need `_check_admin`."""
+    if authorization and authorization.lower().startswith("bearer "):
+        hit = _read_session(authorization[7:].strip())
+        if hit:
+            return hit
     try:
         return _check_admin(authorization, x_admin_password)
     except HTTPException as exc:
