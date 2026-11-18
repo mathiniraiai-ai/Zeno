@@ -71,21 +71,21 @@ TOOLS: List[Dict[str, Any]] = [
                                                        "footage": {"type": "string", "description": "local folder with the raw clips"},
                                                        "name": {"type": "string", "description": "the Notion name of the video"},
                                                        "style": {"type": "string"}, "lang": {"type": "string"},
-                                                       "wait_seconds": {"type": "integer", "description": "seconds to wait before continuing in background (default 480)"}},
+                                                       "wait_seconds": {"type": "integer", "description": "leave unset: the call waits until the video is rendered (up to 90 min)"}},
                      "required": ["script", "footage", "name"]}},
     {"name": "zeno_start_edit", "description": "Run Zeno's 1-call inspect + isolated auto-planner + automatic 9:16 & 1:1 Square render (--inspect --auto-plan --compact) end-to-end without asking Yes/No. Returns the Pitch Card, verification result, output MP4 paths, and token report directly; do NOT read line_map.md, facts.md, editing_packet.md, or clip_sheet_*.jpg unless manual fallback is returned.",
      "inputSchema": {"type": "object", "properties": {"script": {"type": "string", "description": "Google Doc tab link (must end in ?tab=...) or a script file"},
                                                        "footage": {"type": "string", "description": "local folder with the raw clips"},
                                                        "name": {"type": "string", "description": "the Notion name of the video"},
                                                        "style": {"type": "string"}, "lang": {"type": "string"},
-                                                       "wait_seconds": {"type": "integer", "description": "seconds to wait before continuing in background (default 480)"}},
+                                                       "wait_seconds": {"type": "integer", "description": "leave unset: the call waits until the video is rendered (up to 90 min)"}},
                      "required": ["script", "footage", "name"]}},
     {"name": "zeno_edit", "description": "Run Zeno's 1-call auto-planner + automatic 9:16 & 1:1 Square render without asking Yes/No; on manual fallback returns Option B JSON (packet_parts, clip_sheets, execute_command, review_sheet, workflow_hint).",
      "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "Notion name or existing work folder name"},
                                                        "script": {"type": "string", "description": "Google Doc tab link (must end in ?tab=...) or a script file (required for new edit)"},
                                                        "footage": {"type": "string", "description": "local folder with the raw clips (required for new edit)"},
                                                        "style": {"type": "string"}, "lang": {"type": "string"},
-                                                       "wait_seconds": {"type": "integer", "description": "seconds to wait before continuing in background (default 480)"}},
+                                                       "wait_seconds": {"type": "integer", "description": "leave unset: the call waits until the video is rendered (up to 90 min)"}},
                      "required": ["name"]}},
     {"name": "zeno_auto_plan", "description": "Run Zeno's isolated 1-call planner + automatic render (--auto-plan --compact) on an already-inspected edit without asking Yes/No.",
      "inputSchema": {"type": "object", "properties": {"name": {"type": "string", "description": "work folder name from zeno_jobs"}}, "required": ["name"]}},
@@ -93,7 +93,7 @@ TOOLS: List[Dict[str, Any]] = [
      "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}},
     {"name": "zeno_render", "description": "Render a verified plan (9:16 reel and 1:1 square) immediately without asking Yes/No, with automatic QC + post-job cleanup.",
      "inputSchema": {"type": "object", "properties": {"name": {"type": "string"},
-                                                       "wait_seconds": {"type": "integer", "description": "seconds to wait before continuing in background (default 360)"}}, "required": ["name"]}},
+                                                       "wait_seconds": {"type": "integer", "description": "leave unset: the call waits until the render is done (up to 90 min)"}}, "required": ["name"]}},
 ]
 
 
@@ -308,8 +308,9 @@ def _finish_auto_edit(
 ) -> Dict[str, Any]:
     if rc is None:
         return _text(
-            "Measuring + 1-call auto-planning + auto-render is running in the background (heavy clip batch). "
-            "End turn and wait, or check zeno_jobs ONCE after completion — NEVER poll in a loop, NEVER ask Yes/No, "
+            "[ZENO STILL RUNNING] The edit passed 90 minutes and continues in the background. Tell the editor it is still "
+            "running and END THE TURN now. Do not call any Zeno tool again in this message (each check re-reads the whole chat); "
+            "the editor will ask for the status later. NEVER ask Yes/No, "
             "and NEVER open agent/REFERENCE.md, CONCEPT.md, EDIT_RULES.md, FORMATS.md, scripts/*.py, facts.md, "
             "line_map.md, clip_caches.json, ffprobe, or dir."
         )
@@ -338,6 +339,18 @@ def _short_job(j: Dict[str, Any]) -> str:
     st = j.get("status", {})
     pct = f" {j.get('pct', 0)}%" if st.get("phase") == "working" else ""
     return f"{j['name']} | {j.get('title', '')[:60]} | {st.get('label', '')}{pct}"
+
+
+EDIT_WAIT_S = 5400   # one tool call waits for the whole edit (typically 10-40 min); 90 min is only the ceiling for a stuck job
+
+
+def _wait_seconds(a: Dict[str, Any]) -> int:
+    """Edits and renders wait until done: each early return makes the chat check back, and every check re-reads the whole chat.
+    A short wait asked by the model is ignored on purpose (it would bring the polling back); 0 still means start and return."""
+    try:
+        return 0 if a.get("wait_seconds") is not None and int(a.get("wait_seconds")) <= 0 else EDIT_WAIT_S
+    except (TypeError, ValueError):
+        return EDIT_WAIT_S
 
 
 def _run_with_log_tail(cmd: List[str], log_path: Path, wait_s: int, max_chars: int = 7000) -> Tuple[Optional[int], str]:
@@ -402,14 +415,11 @@ def _run_auto_plan_for_job(tool_name: str, d: Path, jobs_mod: Any) -> Dict[str, 
     plan = d / "plan.edl"
     if not plan.is_file():
         return _text("No plan.edl for that edit yet.", True)
-    r = subprocess.run(
+    rc, txt = _run_with_log_tail(
         [_py(), str(ROOT / "scripts" / "zeno.py"), "--auto-plan", "--plan", str(plan), "--compact"],
-        cwd=str(ROOT), capture_output=True, text=True, timeout=420,
+        d / "_auto_plan.log", wait_s=EDIT_WAIT_S,
     )
-    txt = (r.stdout + "\n" + r.stderr).strip()
-    if len(txt) > 7000:
-        txt = "...\n" + txt[-7000:]
-    return _finish_auto_edit(tool_name, d.name, r.returncode, txt, d=d, jobs_mod=jobs_mod)
+    return _finish_auto_edit(tool_name, d.name, rc, txt, d=d, jobs_mod=jobs_mod)
 
 
 def call(name: str, a: Dict[str, Any]) -> Dict[str, Any]:
@@ -475,8 +485,7 @@ def call(name: str, a: Dict[str, Any]) -> Dict[str, Any]:
             return err_resp or _text("Invalid arguments.", True)
         script, footage_path, title = parsed
         cmd = _build_inspect_cmd(script, footage_path, title, a, auto_plan=True)
-        wait_s = max(0, min(900, int(a.get("wait_seconds") if a.get("wait_seconds") is not None else 480)))
-        rc, tail = _run_with_log_tail(cmd, ROOT / "work" / "_mcp_start.log", wait_s=wait_s)
+        rc, tail = _run_with_log_tail(cmd, ROOT / "work" / "_mcp_start.log", wait_s=_wait_seconds(a))
         return _finish_auto_edit(name, title, rc, tail, jobs_mod=jobs)
     if name == "zeno_auto_plan":
         d = _job_dir(str(a.get("name", "")))
@@ -500,13 +509,13 @@ def call(name: str, a: Dict[str, Any]) -> Dict[str, Any]:
         plan = d / "plan.edl" if d else None
         if not plan or not plan.is_file():
             return _text("No plan.edl for that edit yet.", True)
-        wait_s = max(0, min(900, int(a.get("wait_seconds") if a.get("wait_seconds") is not None else 360)))
+        wait_s = _wait_seconds(a)
         cmd = [_py(), str(ROOT / "scripts" / "zeno.py"), "--execute", str(plan), "--square", "--compact"]
         rc, tail = _run_with_log_tail(cmd, d / "_render.log", wait_s=wait_s)
         if rc is None:
             return _text(
-                f"Rendering + QC continues in the background (>{wait_s}s wait). "
-                "End turn and wait, or check zeno_job ONCE later — NEVER poll in a loop or write custom FFmpeg/Python scripts."
+                "[ZENO STILL RUNNING] Rendering + QC passed 90 minutes and continues in the background. Tell the editor and END THE TURN "
+                "now; do not call any tool again in this message. NEVER poll or write custom FFmpeg/Python scripts."
             )
         msg = tail or f"Render finished with exit code {rc}."
         if rc == 0 and (d / "review_sheet.jpg").is_file() and "review_sheet" not in msg:
