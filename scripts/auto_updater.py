@@ -47,6 +47,7 @@ PROTECTED_PREFIXES = (
     ".zeno_session.json",
     ".zeno_owner_session.json",
     ".zeno-dev",
+    ".claude/settings.local.json",
     ".git/",
     ".venv/",
     "models/",
@@ -371,6 +372,13 @@ def apply_bundle_bytes(blob: bytes, expected_sha256: str = "", version: str = ""
             )
         except Exception:
             pass
+
+    try:   # the hooks that depend on this computer (no Git Bash needed)
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import hooks_setup
+        hooks_setup.ensure(ROOT)
+    except Exception:
+        pass
 
     final_ver = version or get_local_version()
     clean_res: Dict[str, Any] = {}

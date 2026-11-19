@@ -89,6 +89,7 @@ SKIP_NAMES = {
     ".zeno-dev",
     "zeno_telemetry.db",
     "zeno_keys.db",
+    "settings.local.json",
 }
 
 SKIP_SUFFIXES = (".pyc", ".pyo", ".pyd", ".so", ".dylib", ".db", ".sqlite", ".log")

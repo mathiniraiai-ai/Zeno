@@ -1153,6 +1153,11 @@ def apply_stage3_tweaks(
 
 
 def main() -> None:
+    try:   # Claude Code hooks for this computer, written without Git Bash (see hooks_setup.py)
+        import hooks_setup
+        hooks_setup.ensure()
+    except Exception:
+        pass
     if "--compact" in sys.argv[1:]:
         from compact_run import run
         args = [arg for arg in sys.argv[1:] if arg != "--compact"]
