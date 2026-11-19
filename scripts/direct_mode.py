@@ -197,6 +197,44 @@ def _cli_help(cmd_tuple: Tuple[str, ...]) -> str:
     return out
 
 
+def find_claude_binary() -> Optional[str]:
+    """Locate the `claude` command: on PATH, as the running Claude Code names itself (CLAUDE_CODE_EXECPATH, set inside the
+    desktop app's Code tab and the CLI), or inside the desktop app's own folder. Editors who only installed the desktop app
+    have no `claude` on PATH, and must never be asked to install anything."""
+    hit = shutil.which("claude")
+    if hit:
+        return hit
+    named = os.environ.get("CLAUDE_CODE_EXECPATH", "").strip()
+    if named and os.path.isfile(named):
+        return named
+    home = Path.home()
+    names = ("claude.exe", "claude") if os.name == "nt" else ("claude",)
+    roots = []
+    for var in ("APPDATA", "LOCALAPPDATA"):
+        if os.environ.get(var):
+            roots += [Path(os.environ[var]) / "Claude" / "claude-code", Path(os.environ[var]) / "Claude" / "claude-code-vm"]
+    roots += [home / "Library" / "Application Support" / "Claude" / "claude-code",
+              home / "Library" / "Application Support" / "Claude" / "claude-code-vm"]
+    found = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        try:
+            for name in names:
+                for cand in root.rglob(name):
+                    if cand.is_file() and (os.name == "nt" or os.access(cand, os.X_OK)):
+                        found.append(cand)
+        except OSError:
+            continue
+    if found:   # the newest app version wins
+        return str(max(found, key=lambda c: (c.stat().st_mtime, str(c))))
+    for cand in (home / ".local" / "bin" / "claude", Path("/opt/homebrew/bin/claude"), Path("/usr/local/bin/claude"),
+                 home / ".local" / "bin" / "claude.exe", home / "AppData" / "Roaming" / "npm" / "claude.cmd"):
+        if cand.is_file():
+            return str(cand)
+    return None
+
+
 def find_codex_binary() -> Optional[str]:
     """Locate the `codex` CLI on PATH or inside macOS/Windows Desktop app bundles."""
     hit = shutil.which("codex")
@@ -229,7 +267,7 @@ def resolve_provider(provider: str) -> str:
     if provider != "auto":
         return provider
     codex_bin = find_codex_binary()
-    claude_bin = shutil.which("claude")
+    claude_bin = find_claude_binary()
     if os.getenv("CODEX_THREAD_ID") and codex_bin:
         return "codex"
     if claude_bin:
@@ -288,7 +326,7 @@ def _claude_flags(exe: str, model: str, system: str, session: Optional[str]) -> 
 def call_claude(system: str, text: str, images: List[Path], model: str, session: Optional[str]) -> Dict[str, Any]:
     """One request to Claude through the `claude` command in an empty temp dir (never `cwd=ROOT`, never `--bare`).
     Returns {"text", "session", "usage", "actual_model", "seconds", "error"}."""
-    exe = shutil.which("claude")
+    exe = find_claude_binary()
     if not exe:
         return {"error": "the claude command is not installed", "text": "", "usage": {}, "session": session, "seconds": 0}
     cmd = _claude_flags(exe, model, system, session)
@@ -789,7 +827,7 @@ def _run_subscription_locked(proj: Path, provider: str, model: str,
     passing = None
     kind = "plan"
     try:
-        if not (shutil.which("claude") if provider == "claude" else find_codex_binary()):
+        if not (find_claude_binary() if provider == "claude" else find_codex_binary()):
             raise ValueError(f"The {provider} command is not installed; no model request dispatched.")
         for n in range(1, total_calls + 1):
             checkpoint = cost_control.snapshot(proj)
@@ -938,10 +976,10 @@ def dry_run_cli(proj: Path, provider: str, model: Optional[str]) -> int:
     """Validate subscription CLI binary, isolation flags, and brief size without any live model call."""
     resolved = resolve_provider(provider)
     if resolved == "claude":
-        exe = shutil.which("claude")
+        exe = find_claude_binary()
         chosen_model = model or os.environ.get("ZENO_CLAUDE_MODEL") or DEFAULT_CLAUDE_MODEL
         if not exe:
-            print("[DRY-RUN] provider=claude: binary NOT FOUND (`claude` is not on PATH)")
+            print("[DRY-RUN] provider=claude: binary NOT FOUND (not on PATH, not named by Claude Code, not in the desktop app folder)")
             return 2
         flags = _claude_flags(exe, chosen_model, "<system>", None)
         print(f"[DRY-RUN] provider=claude | binary={exe} | model={chosen_model} | isolated_cwd=<empty_tempdir> | bare=False | no_chrome={'--no-chrome' in flags}")

@@ -2839,7 +2839,7 @@ class TestDirectMode(unittest.TestCase):
     def test_no_claude_command_is_reported_not_crashed(self):
         from unittest.mock import patch
         import direct_mode
-        with patch.object(direct_mode.shutil, "which", return_value=None):
+        with patch.object(direct_mode, "find_claude_binary", return_value=None):
             c = direct_mode.call_claude("s", "t", [], "sonnet", None)
         self.assertIn("not installed", c["error"])
 

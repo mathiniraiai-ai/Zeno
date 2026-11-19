@@ -23,6 +23,26 @@ class TestPlannerStopRouting(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 zeno.session_gate("inspect", block=True, isolated_planner=False)
 
+    def test_the_planner_finds_claude_inside_the_desktop_app_when_it_is_not_on_path(self):
+        import os
+        import stat
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = Path(tmp) / "claude"
+            exe.write_text("#!/bin/sh\n")
+            exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+            with patch.object(direct_mode.shutil, "which", return_value=None), \
+                    patch.dict(os.environ, {"CLAUDE_CODE_EXECPATH": str(exe)}):
+                self.assertEqual(direct_mode.find_claude_binary(), str(exe))
+                self.assertEqual(direct_mode.resolve_provider("auto"), "claude")
+            app = Path(tmp) / "Library" / "Application Support" / "Claude" / "claude-code" / "9.9.9" / "abc"
+            app.mkdir(parents=True)
+            (app / "claude").write_text("#!/bin/sh\n")
+            (app / "claude").chmod(0o755)
+            env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_EXECPATH"}
+            with patch.object(direct_mode.shutil, "which", return_value=None), patch.dict(os.environ, env, clear=True), \
+                    patch.object(direct_mode.Path, "home", return_value=Path(tmp)):
+                self.assertEqual(direct_mode.find_claude_binary(), str(app / "claude"))
+
     def test_preflight_is_not_blocked_by_a_fresh_chat_that_already_starts_large(self):
         src = (Path(zeno.__file__)).read_text(encoding="utf-8")
         line = next(l for l in src.splitlines() if 'session_gate("preflight"' in l)
