@@ -251,16 +251,13 @@ def smoke_test() -> bool:
 
 
 def _claude_bin():
-    import shutil
-
-    found = shutil.which("claude")
-    if found:
-        return found
-    home = Path.home()
-    for p in (home / ".local" / "bin" / "claude", Path("/opt/homebrew/bin/claude"), Path("/usr/local/bin/claude"), home / "AppData" / "Roaming" / "npm" / "claude.cmd"):
-        if p.exists():
-            return str(p)
-    return None
+    """The `claude` command: on PATH, as the running Claude Code names it, or inside the desktop app's own folder."""
+    try:
+        import direct_mode
+        return direct_mode.find_claude_binary()
+    except Exception:
+        import shutil
+        return shutil.which("claude")
 
 
 def connect_claude(ask=input, interactive=None):
