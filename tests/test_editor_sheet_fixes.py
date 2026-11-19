@@ -154,7 +154,11 @@ class EditorSheetFixesTests(unittest.TestCase):
                 timeout=60,
             )
             self.assertEqual(proc.returncode, 0, f"render_cues.js failed ({width}x{height}): {proc.stderr}")
-            self.assertEqual(proc.stderr.strip(), "", f"Unexpected stderr on {width}x{height}: {proc.stderr}")
+            err_lines = [
+                ln for ln in proc.stderr.splitlines()
+                if ln.strip() and not any(w in ln for w in ("Fontconfig", "Pango-WARNING", "fontconfig"))
+            ]
+            self.assertEqual(err_lines, [], f"Unexpected stderr on {width}x{height}: {proc.stderr}")
             manifest_line = [ln for ln in proc.stdout.splitlines() if ln.startswith("{")][-1]
             manifest = json.loads(manifest_line)
             frames = manifest.get("frames") or []

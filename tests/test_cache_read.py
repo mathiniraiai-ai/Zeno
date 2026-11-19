@@ -300,8 +300,9 @@ class CacheReadTests(unittest.TestCase):
             self.assertEqual(first_edit, second_edit, "Repeated edit_packet.write() must be deterministic for cache hits")
 
     def test_missing_clis_return_unavailable_cleanly(self) -> None:
-        with mock.patch("test_cache_read.find_claude_binary", return_value=None), \
-             mock.patch("test_cache_read.find_codex_binary", return_value=None):
+        this_mod = sys.modules[__name__]
+        with mock.patch.object(this_mod, "find_claude_binary", return_value=None), \
+             mock.patch.object(this_mod, "find_codex_binary", return_value=None):
             c_ws = measure_claude_workspace_call("sample")
             c_iso = measure_claude_isolated_packet_call("sample")
             x_ws = measure_codex_workspace_call("sample")

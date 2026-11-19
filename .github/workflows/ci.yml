@@ -54,7 +54,7 @@ jobs:
           node --check subtitles/render_page.js
 
       - name: Run Zeno Engine Regression Suite
-        run: python3 -m unittest discover -s tests
+        run: python3 -m unittest discover -s tests -v
 
       - name: Run Service, Google OAuth & Learnings Tests
         run: |
