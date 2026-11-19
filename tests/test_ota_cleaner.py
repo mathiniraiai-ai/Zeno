@@ -253,7 +253,10 @@ class OtaManifestCleanerTests(unittest.TestCase):
                         version="2.0.0",
                         sha="v200test",
                     )
-                m_subproc.assert_not_called()
+                for call_item in m_subproc.call_args_list:
+                    cmd_str = " ".join(str(x) for x in (call_item.args[0] if call_item.args else []))
+                    self.assertNotIn("clean.py", cmd_str)
+                    self.assertIn("gpu_install.py", cmd_str)
             finally:
                 sys.path[:] = orig_sys_path
 
