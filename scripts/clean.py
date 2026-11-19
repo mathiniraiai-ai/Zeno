@@ -375,6 +375,83 @@ def _is_legacy_claude_hook_entry(entry: Any) -> bool:
     return any(marker in haystack for marker in LEGACY_CLAUDE_HOOK_MARKERS)
 
 
+def _is_legacy_zeno_mcp_entry(name: str, entry: Any) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    cmd = str(entry.get("command") or "")
+    args = entry.get("args")
+    args_str = " ".join(str(a) for a in args) if isinstance(args, list) else str(args or "")
+    combined = f"{cmd} {args_str}".replace("\\", "/").lower()
+    if "zeno_mcp.py" in combined or "zeno_mcp" in combined:
+        return True
+    return str(name).strip().lower() == "zeno" and "scripts/" in combined and "zeno" in combined
+
+
+def _strip_mcp_map(mcp_map: Any) -> int:
+    if not isinstance(mcp_map, dict):
+        return 0
+    drop_keys = [k for k, v in mcp_map.items() if _is_legacy_zeno_mcp_entry(str(k), v)]
+    for k in drop_keys:
+        mcp_map.pop(k, None)
+    return len(drop_keys)
+
+
+def _cleanup_legacy_claude_mcp(home_dir: Optional[Path] = None) -> int:
+    """Safely remove stale `1.x` `zeno` MCP (`scripts/zeno_mcp.py`) entries from user Claude configs."""
+    home = Path(home_dir) if home_dir is not None else Path.home()
+    candidates: List[Path] = [
+        home / ".claude.json",
+        home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
+        home / ".config" / "Claude" / "claude_desktop_config.json",
+    ]
+    if home_dir is None:
+        appdata = os.environ.get("APPDATA", "").strip()
+        if appdata:
+            candidates.append(Path(appdata) / "Claude" / "claude_desktop_config.json")
+    else:
+        candidates.append(home / "AppData" / "Roaming" / "Claude" / "claude_desktop_config.json")
+
+    total_removed = 0
+    seen: set[Path] = set()
+    for cfg_path in candidates:
+        try:
+            res_p = cfg_path.resolve()
+        except OSError:
+            res_p = cfg_path
+        if res_p in seen or not cfg_path.is_file():
+            continue
+        seen.add(res_p)
+        try:
+            raw = cfg_path.read_text(encoding="utf-8")
+            if not raw.strip():
+                continue
+            data = json.loads(raw)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+
+        removed_here = _strip_mcp_map(data.get("mcpServers"))
+        projs = data.get("projects")
+        if isinstance(projs, dict):
+            for proj_cfg in projs.values():
+                if isinstance(proj_cfg, dict):
+                    removed_here += _strip_mcp_map(proj_cfg.get("mcpServers"))
+
+        if removed_here <= 0:
+            continue
+        try:
+            orig_mode = cfg_path.stat().st_mode & 0o777
+            tmp = cfg_path.with_suffix(".json.zeno_tmp")
+            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            os.chmod(tmp, orig_mode or 0o600)
+            os.replace(tmp, cfg_path)
+            total_removed += removed_here
+        except OSError:
+            continue
+    return total_removed
+
+
 def _cleanup_legacy_claude_hooks(root: Path) -> int:
     """Safely strip legacy Zeno v1.x hook entries from `.claude/settings.local.json` while preserving user hooks/settings."""
     settings_path = Path(root) / ".claude" / "settings.local.json"
@@ -574,21 +651,23 @@ def cleanup_after_update(
     version: str = "",
     prev_version: str = "",
     clear_work: bool = False,
+    home_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Run automatically whenever an OTA software update finishes installing.
 
     Clears stale Python `__pycache__` bytecode under `scripts/`, `service/`, & `tests/`, old engine render chunks
     in `work/_segments`, leftover `work/_ota_stage_*`, stale `work/_update_check.json`, stale job-window markers,
-    legacy Zeno v1.x hooks inside `.claude/settings.local.json`, and prunes obsolete managed files using
-    `_zeno_manifest.json`, while preserving all measured clips (`work/_clips/`), credentials, `.venv/`, `models/`,
-    `tools/`, `subtitles/node_modules/`, `app/node_modules/`, `input/`, and finished videos.
+    legacy Zeno v1.x hooks inside `.claude/settings.local.json`, stale user-global `zeno` MCP (`zeno_mcp.py`) entries
+    in `~/.claude.json`, and prunes obsolete managed files using `_zeno_manifest.json`, while preserving all measured
+    clips (`work/_clips/`), credentials, `.venv/`, `models/`, `tools/`, `subtitles/node_modules/`, `app/node_modules/`,
+    `input/`, and finished videos.
     On major version upgrades (e.g., `1.x -> 2.0.0`) or `clear_work_projects`, also resets old `1.x` `work/` project
     caches while preserving `work/_clips/` and updater/telemetry state.
     Disable with `ZENO_AUTO_CLEAN=0` or `ZENO_CLEAR_ON_UPDATE=0`.
     """
     if os.environ.get("ZENO_AUTO_CLEAN", "1") == "0" or os.environ.get("ZENO_CLEAR_ON_UPDATE", "1") == "0":
         return {"ran": False}
-    freed = files = pruned_files = pruned_dirs = legacy_hooks_removed = 0
+    freed = files = pruned_files = pruned_dirs = legacy_hooks_removed = legacy_mcp_removed = 0
     root_path = Path(root)
     work = root_path / "work"
     resolved_prev = (prev_version or _read_prev_version_for_cleanup(work)).strip()
@@ -614,8 +693,9 @@ def cleanup_after_update(
         if not clear_work_projects and resolved_prev and version and _major_ver(version) > _major_ver(resolved_prev) > 0:
             clear_work_projects = True
 
-        # 0b. Safely strip legacy Zeno v1.x hooks from .claude/settings.local.json without touching user hooks/settings
+        # 0b. Safely strip legacy Zeno v1.x hooks & global zeno_mcp.py server entries without touching user tools
         legacy_hooks_removed = _cleanup_legacy_claude_hooks(root_path)
+        legacy_mcp_removed = _cleanup_legacy_claude_mcp(home_dir=home_dir)
 
         # 1. Clear stale Python bytecode caches inside scripts/, service/, and tests/ so updated .py files take effect immediately
         for code_sub in ("scripts", "service", "tests"):
@@ -677,6 +757,7 @@ def cleanup_after_update(
             "pruned_files": pruned_files,
             "pruned_dirs": pruned_dirs,
             "legacy_hooks_removed": legacy_hooks_removed,
+            "legacy_mcp_removed": legacy_mcp_removed,
             "clear_work_projects": clear_work_projects,
             "freed_mb": round(freed / 1e6, 1),
             "files": files,

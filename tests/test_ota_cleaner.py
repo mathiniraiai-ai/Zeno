@@ -97,7 +97,8 @@ class OtaManifestCleanerTests(unittest.TestCase):
                 managed_dirs=["scripts", "subtitles", "agent", "styles", "formats"],
                 managed_top=["VERSION", "LOW_COST_WORKFLOW.md"],
             )
-            with patch.object(auto_updater, "ROOT", root), \
+            with patch.object(Path, "home", return_value=root.parent / "home"), \
+                 patch.object(auto_updater, "ROOT", root), \
                  patch.object(auto_updater, "WORK", root / "work"), \
                  patch.object(auto_updater, "RELEASE_STATE_FILE", root / "work" / ".cloud_release_state.json"):
                 res = auto_updater.apply_bundle_bytes(blob, expected_sha256=sha, version="1.0.23", sha="abc")
@@ -153,7 +154,7 @@ class OtaManifestCleanerTests(unittest.TestCase):
             (root / "VERSION").write_text("2.0.0\n", encoding="utf-8")
             (root / "_zeno_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-            res = clean.cleanup_after_update(root=root, version="2.0.0")
+            res = clean.cleanup_after_update(root=root, version="2.0.0", home_dir=Path(tmp) / "home")
             self.assertTrue(res["ran"], res)
             self.assertTrue(res["clear_work_projects"])
             self.assertFalse((root / "agent").exists())
@@ -240,18 +241,55 @@ class OtaManifestCleanerTests(unittest.TestCase):
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(body, encoding="utf-8")
 
-            blob, _count, sha = release.build_bundle_bytes(version="2.0.0", clear_work_projects=True)
+            mock_home = root.parent / "home"
+            mock_home.mkdir(parents=True, exist_ok=True)
+            claude_user_json = mock_home / ".claude.json"
+            claude_user_json.write_text(
+                json.dumps(
+                    {
+                        "numStartups": 4,
+                        "mcpServers": {
+                            "zeno": {
+                                "type": "stdio",
+                                "command": str(root / ".venv" / "bin" / "python"),
+                                "args": [str(root / "scripts" / "zeno_mcp.py")],
+                            },
+                            "other_user_mcp": {
+                                "type": "stdio",
+                                "command": "npx",
+                                "args": ["-y", "custom-tool"],
+                            },
+                        },
+                        "projects": {
+                            str(root): {
+                                "mcpServers": {
+                                    "zeno": {
+                                        "command": "python3",
+                                        "args": ["scripts/zeno_mcp.py"],
+                                    }
+                                }
+                            }
+                        },
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            (root / "scripts" / "compact_run.py").write_text("# orphan removed in 2.0.1\n", encoding="utf-8")
+
+            blob, _count, sha = release.build_bundle_bytes(version="2.0.1", clear_work_projects=True)
             orig_sys_path = sys.path[:]
             try:
-                with patch.object(auto_updater, "ROOT", root), \
+                with patch.object(Path, "home", return_value=mock_home), \
+                     patch.object(auto_updater, "ROOT", root), \
                      patch.object(auto_updater, "WORK", root / "work"), \
                      patch.object(auto_updater, "RELEASE_STATE_FILE", root / "work" / ".cloud_release_state.json"), \
                      patch.object(auto_updater.subprocess, "run") as m_subproc:
                     res = auto_updater.apply_bundle_bytes(
                         blob,
                         expected_sha256=sha,
-                        version="2.0.0",
-                        sha="v200test",
+                        version="2.0.1",
+                        sha="v201test",
                     )
                 for call_item in m_subproc.call_args_list:
                     cmd_str = " ".join(str(x) for x in (call_item.args[0] if call_item.args else []))
@@ -265,7 +303,14 @@ class OtaManifestCleanerTests(unittest.TestCase):
             self.assertTrue(res.get("cleanup", {}).get("ran"), res)
             self.assertTrue(res.get("cleanup", {}).get("clear_work_projects"), res)
             self.assertGreaterEqual(res.get("cleanup", {}).get("legacy_hooks_removed", 0), 1, res)
+            self.assertEqual(res.get("cleanup", {}).get("legacy_mcp_removed", 0), 2, res)
             self.assertFalse((root / "_zeno_manifest.json").exists())
+            self.assertFalse((root / "scripts" / "compact_run.py").exists())
+            cleaned_user_cfg = json.loads(claude_user_json.read_text(encoding="utf-8"))
+            self.assertEqual(cleaned_user_cfg["numStartups"], 4)
+            self.assertNotIn("zeno", cleaned_user_cfg["mcpServers"])
+            self.assertIn("other_user_mcp", cleaned_user_cfg["mcpServers"])
+            self.assertNotIn("zeno", cleaned_user_cfg["projects"][str(root)]["mcpServers"])
 
             # 1) ALL deleted 1.x files/dirs + work/old_1x_proj wiped
             for removed_rel in (

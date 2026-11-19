@@ -42,7 +42,7 @@ Use `.venv/bin/python` on macOS/Linux or `.venv\Scripts\python.exe` on Windows a
 ## Electron Desktop App (`app/`) & Cloud OTA Auto-Updater
 
 ### Zeno Desktop App (`Zeno.app` / `Zeno.exe`)
-Located in `app/`, the Electron companion monitors live job telemetry (`scripts/jobs.py`) across all 5 pipeline stages, face scans, speaker detections, cut renders, timeline plans, and output files:
+Located in `app/`, the lightweight Electron companion handles Google Workspace Sign-In, initial workspace bootstrap (`~/Documents/Zeno`), environment setup, and Cloud OTA auto-updates:
 - **Installers:** `Zeno-<version>-arm64.dmg` / `Zeno-<version>-x64.dmg` (macOS) and `Zeno Setup <version>.exe` (Windows). Signing in on a fresh computer automatically downloads Zeno into `~/Documents/Zeno` and triggers setup.
 - **Dev build commands:** `cd app && npm install`, `npm start`, `npm run dist:mac`, `npm run dist:win`.
 

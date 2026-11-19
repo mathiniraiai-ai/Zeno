@@ -44,12 +44,11 @@ def _ensure_venv_if_needed() -> None:
     try:
         import torch  # noqa: F401
     except ImportError:
-        if os.environ.get("_ZENO_REEXEC") == "1" or os.environ.get("_CLAUDE_EDITOR_REEXEC") == "1":
+        if os.environ.get("_ZENO_REEXEC") == "1":
             return
         venv_py = find_venv_python()
         if venv_py and Path(venv_py).is_file():
             os.environ["_ZENO_REEXEC"] = "1"
-            os.environ["_CLAUDE_EDITOR_REEXEC"] = "1"
             if IS_WIN:
                 sys.exit(subprocess.call([str(venv_py), *sys.argv]))
             else:

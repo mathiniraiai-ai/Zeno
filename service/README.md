@@ -34,10 +34,10 @@ Without `DATABASE_URL` the service uses a local SQLite file (`zeno_keys.db`, git
 
 ## What each person puts in their own `.env` (never in git)
 ```
-SCRIPTCUT_CLOUD_URL=https://<your-domain>
-SCRIPTCUT_CLOUD_TOKEN=zeno_...their personal key...
+ZENO_CLOUD_URL=https://<your-domain>
+ZENO_CLOUD_TOKEN=zeno_...their personal key...
 ```
-and leaves `GEMINI_API_KEY` empty. Zeno uses the service only when no local Gemini key is set.
+*(Or sign in once via `python3 scripts/setup.py --login` or the Zeno Desktop App, which stores `.zeno_session.json` and syncs `.env` automatically.)* Leave `GEMINI_API_KEY` empty — Zeno uses Zeno Cloud whenever no local Gemini key is set.
 
 ## Other settings (Railway variables, all optional)
 `ZENO_RATE_PER_MIN`, `ZENO_MAX_UPLOAD_MB`, `GEMINI_RPM`, `GEMINI_MODELS` (model order, default lite first), `GEMINI_API_KEY_1..4` (extra keys).

@@ -1,6 +1,6 @@
 # Zeno desktop app
 
-A dedicated app that shows every edit and what the backend is doing, step by step: the five stages, the face scan of each clip, who speaks, every cut being rendered, every check, the plan as a timeline, the output files and the token numbers. Dark grey with green accents. It only reads job state (`scripts/jobs.py`); the editing itself still runs in Claude Code or Antigravity, started from **New edit** (the lean launcher).
+A lightweight desktop launcher & companion for Zeno: handles Google Workspace Sign-In (`@gosupernova.live`), initial workspace download into `~/Documents/Zeno`, one-click setup bootstrap, and Cloud OTA auto-updates with clean hot-reload. Video editing itself runs through the zero-MCP Host-AI Direct launchers (`edit.command`, `edit-7k.command`, `edit-codex.command` or their `.bat` equivalents on Windows) and delivers outputs to `~/Downloads/Zeno Outs/<VideoName>/`.
 
 ## Use
 - **Mac:** open `Zeno-<version>-arm64.dmg` (Apple Silicon) or `Zeno-<version>-x64.dmg` (Intel) and drag Zeno to Applications. The build is ad-hoc signed, not notarised (that needs an Apple Developer account), so macOS blocks the first open. macOS 15 or later: double-click Zeno, press **Done**, then **System Settings > Privacy & Security > Open Anyway**. Older macOS: right-click Zeno, **Open**, **Open**. Or in Terminal: `xattr -dr com.apple.quarantine /Applications/Zeno.app`.

@@ -54,23 +54,6 @@ def check_or_setup_ffmpeg() -> bool:
     target_bin = bundled_dir / ("ffmpeg.exe" if common.IS_WIN else "ffmpeg")
     target_probe = bundled_dir / ("ffprobe.exe" if common.IS_WIN else "ffprobe")
 
-    # Auto-copy from sibling ScriptCut-AI/bin if local tools/ffmpeg binary is missing
-    if not target_bin.is_file():
-        sib_bin = common.SCRIPTCUT_ROOT / "bin" / ("ffmpeg.exe" if common.IS_WIN else "ffmpeg")
-        if sib_bin.is_file():
-            shutil.copy2(sib_bin, target_bin)
-            if not common.IS_WIN:
-                target_bin.chmod(0o755)
-            print(f"  + Copied FFmpeg from sibling ScriptCut-AI -> {target_bin}")
-
-    if not target_probe.is_file():
-        sib_probe = common.SCRIPTCUT_ROOT / "bin" / ("ffprobe.exe" if common.IS_WIN else "ffprobe")
-        if sib_probe.is_file():
-            shutil.copy2(sib_probe, target_probe)
-            if not common.IS_WIN:
-                target_probe.chmod(0o755)
-            print(f"  + Copied FFprobe from sibling ScriptCut-AI -> {target_probe}")
-
     ffmpeg_path = common.resolve_ffmpeg()
     ffprobe_path = common.resolve_ffprobe()
     try:
@@ -224,14 +207,11 @@ def check_env() -> None:
     import auth_session
     info = auth_session.get_session_info()
     local_env = common.ROOT / ".env"
-    sibling_env = common.SCRIPTCUT_ROOT / ".env"
     session_file = common.ROOT / ".zeno_session.json"
     if session_file.is_file():
         print(f"  [OK] Found active Zeno Cloud session ({session_file.name}: {info.get('email') or info.get('name') or 'authenticated'})")
     elif local_env.is_file():
         print(f"  [OK] Found local .env ({local_env})")
-    elif sibling_env.is_file():
-        print(f"  [OK] Using fallback sibling .env ({sibling_env})")
     else:
         print("  [i] No session or .env found yet. Run: python3 scripts/setup.py --login")
 
@@ -341,6 +321,13 @@ def main():
     venv_ok = check_or_setup_venv(init_venv=args.init_venv, prewarm=args.prewarm)
     assets_ok = verify_assets()
     check_env()
+    try:
+        import clean as _clean_mod
+        removed_mcp = _clean_mod._cleanup_legacy_claude_mcp()
+        if removed_mcp > 0:
+            print(f"\n[Clean] Removed {removed_mcp} legacy Zeno MCP server entry(s) from user Claude config.")
+    except Exception:
+        pass
     smoke_ok = smoke_test() if args.smoke else True
 
     print("\n" + "=" * 72)

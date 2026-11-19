@@ -204,6 +204,7 @@ OBSOLETE_PATHS: Tuple[str, ...] = (
     "scripts/session_check.py",
     "scripts/eval_alignment.py",
     "scripts/brain_memory.py",
+    "scripts/compact_run.py",
     "scripts/format_learning.py",
     "scripts/style_readiness.py",
     "scripts/team_patterns.py",

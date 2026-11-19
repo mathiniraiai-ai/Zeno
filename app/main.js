@@ -1,5 +1,5 @@
 // Zeno desktop app: the window, Google Workspace sign-in, native Cloud OTA updater, and workspace setup.
-const { app, BrowserWindow, Notification, ipcMain, shell, nativeTheme, dialog, clipboard } = require('electron');
+const { app, BrowserWindow, Notification, ipcMain, shell, nativeTheme } = require('electron');
 const { spawn } = require('child_process');
 const crypto = require('crypto');
 const zlib = require('zlib');
@@ -289,6 +289,53 @@ function stripLegacyZenoHooks(destDir) {
   }
 }
 
+function isLegacyZenoMcpEntry(name, entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  const cmd = String(entry.command || '');
+  const argsStr = Array.isArray(entry.args) ? entry.args.map(String).join(' ') : String(entry.args || '');
+  const combined = `${cmd} ${argsStr}`.replace(/\\/g, '/').toLowerCase();
+  if (combined.includes('zeno_mcp')) return true;
+  return String(name || '').trim().toLowerCase() === 'zeno' && combined.includes('scripts/') && combined.includes('zeno');
+}
+
+function stripLegacyUserMcp() {
+  const candidates = [
+    path.join(os.homedir(), '.claude.json'),
+    IS_MAC
+      ? path.join(os.homedir(), 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json')
+      : (IS_WIN && process.env.APPDATA
+          ? path.join(process.env.APPDATA, 'Claude', 'claude_desktop_config.json')
+          : path.join(os.homedir(), '.config', 'Claude', 'claude_desktop_config.json')),
+  ];
+  let removed = 0;
+  for (const cfgPath of candidates) {
+    if (!fs.existsSync(cfgPath)) continue;
+    let data;
+    try { data = JSON.parse(fs.readFileSync(cfgPath, 'utf8') || '{}'); } catch (e) { continue; }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) continue;
+    let changed = false;
+    const pruneMap = (m) => {
+      if (!m || typeof m !== 'object' || Array.isArray(m)) return;
+      for (const [k, v] of Object.entries(m)) {
+        if (isLegacyZenoMcpEntry(k, v)) { delete m[k]; changed = true; removed++; }
+      }
+    };
+    pruneMap(data.mcpServers);
+    if (data.projects && typeof data.projects === 'object') {
+      for (const projCfg of Object.values(data.projects)) {
+        if (projCfg && typeof projCfg === 'object') pruneMap(projCfg.mcpServers);
+      }
+    }
+    if (!changed) continue;
+    try {
+      const tmp = `${cfgPath}.zeno_tmp_${process.pid}`;
+      fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 });
+      fs.renameSync(tmp, cfgPath);
+    } catch (e) { /* ignore */ }
+  }
+  return removed;
+}
+
 function isPreservedRel(cleanRel) {
   const rel = String(cleanRel || '').replace(/\\/g, '/').replace(/^\/+/, '');
   if (!rel || rel.split('/').includes('..')) return true;
@@ -526,6 +573,7 @@ async function applyCloudUpdateNative(auth, targetRoot) {
   const installedVer = headerVer || localVersion(dest);
   pruneFromManifest(dest, installedVer, prevVer);
   stripLegacyZenoHooks(dest);
+  stripLegacyUserMcp();
   writeUpdateState(dest, {
     installed_version: installedVer,
     last_bundle_sha256: actualSha,
@@ -597,29 +645,10 @@ app.whenReady().then(() => {
     if (!fs.existsSync(path.join(ROOT, 'scripts', 'call_cap.py')) && !fs.existsSync(path.join(ROOT, 'scripts', 'chat_guard.py'))) {
       stripLegacyZenoHooks(ROOT);
     }
-  }
-
-  const activeEmail = () => {
-    if (arg('skip-auth') === '1') return 'preview@gosupernova.live';
-    const a = readAppAuth();
-    return a && a.email ? String(a.email).trim().toLowerCase() : '';
-  };
-  const jobOwnedBy = (jobDir, email) => {
-    if (!email) return false;
-    for (const [fn, key] of [['owner.json', 'owner_email'], ['progress.json', 'owner_email'], ['token_telemetry.json', 'user_email']]) {
-      try {
-        const p = path.join(jobDir, fn);
-        if (fs.existsSync(p)) {
-          const d = JSON.parse(fs.readFileSync(p, 'utf8'));
-          const em = String((d && d[key]) || '').trim().toLowerCase();
-          if (em) return em === email;
-        }
-      } catch (e) { /* continue */ }
+    if (!fs.existsSync(path.join(ROOT, 'scripts', 'zeno_mcp.py'))) {
+      stripLegacyUserMcp();
     }
-    return false;
-  };
-
-  ipcMain.handle('zeno:root', () => ROOT);
+  }
 
   ipcMain.handle('zeno:info', async (_e, check) => {
     if (!ROOT) ROOT = findRoot();
@@ -663,15 +692,6 @@ app.whenReady().then(() => {
     };
   });
 
-  ipcMain.handle('zeno:reveal', (_e, p) => { if (p && fs.existsSync(p)) shell.showItemInFolder(p); });
-  ipcMain.handle('zeno:open', (_e, p) => { if (p && fs.existsSync(p)) return shell.openPath(p); });
-  ipcMain.handle('zeno:newEdit', () => {
-    if (!ROOT) return false;
-    if (IS_MAC) spawn('open', ['-a', 'Terminal', path.join(ROOT, 'edit.command')], { detached: true, stdio: 'ignore' }).unref();
-    else if (IS_WIN) spawn('cmd', ['/c', 'start', '""', path.join(ROOT, 'edit.bat')], { detached: true, stdio: 'ignore', windowsVerbatimArguments: true }).unref();
-    else spawn('x-terminal-emulator', ['-e', 'bash', path.join(ROOT, 'edit.command')], { detached: true, stdio: 'ignore' }).unref();
-    return true;
-  });
   ipcMain.handle('zeno:runSetup', () => {
     const target = ROOT || path.join(os.homedir(), 'Documents', 'Zeno');
     if (!fs.existsSync(target)) return { ok: false, text: 'Zeno workspace not downloaded yet.' };
@@ -680,33 +700,6 @@ app.whenReady().then(() => {
     else spawn('x-terminal-emulator', ['-e', 'bash', path.join(target, 'install.command')], { detached: true, stdio: 'ignore' }).unref();
     return { ok: true };
   });
-  // the editor's Yes: render the approved plan (reel and square) in the background; the app then follows it live
-  ipcMain.handle('zeno:render', (_e, name, planFile) => {
-    const em = activeEmail();
-    if (!em || !ROOT || !/^[\w.\-]+$/.test(String(name)) || !/^[\w.\-]+\.edl$/.test(String(planFile))) return { ok: false, text: 'Not a valid job.' };
-    const jobDir = path.join(ROOT, 'work', String(name));
-    if (!jobOwnedBy(jobDir, em)) return { ok: false, text: 'This project belongs to another account.' };
-    const plan = path.join(jobDir, String(planFile));
-    if (!fs.existsSync(plan)) return { ok: false, text: 'The plan file is missing.' };
-    const log = fs.openSync(path.join(jobDir, '_render.log'), 'a');
-    const child = spawn(pythonFor(ROOT), [path.join(ROOT, 'scripts', 'zeno.py'), '--execute', plan, '--square'], { cwd: ROOT, detached: true, stdio: ['ignore', log, log], env: { ...process.env, ZENO_USER_EMAIL: em, PYTHONIOENCODING: 'utf-8' } });
-    child.unref();
-    return { ok: true };
-  });
-  // Download: save a copy of the finished video wherever the editor chooses
-  ipcMain.handle('zeno:download', async (e, p) => {
-    if (!p || !fs.existsSync(p)) return { ok: false, text: 'The file is missing.' };
-    const win = BrowserWindow.fromWebContents(e.sender);
-    const r = await dialog.showSaveDialog(win, { defaultPath: path.join(app.getPath('downloads'), path.basename(p)), buttonLabel: 'Save' });
-    if (r.canceled || !r.filePath) return { ok: false, canceled: true };
-    try { await fs.promises.copyFile(p, r.filePath); shell.showItemInFolder(r.filePath); return { ok: true, path: r.filePath }; } catch (err) { return { ok: false, text: String(err.message || err) }; }
-  });
-
-  ipcMain.handle('zeno:pickFolder', async (e) => {
-    const r = await dialog.showOpenDialog(BrowserWindow.fromWebContents(e.sender), { properties: ['openDirectory'] });
-    return r.canceled ? null : r.filePaths[0];
-  });
-  ipcMain.handle('zeno:copy', (_e, text) => { clipboard.writeText(String(text || '')); return true; });
 
   ipcMain.handle('zeno:update', async () => {
     const auth = readAppAuth();
@@ -767,13 +760,6 @@ app.whenReady().then(() => {
     } finally {
       signInBusy = false;
     }
-  });
-
-  ipcMain.handle('zeno:signOut', () => {
-    clearAppAuth();
-    if (ROOT) clearRootAuth(ROOT);
-    cachedCloudInfo = null;
-    return { ok: true };
   });
 
   ipcMain.handle('zeno:openExternal', (_e, u) => {

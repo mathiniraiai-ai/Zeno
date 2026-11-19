@@ -38,13 +38,11 @@ IS_MAC = sys.platform == "darwin"
 ARCH = platform.machine().lower()
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPTCUT_ROOT = ROOT.parent / "ScriptCut-AI"
 
-# Project-local keys that must never bleed across sibling repos during read-only fallback
+# Project-local keys that must never leak into external fallback loading
 _LOCAL_ONLY_ENV_KEYS = frozenset({
     "FFMPEG_PATH",
     "FFPROBE_PATH",
-    "CLAUDE_EDITOR_PYTHON",
     "ZENO_OUTPUT_DIR",
     "SQLITE_DB_PATH",
 })
@@ -53,17 +51,15 @@ _LOCAL_ONLY_ENV_KEYS = frozenset({
 def load_dotenv(dotenv_path: Optional[Path | str] = None, override: bool = False) -> Dict[str, str]:
     """Load `.env` and `.zeno_session.json` variables using the Python standard library.
 
-    Resolution order (strictly read-only on sibling fallback directories):
+    Resolution order:
       1. `ROOT / '.env'` (primary)
-      2. `SCRIPTCUT_ROOT / '.env'` (read-only fallback for missing credentials)
-      3. `ROOT / '.zeno_session.json'` (OAuth session fallback for missing cloud keys)
+      2. `ROOT / '.zeno_session.json'` (OAuth session fallback for missing cloud keys)
     """
     candidates: List[tuple[Path, bool]] = []
     if dotenv_path is not None:
         candidates.append((Path(dotenv_path), True))
     else:
         candidates.append((ROOT / ".env", True))
-        candidates.append((SCRIPTCUT_ROOT / ".env", False))
 
     loaded: Dict[str, str] = {}
     for path, is_primary in candidates:
@@ -214,10 +210,6 @@ def resolve_ffmpeg() -> Path:
         if _is_runnable_binary(sys_cand):
             return sys_cand
 
-    sib_ffmpeg = SCRIPTCUT_ROOT / "bin" / bin_name
-    if _is_runnable_binary(sib_ffmpeg):
-        return sib_ffmpeg
-
     return bundled
 
 
@@ -240,10 +232,6 @@ def resolve_ffprobe() -> Path:
     for sys_cand in (Path("/opt/homebrew/bin/ffprobe"), Path("/usr/local/bin/ffprobe")):
         if _is_runnable_binary(sys_cand):
             return sys_cand
-
-    sib_ffprobe = SCRIPTCUT_ROOT / "bin" / bin_name
-    if _is_runnable_binary(sib_ffprobe):
-        return sib_ffprobe
 
     return bundled
 
@@ -298,10 +286,9 @@ def find_venv_python() -> Path:
             base / ".venv" / "Scripts" / "python.exe",
         ]
 
-    for base in (ROOT, SCRIPTCUT_ROOT):
-        for cand in _venv_cands(base):
-            if _is_runnable_binary(cand):
-                return cand
+    for cand in _venv_cands(ROOT):
+        if _is_runnable_binary(cand):
+            return cand
 
     return Path(sys.executable)
 

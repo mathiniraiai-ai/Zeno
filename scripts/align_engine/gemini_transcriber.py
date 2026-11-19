@@ -30,7 +30,6 @@ logger = logging.getLogger("align_engine.gemini_transcriber")
 THIS_DIR = Path(__file__).resolve().parent
 SCRIPTS_DIR = THIS_DIR.parent
 PROJECT_ROOT = SCRIPTS_DIR.parent
-SIBLING_SCRIPTCUT = PROJECT_ROOT.parent / "ScriptCut-AI"
 
 
 def zeno_client_headers() -> Dict[str, str]:
@@ -89,11 +88,7 @@ def _load_env_files() -> None:
     except Exception:
         pass
 
-    for env_cand in (
-        PROJECT_ROOT / ".env",
-        SIBLING_SCRIPTCUT / ".env",
-    ):
-        _parse_env_file_readonly(env_cand)
+    _parse_env_file_readonly(PROJECT_ROOT / ".env")
 
     # Read-only session lookup: Zeno/.zeno_session.json
     session_path = PROJECT_ROOT / ".zeno_session.json"
