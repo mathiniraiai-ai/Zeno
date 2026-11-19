@@ -519,6 +519,22 @@ def _segment_duration(seg: Dict[str, Any]) -> float:
     return max(0.08, _segment_play_duration(seg) + _segment_hold_tail(seg))
 
 
+def _quantize_segment_frames(seg: Dict[str, Any], fps: int) -> Tuple[int, int, int, float, float]:
+    """Quantize `(play_frames, hold_frames, frames, play_exact, exact)` with `round()` to match `render.py`/`verify.py`."""
+    eff_fps = max(1, int(fps or 24))
+    src_dur = max(0.04, float(seg["end"]) - float(seg["start"]))
+    is_retimed = abs(_segment_speed(seg) - 1.0) > 1e-3
+    play_dur = _segment_play_duration(seg) if is_retimed else max(0.08, src_dur)
+    hold_tail = _segment_hold_tail(seg)
+    play_frames = max(1, int(round(play_dur * eff_fps)))
+    if hold_tail > 0.001:
+        frames = max(play_frames, int(round(max(0.08, _segment_duration(seg)) * eff_fps)))
+    else:
+        frames = play_frames
+    hold_frames = max(0, frames - play_frames)
+    return play_frames, hold_frames, frames, play_frames / float(eff_fps), frames / float(eff_fps)
+
+
 def _normalize_mark_type(mark_type: str) -> str:
     """Normalize mark classification strings into `'right'` or `'wrong'`."""
     fn = getattr(_common, "_normalize_mark_type", None) or getattr(_common, "normalize_mark_type", None)
@@ -2422,13 +2438,12 @@ def build_segment_cache_key(
             "offset_y": _parse_offset_y(peer.get("offset_y")),
         }
 
-    eff_fps = int(fps or 24)
+    eff_fps = max(1, int(fps or 24))
     spd = _segment_speed(seg)
     is_muted = _segment_is_muted(seg)
     is_beat = _segment_is_beat(seg)
-    play_dur = _segment_play_duration(seg)
     hold_tail = _segment_hold_tail(seg)
-    play_exact = max(1, int(math.ceil(play_dur * eff_fps - 1e-6))) / float(eff_fps)
+    _, _, _, play_exact, _ = _quantize_segment_frames(seg, eff_fps)
     rz0, rz1, rz_style, rz_at, rz_dur = resolve_segment_zoom_spec(seg, play_exact)
     rz_peak = _resolve_zoom_peak(seg, rz0, rz1, rz_style)
     active_panel = _resolve_active_slot(seg)
@@ -2461,7 +2476,7 @@ def build_segment_cache_key(
 
     plan_loudness = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
     payload = {
-        "v": 18,
+        "v": 19,
         "src": _file_mtime_sig(seg["src"]),
         "start": round(float(seg["start"]), 4),
         "end": round(float(seg["end"]), 4),
@@ -2789,19 +2804,14 @@ def build_segment_ffmpeg_args(
     """
     plan = plan or {}
     W, H = even(W), even(H)
-    fps = int(fps or 24)
+    fps = max(1, int(fps or 24))
     src_dur = max(0.04, float(seg["end"]) - float(seg["start"]))
     spd = _segment_speed(seg)
     is_retimed = abs(spd - 1.0) > 1e-3
     is_muted = _segment_is_muted(seg)
-    play_dur = _segment_play_duration(seg) if is_retimed else max(0.08, src_dur)
+    dur = _segment_play_duration(seg) if is_retimed else max(0.08, src_dur)
     hold_tail = _segment_hold_tail(seg)
-    play_frames = max(1, int(math.ceil(play_dur * fps - 1e-6)))
-    play_exact = play_frames / float(fps)
-    hold_frames = max(0, int(round(hold_tail * fps)))
-    frames = play_frames + hold_frames
-    exact = frames / float(fps)
-    dur = play_dur
+    play_frames, hold_frames, frames, play_exact, exact = _quantize_segment_frames(seg, fps)
 
     lay = normalize_layout_name(seg.get("layout"))
     z0, z1, zoom_style, zoom_at, zoom_dur = resolve_segment_zoom_spec(seg, play_exact)

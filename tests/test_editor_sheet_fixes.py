@@ -40,6 +40,7 @@ if str(ROOT / "scripts") not in sys.path:
 import common  # noqa: E402
 import edl_parser  # noqa: E402
 import flashcard_placer  # noqa: E402
+import layouts  # noqa: E402
 import render  # noqa: E402
 import script_order  # noqa: E402
 import subtitles  # noqa: E402
@@ -901,6 +902,29 @@ class EditorSheetFixesTests(unittest.TestCase):
             bleed_slice = pcm[int(1.03 * sr) : int(1.90 * sr)]
             bleed_rms_db = 20.0 * math.log10(max(float(np.sqrt(np.mean(bleed_slice * bleed_slice))), 1e-10))
             self.assertLess(bleed_rms_db, -60.0, f"Audio bled into cut B past 16ms splice: {bleed_rms_db:.1f} dBFS")
+
+    def test_layouts_frame_quantization_matches_verify_timeline(self) -> None:
+        """Multi-cut 24fps timelines must not accumulate +1 frame/cut ceil drift against verify.py."""
+        sample_durs = [
+            0.42, 2.71, 1.70, 2.38, 2.30, 2.71, 2.10, 1.34, 1.25, 5.19,
+            9.00, 3.05, 2.86, 2.47, 9.85, 0.63, 3.11, 3.78, 7.87, 4.09, 7.64,
+        ]
+        segs = [
+            {"id": f"L{i + 1}", "src": "missing_clip.mp4", "start": 0.50, "end": round(0.50 + d, 2)}
+            for i, d in enumerate(sample_durs)
+        ]
+        segs.append({"id": "L22", "src": "missing_clip.mp4", "start": 0.50, "end": 1.52, "hold_tail": 0.45})
+        plan = {"canvas": {"width": 720, "height": 1280, "fps": 24}, "segments": segs}
+
+        _, _, verify_total, _ = verify.compute_timeline_starts(plan, 24)
+        layout_total = 0.0
+        for idx, seg in enumerate(segs):
+            _, exact, frames = layouts.build_segment_ffmpeg_args(seg, plan, 720, 1280, 24, Path(f"/tmp/seg_{idx}.mkv"))
+            expected_frames = max(1, round(common.segment_duration(seg) * 24))
+            self.assertEqual(frames, expected_frames, f"Frame mismatch on {seg['id']}")
+            layout_total += exact
+
+        self.assertAlmostEqual(layout_total, verify_total, delta=1e-6)
 
 
 if __name__ == "__main__":
