@@ -252,7 +252,7 @@ def _archive_blocked(stage: str, reason: str, script_arg: str = "", inputs: Opti
         pass
 
 
-SESSION_LIMIT = 1_000_000   # multi-video queued chats up to 1M tokens; config/cost_controls.json owns policy
+SESSION_LIMIT = 5_000_000   # chat-size block (owner: 5M); config/cost_controls.json owns policy
 SESSION_WARN = 750_000
 
 

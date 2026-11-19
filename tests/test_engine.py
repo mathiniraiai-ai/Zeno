@@ -2690,7 +2690,7 @@ class TestNewChatGate(unittest.TestCase):
         import tempfile
         import chat_guard
         with tempfile.TemporaryDirectory() as td:
-            self._log(Path(td), str(ROOT), [60_000, 1_200_000])
+            self._log(Path(td), str(ROOT), [60_000, 6_000_000])
             path = str(Path(td) / ".claude" / "projects" / "-zeno" / "sess1.jsonl")
             new = "/zeno ~/RAW https://docs.google.com/document/d/abc/edit?tab=t.1"
             self.assertEqual(chat_guard.decide({"prompt": new, "transcript_path": path}), "")
@@ -2709,7 +2709,7 @@ class TestNewChatGate(unittest.TestCase):
         from unittest.mock import patch
         import agent_log
         import zeno
-        big = {"tokens": 1_200_000, "steps": 60, "session": "s", "file": "f"}
+        big = {"tokens": 6_000_000, "steps": 60, "session": "s", "file": "f"}
         with patch.object(agent_log, "session_size", return_value=big), patch.object(zeno, "_archive_blocked") as arch, \
                 patch("sys.stdout", new_callable=io.StringIO) as out:
             with self.assertRaises(SystemExit) as cm:
@@ -2720,7 +2720,7 @@ class TestNewChatGate(unittest.TestCase):
         for size in (
             None,
             {"tokens": 25_000, "steps": 3, "session": "s", "file": "f"},
-            {"tokens": 99_000, "steps": 5, "session": "s", "file": "f"},
+            {"tokens": 4_900_000, "steps": 5, "session": "s", "file": "f"},
         ):
             with patch.object(agent_log, "session_size", return_value=size), patch("sys.stdout", new_callable=io.StringIO) as out:
                 zeno.session_gate("inspect", block=True)   # no exit

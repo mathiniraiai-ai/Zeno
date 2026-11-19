@@ -16,7 +16,7 @@ import zeno_mcp
 class TestPlannerStopRouting(unittest.TestCase):
     def test_shared_chat_allowed_only_for_isolated_planning(self):
         import agent_log
-        measured = {"tokens": 1500000, "steps": 50}
+        measured = {"tokens": 6000000, "steps": 50}
         with patch.object(agent_log, "session_size", return_value=measured), \
                 patch.object(zeno, "_archive_blocked"), contextlib.redirect_stdout(io.StringIO()):
             zeno.session_gate("inspect", block=True, isolated_planner=True)

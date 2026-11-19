@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-LIMIT = 1_000_000
+LIMIT = 5_000_000
 _NEW_EDIT = re.compile(r"(?is)^\s*/(zeno|edit)\b|docs\.google\.com/document/")
 _CONTINUE = re.compile(r"(?i)\bcontinue the edit\b")
 _ISOLATED = re.compile(r"(?i)^\s*/zeno\b|(?<!\S)--auto-plan\b")
