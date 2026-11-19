@@ -1336,7 +1336,9 @@ def main() -> None:
         import preflight
 
         common.job_start_epoch()
-        session_gate("preflight", block=True, script_arg=args.script or "", inputs=args.inputs)
+        # Preflight only measures the computer. /zeno plans in an isolated call, so the size of this chat must not stop it
+        # (a fresh chat can already hold 100k+ of tool lists, skills and instructions); the real guard is at --inspect.
+        session_gate("preflight", block=True, script_arg=args.script or "", inputs=args.inputs, isolated_planner=True)
         print("\nZeno pre-job checks (live)")
         checks = preflight.run_system_checks()
         preflight.print_checks(checks)

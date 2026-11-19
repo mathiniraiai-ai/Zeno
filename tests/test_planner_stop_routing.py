@@ -23,6 +23,11 @@ class TestPlannerStopRouting(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 zeno.session_gate("inspect", block=True, isolated_planner=False)
 
+    def test_preflight_is_not_blocked_by_a_fresh_chat_that_already_starts_large(self):
+        src = (Path(zeno.__file__)).read_text(encoding="utf-8")
+        line = next(l for l in src.splitlines() if 'session_gate("preflight"' in l)
+        self.assertIn("isolated_planner=True", line)
+
     def test_zero_response_budget_failure_does_not_offer_manual_packet(self):
         with tempfile.TemporaryDirectory() as tmp:
             plan = Path(tmp) / "plan.edl"
