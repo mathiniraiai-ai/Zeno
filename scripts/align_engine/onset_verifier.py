@@ -1,35 +1,32 @@
-"""
-FlowAlign-v1 — Acoustic Onset Verification & Boundary Correction Layer
-Analyzes local waveform energy, spectral flux, and CTC emission curves to lock
-the exact physical vocal onset time and prevent early-trigger artifacts.
-"""
+"""Acoustic onset and offset verification against raw waveform RMS energy and flux."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
-from typing import Optional, List, Dict, Any, Tuple
 
 
 class AcousticOnsetVerifier:
-    """
-    Acoustic Onset Detector & Boundary Refiner.
-    Verifies candidate word boundaries against the raw audio waveform.
-    """
+    """Verifies and refines CTC word boundaries against short-time waveform energy."""
+
     def __init__(self, sample_rate: int = 16000, hop_length: int = 160):
         self.sample_rate = sample_rate
-        self.hop_length = hop_length  # 160 samples = 10ms resolution for onset detection
+        self.hop_length = hop_length  # 160 samples @ 16 kHz = 10 ms resolution
 
     def compute_energy_envelope(self, waveform: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Computes short-time root-mean-square (RMS) energy envelope using fast vectorized NumPy."""
-        frame_length = 320  # 20ms window
+        """Compute normalized 20 ms short-time RMS energy envelope at 10 ms hop intervals."""
+        frame_length = 320  # 20 ms window
         y = np.asarray(waveform, dtype=np.float32)
         if len(y) == 0:
             return np.zeros(1, dtype=np.float32), np.zeros(1, dtype=np.float32)
         pad = frame_length // 2
         y_padded = np.pad(y, (pad, pad), mode="constant")
         if len(y_padded) < frame_length:
-            rms = np.array([ float(np.sqrt(np.mean(y_padded ** 2))) ], dtype=np.float32)
+            rms = np.array([float(np.sqrt(np.mean(y_padded ** 2)))], dtype=np.float32)
         else:
-            windows = sliding_window_view(y_padded, window_shape=frame_length)[::self.hop_length]
+            windows = sliding_window_view(y_padded, window_shape=frame_length)[:: self.hop_length]
             rms = np.sqrt(np.mean(windows ** 2, axis=-1))
         max_rms = float(np.max(rms)) if len(rms) > 0 and np.max(rms) > 0 else 1.0
         norm_rms = rms / max_rms
@@ -37,7 +34,7 @@ class AcousticOnsetVerifier:
         return norm_rms, times
 
     def compute_spectral_onset(self, waveform: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Computes fast first-order positive energy flux / onset strength envelope."""
+        """Compute normalized positive first-order RMS energy flux."""
         norm_rms, times = self.compute_energy_envelope(waveform)
         flux = np.maximum(0.0, np.diff(norm_rms, prepend=norm_rms[:1]))
         max_onset = float(np.max(flux)) if len(flux) > 0 and np.max(flux) > 0 else 1.0
@@ -48,90 +45,64 @@ class AcousticOnsetVerifier:
         self,
         words: List[Dict[str, Any]],
         waveform: np.ndarray,
-        duration_sec: float
+        duration_sec: float,
     ) -> List[Dict[str, Any]]:
-        """
-        Refines each candidate word's start timestamp by detecting the true acoustic onset.
-        
-        Rules:
-          1. Examine search window: [candidate_start - 0.10s, candidate_start + 0.35s]
-          2. Locate the steepest rise in vocal energy / spectral flux.
-          3. If the candidate start falls in quiet silence before vocal attack, 
-             snap the onset forward to the rising edge.
-        """
+        """Snap early candidate word starts forward out of leading silence onto vocal attack."""
         if not words or len(waveform) == 0:
             return words
 
         rms_env, rms_times = self.compute_energy_envelope(waveform)
-        onset_env, onset_times = self.compute_spectral_onset(waveform)
-
         refined_words: List[Dict[str, Any]] = []
 
         for i, w in enumerate(words):
             raw_start = w["start"]
             raw_end = w["end"]
-            
-            # If word is at timeline origin or invalid, pass through
+
             if raw_start < 0.05:
-                refined_words.append({
-                    **w,
-                    "onset_confidence": 0.95
-                })
+                refined_words.append({**w, "onset_confidence": 0.95})
                 continue
 
-            # Define local search window around candidate start
             window_min = max(0.0, raw_start - 0.08)
             window_max = min(duration_sec, raw_start + 0.35)
 
-            # Find frames in window
             mask = (rms_times >= window_min) & (rms_times <= window_max)
             win_times = rms_times[mask]
             win_rms = rms_env[mask]
-            win_onset = onset_env[mask]
 
             if len(win_rms) < 3:
-                refined_words.append({
-                    **w,
-                    "onset_confidence": 0.80
-                })
+                refined_words.append({**w, "onset_confidence": 0.80})
                 continue
 
-            # Combined acoustic energy index: 0.6 * RMS + 0.4 * Spectral Flux
-            combined_energy = 0.6 * win_rms + 0.4 * win_onset
-
-            # Threshold for audible speech onset (relative to local background)
             bg_floor = np.percentile(win_rms, 20)
             voice_threshold = bg_floor + 0.15 * (np.max(win_rms) - bg_floor)
-
-            # Find the first frame exceeding vocal threshold
             exceeding_indices = np.where(win_rms >= voice_threshold)[0]
 
             if len(exceeding_indices) > 0:
                 onset_idx = exceeding_indices[0]
                 detected_onset_sec = float(win_times[onset_idx])
-                
-                # Check energy gradient slope
+
                 if onset_idx > 0:
                     gradient = win_rms[onset_idx] - win_rms[onset_idx - 1]
                     onset_conf = min(1.0, float(0.7 + gradient))
                 else:
                     onset_conf = 0.85
 
-                # Prevent pushing past end or dragging before previous word
                 prev_start = refined_words[i - 1]["start"] if i > 0 else 0.0
                 clamped_start = max(prev_start + 0.04, min(detected_onset_sec, raw_end - 0.05))
             else:
                 clamped_start = raw_start
                 onset_conf = 0.70
 
-            refined_words.append({
-                "word": w["word"],
-                "start": round(clamped_start, 3),
-                "end": round(raw_end, 3),
-                "confidence": w.get("confidence", 0.90),
-                "onset_confidence": round(onset_conf, 2),
-                "raw_ctc_start": raw_start
-            })
+            refined_words.append(
+                {
+                    "word": w["word"],
+                    "start": round(clamped_start, 3),
+                    "end": round(raw_end, 3),
+                    "confidence": w.get("confidence", 0.90),
+                    "onset_confidence": round(onset_conf, 2),
+                    "raw_ctc_start": raw_start,
+                }
+            )
 
         return refined_words
 
@@ -145,20 +116,15 @@ class AcousticOnsetVerifier:
         rise_frac: float = 0.35,
         phrase_starts_only: bool = True,
     ) -> List[Dict[str, Any]]:
-        """
-        Move a word's start to the nearest real speech onset: the rising edge after a deep energy valley
-        (silence or a clear dip between words) within [start - back_sec, start + fwd_sec].
+        """Snap phrase-initial word starts to the rising edge following a deep energy valley.
 
-        Only phrase starts are touched (the first word, and any word after one ending in . ? ! ... or the danda):
-        inside a sentence, speech has many dips (stop consonants) that look like pauses, and snapping to them
-        moved ordinary words by up to 0.34 s in testing. Only deep valleys count (at least `deep_db` below the local
-        speech level). If no deep valley is near, the start is left alone. Checked on a reference video where CTC put
-        one line start 0.12 s late and another 0.22 s early; both were corrected from the energy curve.
+        By default only phrase starts (word 0 or any word following `. ? ! … । ॥`) are adjusted,
+        avoiding false snaps onto stop-consonant closures inside continuous phrases.
         """
-        sentence_end = ('.', '?', '!', '\u2026', '\u0964', '\u0965')
+        sentence_end = (".", "?", "!", "\u2026", "\u0964", "\u0965")
         if not words or len(waveform) == 0:
             return words
-        rms, times = self.compute_energy_envelope(waveform)
+        rms, _ = self.compute_energy_envelope(waveform)
         if len(rms) < 5:
             return words
         db = 20.0 * np.log10(np.maximum(rms, 1e-5))
@@ -176,12 +142,11 @@ class AcousticOnsetVerifier:
             hi = min(len(db) - 1, int((s + fwd_sec) / hop))
             ctx_lo = max(0, int((s - 0.5) / hop))
             ctx_hi = min(len(db) - 1, int((s + 0.5) / hop))
-            level = float(np.percentile(db[ctx_lo:ctx_hi + 1], 85))
+            level = float(np.percentile(db[ctx_lo : ctx_hi + 1], 85))
             new_start = s
             best = None
             if hi - lo >= 5:
-                seg = db[lo:hi + 1]
-                # candidate valleys: local minima that are deep relative to the speech level
+                seg = db[lo : hi + 1]
                 for k in range(1, len(seg) - 1):
                     if not (seg[k] <= seg[k - 1] and seg[k] <= seg[k + 1]):
                         continue
@@ -193,7 +158,7 @@ class AcousticOnsetVerifier:
                         j += 1
                     onset = max(0.0, (lo + j) * hop - 0.035)
                     if out and onset < out[-1]["end"] - 0.05:
-                        continue   # would start inside the previous word (CTC word ends run early, so allow 50 ms)
+                        continue
                     if best is None or abs(onset - s) < abs(best - s):
                         best = onset
             if best is not None:
@@ -215,11 +180,7 @@ class AcousticOnsetVerifier:
         max_extend_sec: float = 0.35,
         drop_db: float = 24.0,
     ) -> List[Dict[str, Any]]:
-        """
-        CTC marks a word's end at its last emitting frame, which is 80-160 ms before the syllable coda really stops.
-        Extend each end forward while the energy stays within `drop_db` of the word's own level, up to `max_extend_sec`,
-        plus a +45 ms coda release guard, and never into the next word. Ends are only extended, never shortened.
-        """
+        """Extend CTC word end timestamps to cover full syllable coda decay without overlapping the next word."""
         if not words or len(waveform) == 0:
             return words
         rms, _ = self.compute_energy_envelope(waveform)
@@ -236,22 +197,24 @@ class AcousticOnsetVerifier:
             if b <= a:
                 out.append(dict(w))
                 continue
-            level = float(np.percentile(db[a:b + 1], 85))
+            level = float(np.percentile(db[a : b + 1], 85))
             k = b
             limit = min(len(db) - 1, int((e + max_extend_sec) / hop))
             while k < limit and db[k + 1] >= level - drop_db:
                 k += 1
             target = max(e, k * hop + 0.045)
-            # extend, but never run into the next word; also trim any overlap CTC left between neighbours
             end = min(target, nxt) if nxt - target < 0.015 else min(target, nxt - 0.015)
             out.append({**w, "end": round(max(float(w["start"]) + 0.05, end), 3)})
         return out
 
-    def silent_runs(self, waveform: np.ndarray, floor_db: float = -58.0, min_run_sec: float = 0.12) -> List[Tuple[float, float]]:
-        """Stretches with no sound at all: at least `min_run_sec` long and `floor_db` below the loudest sound in the audio.
-        Short dips inside words (stop-consonant closures) are shorter than that and are never counted. In a noisy
-        recording nothing counts as silent, which is the safe direction: the aligner then works as before."""
-        rms, times = self.compute_energy_envelope(waveform)
+    def silent_runs(
+        self,
+        waveform: np.ndarray,
+        floor_db: float = -58.0,
+        min_run_sec: float = 0.12,
+    ) -> List[Tuple[float, float]]:
+        """Return contiguous intervals at least `min_run_sec` long whose RMS energy stays below `floor_db`."""
+        rms, _ = self.compute_energy_envelope(waveform)
         if len(rms) < 5:
             return []
         db = 20.0 * np.log10(np.maximum(rms, 1e-7))
@@ -271,10 +234,13 @@ class AcousticOnsetVerifier:
                 i += 1
         return runs
 
-    def clamp_words_to_sound(self, words: List[Dict[str, Any]], waveform: np.ndarray, extra_runs: Optional[List[Tuple[float, float]]] = None) -> List[Dict[str, Any]]:
-        """Last check on every word: a word's start and end must lie where there is sound. An end that runs into silence is
-        pulled back to the last sound inside the word; a start in silence moves to the first sound. A word with no sound
-        anywhere inside it is flagged `no_sound` (its time cannot be trusted). Never lengthens a word."""
+    def clamp_words_to_sound(
+        self,
+        words: List[Dict[str, Any]],
+        waveform: np.ndarray,
+        extra_runs: Optional[List[Tuple[float, float]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Clamp word start and end timestamps out of confirmed silence intervals; flag words lying wholly in silence."""
         runs = sorted(set(self.silent_runs(waveform)) | set(extra_runs or []))
         if not runs or not words:
             return words
@@ -284,13 +250,13 @@ class AcousticOnsetVerifier:
             ns, ne = s, e
             for a, b in runs:
                 if b <= s or a >= e:
-                    continue                                   # this silence does not touch the word
+                    continue
                 if a <= s + 0.10 and b < e - 0.05:
-                    ns = max(ns, b - 0.02)                     # word starts in silence: move to the first sound
+                    ns = max(ns, b - 0.02)
                 elif a > s and b >= e - 0.10:
-                    ne = min(ne, a + 0.04)                     # word runs on into silence (also when it overshoots the silence): end at the last sound
+                    ne = min(ne, a + 0.04)
                 elif a <= s + 0.10 and b >= e - 0.10:
-                    ns, ne = s, s                              # the whole word lies in silence
+                    ns, ne = s, s
             nw = dict(w)
             if ne - ns < 0.03 and any(a <= s and e <= b for a, b in runs):
                 nw["no_sound"] = True
@@ -306,13 +272,9 @@ class AcousticOnsetVerifier:
         start_sec: float,
         end_sec: float,
         waveform: np.ndarray,
-        duration_sec: float
+        duration_sec: float,
     ) -> Tuple[float, float]:
-        """
-        Wave Model Acoustic Boundary Refiner for ScriptCut-AI segment cuts:
-        Snaps both the start (vocal attack) and end (vocal decay) of a spoken take
-        using 10ms RMS energy + spectral flux analysis so no phoneme or breath is clipped.
-        """
+        """Refine segment cut start (vocal attack) and end (vocal decay) using 10 ms RMS energy."""
         if len(waveform) == 0 or end_sec <= start_sec:
             return round(start_sec, 3), round(end_sec, 3)
 
@@ -320,7 +282,6 @@ class AcousticOnsetVerifier:
         if len(rms_env) < 3:
             return round(start_sec, 3), round(end_sec, 3)
 
-        # 1. Refine start (onset) in [start_sec - 0.12s, start_sec + 0.25s]
         s_min = max(0.0, start_sec - 0.12)
         s_max = min(duration_sec, start_sec + 0.25)
         s_mask = (rms_times >= s_min) & (rms_times <= s_max)
@@ -334,7 +295,6 @@ class AcousticOnsetVerifier:
             if len(idx) > 0:
                 refined_start = float(s_times[idx[0]])
 
-        # 2. Refine end (offset/decay) in [end_sec - 0.20s, end_sec + 0.18s]
         e_min = max(refined_start + 0.08, end_sec - 0.20)
         e_max = min(duration_sec, end_sec + 0.18)
         e_mask = (rms_times >= e_min) & (rms_times <= e_max)

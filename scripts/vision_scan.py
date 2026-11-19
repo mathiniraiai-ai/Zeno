@@ -1,108 +1,234 @@
 #!/usr/bin/env python3
-"""Watch the face tracker work: scan a clip frame by frame with the same YuNet detector Zeno uses, print one line per frame, and report each frame
-(a small picture plus the faces found) to the desktop app's live view. It measures only; it changes nothing.
+"""Live Frame-by-Frame YuNet Face Scanner & Event Telemetry Reporter (`vision_scan.py`).
 
-    python3 scripts/vision_scan.py "<clip or folder>" [--step 0.5] [--max 60] [--project <work folder>]
+Scans source video clips at fixed time steps using `vision_tracker`, writes compact
+JPEG frame thumbnails into `work/<project>/_scan/`, and emits `"scan"` telemetry events
+for desktop live inspection without mutating source media or edit plans.
+
+Usage:
+    python3 scripts/vision_scan.py "<clip_or_folder>" [--step 0.5] [--max 60] [--project <name>]
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Union
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import events  # noqa: E402
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+ROOT: Path = _SCRIPTS_DIR.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
 
-THUMB_W = 220
-VIDEO_EXT = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
+try:
+    import events  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover
+    events = None  # type: ignore[assignment]
+
+THUMB_W: int = 220
+VIDEO_EXT: Set[str] = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
 
 
-def _face_row(f: Dict[str, Any]) -> Dict[str, Any]:
-    return {"box": f.get("bbox_norm"), "eyes": f.get("eye_center_norm"), "mouth": f.get("mouth_roi_norm"), "mar": round(float(f.get("mar_score") or 0), 3),
-            "speaking": bool(f.get("is_speaking")), "conf": round(float(f.get("confidence") or 0), 2)}
+def _resolve_active_project_dir(project_dir: Optional[Union[str, Path]] = None) -> Optional[Path]:
+    """Resolve the active job work directory for thumbnail and event recording."""
+    if project_dir is not None:
+        return Path(project_dir)
+    if events is None:
+        return None
+    if hasattr(events, "_project_dir"):
+        return events._project_dir()
+    if hasattr(events, "project_dir"):
+        return events.project_dir()
+    job_name = os.environ.get("ZENO_JOB_PROJECT", "").strip()
+    if job_name:
+        work_root = Path(getattr(events, "WORK", ROOT / "work"))
+        return work_root / job_name
+    return None
 
 
-def record(clip_name: str, t: float, frame: Any, faces: List[Dict[str, Any]], i: int, n: int, ms: float, project_dir: Optional[Path] = None, thumb_w: int = THUMB_W) -> None:
-    """Save a small picture of the scanned frame and report it. Never raises."""
+def _face_row(face: Dict[str, Any]) -> Dict[str, Any]:
+    """Format a detected face dictionary into a compact telemetry event record."""
+    return {
+        "box": face.get("bbox_norm"),
+        "eyes": face.get("eye_center_norm"),
+        "mouth": face.get("mouth_roi_norm"),
+        "mar": round(float(face.get("mar_score") or 0.0), 3),
+        "speaking": bool(face.get("is_speaking")),
+        "conf": round(float(face.get("confidence") or 0.0), 2),
+    }
+
+
+def record(
+    clip_name: str,
+    t: float,
+    frame: Any,
+    faces: List[Dict[str, Any]],
+    i: int,
+    n: int,
+    ms: float,
+    project_dir: Optional[Path] = None,
+    thumb_w: int = THUMB_W,
+) -> None:
+    """Persist a compact frame thumbnail and emit a `"scan"` event. Never raises."""
     try:
         import cv2
 
-        d = project_dir or events._project_dir()
-        if d is None or not d.is_dir():
+        target_dir = _resolve_active_project_dir(project_dir)
+        if target_dir is None or not target_dir.is_dir() or frame is None:
             return
-        out = d / "_scan"
-        out.mkdir(exist_ok=True)
+
+        scan_dir = target_dir / "_scan"
+        scan_dir.mkdir(exist_ok=True)
         h, w = frame.shape[:2]
-        thumb = cv2.resize(frame, (thumb_w, max(1, int(h * thumb_w / w))), interpolation=cv2.INTER_AREA)
-        stem = "".join(c if c.isalnum() else "_" for c in Path(clip_name).stem)[:24]
-        f = out / f"{stem}_{i:03d}.jpg"
-        cv2.imwrite(str(f), thumb, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
-        events.emit("scan", f"{clip_name} {t:.2f}s: {len(faces)} face(s), {ms:.0f} ms", clip=clip_name, t_clip=round(t, 2), i=i, n=n, ms=round(ms, 1),
-                    faces=[_face_row(x) for x in faces], thumb=str(f), size=[w, h])
-    except Exception:   # noqa: BLE001
+        if h <= 0 or w <= 0:
+            return
+
+        tw = max(16, int(thumb_w))
+        th = max(1, int(h * tw / w))
+        thumb = cv2.resize(frame, (tw, th), interpolation=cv2.INTER_AREA)
+
+        safe_stem = "".join(ch if ch.isalnum() else "_" for ch in Path(clip_name).stem)[:24] or "clip"
+        thumb_path = scan_dir / f"{safe_stem}_{int(i):03d}.jpg"
+        cv2.imwrite(str(thumb_path), thumb, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
+
+        if events is not None and hasattr(events, "emit"):
+            events.emit(
+                "scan",
+                f"{clip_name} {t:.2f}s: {len(faces)} face(s), {ms:.0f} ms",
+                clip=clip_name,
+                t_clip=round(float(t), 2),
+                i=int(i),
+                n=int(n),
+                ms=round(float(ms), 1),
+                faces=[_face_row(f) for f in faces],
+                thumb=str(thumb_path),
+                size=[int(w), int(h)],
+            )
+    except Exception:
         pass
 
 
-def scan_clip(path: Path, step: float = 0.5, max_frames: int = 60, project: Optional[str] = None, pause: float = 0.0, echo: bool = True, thumb_w: int = THUMB_W) -> List[Dict[str, Any]]:
+def scan_clip(
+    path: Union[str, Path],
+    step: float = 0.5,
+    max_frames: int = 60,
+    project: Optional[str] = None,
+    pause: float = 0.0,
+    echo: bool = True,
+    thumb_w: int = THUMB_W,
+) -> List[Dict[str, Any]]:
+    """Scan a single video clip at `step`-second intervals with the YuNet face detector."""
     import cv2
     import vision_tracker
 
-    if project:
+    clip_path = Path(path)
+    if project and events is not None and hasattr(events, "set_project"):
         events.set_project(project)
-    cap = cv2.VideoCapture(str(path))
+
+    cap = cv2.VideoCapture(str(clip_path))
     if not cap.isOpened():
-        raise SystemExit(f"Cannot open {path}")
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    dur = total / fps if total else 0.0
-    times = []
-    t = 0.0
-    while t < dur and len(times) < max_frames:
-        times.append(t)
-        t += step
+        raise SystemExit(f"Cannot open video clip: {clip_path}")
+
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0) or 25.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    duration = total_frames / fps if total_frames > 0 else 0.0
+
+    step_sec = max(0.04, float(step))
+    times: List[float] = []
+    t_cur = 0.0
+    while t_cur < duration and len(times) < int(max_frames):
+        times.append(t_cur)
+        t_cur += step_sec
+
     if echo:
-        print(f"{path.name}: {dur:.1f} s, {fps:.0f} fps, scanning {len(times)} frames (one every {step:g} s) with the YuNet face detector")
+        print(
+            f"{clip_path.name}: {duration:.1f} s, {fps:.0f} fps, scanning {len(times)} frames "
+            f"(every {step_sec:g} s) with YuNet face detector"
+        )
+
     rows: List[Dict[str, Any]] = []
-    for i, tt in enumerate(times, 1):
-        cap.set(cv2.CAP_PROP_POS_MSEC, tt * 1000.0)
+    for idx, ts in enumerate(times, 1):
+        cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000.0)
         ok, frame = cap.read()
         if not ok or frame is None:
             continue
+
         t0 = time.perf_counter()
         faces = vision_tracker.prominent_faces(vision_tracker.detect_faces_in_frame(frame))
-        ms = (time.perf_counter() - t0) * 1000.0
-        record(path.name, tt, frame, faces, i, len(times), ms, thumb_w=thumb_w)
-        rows.append({"t": tt, "faces": len(faces), "ms": ms})
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+        record(clip_path.name, ts, frame, faces, idx, len(times), elapsed_ms, thumb_w=thumb_w)
+        rows.append({"t": ts, "faces": len(faces), "ms": elapsed_ms})
+
         if echo:
-            desc = "  ".join(f"[{(f['bbox_norm'][0] + f['bbox_norm'][2]) / 2:.2f},{(f['bbox_norm'][1] + f['bbox_norm'][3]) / 2:.2f}]{' speaking' if f.get('is_speaking') else ''}" for f in faces)
-            print(f"  frame {i:>3}/{len(times)}  t={tt:5.2f}s  {len(faces)} face(s)  {ms:4.0f} ms  {desc}", flush=True)
-        if pause:
+            desc = "  ".join(
+                f"[{(f['bbox_norm'][0] + f['bbox_norm'][2]) / 2:.2f},"
+                f"{(f['bbox_norm'][1] + f['bbox_norm'][3]) / 2:.2f}]"
+                f"{' speaking' if f.get('is_speaking') else ''}"
+                for f in faces
+            )
+            print(
+                f"  frame {idx:>3}/{len(times)}  t={ts:5.2f}s  {len(faces)} face(s)  "
+                f"{elapsed_ms:4.0f} ms  {desc}",
+                flush=True,
+            )
+        if pause > 0.0:
             time.sleep(pause)
+
     cap.release()
+
     if echo and rows:
-        print(f"  done: {len(rows)} frames, average {sum(r['ms'] for r in rows) / len(rows):.0f} ms a frame")
-    events.emit("info", f"{path.name}: scanned {len(rows)} frames, faces seen in {sum(1 for r in rows if r['faces'])}", clip=path.name)
+        avg_ms = sum(r["ms"] for r in rows) / len(rows)
+        print(f"  done: {len(rows)} frames, average {avg_ms:.0f} ms/frame")
+
+    if events is not None and hasattr(events, "emit"):
+        faces_seen = sum(1 for r in rows if r["faces"] > 0)
+        events.emit(
+            "info",
+            f"{clip_path.name}: scanned {len(rows)} frames, faces seen in {faces_seen}",
+            clip=clip_path.name,
+        )
     return rows
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("clips", nargs="+")
-    ap.add_argument("--step", type=float, default=0.5, help="seconds between scanned frames")
-    ap.add_argument("--max", type=int, default=60, help="most frames per clip")
-    ap.add_argument("--project", default=None, help="work folder to report to (default: the latest job)")
-    ap.add_argument("--pause", type=float, default=0.0, help="wait this long after each frame (to watch it live)")
-    ap.add_argument("--thumb", type=int, default=THUMB_W, help="width in pixels of the picture saved for each frame")
-    a = ap.parse_args()
-    clips: List[Path] = []
-    for c in a.clips:                      # a folder means every video in it
-        q = Path(c)
-        clips += sorted(x for x in q.iterdir() if x.suffix.lower() in VIDEO_EXT and not x.name.startswith(".")) if q.is_dir() else [q]
-    for c in clips:
-        scan_clip(c, a.step, a.max, a.project, a.pause, thumb_w=a.thumb)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("clips", nargs="+", help="Video file(s) or folder(s) to scan")
+    parser.add_argument("--step", type=float, default=0.5, help="Seconds between scanned frames")
+    parser.add_argument("--max", type=int, default=60, help="Maximum frames scanned per clip")
+    parser.add_argument("--project", default=None, help="Work project name to report events into")
+    parser.add_argument("--pause", type=float, default=0.0, help="Delay in seconds after each frame")
+    parser.add_argument("--thumb", type=int, default=THUMB_W, help="Thumbnail width in pixels")
+    args = parser.parse_args()
+
+    clip_paths: List[Path] = []
+    for raw in args.clips:
+        target = Path(raw)
+        if target.is_dir():
+            clip_paths.extend(
+                sorted(
+                    p
+                    for p in target.iterdir()
+                    if p.is_file() and p.suffix.lower() in VIDEO_EXT and not p.name.startswith(".")
+                )
+            )
+        else:
+            clip_paths.append(target)
+
+    for clip_path in clip_paths:
+        scan_clip(
+            clip_path,
+            step=args.step,
+            max_frames=args.max,
+            project=args.project,
+            pause=args.pause,
+            thumb_w=args.thumb,
+        )
     return 0
 
 

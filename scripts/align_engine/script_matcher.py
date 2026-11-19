@@ -1,18 +1,18 @@
-"""
-ScriptCut-AI / Claude Editor — Precision Script-to-Take Word-Window Aligner,
-Retake/Fumble Eliminator & Zoom/SFX Planner.
-Standalone adaptation with zero external dependencies on `src.config` or `src.schemas`.
-"""
+"""Script-to-take word-window matcher, stumble/retake eliminator, and segment planner."""
 
-import re
-import json
+from __future__ import annotations
+
 import functools
-from dataclasses import dataclass, field, asdict
+import json
+import re
+from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from .phonetics.indic_phonemes import IndicPhoneticMapper
-
+try:
+    from .phonetics.indic_phonemes import IndicPhoneticMapper
+except ImportError:
+    from .pipeline import IndicPhoneticMapper
 
 PAUSE_SPLIT_SEC = 0.35
 FUMBLE_MAX_GAP_SEC = 1.0
@@ -120,16 +120,13 @@ class DroppedTake:
 
 
 def _w_str(w: Dict[str, Any]) -> str:
-    """Extracts word text whether key is 'word' or 'w'."""
+    """Extract word text whether stored under `'word'` or `'w'`."""
     val = w.get("word") if "word" in w else w.get("w", "")
     return str(val or "").strip()
 
 
 def parse_target_script(script_text_or_path: str) -> List[str]:
-    """
-    Parses a target script from either a file path (.txt, .md, .json) or raw multiline string
-    into an ordered list of clean dialogue lines.
-    """
+    """Parse a target script from a file path (`.txt`, `.md`, `.json`) or multiline string into dialogue lines."""
     raw = str(script_text_or_path)
     if "\n" not in raw and len(raw) < 4096:
         try:
@@ -150,9 +147,9 @@ def parse_target_script(script_text_or_path: str) -> List[str]:
                     for item in data
                     if str(item).strip()
                 ]
-            elif isinstance(data, dict) and "lines" in data:
+            if isinstance(data, dict) and "lines" in data:
                 return [str(x).strip() for x in data["lines"] if str(x).strip()]
-            elif isinstance(data, dict) and "segments" in data:
+            if isinstance(data, dict) and "segments" in data:
                 return [str(s.get("script_line", "")).strip() for s in data["segments"] if s.get("script_line")]
         except Exception:
             pass
@@ -173,12 +170,12 @@ def parse_target_script(script_text_or_path: str) -> List[str]:
 
 
 def _clean_unicode_token(word: str) -> str:
-    """Preserves all Unicode letters/marks (Devanagari, Tamil, Telugu, Kannada, Malayalam, Latin, digits) in lowercase."""
+    """Keep Unicode letters, combining marks (Indic `0900..0D7F`), Latin letters, and digits in lowercase."""
     return re.sub(r"[^\w\u0900-\u0D7F']", "", str(word).lower()).strip()
 
 
 def _phonetic_token(word: str) -> str:
-    """Maps any word (Native Indic or Latin) to its normalized Roman phonetic representation."""
+    """Convert any native Indic or Latin token to its normalized Roman phonetic representation."""
     u = _clean_unicode_token(word)
     if not u:
         return ""
@@ -195,11 +192,7 @@ def normalize_phonetic_tokens(text: str, lang: str = "en") -> List[str]:
 
 
 def normalize_dual_tokens(text: str) -> List[Tuple[str, str]]:
-    """
-    Returns a list of `(unicode_token, phonetic_token)` pairs for each word in `text`.
-    Guarantees 1.000 matching when both script and transcript share the same script
-    AND seamless cross-script matching when one is Romanized and the other is Native script.
-    """
+    """Return `(unicode_token, phonetic_token)` pairs for exact same-script and cross-script matching."""
     raw_words = re.findall(r"[\w\u0900-\u0D7F']+", str(text).lower())
     out: List[Tuple[str, str]] = []
     for w in raw_words:
@@ -212,7 +205,7 @@ def normalize_dual_tokens(text: str) -> List[Tuple[str, str]]:
 
 @functools.lru_cache(maxsize=65536)
 def _dual_word_sim(a: Tuple[str, str], b: Tuple[str, str]) -> float:
-    """Computes word-to-word similarity using both exact Unicode and phonetic representations."""
+    """Compute word-level similarity across Unicode and Roman phonetic representations."""
     ua, pa = a
     ub, pb = b
     if ua and ub and ua == ub:
@@ -228,9 +221,7 @@ def compute_dual_span_similarity(
     span_tokens: List[Tuple[str, str]],
     script_tokens: List[Tuple[str, str]],
 ) -> float:
-    """
-    Computes sequence-aware similarity between a candidate word span and a target script line.
-    """
+    """Compute sequence-aware similarity between a candidate word span and a target script line."""
     if not span_tokens or not script_tokens:
         return 0.0
 
@@ -290,16 +281,16 @@ def compute_dual_span_similarity(
 
 
 def compute_take_similarity(take_tokens: List[str], script_tokens: List[str]) -> float:
-    """Backward-compatible helper for single-string phonetic token lists."""
+    """Backward-compatible wrapper over `compute_dual_span_similarity` for single-token lists."""
     dual_a = [(t, t) for t in take_tokens if t]
     dual_b = [(t, t) for t in script_tokens if t]
     return compute_dual_span_similarity(dual_a, dual_b)
 
 
-def filter_fumbles_in_words(words: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Detects rapid-fire immediate word repeats ("the the", "so so") within 1.0s and keeps only the last occurrence.
-    """
+def filter_fumbles_in_words(
+    words: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Detect rapid-fire immediate word stutters (`<= 1.0 s` gap) and retain only the final attempt."""
     kept: List[Dict[str, Any]] = []
     fumbles: List[Dict[str, Any]] = []
     i = 0
@@ -321,11 +312,13 @@ def filter_fumbles_in_words(words: List[Dict[str, Any]]) -> Tuple[List[Dict[str,
                 break
 
         if j - i >= 2:
-            fumbles.append({
-                "start": float(words[i].get("start", 0.0)),
-                "end": float(words[j - 2].get("end", 0.0)),
-                "text": " ".join(_w_str(w) for w in words[i:j]),
-            })
+            fumbles.append(
+                {
+                    "start": float(words[i].get("start", 0.0)),
+                    "end": float(words[j - 2].get("end", 0.0)),
+                    "text": " ".join(_w_str(w) for w in words[i:j]),
+                }
+            )
             kept.append(words[j - 1])
         else:
             kept.append(words[i])
@@ -338,10 +331,7 @@ def group_words_into_utterances(
     words: List[Dict[str, Any]],
     pause_split_sec: float = PAUSE_SPLIT_SEC,
 ) -> List[Dict[str, Any]]:
-    """
-    Splits aligned words into natural sentence/clause utterances on pauses >= `pause_split_sec`
-    or sentence-ending punctuation (`.?!।`).
-    """
+    """Group aligned words into clause/sentence utterances on pauses `>= pause_split_sec` or `.?!।`."""
     utterances: List[Dict[str, Any]] = []
     current: List[Dict[str, Any]] = []
 
@@ -354,14 +344,16 @@ def group_words_into_utterances(
 
         if not nxt or gap >= pause_split_sec or ends_sentence:
             text_str = " ".join(_w_str(x) for x in current)
-            utterances.append({
-                "words": current,
-                "start": float(current[0].get("start", 0.0)),
-                "end": float(current[-1].get("end", 0.0)),
-                "text": text_str,
-                "tokens": normalize_phonetic_tokens(text_str),
-                "dual_tokens": normalize_dual_tokens(text_str),
-            })
+            utterances.append(
+                {
+                    "words": current,
+                    "start": float(current[0].get("start", 0.0)),
+                    "end": float(current[-1].get("end", 0.0)),
+                    "text": text_str,
+                    "tokens": normalize_phonetic_tokens(text_str),
+                    "dual_tokens": normalize_dual_tokens(text_str),
+                }
+            )
             current = []
 
     return utterances
@@ -524,9 +516,7 @@ def match_clips_to_script(
     enable_zoom: Optional[bool] = None,
     enable_transitions: Optional[bool] = None,
 ) -> Tuple[List[SegmentPlan], List[DroppedTake]]:
-    """
-    Precision Word-Window & Utterance Script Aligner.
-    """
+    """Align transcribed footage takes to ordered script lines while isolating fumbles and retakes."""
     dropped_takes: List[DroppedTake] = []
     clip_data_list: List[Dict[str, Any]] = []
 
@@ -571,27 +561,31 @@ def match_clips_to_script(
                 merged_text = " ".join(_w_str(w) for w in merged_words)
                 dual_toks = normalize_dual_tokens(merged_text)
                 word_keys = {t[0] for t in dual_toks if t[0]} | {t[1] for t in dual_toks if t[1]}
-                candidates.append({
-                    "source_clip": clip_path,
-                    "language": lang,
-                    "utt_range": (idx, idx + span_len - 1),
-                    "start": sub_utts[0]["start"],
-                    "end": sub_utts[-1]["end"],
-                    "text": merged_text,
-                    "dual_tokens": dual_toks,
-                    "word_keys": word_keys,
-                    "words": merged_words,
-                    "order_index": idx,
-                    "is_full_clip_utt": span_len == len(utterances),
-                })
+                candidates.append(
+                    {
+                        "source_clip": clip_path,
+                        "language": lang,
+                        "utt_range": (idx, idx + span_len - 1),
+                        "start": sub_utts[0]["start"],
+                        "end": sub_utts[-1]["end"],
+                        "text": merged_text,
+                        "dual_tokens": dual_toks,
+                        "word_keys": word_keys,
+                        "words": merged_words,
+                        "order_index": idx,
+                        "is_full_clip_utt": span_len == len(utterances),
+                    }
+                )
 
-        clip_data_list.append({
-            "source_clip": clip_path,
-            "language": lang,
-            "clean_words": clean_words,
-            "utterances": utterances,
-            "candidates": candidates,
-        })
+        clip_data_list.append(
+            {
+                "source_clip": clip_path,
+                "language": lang,
+                "clean_words": clean_words,
+                "utterances": utterances,
+                "candidates": candidates,
+            }
+        )
 
     if not target_script_lines:
         auto_lines: List[str] = []
@@ -644,7 +638,6 @@ def match_clips_to_script(
         max_len = int(len_script * 4.0) + 4
 
         scored_matches: List[Tuple[float, float, Dict[str, Any]]] = []
-        avail_cands: List[Dict[str, Any]] = []
         for cand in all_candidates:
             overlaps = any(
                 c_path == cand["source_clip"] and not (cand["end"] <= s_start + 0.02 or cand["start"] >= s_end - 0.02)
@@ -652,7 +645,6 @@ def match_clips_to_script(
             )
             if overlaps:
                 continue
-            avail_cands.append(cand)
 
             cand_len = len(cand["dual_tokens"])
             if cand_len < min_len or cand_len > max_len:
@@ -698,12 +690,13 @@ def match_clips_to_script(
                 rem_words = cand_words[best_k:]
                 sub_text = " ".join(_w_str(w) for w in sub_words)
                 sub_dual = normalize_dual_tokens(sub_text)
+                orig_cand_end = best_cand["end"]
                 best_cand = {
                     "source_clip": best_cand["source_clip"],
                     "language": best_cand["language"],
                     "utt_range": best_cand.get("utt_range", (0, 0)),
                     "start": float(sub_words[0].get("start", best_cand["start"])),
-                    "end": float(sub_words[-1].get("end", best_cand["end"])),
+                    "end": float(sub_words[-1].get("end", orig_cand_end)),
                     "text": sub_text,
                     "dual_tokens": sub_dual,
                     "word_keys": {t[0] for t in sub_dual if t[0]} | {t[1] for t in sub_dual if t[1]},
@@ -720,7 +713,7 @@ def match_clips_to_script(
                         "language": best_cand["language"],
                         "utt_range": best_cand.get("utt_range", (0, 0)),
                         "start": float(rem_words[0].get("start", sub_words[-1].get("end", 0.0))),
-                        "end": float(rem_words[-1].get("end", best_cand["end"])),
+                        "end": float(rem_words[-1].get("end", orig_cand_end)),
                         "text": rem_text,
                         "dual_tokens": rem_dual,
                         "word_keys": {t[0] for t in rem_dual if t[0]} | {t[1] for t in rem_dual if t[1]},
@@ -754,7 +747,10 @@ def match_clips_to_script(
                 first_gap = float(cand_words[1].get("start", 0.0)) - float(cand_words[0].get("end", 0.0))
                 first_dur = float(cand_words[0].get("end", 0.0)) - float(cand_words[0].get("start", 0.0))
                 if first_gap >= 0.8 and first_dur < 0.25:
-                    new_w0_end = round(max(float(cand_words[0].get("end", 0.0)), float(cand_words[1].get("start", 0.0)) - 0.12), 3)
+                    new_w0_end = round(
+                        max(float(cand_words[0].get("end", 0.0)), float(cand_words[1].get("start", 0.0)) - 0.12),
+                        3,
+                    )
                     new_w0_start = round(max(float(cand_words[0].get("start", 0.0)), new_w0_end - 0.35), 3)
                     cand_words[0]["start"] = new_w0_start
                     cand_words[0]["end"] = new_w0_end
@@ -769,7 +765,13 @@ def match_clips_to_script(
                     left_dur = float(cur_group[-1].get("end", 0.0)) - float(cur_group[0].get("start", 0.0))
                     rem_words = cand_words[wi + 1 :]
                     right_dur = float(rem_words[-1].get("end", 0.0)) - float(rem_words[0].get("start", 0.0))
-                    if gap_w >= max_internal_gap and len(cur_group) >= 2 and left_dur >= 0.8 and len(rem_words) >= 2 and right_dur >= 0.8:
+                    if (
+                        gap_w >= max_internal_gap
+                        and len(cur_group) >= 2
+                        and left_dur >= 0.8
+                        and len(rem_words) >= 2
+                        and right_dur >= 0.8
+                    ):
                         word_groups.append(cur_group)
                         cur_group = []
             if cur_group:

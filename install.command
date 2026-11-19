@@ -5,7 +5,7 @@
 set -e
 cd "$(dirname "$0")"
 
-# 0. Team rule: Zeno lives in ~/Documents/Zeno and finished videos go to ~/Downloads/Zeno Outputs.
+# 0. Team rule: Zeno lives in ~/Documents/Zeno and finished videos go to ~/Downloads/Zeno Outs.
 #    If this folder is somewhere else, move it there first. (The owner's dev copy has a .zeno-dev file and stays put.)
 TARGET="$HOME/Documents/Zeno"
 HERE="$(pwd -P)"
@@ -20,7 +20,7 @@ if [ ! -f .zeno-dev ] && [ "$HERE" != "$(cd "$TARGET" 2>/dev/null && pwd -P)" ];
   mv "$HERE" "$TARGET"
   exec bash "$TARGET/install.command"
 fi
-mkdir -p "$HOME/Downloads/Zeno Outputs"
+mkdir -p "$HOME/Downloads/Zeno Outs"
 if [ -d "/Applications/Zeno.app" ]; then
   xattr -cr "/Applications/Zeno.app" 2>/dev/null || true
 fi
@@ -28,7 +28,7 @@ fi
 echo "=============================================="
 echo " Zeno installer (macOS)"
 echo " Folder : $(pwd)"
-echo " Videos : $HOME/Downloads/Zeno Outputs"
+echo " Videos : $HOME/Downloads/Zeno Outs"
 echo "=============================================="
 
 # 1. uv: installs Python 3.12 and the packages (user folder only, no admin)
@@ -93,8 +93,6 @@ if ! .venv/bin/python scripts/setup.py --whoami >/dev/null 2>&1; then
   .venv/bin/python scripts/setup.py --login || true
 fi
 
-.venv/bin/python scripts/setup.py --lean-session || true
-.venv/bin/python scripts/setup.py --connect-claude || true
 .venv/bin/python scripts/setup.py --smoke || true
 
 echo ""

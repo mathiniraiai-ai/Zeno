@@ -109,7 +109,7 @@ def detect(since: float, until: float | None = None, root: Path | None = None,
     if not sessions.is_dir():
         return None
     # Restrict to the named session whenever the harness provides it.
-    files = sessions.rglob(f"*{sid}.jsonl" if sid else "*.jsonl")
+    files = sessions.rglob(f"*{sid}*.jsonl" if sid else "*.jsonl")
     candidates = []
     for path in files:
         try:

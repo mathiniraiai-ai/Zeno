@@ -1,107 +1,134 @@
+"""End-to-end multilingual forced alignment pipeline.
+
+Combines Indic G2P phonetics + `uroman`, Meta Wav2Vec2 95M CTC emission extraction,
+silence-masked Viterbi decoding, and acoustic onset/offset boundary refinement.
 """
-Kavioo / ScriptCut-AI Acoustic Engine — End-to-End Forced Alignment Pipeline
-Standalone high-precision neural forced acoustic alignment engine.
-Integrates Indian Language G2P Phonetics, Acoustic Extraction, Custom Viterbi Decoding,
-and Acoustic Onset Verification.
-"""
+
+from __future__ import annotations
 
 import os
 import re
+import subprocess
 import sys
 import time
-import subprocess
 import unicodedata
-from typing import Dict, Any, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+# Ensure PyTorch Hub model cache resolves to Zeno/models/torch before loading acoustic modules.
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_TORCH_HOME = _PROJECT_ROOT / "models" / "torch"
+os.environ.setdefault("TORCH_HOME", str(_TORCH_HOME))
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
 import numpy as np
 
 from .acoustic import AcousticModel
-from .viterbi import ViterbiAligner
 from .onset_verifier import AcousticOnsetVerifier
-from .phonetics.indic_phonemes import IndicPhoneticMapper, INVISIBLE_CHARS
+from .viterbi import ViterbiAligner
 
-# Typographic symbols that Word/Google Docs/Gemini insert; map to plain ASCII before romanizing.
-_SYMBOL_MAP = str.maketrans({
-    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u2032": "'",
-    "\u201c": '"', "\u201d": '"', "\u201e": '"',
-    "\u2013": "-", "\u2014": "-", "\u2212": "-",
-    "\u2026": "...", "\u00a0": " ",
-})
+try:
+    from .phonetics.indic_phonemes import INVISIBLE_CHARS, IndicPhoneticMapper
+except ImportError:
+    import types as _types
+
+    _local_ip = Path(__file__).resolve().parent / "phonetics" / "indic_phonemes.py"
+    if _local_ip.is_file():
+        _ip_mod = _types.ModuleType("align_engine._indic_phonemes_fallback")
+        exec(compile(_local_ip.read_text(encoding="utf-8"), str(_local_ip), "exec"), _ip_mod.__dict__)
+        IndicPhoneticMapper = _ip_mod.IndicPhoneticMapper
+        INVISIBLE_CHARS = _ip_mod.INVISIBLE_CHARS
+    else:
+        raise
+
+# Normalize typographic quotes, dashes, ellipses, and NBSPs before romanization.
+_SYMBOL_MAP = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201a": "'",
+        "\u2032": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u201e": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+        "\u2026": "...",
+        "\u00a0": " ",
+    }
+)
 
 
 def _clean_symbols(word: str) -> str:
-    """NFC-normalise and drop invisible joiners/typographic symbols so only real letters reach the romanizer."""
+    """NFC-normalize and strip zero-width joiners/typographic punctuation prior to romanization."""
     w = unicodedata.normalize("NFC", word).translate(_SYMBOL_MAP)
     for ch in INVISIBLE_CHARS:
         w = w.replace(ch, "")
     return w or word
 
 
-class KaviooAcousticPipeline:
-    """
-    Main orchestrator for Kavioo / ScriptCut-AI Acoustic Alignment Engine.
-    """
+class ZenoAcousticPipeline:
+    """Orchestrates multilingual G2P romanization, Wav2Vec2 CTC extraction, Viterbi alignment, and onset verification."""
+
     def __init__(self, device: Optional[str] = None):
         self.acoustic_model = AcousticModel(device=device)
         self.viterbi = ViterbiAligner(blank_id=self.acoustic_model.blank_id)
         self.onset_verifier = AcousticOnsetVerifier(sample_rate=self.acoustic_model.sample_rate)
         self._uroman_cache: Dict[str, str] = {}
+        self._warned_unromanized: bool = False
 
-    def unload_model(self):
-        """Unloads acoustic model weights if explicitly requested."""
+    def unload_model(self) -> None:
+        """Unload acoustic neural weights from memory."""
         if self.acoustic_model is not None:
             self.acoustic_model.unload_model()
 
     def _warn_unromanized(self, words: List[str], reason: str) -> None:
-        """Tell the user once per run that some words could not be converted to Latin sounds."""
-        if getattr(self, "_warned_unromanized", False):
+        """Emit a single warning per pipeline instance if words cannot be romanized."""
+        if self._warned_unromanized:
             return
         self._warned_unromanized = True
         sample = ", ".join(words[:5])
         print(f"[align] WARNING: {len(words)} word(s) left unromanized ({reason}): {sample}", file=sys.stderr)
 
     def batch_romanize_words(self, words: List[str]) -> List[str]:
-        """Runs uroman in a single batch process for high performance, with in-memory caching and Indic G2P fast-path."""
+        """Convert words to Roman script using `IndicPhoneticMapper` fast-path and batched `uroman` fallback."""
         if not words:
             return []
 
-        # Fast path: Check which words actually need uroman.pl subprocess
-        # (ASCII words and multi-letter Indic words handled by IndicPhoneticMapper need no 2s Perl startup)
         results: List[Optional[str]] = [None] * len(words)
         to_query_indices: List[int] = []
         to_query_words: List[str] = []
 
         for idx, w in enumerate(words):
-            w = _clean_symbols(w)
-            if all(ord(c) < 128 for c in w):
-                results[idx] = w
-            elif w in self._uroman_cache:
-                results[idx] = self._uroman_cache[w]
-            elif IndicPhoneticMapper.is_pure_indic(w):
-                trans = IndicPhoneticMapper.transliterate_indic_script(w)
+            w_clean = _clean_symbols(w)
+            if all(ord(c) < 128 for c in w_clean):
+                results[idx] = w_clean
+            elif w_clean in self._uroman_cache:
+                results[idx] = self._uroman_cache[w_clean]
+            elif IndicPhoneticMapper.is_pure_indic(w_clean):
+                trans = IndicPhoneticMapper.transliterate_indic_script(w_clean)
                 alpha = re.sub(r"[^a-zA-Z]", "", trans)
                 if len(alpha) >= 2:
                     results[idx] = trans
-                    self._uroman_cache[w] = trans
+                    self._uroman_cache[w_clean] = trans
                 else:
                     to_query_indices.append(idx)
-                    to_query_words.append(w)
+                    to_query_words.append(w_clean)
             else:
                 to_query_indices.append(idx)
-                to_query_words.append(w)
+                to_query_words.append(w_clean)
 
         if not to_query_words:
             return [r if r is not None else words[i] for i, r in enumerate(results)]
 
+        here = Path(__file__).resolve().parent
         candidate_paths = [
-            os.path.join(os.path.dirname(__file__), "uroman", "uroman", "uroman.pl"),
-            os.path.join(os.path.dirname(__file__), "uroman", "bin", "uroman.pl"),
-            os.path.join(os.path.dirname(__file__), "uroman", "uroman.pl"),
+            here / "uroman" / "uroman" / "uroman.pl",
+            here / "uroman" / "bin" / "uroman.pl",
+            here / "uroman" / "uroman.pl",
         ]
-        uroman_script = None
-        for p_test in candidate_paths:
-            if os.path.exists(p_test):
-                uroman_script = p_test
-                break
+        uroman_script = next((str(p) for p in candidate_paths if p.is_file()), None)
 
         if not uroman_script:
             self._warn_unromanized(to_query_words, "uroman.pl not found")
@@ -117,14 +144,14 @@ class KaviooAcousticPipeline:
             if os.path.exists(lib_dir):
                 cmd.extend(["-I", lib_dir])
             cmd.extend([uroman_script, "-l", "xxx"])
-            p = subprocess.run(
+            proc = subprocess.run(
                 cmd,
                 input=joined.encode("utf-8"),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                check=True
+                check=True,
             )
-            romanized_lines = p.stdout.decode("utf-8").split("\n")
+            romanized_lines = proc.stdout.decode("utf-8").split("\n")
             for q_i, orig_idx in enumerate(to_query_indices):
                 rom_val = romanized_lines[q_i].strip() if q_i < len(romanized_lines) else to_query_words[q_i]
                 results[orig_idx] = rom_val
@@ -137,7 +164,7 @@ class KaviooAcousticPipeline:
         return [r if r is not None else words[i] for i, r in enumerate(results)]
 
     def _word_to_phonetic_tokens(self, orig_w: str, clean_w: str, rw: str, language_code: str) -> str:
-        """Maps a word (including Law-12 hyphenated/code-switched compounds) to Wav2Vec2 acoustic tokens."""
+        """Map a word (including bilingual Latin-Indic compounds) to Wav2Vec2 acoustic character tokens."""
         has_indic = IndicPhoneticMapper.is_pure_indic(clean_w)
         has_latin = bool(re.search(r"[A-Za-z0-9]", clean_w))
 
@@ -151,7 +178,7 @@ class KaviooAcousticPipeline:
                             seg,
                             lang=language_code,
                             is_native_indic=True,
-                            orig_word=seg
+                            orig_word=seg,
                         )
                     )
                 else:
@@ -160,7 +187,7 @@ class KaviooAcousticPipeline:
                             seg,
                             lang="en",
                             is_native_indic=False,
-                            orig_word=seg
+                            orig_word=seg,
                         )
                     )
             return "".join(phonetic_parts)
@@ -171,7 +198,7 @@ class KaviooAcousticPipeline:
             rw,
             lang="en" if is_pure_english_word else language_code,
             is_native_indic=is_word_indic,
-            orig_word=clean_w
+            orig_word=clean_w,
         )
 
     def align(
@@ -184,23 +211,18 @@ class KaviooAcousticPipeline:
         verify_onsets: bool = True,
         max_audio_sec: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """
-        Executes language-aware forced alignment on audio and transcript.
-        Guarantees 100% 1:1 word-for-word mapping without dropping punctuation or loanwords.
-        If cues are provided with rough timestamps, routes to align_anchored_cues.
-        """
+        """Run forced alignment on `audio_path`, preserving 1:1 correspondence with input words."""
         if cues is not None and len(cues) > 0:
             return self.align_anchored_cues(
                 audio_path=audio_path,
                 cues=cues,
                 language_code=language_code,
-                verify_onsets=verify_onsets
+                verify_onsets=verify_onsets,
             )
 
         self.acoustic_model._ensure_model_loaded()
         t0 = time.time()
 
-        # 1. Determine input words
         if word_list is not None and len(word_list) > 0:
             input_words = [str(w) for w in word_list]
         elif transcript_text:
@@ -211,7 +233,6 @@ class KaviooAcousticPipeline:
         if not input_words:
             return {"status": "error", "detail": "Empty transcript", "words": []}
 
-        # 2. Clean and batch romanize all words in 1 fast pass
         clean_words = []
         clean_indices = []
         for idx, orig_w in enumerate(input_words):
@@ -238,19 +259,20 @@ class KaviooAcousticPipeline:
                     valid_chars += 1
 
             if valid_chars > 0:
-                word_spans_meta.append({
-                    "word": orig_w,
-                    "num_chars": valid_chars,
-                    "orig_idx": orig_idx
-                })
+                word_spans_meta.append(
+                    {
+                        "word": orig_w,
+                        "num_chars": valid_chars,
+                        "orig_idx": orig_idx,
+                    }
+                )
 
         if not token_ids or not word_spans_meta:
             return {"status": "error", "detail": "No valid phonetic token targets found", "words": []}
 
-        # 3. Acoustic Emission Extraction (Apache 2.0 Wav2Vec2 95M Backbone)
         log_probs, raw_waveform, duration_sec, time_per_frame = self.acoustic_model.extract_emissions(audio_path)
 
-        # 4. Smart Active Speech Bounding for Short Transcripts / Trailing Silence
+        # Bound active speech window when short transcripts sit inside much longer audio buffers
         if max_audio_sec is not None and max_audio_sec > 0 and len(log_probs) > 0:
             cutoff_frame = min(len(log_probs), max(1, int(max_audio_sec / time_per_frame)))
             log_probs_for_viterbi = log_probs[:cutoff_frame]
@@ -269,26 +291,31 @@ class KaviooAcousticPipeline:
             else:
                 log_probs_for_viterbi = log_probs
 
-        # 5. Custom Viterbi Dynamic Programming Alignment
         silent = self.onset_verifier.silent_runs(raw_waveform)
         try:
             from . import vad
 
-            silent = vad.merge_runs(silent, vad.nonspeech_runs(vad.speech_spans(raw_waveform), duration_sec))   # also finds silence under noise
+            silent = vad.merge_runs(silent, vad.nonspeech_runs(vad.speech_spans(raw_waveform), duration_sec))
         except Exception:
             pass
-        viterbi_words = self.viterbi.align(log_probs_for_viterbi, token_ids, word_spans_meta, time_per_frame, silent_spans=silent)
+        viterbi_words = self.viterbi.align(
+            log_probs_for_viterbi,
+            token_ids,
+            word_spans_meta,
+            time_per_frame,
+            silent_spans=silent,
+        )
 
-        # 6. Acoustic Onset Verification Layer
         if verify_onsets:
             refined_active_words = self.onset_verifier.refine_word_onsets(viterbi_words, raw_waveform, duration_sec)
             refined_active_words = self.onset_verifier.snap_starts_to_energy(refined_active_words, raw_waveform)
             refined_active_words = self.onset_verifier.extend_ends_to_energy(refined_active_words, raw_waveform)
         else:
             refined_active_words = viterbi_words
-        refined_active_words = self.onset_verifier.clamp_words_to_sound(refined_active_words, raw_waveform, extra_runs=silent)   # no word edge in silence
+        refined_active_words = self.onset_verifier.clamp_words_to_sound(
+            refined_active_words, raw_waveform, extra_runs=silent
+        )
 
-        # 7. Reconstruct 100% 1:1 Output matching input_words length exactly
         final_words: List[Dict[str, Any]] = []
         active_map = {word_spans_meta[i]["orig_idx"]: refined_active_words[i] for i in range(len(refined_active_words))}
 
@@ -301,32 +328,35 @@ class KaviooAcousticPipeline:
                 w_start = float(w_res["start"])
                 w_end = float(w_res["end"])
 
-                # Guardrail: Prevent artificial Viterbi stretching across long silence / music
                 max_natural_duration = min(2.5, max(0.35, len(orig_w) * 0.08 + 0.35))
                 if w_end - w_start > max_natural_duration:
                     w_end = w_start + max_natural_duration
 
                 last_known_start = w_start
                 last_known_end = w_end
-                final_words.append({
-                    "word": orig_w,
-                    "start": round(w_start, 3),
-                    "end": round(w_end, 3),
-                    "confidence": round(w_res.get("confidence", 0.95), 3)
-                })
+                final_words.append(
+                    {
+                        "word": orig_w,
+                        "start": round(w_start, 3),
+                        "end": round(w_end, 3),
+                        "confidence": round(w_res.get("confidence", 0.95), 3),
+                    }
+                )
             else:
-                final_words.append({
-                    "word": orig_w,
-                    "start": round(last_known_start, 3),
-                    "end": round(last_known_end, 3),
-                    "confidence": 0.90
-                })
+                final_words.append(
+                    {
+                        "word": orig_w,
+                        "start": round(last_known_start, 3),
+                        "end": round(last_known_end, 3),
+                        "confidence": 0.90,
+                    }
+                )
 
         processing_time = round(time.time() - t0, 3)
 
         return {
             "status": "success",
-            "engine": "Kavioo Acoustic Engine",
+            "engine": "Zeno Acoustic Engine",
             "language": language_code,
             "processing_time_sec": processing_time,
             "duration_sec": round(duration_sec, 2),
@@ -342,26 +372,19 @@ class KaviooAcousticPipeline:
         cues: List[Dict[str, Any]],
         language_code: str = "en",
         verify_onsets: bool = True,
-        total_duration_sec: Optional[float] = None
+        total_duration_sec: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """
-        Dual-Scale Precision Alignment Engine for multi-sentence clips or long videos.
-        Uses sentence/phrase cues as Macro Anchors:
-          1. Slices audio locally per cue [start - 0.35s, end + 0.35s].
-          2. Extracts Wav2Vec2 emissions and computes Viterbi inside the local slice.
-          3. Offsets word timestamps back to absolute timeline seconds.
-          4. Verifies acoustic onsets and chains words according to the 7-second pause law.
-        """
+        """Align multi-sentence clips locally within each cue's `[start - 0.35s, end + 0.35s]` window."""
         self.acoustic_model._ensure_model_loaded()
         t0 = time.time()
 
         if not cues:
             return {
                 "status": "success",
-                "engine": "Kavioo Acoustic Engine (Anchor-Based)",
+                "engine": "Zeno Acoustic Engine (Anchor-Based)",
                 "cues": [],
                 "words": [],
-                "processing_time_sec": 0.0
+                "processing_time_sec": 0.0,
             }
 
         cue_word_lists = []
@@ -415,11 +438,13 @@ class KaviooAcousticPipeline:
                         valid_chars += 1
 
                 if valid_chars > 0:
-                    word_spans_meta.append({
-                        "word": orig_w,
-                        "num_chars": valid_chars,
-                        "orig_idx": idx
-                    })
+                    word_spans_meta.append(
+                        {
+                            "word": orig_w,
+                            "num_chars": valid_chars,
+                            "orig_idx": idx,
+                        }
+                    )
 
             if not token_ids or not word_spans_meta:
                 dur = max(0.2, c_end - c_start)
@@ -428,12 +453,14 @@ class KaviooAcousticPipeline:
                 for idx, w_info in enumerate(c_words_info):
                     w_s = c_start + idx * step
                     w_e = w_s + step
-                    fallback_words.append({
-                        "word": w_info["orig"],
-                        "start": round(w_s, 3),
-                        "end": round(w_e, 3),
-                        "confidence": 0.85
-                    })
+                    fallback_words.append(
+                        {
+                            "word": w_info["orig"],
+                            "start": round(w_s, 3),
+                            "end": round(w_e, 3),
+                            "confidence": 0.85,
+                        }
+                    )
                 cue_copy = dict(cue)
                 cue_copy["start"] = round(c_start, 3)
                 cue_copy["end"] = round(c_end, 3)
@@ -445,17 +472,23 @@ class KaviooAcousticPipeline:
                 continue
 
             try:
-                log_probs, raw_waveform, slice_dur, time_per_frame, actual_slice_start = \
+                log_probs, raw_waveform, slice_dur, time_per_frame, actual_slice_start = (
                     self.acoustic_model.extract_emissions_range(
                         audio_path=audio_path,
                         start_sec=c_start,
                         end_sec=c_end,
                         pad_sec=0.35,
-                        total_duration=total_duration_sec
+                        total_duration=total_duration_sec,
                     )
+                )
 
-                viterbi_words = self.viterbi.align(log_probs, token_ids, word_spans_meta, time_per_frame,
-                                                   silent_spans=self.onset_verifier.silent_runs(raw_waveform) if len(raw_waveform) > 0 else None)
+                viterbi_words = self.viterbi.align(
+                    log_probs,
+                    token_ids,
+                    word_spans_meta,
+                    time_per_frame,
+                    silent_spans=self.onset_verifier.silent_runs(raw_waveform) if len(raw_waveform) > 0 else None,
+                )
 
                 if verify_onsets and len(raw_waveform) > 0:
                     refined_active = self.onset_verifier.refine_word_onsets(viterbi_words, raw_waveform, slice_dur)
@@ -483,19 +516,23 @@ class KaviooAcousticPipeline:
 
                         last_w_start = w_s
                         last_w_end = w_e
-                        cue_aligned_words.append({
-                            "word": orig_w,
-                            "start": round(w_s, 3),
-                            "end": round(w_e, 3),
-                            "confidence": round(w_res.get("confidence", 0.95), 3)
-                        })
+                        cue_aligned_words.append(
+                            {
+                                "word": orig_w,
+                                "start": round(w_s, 3),
+                                "end": round(w_e, 3),
+                                "confidence": round(w_res.get("confidence", 0.95), 3),
+                            }
+                        )
                     else:
-                        cue_aligned_words.append({
-                            "word": orig_w,
-                            "start": round(last_w_start, 3),
-                            "end": round(last_w_end, 3),
-                            "confidence": 0.90
-                        })
+                        cue_aligned_words.append(
+                            {
+                                "word": orig_w,
+                                "start": round(last_w_start, 3),
+                                "end": round(last_w_end, 3),
+                                "confidence": 0.90,
+                            }
+                        )
 
                 for w_i in range(len(cue_aligned_words)):
                     cur_w = cue_aligned_words[w_i]
@@ -509,7 +546,10 @@ class KaviooAcousticPipeline:
                         else:
                             cur_w["end"] = round(max(cur_w["end"], cur_w["start"] + 0.1), 3)
                     else:
-                        cur_w["end"] = round(min(c_end if c_end > cur_w["start"] else (cur_w["start"] + 0.6), cur_w["start"] + 7.0), 3)
+                        cur_w["end"] = round(
+                            min(c_end if c_end > cur_w["start"] else (cur_w["start"] + 0.6), cur_w["start"] + 7.0),
+                            3,
+                        )
 
                 c_actual_start = cue_aligned_words[0]["start"] if cue_aligned_words else c_start
                 c_actual_end = cue_aligned_words[-1]["end"] if cue_aligned_words else c_end
@@ -524,19 +564,21 @@ class KaviooAcousticPipeline:
                 all_aligned_words_out.extend(cue_aligned_words)
 
             except Exception as cue_err:
-                print(f"[Kavioo Acoustic Engine] Cue {c_idx+1} local alignment fallback: {cue_err}")
+                print(f"[Zeno Aligner] Cue {c_idx + 1} local alignment fallback: {cue_err}")
                 dur = max(0.2, c_end - c_start)
                 step = dur / max(1, len(c_words_info))
                 fallback_words = []
                 for idx, w_info in enumerate(c_words_info):
                     w_s = c_start + idx * step
                     w_e = w_s + step
-                    fallback_words.append({
-                        "word": w_info["orig"],
-                        "start": round(w_s, 3),
-                        "end": round(w_e, 3),
-                        "confidence": 0.85
-                    })
+                    fallback_words.append(
+                        {
+                            "word": w_info["orig"],
+                            "start": round(w_s, 3),
+                            "end": round(w_e, 3),
+                            "confidence": 0.85,
+                        }
+                    )
                 cue_copy = dict(cue)
                 cue_copy["start"] = round(c_start, 3)
                 cue_copy["end"] = round(c_end, 3)
@@ -549,34 +591,32 @@ class KaviooAcousticPipeline:
         processing_time = round(time.time() - t0, 3)
         return {
             "status": "success",
-            "engine": "Kavioo Acoustic Engine (Anchor-Based)",
+            "engine": "Zeno Acoustic Engine (Anchor-Based)",
             "language": language_code,
             "processing_time_sec": processing_time,
             "cues": aligned_cues_out,
-            "words": all_aligned_words_out
+            "words": all_aligned_words_out,
         }
 
 
-# Backward compatibility aliases
-KaviyoAcousticPipeline = KaviooAcousticPipeline
-EditFlowAcousticPipeline = KaviooAcousticPipeline
-ScriptCutAcousticPipeline = KaviooAcousticPipeline
+# Backward-compatible aliases
+KaviooAcousticPipeline = ZenoAcousticPipeline
+KaviyoAcousticPipeline = ZenoAcousticPipeline
+EditFlowAcousticPipeline = ZenoAcousticPipeline
+ScriptCutAcousticPipeline = ZenoAcousticPipeline
 
-_shared_pipeline: Optional[KaviooAcousticPipeline] = None
+_shared_pipeline: Optional[ZenoAcousticPipeline] = None
 
 
-def get_shared_pipeline(device: Optional[str] = None) -> KaviooAcousticPipeline:
-    """
-    Returns the persistent singleton instance of KaviooAcousticPipeline resident in RAM.
-    Guarantees only one shared copy of the PyTorch neural model is loaded.
-    """
+def get_shared_pipeline(device: Optional[str] = None) -> ZenoAcousticPipeline:
+    """Return the shared singleton `ZenoAcousticPipeline` instance."""
     global _shared_pipeline
     if _shared_pipeline is None:
-        _shared_pipeline = KaviooAcousticPipeline(device=device)
+        _shared_pipeline = ZenoAcousticPipeline(device=device)
     return _shared_pipeline
 
 
 def reset_shared_pipeline() -> None:
-    """Drop the shared pipeline so the next `get_shared_pipeline(device=...)` builds a new one (GPU failed: retry on the CPU)."""
+    """Reset the shared pipeline singleton (e.g., to reinitialize on CPU after a GPU error)."""
     global _shared_pipeline
     _shared_pipeline = None

@@ -1,602 +1,1082 @@
 [
- {
-  "file": "AnekBangla-Bold.ttf",
-  "family": "Anek Bangla",
-  "weight": 700
- },
- {
-  "file": "AnekDevanagari-Bold.ttf",
-  "family": "Anek Devanagari",
-  "weight": 700
- },
- {
-  "file": "AnekGujarati-Bold.ttf",
-  "family": "Anek Gujarati",
-  "weight": 700
- },
- {
-  "file": "AnekGurmukhi-Bold.ttf",
-  "family": "Anek Gurmukhi",
-  "weight": 700
- },
- {
-  "file": "AnekKannada-Bold.ttf",
-  "family": "Anek Kannada",
-  "weight": 700
- },
- {
-  "file": "AnekMalayalam-Bold.ttf",
-  "family": "Anek Malayalam",
-  "weight": 700
- },
- {
-  "file": "AnekOdia-Bold.ttf",
-  "family": "Anek Odia",
-  "weight": 700
- },
- {
-  "file": "AnekTamil-Bold.ttf",
-  "family": "Anek Tamil",
-  "weight": 700
- },
- {
-  "file": "AnekTelugu-Bold.ttf",
-  "family": "Anek Telugu",
-  "weight": 700
- },
- {
-  "file": "BalooTamma2-700.ttf",
-  "family": "Baloo Tamma 2",
-  "weight": 700
- },
- {
-  "file": "Catamaran-Bold.ttf",
-  "family": "Catamaran",
-  "weight": 700
- },
- {
-  "file": "Montserrat-400.ttf",
-  "family": "Montserrat",
-  "weight": 400
- },
- {
-  "file": "Montserrat-500.ttf",
-  "family": "Montserrat",
-  "weight": 500
- },
- {
-  "file": "Montserrat-600.ttf",
-  "family": "Montserrat",
-  "weight": 600
- },
- {
-  "file": "Montserrat-700.ttf",
-  "family": "Montserrat",
-  "weight": 700
- },
- {
-  "file": "Montserrat-800.ttf",
-  "family": "Montserrat",
-  "weight": 800
- },
- {
-  "file": "Montserrat-900.ttf",
-  "family": "Montserrat",
-  "weight": 900
- },
- {
-  "file": "NotoSans-400.ttf",
-  "family": "Noto Sans",
-  "weight": 400
- },
- {
-  "file": "NotoSans-500.ttf",
-  "family": "Noto Sans",
-  "weight": 500
- },
- {
-  "file": "NotoSans-600.ttf",
-  "family": "Noto Sans",
-  "weight": 600
- },
- {
-  "file": "NotoSans-700.ttf",
-  "family": "Noto Sans",
-  "weight": 700
- },
- {
-  "file": "NotoSans-800.ttf",
-  "family": "Noto Sans",
-  "weight": 800
- },
- {
-  "file": "NotoSans-900.ttf",
-  "family": "Noto Sans",
-  "weight": 900
- },
- {
-  "file": "NotoSansBengali-400.ttf",
-  "family": "Noto Sans Bengali",
-  "weight": 400
- },
- {
-  "file": "NotoSansBengali-700.ttf",
-  "family": "Noto Sans Bengali",
-  "weight": 700
- },
- {
-  "file": "NotoSansDevanagari-400.ttf",
-  "family": "Noto Sans Devanagari",
-  "weight": 400
- },
- {
-  "file": "NotoSansDevanagari-500.ttf",
-  "family": "Noto Sans Devanagari",
-  "weight": 500
- },
- {
-  "file": "NotoSansDevanagari-600.ttf",
-  "family": "Noto Sans Devanagari",
-  "weight": 600
- },
- {
-  "file": "NotoSansDevanagari-700.ttf",
-  "family": "Noto Sans Devanagari",
-  "weight": 700
- },
- {
-  "file": "NotoSansDevanagari-800.ttf",
-  "family": "Noto Sans Devanagari",
-  "weight": 800
- },
- {
-  "file": "NotoSansDevanagari-900.ttf",
-  "family": "Noto Sans Devanagari",
-  "weight": 900
- },
- {
-  "file": "NotoSansGujarati-400.ttf",
-  "family": "Noto Sans Gujarati",
-  "weight": 400
- },
- {
-  "file": "NotoSansGujarati-700.ttf",
-  "family": "Noto Sans Gujarati",
-  "weight": 700
- },
- {
-  "file": "NotoSansGurmukhi-Bold.ttf",
-  "family": "Noto Sans Gurmukhi",
-  "weight": 700
- },
- {
-  "file": "NotoSansKannada-400.ttf",
-  "family": "Noto Sans Kannada",
-  "weight": 400
- },
- {
-  "file": "NotoSansKannada-700.ttf",
-  "family": "Noto Sans Kannada",
-  "weight": 700
- },
- {
-  "file": "NotoSansMalayalam-400.ttf",
-  "family": "Noto Sans Malayalam",
-  "weight": 400
- },
- {
-  "file": "NotoSansMalayalam-700.ttf",
-  "family": "Noto Sans Malayalam",
-  "weight": 700
- },
- {
-  "file": "NotoSansTamil-400.ttf",
-  "family": "Noto Sans Tamil",
-  "weight": 400
- },
- {
-  "file": "NotoSansTamil-500.ttf",
-  "family": "Noto Sans Tamil",
-  "weight": 500
- },
- {
-  "file": "NotoSansTamil-600.ttf",
-  "family": "Noto Sans Tamil",
-  "weight": 600
- },
- {
-  "file": "NotoSansTamil-700.ttf",
-  "family": "Noto Sans Tamil",
-  "weight": 700
- },
- {
-  "file": "NotoSansTamil-800.ttf",
-  "family": "Noto Sans Tamil",
-  "weight": 800
- },
- {
-  "file": "NotoSansTamil-900.ttf",
-  "family": "Noto Sans Tamil",
-  "weight": 900
- },
- {
-  "file": "NotoSansTelugu-400.ttf",
-  "family": "Noto Sans Telugu",
-  "weight": 400
- },
- {
-  "file": "NotoSansTelugu-500.ttf",
-  "family": "Noto Sans Telugu",
-  "weight": 500
- },
- {
-  "file": "NotoSansTelugu-600.ttf",
-  "family": "Noto Sans Telugu",
-  "weight": 600
- },
- {
-  "file": "NotoSansTelugu-700.ttf",
-  "family": "Noto Sans Telugu",
-  "weight": 700
- },
- {
-  "file": "NotoSansTelugu-800.ttf",
-  "family": "Noto Sans Telugu",
-  "weight": 800
- },
- {
-  "file": "NotoSansTelugu-900.ttf",
-  "family": "Noto Sans Telugu",
-  "weight": 900
- },
- {
-  "file": "Outfit-300.ttf",
-  "family": "Outfit",
-  "weight": 300
- },
- {
-  "file": "Outfit-400.ttf",
-  "family": "Outfit",
-  "weight": 400
- },
- {
-  "file": "Outfit-500.ttf",
-  "family": "Outfit",
-  "weight": 500
- },
- {
-  "file": "Outfit-600.ttf",
-  "family": "Outfit",
-  "weight": 600
- },
- {
-  "file": "Outfit-700.ttf",
-  "family": "Outfit",
-  "weight": 700
- },
- {
-  "file": "Outfit-800.ttf",
-  "family": "Outfit",
-  "weight": 800
- },
- {
-  "file": "Outfit-900.ttf",
-  "family": "Outfit",
-  "weight": 900
- },
- {
-  "file": "PermanentMarker-400.ttf",
-  "family": "Permanent Marker",
-  "weight": 400
- },
- {
-  "file": "PlusJakartaSans-400.ttf",
-  "family": "Plus Jakarta Sans",
-  "weight": 400
- },
- {
-  "file": "PlusJakartaSans-500.ttf",
-  "family": "Plus Jakarta Sans",
-  "weight": 500
- },
- {
-  "file": "PlusJakartaSans-600.ttf",
-  "family": "Plus Jakarta Sans",
-  "weight": 600
- },
- {
-  "file": "PlusJakartaSans-700.ttf",
-  "family": "Plus Jakarta Sans",
-  "weight": 700
- },
- {
-  "file": "PlusJakartaSans-800.ttf",
-  "family": "Plus Jakarta Sans",
-  "weight": 800
- },
- {
-  "file": "Ramabhadra-400.ttf",
-  "family": "Ramabhadra",
-  "weight": 400
- },
- {
-  "file": "Anton-Regular.ttf",
-  "family": "Anton",
-  "weight": 400
- },
- {
-  "file": "BebasNeue-Regular.ttf",
-  "family": "Bebas Neue",
-  "weight": 400
- },
- {
-  "file": "ArchivoBlack-Regular.ttf",
-  "family": "Archivo Black",
-  "weight": 400
- },
- {
-  "file": "Poppins-Regular.ttf",
-  "family": "Poppins",
-  "weight": 400
- },
- {
-  "file": "Poppins-SemiBold.ttf",
-  "family": "Poppins",
-  "weight": 600
- },
- {
-  "file": "Poppins-Bold.ttf",
-  "family": "Poppins",
-  "weight": 700
- },
- {
-  "file": "Poppins-ExtraBold.ttf",
-  "family": "Poppins",
-  "weight": 800
- },
- {
-  "file": "Poppins-Black.ttf",
-  "family": "Poppins",
-  "weight": 900
- },
- {
-  "file": "Oswald-Regular.ttf",
-  "family": "Oswald",
-  "weight": 400
- },
- {
-  "file": "Oswald-Bold.ttf",
-  "family": "Oswald",
-  "weight": 700
- },
- {
-  "file": "Inter-400.ttf",
-  "family": "Inter",
-  "weight": 400
- },
- {
-  "file": "Inter-600.ttf",
-  "family": "Inter",
-  "weight": 600
- },
- {
-  "file": "Inter-700.ttf",
-  "family": "Inter",
-  "weight": 700
- },
- {
-  "file": "Inter-800.ttf",
-  "family": "Inter",
-  "weight": 800
- },
- {
-  "file": "Inter-900.ttf",
-  "family": "Inter",
-  "weight": 900
- },
- {
-  "file": "Caveat-Regular.ttf",
-  "family": "Caveat",
-  "weight": 400
- },
- {
-  "file": "Caveat-Bold.ttf",
-  "family": "Caveat",
-  "weight": 700
- },
- {
-  "file": "ShadowsIntoLight-Regular.ttf",
-  "family": "Shadows Into Light",
-  "weight": 400
- },
- {
-  "file": "Kalam-Regular.ttf",
-  "family": "Kalam",
-  "weight": 400
- },
- {
-  "file": "Kalam-Bold.ttf",
-  "family": "Kalam",
-  "weight": 700
- },
- {
-  "file": "AmaticSC-Regular.ttf",
-  "family": "Amatic SC",
-  "weight": 400
- },
- {
-  "file": "AmaticSC-Bold.ttf",
-  "family": "Amatic SC",
-  "weight": 700
- },
- {
-  "file": "Pacifico-Regular.ttf",
-  "family": "Pacifico",
-  "weight": 400
- },
- {
-  "file": "DancingScript-Regular.ttf",
-  "family": "Dancing Script",
-  "weight": 400
- },
- {
-  "file": "DancingScript-Bold.ttf",
-  "family": "Dancing Script",
-  "weight": 700
- },
- {
-  "file": "Bungee-Regular.ttf",
-  "family": "Bungee",
-  "weight": 400
- },
- {
-  "file": "Righteous-Regular.ttf",
-  "family": "Righteous",
-  "weight": 400
- },
- {
-  "file": "LuckiestGuy-Regular.ttf",
-  "family": "Luckiest Guy",
-  "weight": 400
- },
- {
-  "file": "Fredoka-Regular.ttf",
-  "family": "Fredoka",
-  "weight": 400
- },
- {
-  "file": "Fredoka-Bold.ttf",
-  "family": "Fredoka",
-  "weight": 700
- },
- {
-  "file": "Bangers-Regular.ttf",
-  "family": "Bangers",
-  "weight": 400
- },
- {
-  "file": "BagelFatOne-Regular.ttf",
-  "family": "Bagel Fat One",
-  "weight": 400
- },
- {
-  "file": "Acme-Regular.ttf",
-  "family": "Acme",
-  "weight": 400
- },
- {
-  "file": "Atma-Bold.ttf",
-  "family": "Atma",
-  "weight": 700
- },
- {
-  "file": "Baloo2-Bold.ttf",
-  "family": "Baloo 2",
-  "weight": 700
- },
- {
-  "file": "BalooBhai2-Bold.ttf",
-  "family": "Baloo Bhai 2",
-  "weight": 700
- },
- {
-  "file": "BalooChettan2-Bold.ttf",
-  "family": "Baloo Chettan 2",
-  "weight": 700
- },
- {
-  "file": "BalooDa2-Bold.ttf",
-  "family": "Baloo Da 2",
-  "weight": 700
- },
- {
-  "file": "BalooPaaji2-Bold.ttf",
-  "family": "Baloo Paaji 2",
-  "weight": 700
- },
- {
-  "file": "BalooTamma2-400.ttf",
-  "family": "Baloo Tamma 2",
-  "weight": 400
- },
- {
-  "file": "BalooTamma2-500.ttf",
-  "family": "Baloo Tamma 2",
-  "weight": 500
- },
- {
-  "file": "BalooTamma2-600.ttf",
-  "family": "Baloo Tamma 2",
-  "weight": 600
- },
- {
-  "file": "BalooTamma2-800.ttf",
-  "family": "Baloo Tamma 2",
-  "weight": 800
- },
- {
-  "file": "BalooThambi2-Bold.ttf",
-  "family": "Baloo Thambi 2",
-  "weight": 700
- },
- {
-  "file": "Chilanka-Regular.ttf",
-  "family": "Chilanka",
-  "weight": 400
- },
- {
-  "file": "Coiny-Regular.ttf",
-  "family": "Coiny",
-  "weight": 400
- },
- {
-  "file": "Galada-Regular.ttf",
-  "family": "Galada",
-  "weight": 400
- },
- {
-  "file": "Gidugu-Regular.ttf",
-  "family": "Gidugu",
-  "weight": 400
- },
- {
-  "file": "Kavivanar-Regular.ttf",
-  "family": "Kavivanar",
-  "weight": 400
- },
- {
-  "file": "Modak-Regular.ttf",
-  "family": "Modak",
-  "weight": 400
- },
- {
-  "file": "Mogra-Regular.ttf",
-  "family": "Mogra",
-  "weight": 400
- },
- {
-  "file": "RozhaOne-Regular.ttf",
-  "family": "Rozha One",
-  "weight": 400
- },
- {
-  "file": "RussoOne-400.ttf",
-  "family": "Russo One",
-  "weight": 400
- },
- {
-  "file": "Kalam-Light.ttf",
-  "family": "Kalam",
-  "weight": 300
- },
- {
-  "file": "Inter-500.ttf",
-  "family": "Inter",
-  "weight": 500
- },
- {
-  "file": "Poppins-500.ttf",
-  "family": "Poppins",
-  "weight": 500
- }
+  {
+    "file": "Acme-Regular.ttf",
+    "family": "Acme",
+    "weight": 400
+  },
+  {
+    "file": "AmaticSC-Regular.ttf",
+    "family": "Amatic SC",
+    "weight": 400
+  },
+  {
+    "file": "AmaticSC-Bold.ttf",
+    "family": "Amatic SC",
+    "weight": 700
+  },
+  {
+    "file": "AnekBangla-Bold.ttf",
+    "family": "Anek Bangla",
+    "weight": 700
+  },
+  {
+    "file": "AnekDevanagari-Bold.ttf",
+    "family": "Anek Devanagari",
+    "weight": 700
+  },
+  {
+    "file": "AnekGujarati-Bold.ttf",
+    "family": "Anek Gujarati",
+    "weight": 700
+  },
+  {
+    "file": "AnekGurmukhi-Bold.ttf",
+    "family": "Anek Gurmukhi",
+    "weight": 700
+  },
+  {
+    "file": "AnekKannada-Bold.ttf",
+    "family": "Anek Kannada",
+    "weight": 700
+  },
+  {
+    "file": "AnekMalayalam-Bold.ttf",
+    "family": "Anek Malayalam",
+    "weight": 700
+  },
+  {
+    "file": "AnekOdia-Bold.ttf",
+    "family": "Anek Odia",
+    "weight": 700
+  },
+  {
+    "file": "AnekTamil-Bold.ttf",
+    "family": "Anek Tamil",
+    "weight": 700
+  },
+  {
+    "file": "AnekTelugu-Bold.ttf",
+    "family": "Anek Telugu",
+    "weight": 700
+  },
+  {
+    "file": "Anton-Regular.ttf",
+    "family": "Anton",
+    "weight": 400
+  },
+  {
+    "file": "ArchivoBlack-Regular.ttf",
+    "family": "Archivo Black",
+    "weight": 400
+  },
+  {
+    "file": "Atma-Bold.ttf",
+    "family": "Atma",
+    "weight": 700
+  },
+  {
+    "file": "BagelFatOne-Regular.ttf",
+    "family": "Bagel Fat One",
+    "weight": 400
+  },
+  {
+    "file": "Baloo2-Bold.ttf",
+    "family": "Baloo 2",
+    "weight": 700
+  },
+  {
+    "file": "BalooBhai2-Bold.ttf",
+    "family": "Baloo Bhai 2",
+    "weight": 700
+  },
+  {
+    "file": "BalooBhaina2-400.ttf",
+    "family": "Baloo Bhaina 2",
+    "weight": 400
+  },
+  {
+    "file": "BalooBhaina2-600.ttf",
+    "family": "Baloo Bhaina 2",
+    "weight": 600
+  },
+  {
+    "file": "BalooBhaina2-700.ttf",
+    "family": "Baloo Bhaina 2",
+    "weight": 700
+  },
+  {
+    "file": "BalooBhaina2-800.ttf",
+    "family": "Baloo Bhaina 2",
+    "weight": 800
+  },
+  {
+    "file": "BalooChettan2-Bold.ttf",
+    "family": "Baloo Chettan 2",
+    "weight": 700
+  },
+  {
+    "file": "BalooDa2-Bold.ttf",
+    "family": "Baloo Da 2",
+    "weight": 700
+  },
+  {
+    "file": "BalooPaaji2-Bold.ttf",
+    "family": "Baloo Paaji 2",
+    "weight": 700
+  },
+  {
+    "file": "BalooTamma2-400.ttf",
+    "family": "Baloo Tamma 2",
+    "weight": 400
+  },
+  {
+    "file": "BalooTamma2-500.ttf",
+    "family": "Baloo Tamma 2",
+    "weight": 500
+  },
+  {
+    "file": "BalooTamma2-600.ttf",
+    "family": "Baloo Tamma 2",
+    "weight": 600
+  },
+  {
+    "file": "BalooTamma2-700.ttf",
+    "family": "Baloo Tamma 2",
+    "weight": 700
+  },
+  {
+    "file": "BalooTamma2-800.ttf",
+    "family": "Baloo Tamma 2",
+    "weight": 800
+  },
+  {
+    "file": "BalooThambi2-Bold.ttf",
+    "family": "Baloo Thambi 2",
+    "weight": 700
+  },
+  {
+    "file": "Bangers-Regular.ttf",
+    "family": "Bangers",
+    "weight": 400
+  },
+  {
+    "file": "Barlow-400.ttf",
+    "family": "Barlow",
+    "weight": 400
+  },
+  {
+    "file": "Barlow-600.ttf",
+    "family": "Barlow",
+    "weight": 600
+  },
+  {
+    "file": "Barlow-700.ttf",
+    "family": "Barlow",
+    "weight": 700
+  },
+  {
+    "file": "Barlow-800.ttf",
+    "family": "Barlow",
+    "weight": 800
+  },
+  {
+    "file": "BebasNeue-Regular.ttf",
+    "family": "Bebas Neue",
+    "weight": 400
+  },
+  {
+    "file": "Bungee-Regular.ttf",
+    "family": "Bungee",
+    "weight": 400
+  },
+  {
+    "file": "Catamaran-Bold.ttf",
+    "family": "Catamaran",
+    "weight": 700
+  },
+  {
+    "file": "Caveat-Regular.ttf",
+    "family": "Caveat",
+    "weight": 400
+  },
+  {
+    "file": "Caveat-Bold.ttf",
+    "family": "Caveat",
+    "weight": 700
+  },
+  {
+    "file": "Chilanka-Regular.ttf",
+    "family": "Chilanka",
+    "weight": 400
+  },
+  {
+    "file": "Coiny-Regular.ttf",
+    "family": "Coiny",
+    "weight": 400
+  },
+  {
+    "file": "DancingScript-Regular.ttf",
+    "family": "Dancing Script",
+    "weight": 400
+  },
+  {
+    "file": "DancingScript-Bold.ttf",
+    "family": "Dancing Script",
+    "weight": 700
+  },
+  {
+    "file": "DMSans-400.ttf",
+    "family": "DM Sans",
+    "weight": 400
+  },
+  {
+    "file": "DMSans-600.ttf",
+    "family": "DM Sans",
+    "weight": 600
+  },
+  {
+    "file": "DMSans-700.ttf",
+    "family": "DM Sans",
+    "weight": 700
+  },
+  {
+    "file": "DMSans-800.ttf",
+    "family": "DM Sans",
+    "weight": 800
+  },
+  {
+    "file": "Fredoka-Regular.ttf",
+    "family": "Fredoka",
+    "weight": 400
+  },
+  {
+    "file": "Fredoka-Bold.ttf",
+    "family": "Fredoka",
+    "weight": 700
+  },
+  {
+    "file": "Galada-Regular.ttf",
+    "family": "Galada",
+    "weight": 400
+  },
+  {
+    "file": "Gidugu-Regular.ttf",
+    "family": "Gidugu",
+    "weight": 400
+  },
+  {
+    "file": "Hind-400.ttf",
+    "family": "Hind",
+    "weight": 400
+  },
+  {
+    "file": "Hind-600.ttf",
+    "family": "Hind",
+    "weight": 600
+  },
+  {
+    "file": "Hind-700.ttf",
+    "family": "Hind",
+    "weight": 700
+  },
+  {
+    "file": "HindGuntur-400.ttf",
+    "family": "Hind Guntur",
+    "weight": 400
+  },
+  {
+    "file": "HindGuntur-600.ttf",
+    "family": "Hind Guntur",
+    "weight": 600
+  },
+  {
+    "file": "HindGuntur-700.ttf",
+    "family": "Hind Guntur",
+    "weight": 700
+  },
+  {
+    "file": "HindMadurai-400.ttf",
+    "family": "Hind Madurai",
+    "weight": 400
+  },
+  {
+    "file": "HindMadurai-600.ttf",
+    "family": "Hind Madurai",
+    "weight": 600
+  },
+  {
+    "file": "HindMadurai-700.ttf",
+    "family": "Hind Madurai",
+    "weight": 700
+  },
+  {
+    "file": "HindSiliguri-400.ttf",
+    "family": "Hind Siliguri",
+    "weight": 400
+  },
+  {
+    "file": "HindSiliguri-600.ttf",
+    "family": "Hind Siliguri",
+    "weight": 600
+  },
+  {
+    "file": "HindSiliguri-700.ttf",
+    "family": "Hind Siliguri",
+    "weight": 700
+  },
+  {
+    "file": "HindVadodara-400.ttf",
+    "family": "Hind Vadodara",
+    "weight": 400
+  },
+  {
+    "file": "HindVadodara-600.ttf",
+    "family": "Hind Vadodara",
+    "weight": 600
+  },
+  {
+    "file": "HindVadodara-700.ttf",
+    "family": "Hind Vadodara",
+    "weight": 700
+  },
+  {
+    "file": "Inter-400.ttf",
+    "family": "Inter",
+    "weight": 400
+  },
+  {
+    "file": "Inter-500.ttf",
+    "family": "Inter",
+    "weight": 500
+  },
+  {
+    "file": "Inter-600.ttf",
+    "family": "Inter",
+    "weight": 600
+  },
+  {
+    "file": "Inter-700.ttf",
+    "family": "Inter",
+    "weight": 700
+  },
+  {
+    "file": "Inter-800.ttf",
+    "family": "Inter",
+    "weight": 800
+  },
+  {
+    "file": "Inter-900.ttf",
+    "family": "Inter",
+    "weight": 900
+  },
+  {
+    "file": "Kalam-Light.ttf",
+    "family": "Kalam",
+    "weight": 300
+  },
+  {
+    "file": "Kalam-Regular.ttf",
+    "family": "Kalam",
+    "weight": 400
+  },
+  {
+    "file": "Kalam-Bold.ttf",
+    "family": "Kalam",
+    "weight": 700
+  },
+  {
+    "file": "Kavivanar-Regular.ttf",
+    "family": "Kavivanar",
+    "weight": 400
+  },
+  {
+    "file": "Lato-400.ttf",
+    "family": "Lato",
+    "weight": 400
+  },
+  {
+    "file": "Lato-700.ttf",
+    "family": "Lato",
+    "weight": 700
+  },
+  {
+    "file": "Lato-900.ttf",
+    "family": "Lato",
+    "weight": 900
+  },
+  {
+    "file": "LuckiestGuy-Regular.ttf",
+    "family": "Luckiest Guy",
+    "weight": 400
+  },
+  {
+    "file": "Manjari-400.ttf",
+    "family": "Manjari",
+    "weight": 400
+  },
+  {
+    "file": "Manjari-700.ttf",
+    "family": "Manjari",
+    "weight": 700
+  },
+  {
+    "file": "Manrope-400.ttf",
+    "family": "Manrope",
+    "weight": 400
+  },
+  {
+    "file": "Manrope-600.ttf",
+    "family": "Manrope",
+    "weight": 600
+  },
+  {
+    "file": "Manrope-700.ttf",
+    "family": "Manrope",
+    "weight": 700
+  },
+  {
+    "file": "Manrope-800.ttf",
+    "family": "Manrope",
+    "weight": 800
+  },
+  {
+    "file": "Modak-Regular.ttf",
+    "family": "Modak",
+    "weight": 400
+  },
+  {
+    "file": "Mogra-Regular.ttf",
+    "family": "Mogra",
+    "weight": 400
+  },
+  {
+    "file": "Montserrat-400.ttf",
+    "family": "Montserrat",
+    "weight": 400
+  },
+  {
+    "file": "Montserrat-500.ttf",
+    "family": "Montserrat",
+    "weight": 500
+  },
+  {
+    "file": "Montserrat-600.ttf",
+    "family": "Montserrat",
+    "weight": 600
+  },
+  {
+    "file": "Montserrat-700.ttf",
+    "family": "Montserrat",
+    "weight": 700
+  },
+  {
+    "file": "Montserrat-800.ttf",
+    "family": "Montserrat",
+    "weight": 800
+  },
+  {
+    "file": "Montserrat-900.ttf",
+    "family": "Montserrat",
+    "weight": 900
+  },
+  {
+    "file": "Mukta-400.ttf",
+    "family": "Mukta",
+    "weight": 400
+  },
+  {
+    "file": "Mukta-600.ttf",
+    "family": "Mukta",
+    "weight": 600
+  },
+  {
+    "file": "Mukta-700.ttf",
+    "family": "Mukta",
+    "weight": 700
+  },
+  {
+    "file": "Mukta-800.ttf",
+    "family": "Mukta",
+    "weight": 800
+  },
+  {
+    "file": "MuktaMahee-400.ttf",
+    "family": "Mukta Mahee",
+    "weight": 400
+  },
+  {
+    "file": "MuktaMahee-600.ttf",
+    "family": "Mukta Mahee",
+    "weight": 600
+  },
+  {
+    "file": "MuktaMahee-700.ttf",
+    "family": "Mukta Mahee",
+    "weight": 700
+  },
+  {
+    "file": "MuktaMahee-800.ttf",
+    "family": "Mukta Mahee",
+    "weight": 800
+  },
+  {
+    "file": "MuktaMalar-400.ttf",
+    "family": "Mukta Malar",
+    "weight": 400
+  },
+  {
+    "file": "MuktaMalar-600.ttf",
+    "family": "Mukta Malar",
+    "weight": 600
+  },
+  {
+    "file": "MuktaMalar-700.ttf",
+    "family": "Mukta Malar",
+    "weight": 700
+  },
+  {
+    "file": "MuktaMalar-800.ttf",
+    "family": "Mukta Malar",
+    "weight": 800
+  },
+  {
+    "file": "MuktaVaani-400.ttf",
+    "family": "Mukta Vaani",
+    "weight": 400
+  },
+  {
+    "file": "MuktaVaani-600.ttf",
+    "family": "Mukta Vaani",
+    "weight": 600
+  },
+  {
+    "file": "MuktaVaani-700.ttf",
+    "family": "Mukta Vaani",
+    "weight": 700
+  },
+  {
+    "file": "MuktaVaani-800.ttf",
+    "family": "Mukta Vaani",
+    "weight": 800
+  },
+  {
+    "file": "NotoSans-400.ttf",
+    "family": "Noto Sans",
+    "weight": 400
+  },
+  {
+    "file": "NotoSans-500.ttf",
+    "family": "Noto Sans",
+    "weight": 500
+  },
+  {
+    "file": "NotoSans-600.ttf",
+    "family": "Noto Sans",
+    "weight": 600
+  },
+  {
+    "file": "NotoSans-700.ttf",
+    "family": "Noto Sans",
+    "weight": 700
+  },
+  {
+    "file": "NotoSans-800.ttf",
+    "family": "Noto Sans",
+    "weight": 800
+  },
+  {
+    "file": "NotoSans-900.ttf",
+    "family": "Noto Sans",
+    "weight": 900
+  },
+  {
+    "file": "NotoSansBengali-400.ttf",
+    "family": "Noto Sans Bengali",
+    "weight": 400
+  },
+  {
+    "file": "NotoSansBengali-700.ttf",
+    "family": "Noto Sans Bengali",
+    "weight": 700
+  },
+  {
+    "file": "NotoSansDevanagari-400.ttf",
+    "family": "Noto Sans Devanagari",
+    "weight": 400
+  },
+  {
+    "file": "NotoSansDevanagari-500.ttf",
+    "family": "Noto Sans Devanagari",
+    "weight": 500
+  },
+  {
+    "file": "NotoSansDevanagari-600.ttf",
+    "family": "Noto Sans Devanagari",
+    "weight": 600
+  },
+  {
+    "file": "NotoSansDevanagari-700.ttf",
+    "family": "Noto Sans Devanagari",
+    "weight": 700
+  },
+  {
+    "file": "NotoSansDevanagari-800.ttf",
+    "family": "Noto Sans Devanagari",
+    "weight": 800
+  },
+  {
+    "file": "NotoSansDevanagari-900.ttf",
+    "family": "Noto Sans Devanagari",
+    "weight": 900
+  },
+  {
+    "file": "NotoSansGujarati-400.ttf",
+    "family": "Noto Sans Gujarati",
+    "weight": 400
+  },
+  {
+    "file": "NotoSansGujarati-700.ttf",
+    "family": "Noto Sans Gujarati",
+    "weight": 700
+  },
+  {
+    "file": "NotoSansGurmukhi-400.ttf",
+    "family": "Noto Sans Gurmukhi",
+    "weight": 400
+  },
+  {
+    "file": "NotoSansGurmukhi-Bold.ttf",
+    "family": "Noto Sans Gurmukhi",
+    "weight": 700
+  },
+  {
+    "file": "NotoSansKannada-400.ttf",
+    "family": "Noto Sans Kannada",
+    "weight": 400
+  },
+  {
+    "file": "NotoSansKannada-600.ttf",
+    "family": "Noto Sans Kannada",
+    "weight": 600
+  },
+  {
+    "file": "NotoSansKannada-700.ttf",
+    "family": "Noto Sans Kannada",
+    "weight": 700
+  },
+  {
+    "file": "NotoSansKannada-800.ttf",
+    "family": "Noto Sans Kannada",
+    "weight": 800
+  },
+  {
+    "file": "NotoSansMalayalam-400.ttf",
+    "family": "Noto Sans Malayalam",
+    "weight": 400
+  },
+  {
+    "file": "NotoSansMalayalam-700.ttf",
+    "family": "Noto Sans Malayalam",
+    "weight": 700
+  },
+  {
+    "file": "NotoSansOriya-400.ttf",
+    "family": "Noto Sans Oriya",
+    "weight": 400
+  },
+  {
+    "file": "NotoSansOriya-700.ttf",
+    "family": "Noto Sans Oriya",
+    "weight": 700
+  },
+  {
+    "file": "NotoSansTamil-400.ttf",
+    "family": "Noto Sans Tamil",
+    "weight": 400
+  },
+  {
+    "file": "NotoSansTamil-500.ttf",
+    "family": "Noto Sans Tamil",
+    "weight": 500
+  },
+  {
+    "file": "NotoSansTamil-600.ttf",
+    "family": "Noto Sans Tamil",
+    "weight": 600
+  },
+  {
+    "file": "NotoSansTamil-700.ttf",
+    "family": "Noto Sans Tamil",
+    "weight": 700
+  },
+  {
+    "file": "NotoSansTamil-800.ttf",
+    "family": "Noto Sans Tamil",
+    "weight": 800
+  },
+  {
+    "file": "NotoSansTamil-900.ttf",
+    "family": "Noto Sans Tamil",
+    "weight": 900
+  },
+  {
+    "file": "NotoSansTelugu-400.ttf",
+    "family": "Noto Sans Telugu",
+    "weight": 400
+  },
+  {
+    "file": "NotoSansTelugu-500.ttf",
+    "family": "Noto Sans Telugu",
+    "weight": 500
+  },
+  {
+    "file": "NotoSansTelugu-600.ttf",
+    "family": "Noto Sans Telugu",
+    "weight": 600
+  },
+  {
+    "file": "NotoSansTelugu-700.ttf",
+    "family": "Noto Sans Telugu",
+    "weight": 700
+  },
+  {
+    "file": "NotoSansTelugu-800.ttf",
+    "family": "Noto Sans Telugu",
+    "weight": 800
+  },
+  {
+    "file": "NotoSansTelugu-900.ttf",
+    "family": "Noto Sans Telugu",
+    "weight": 900
+  },
+  {
+    "file": "NotoSerifBengali-400.ttf",
+    "family": "Noto Serif Bengali",
+    "weight": 400
+  },
+  {
+    "file": "NotoSerifBengali-700.ttf",
+    "family": "Noto Serif Bengali",
+    "weight": 700
+  },
+  {
+    "file": "NotoSerifDevanagari-400.ttf",
+    "family": "Noto Serif Devanagari",
+    "weight": 400
+  },
+  {
+    "file": "NotoSerifDevanagari-700.ttf",
+    "family": "Noto Serif Devanagari",
+    "weight": 700
+  },
+  {
+    "file": "NotoSerifKannada-400.ttf",
+    "family": "Noto Serif Kannada",
+    "weight": 400
+  },
+  {
+    "file": "NotoSerifKannada-700.ttf",
+    "family": "Noto Serif Kannada",
+    "weight": 700
+  },
+  {
+    "file": "NotoSerifMalayalam-400.ttf",
+    "family": "Noto Serif Malayalam",
+    "weight": 400
+  },
+  {
+    "file": "NotoSerifMalayalam-700.ttf",
+    "family": "Noto Serif Malayalam",
+    "weight": 700
+  },
+  {
+    "file": "NotoSerifOriya-400.ttf",
+    "family": "Noto Serif Oriya",
+    "weight": 400
+  },
+  {
+    "file": "NotoSerifOriya-700.ttf",
+    "family": "Noto Serif Oriya",
+    "weight": 700
+  },
+  {
+    "file": "NotoSerifTelugu-400.ttf",
+    "family": "Noto Serif Telugu",
+    "weight": 400
+  },
+  {
+    "file": "NotoSerifTelugu-700.ttf",
+    "family": "Noto Serif Telugu",
+    "weight": 700
+  },
+  {
+    "file": "Nunito-400.ttf",
+    "family": "Nunito",
+    "weight": 400
+  },
+  {
+    "file": "Nunito-700.ttf",
+    "family": "Nunito",
+    "weight": 700
+  },
+  {
+    "file": "Nunito-800.ttf",
+    "family": "Nunito",
+    "weight": 800
+  },
+  {
+    "file": "OpenSans-400.ttf",
+    "family": "Open Sans",
+    "weight": 400
+  },
+  {
+    "file": "OpenSans-600.ttf",
+    "family": "Open Sans",
+    "weight": 600
+  },
+  {
+    "file": "OpenSans-700.ttf",
+    "family": "Open Sans",
+    "weight": 700
+  },
+  {
+    "file": "OpenSans-800.ttf",
+    "family": "Open Sans",
+    "weight": 800
+  },
+  {
+    "file": "Oswald-Regular.ttf",
+    "family": "Oswald",
+    "weight": 400
+  },
+  {
+    "file": "Oswald-Bold.ttf",
+    "family": "Oswald",
+    "weight": 700
+  },
+  {
+    "file": "Outfit-300.ttf",
+    "family": "Outfit",
+    "weight": 300
+  },
+  {
+    "file": "Outfit-400.ttf",
+    "family": "Outfit",
+    "weight": 400
+  },
+  {
+    "file": "Outfit-500.ttf",
+    "family": "Outfit",
+    "weight": 500
+  },
+  {
+    "file": "Outfit-600.ttf",
+    "family": "Outfit",
+    "weight": 600
+  },
+  {
+    "file": "Outfit-700.ttf",
+    "family": "Outfit",
+    "weight": 700
+  },
+  {
+    "file": "Outfit-800.ttf",
+    "family": "Outfit",
+    "weight": 800
+  },
+  {
+    "file": "Outfit-900.ttf",
+    "family": "Outfit",
+    "weight": 900
+  },
+  {
+    "file": "Pacifico-Regular.ttf",
+    "family": "Pacifico",
+    "weight": 400
+  },
+  {
+    "file": "PermanentMarker-400.ttf",
+    "family": "Permanent Marker",
+    "weight": 400
+  },
+  {
+    "file": "PlusJakartaSans-400.ttf",
+    "family": "Plus Jakarta Sans",
+    "weight": 400
+  },
+  {
+    "file": "PlusJakartaSans-500.ttf",
+    "family": "Plus Jakarta Sans",
+    "weight": 500
+  },
+  {
+    "file": "PlusJakartaSans-600.ttf",
+    "family": "Plus Jakarta Sans",
+    "weight": 600
+  },
+  {
+    "file": "PlusJakartaSans-700.ttf",
+    "family": "Plus Jakarta Sans",
+    "weight": 700
+  },
+  {
+    "file": "PlusJakartaSans-800.ttf",
+    "family": "Plus Jakarta Sans",
+    "weight": 800
+  },
+  {
+    "file": "Poppins-Regular.ttf",
+    "family": "Poppins",
+    "weight": 400
+  },
+  {
+    "file": "Poppins-500.ttf",
+    "family": "Poppins",
+    "weight": 500
+  },
+  {
+    "file": "Poppins-SemiBold.ttf",
+    "family": "Poppins",
+    "weight": 600
+  },
+  {
+    "file": "Poppins-Bold.ttf",
+    "family": "Poppins",
+    "weight": 700
+  },
+  {
+    "file": "Poppins-ExtraBold.ttf",
+    "family": "Poppins",
+    "weight": 800
+  },
+  {
+    "file": "Poppins-Black.ttf",
+    "family": "Poppins",
+    "weight": 900
+  },
+  {
+    "file": "Raleway-400.ttf",
+    "family": "Raleway",
+    "weight": 400
+  },
+  {
+    "file": "Raleway-700.ttf",
+    "family": "Raleway",
+    "weight": 700
+  },
+  {
+    "file": "Raleway-800.ttf",
+    "family": "Raleway",
+    "weight": 800
+  },
+  {
+    "file": "Ramabhadra-400.ttf",
+    "family": "Ramabhadra",
+    "weight": 400
+  },
+  {
+    "file": "Righteous-Regular.ttf",
+    "family": "Righteous",
+    "weight": 400
+  },
+  {
+    "file": "Roboto-400.ttf",
+    "family": "Roboto",
+    "weight": 400
+  },
+  {
+    "file": "Roboto-500.ttf",
+    "family": "Roboto",
+    "weight": 500
+  },
+  {
+    "file": "Roboto-700.ttf",
+    "family": "Roboto",
+    "weight": 700
+  },
+  {
+    "file": "Roboto-800.ttf",
+    "family": "Roboto",
+    "weight": 800
+  },
+  {
+    "file": "Roboto-900.ttf",
+    "family": "Roboto",
+    "weight": 900
+  },
+  {
+    "file": "RozhaOne-Regular.ttf",
+    "family": "Rozha One",
+    "weight": 400
+  },
+  {
+    "file": "Rubik-400.ttf",
+    "family": "Rubik",
+    "weight": 400
+  },
+  {
+    "file": "Rubik-600.ttf",
+    "family": "Rubik",
+    "weight": 600
+  },
+  {
+    "file": "Rubik-700.ttf",
+    "family": "Rubik",
+    "weight": 700
+  },
+  {
+    "file": "Rubik-800.ttf",
+    "family": "Rubik",
+    "weight": 800
+  },
+  {
+    "file": "RussoOne-400.ttf",
+    "family": "Russo One",
+    "weight": 400
+  },
+  {
+    "file": "ShadowsIntoLight-Regular.ttf",
+    "family": "Shadows Into Light",
+    "weight": 400
+  },
+  {
+    "file": "Teko-400.ttf",
+    "family": "Teko",
+    "weight": 400
+  },
+  {
+    "file": "Teko-600.ttf",
+    "family": "Teko",
+    "weight": 600
+  },
+  {
+    "file": "Teko-700.ttf",
+    "family": "Teko",
+    "weight": 700
+  },
+  {
+    "file": "TiroKannada-400.ttf",
+    "family": "Tiro Kannada",
+    "weight": 400
+  },
+  {
+    "file": "WorkSans-400.ttf",
+    "family": "Work Sans",
+    "weight": 400
+  },
+  {
+    "file": "WorkSans-600.ttf",
+    "family": "Work Sans",
+    "weight": 600
+  },
+  {
+    "file": "WorkSans-700.ttf",
+    "family": "Work Sans",
+    "weight": 700
+  },
+  {
+    "file": "WorkSans-800.ttf",
+    "family": "Work Sans",
+    "weight": 800
+  }
 ]

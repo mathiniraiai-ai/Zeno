@@ -1,0 +1,20 @@
+{
+  "id": "selfie",
+  "layout": "single",
+  "names": [
+    "selfie",
+    "selfie style",
+    "selfie video",
+    "talking to camera",
+    "vlog"
+  ],
+  "description": "Single presenter framed close and centered in a direct-to-camera full-frame shot without split panels.",
+  "when": "single-speaker direct hooks, vox-pop intros, and direct-to-camera testimonials",
+  "geometry": {
+    "canvas": "1080x1920",
+    "subs_y": 68,
+    "zoom": "1.0 with 1.0->1.06 pushes or 1.08 punch-ins on stressed words"
+  },
+  "confidence": "defined",
+  "source": "Zeno Pro layout specification (single selfie framing)"
+}

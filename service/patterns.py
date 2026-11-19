@@ -45,7 +45,7 @@ def _num(x: Any) -> float:
 
 
 _FAMILIES = {"1": "micro narrative", "2": "live conversation", "3": "split screen", "4": "scrolling text",
-             "5": "how would you translate", "6": "story based", "7": "realistic to 3d", "8": "3d to 2d"}
+             "5": "how would you translate", "6": "story based", "7": "realistic to 3d", "8": "3d to 2d", "9": "story pitch"}
 
 
 def _format_of(analysis: str) -> str:
@@ -81,7 +81,7 @@ def digest(p: Dict[str, Any], editor: str = "", created_at: float = 0.0, updated
     until_pass = next((i + 1 for i, c in enumerate(checks) if c.get("result") == "passed"), None)
 
     verify_fails = sorted({f"{m.group(1)} {m.group(2)}" for m in _VERIFY_TAG.finditer(str(ver.get("text") or ""))})
-    renders_failed = sum(1 for e in events if isinstance(e, dict) and e.get("kind") == "render_failed") or (1 if kind == "render_failed" else 0)
+    renders_failed = sum(1 for e in events if isinstance(e, dict) and e.get("kind") in ("render_failed", "failed")) or (1 if kind in ("render_failed", "failed") else 0)
     renders = int(summ.get("renders") or 0)
 
     fb = [f for f in (p.get("feedback") or []) if isinstance(f, dict) and f.get("text")]
@@ -102,9 +102,9 @@ def digest(p: Dict[str, Any], editor: str = "", created_at: float = 0.0, updated
 
     if kind == "blocked":
         outcome = "bad"
-    elif kind in ("inspected", "checking") and not renders:
+    elif kind in ("inspect", "inspected", "checking") and not renders:
         outcome = "open"
-    elif kind == "render_failed" or (renders == 0 and renders_failed):
+    elif kind in ("render_failed", "failed") or (renders == 0 and renders_failed):
         outcome = "bad"
     elif "negative" in fb_s and "positive" not in fb_s:
         outcome = "bad"

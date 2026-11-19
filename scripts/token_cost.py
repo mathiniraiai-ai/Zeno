@@ -99,7 +99,8 @@ def estimate(agent: dict[str, Any]) -> dict[str, Any]:
         fresh = max(0, inp - cached - total_write)
         out = int(request.get("output_tokens") or 0)
         ctx = int(request.get("context", inp) or 0)
-        is_sol = str(model_raw or "").strip().lower().startswith("gpt-6.1-sol")
+        norm_model = str(model_raw or "").strip().lower().rsplit("/", 1)[-1]
+        is_sol = norm_model.startswith("gpt-6.1-sol")
         long_input = 2 if (is_sol and ctx > 272000) else 1
         long_output = 1.5 if (is_sol and ctx > 272000) else 1
         speed_mult = multipliers[speed]

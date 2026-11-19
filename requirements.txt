@@ -1,5 +1,6 @@
-# Zeno — direct dependencies (Python 3.12). macOS: uv pip install --python .venv/bin/python -r requirements.txt
-# Windows NVIDIA GPU: install torch+torchaudio from the CUDA index first (see README), then this file.
+# Zeno — direct dependencies (Python 3.12).
+# macOS/Linux: uv pip install --python .venv/bin/python -r requirements.txt
+# Windows NVIDIA GPU: install torch+torchaudio from the CUDA index first, then install this file.
 torch==2.15.0
 torchaudio==2.11.1
 numpy==2.5.4

@@ -325,13 +325,13 @@ ADMIN_PAGE = f"""<!doctype html><html lang="en"><head>
   </div>
   <div class="card" id="brain-section">
     <h1>Editorial Brain &amp; Team Learnings</h1>
-    <p class="sub">Patterns learned across Hindi, Kannada, Malayalam, Telugu, Tamil &amp; English edits (<code>plan.auto.edl → plan.edl</code> diffs &amp; shared <code>brain_memory.json</code> rules).</p>
+    <p class="sub">Patterns learned across Hindi, Kannada, Malayalam, Telugu, Tamil &amp; English edits (<code>plan.edl</code> diffs &amp; shared team editorial rules).</p>
     <h2>Language Editing Patterns</h2>
     <div id="lang-stats" class="lang-pills"><span class="lang-pill">Loading language stats…</span></div>
     <h2>Shared Brain Memory Rules</h2>
     <table><thead><tr><th>Lang</th><th>Category</th><th>Learned Rule</th><th>Author</th><th>Created</th></tr></thead>
     <tbody id="brain-rules"><tr><td colspan="5">Loading rules…</td></tr></tbody></table>
-    <h2 style="margin-top:20px">Recent Auto-Plan → Final-Plan Editorial Diffs</h2>
+    <h2 style="margin-top:20px">Recent Plan Editorial Diffs</h2>
     <table><thead><tr><th>When</th><th>Editor</th><th>Project &amp; Lang</th><th>Take Swaps</th><th>Pause/Cut Trims</th><th>Zoom Changes</th><th>Marks Pack</th></tr></thead>
     <tbody id="plan-diffs"><tr><td colspan="7">Loading diffs…</td></tr></tbody></table>
   </div>
@@ -372,7 +372,7 @@ async function load(){{
     <td>${{esc(rl.rule_text||rl.rule||'')}}</td>
     <td>${{esc(rl.author_email||'-')}}</td>
     <td>${{esc(String(rl.created_at||'').slice(0,16))}}</td>
-  </tr>`).join('') || '<tr><td colspan="5">No shared brain memory rules pushed yet</td></tr>';
+  </tr>`).join('') || '<tr><td colspan="5">No shared team editorial rules pushed yet</td></tr>';
 
   const diffs = lrn.edl_diffs || [];
   document.getElementById('plan-diffs').innerHTML = diffs.map(df => {{

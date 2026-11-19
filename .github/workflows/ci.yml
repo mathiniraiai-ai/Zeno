@@ -8,7 +8,7 @@ on:
 
 jobs:
   test:
-    name: Engine, Service & Doc Sync Checks (Python 3.12)
+    name: Engine, Service & Zeno v2.0.0 Checks (Python 3.12)
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -30,10 +30,28 @@ jobs:
             requirements.txt
             service/requirements.txt
 
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: subtitles/package-lock.json
+
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip
           python3 -m pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt -r service/requirements.txt
+          npm --prefix subtitles ci --no-audit --no-fund
+
+      - name: Check Desktop App & Subtitle JS Syntax
+        run: |
+          node --check app/main.js
+          node --check app/preload.js
+          node --check app/renderer/app.js
+          node --check subtitles/caption-renderer.js
+          node --check subtitles/render_cues.js
+          node --check subtitles/render_flashcard.js
+          node --check subtitles/render_page.js
 
       - name: Run Zeno Engine Regression Suite
         run: python3 -m unittest discover -s tests
@@ -44,36 +62,56 @@ jobs:
           python3 service/check_prompt_sync.py
           python3 service/test_service.py --no-live
 
-      - name: Prompt & Documentation Sync Check (CLAUDE.md, AGENTS.md, agent/concepts/)
+      - name: Zeno v2.0.0 Doc Sync & Artifact Hygiene Check
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
           root = Path(".")
-          claude_md = (root / "CLAUDE.md").read_text(encoding="utf-8")
-          agents_md = (root / "AGENTS.md").read_text(encoding="utf-8")
 
-          assert claude_md == agents_md, "CLAUDE.md and AGENTS.md must match"
+          claude_bytes = (root / "CLAUDE.md").read_bytes()
+          agents_bytes = (root / "AGENTS.md").read_bytes()
+          assert claude_bytes == agents_bytes, "CLAUDE.md and AGENTS.md must match byte-for-byte"
+
+          claude_md = claude_bytes.decode("utf-8")
+          agents_md = agents_bytes.decode("utf-8")
+          readme_md = (root / "README.md").read_text(encoding="utf-8")
+          settings_json = (root / ".claude" / "settings.json").read_text(encoding="utf-8")
+
           required_markers = [
-              "agent/DIRECTOR.md",
-              "~/Downloads/Zeno Outputs/",
-              "agent/EDIT_RULES.md",
-              "--check-plan",
-              "--auto-plan",
-              "< 1,00,000",
-              "scripts/zeno.py --check",
-              "scripts/zeno.py --inspect",
-              "scripts/zeno.py --execute",
-              ".zeno_session.json",
+              "~/Downloads/Zeno Outs/",
+              "--queue",
+              "--execute",
+              "scripts/zeno.py",
           ]
-          for marker in required_markers:
-              assert marker in claude_md, f"Missing core rule marker in CLAUDE.md: {marker}"
-              assert marker in agents_md, f"Missing core rule marker in AGENTS.md: {marker}"
+          for doc_name, content in (
+              ("CLAUDE.md", claude_md),
+              ("AGENTS.md", agents_md),
+              ("README.md", readme_md),
+          ):
+              for marker in required_markers:
+                  assert marker in content, f"Missing Zeno v2.0.0 marker {marker!r} in {doc_name}"
 
-          offenders = []
-          for p in (root / "agent" / "concepts").rglob("*"):
-              if p.is_file() and "mms-300m" in p.read_text(encoding="utf-8", errors="ignore").lower():
-                  offenders.append(str(p))
-          assert not offenders, f"Forbidden 'mms-300m' found in agent/concepts/: {offenders}"
-          print("[OK] CLAUDE.md and AGENTS.md core rules synced; 0 'mms-300m' references in agent/concepts/.")
+          forbidden_artifacts = [
+              "agent",
+              "styles",
+              "config",
+              "scripts/zeno_mcp.py",
+              "scripts/ai_director.py",
+              "scripts/direct_mode.py",
+              "scripts/brain_memory.py",
+          ]
+          present = [p for p in forbidden_artifacts if (root / p).exists() or (root / p).is_symlink()]
+          assert not present, f"Forbidden 1.x / MCP / auto-plan artifacts still present: {present}"
+
+          forbidden_tokens = ["--auto-plan", "zeno_mcp.py"]
+          for fname, content in (
+              ("AGENTS.md", agents_md),
+              ("CLAUDE.md", claude_md),
+              (".claude/settings.json", settings_json),
+          ):
+              for tok in forbidden_tokens:
+                  assert tok not in content, f"Forbidden token {tok!r} found in {fname}"
+
+          print("[OK] Zeno v2.0.0 doc sync, required markers, and artifact hygiene verified.")
           PY

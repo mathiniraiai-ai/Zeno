@@ -9,7 +9,7 @@ Updates happen in three ways:
      and Python engine in seconds without reinstalling the `.dmg` or `.exe`.
   2. **Pre-Job Auto-Update**: Whenever an editor starts a job (`zeno.py --inspect`, `prepare.py`,
      `zeno.py --check`) or when >= 12 hours have elapsed, Zeno checks `/v1/version` and downloads `/v1/update-bundle`
-     automatically, plus syncs `brain_memory.json` rules.
+     automatically.
   3. **Daily 11:00 AM OS Scheduler**: Runs in the background via macOS `launchd` / Windows Scheduled Task.
 """
 from __future__ import annotations
@@ -52,9 +52,12 @@ PROTECTED_PREFIXES = (
     ".venv/",
     "models/",
     "tools/",
+    "subtitles/node_modules/",
     "work/",
     "input/",
     "output/",
+    "app/node_modules/",
+    "app/dist/",
     "scratch/",
     "service/",
 )
@@ -281,7 +284,7 @@ def check_cloud_update(force: bool = False, timeout_sec: float = 8.0, cache_ttl_
 
 
 def _is_protected_relpath(rel_posix: str) -> bool:
-    clean = rel_posix.lstrip("/")
+    clean = rel_posix.replace("\\", "/").lstrip("/")
     if not clean or ".." in clean.split("/"):
         return True
     for pref in PROTECTED_PREFIXES:
@@ -373,18 +376,20 @@ def apply_bundle_bytes(blob: bytes, expected_sha256: str = "", version: str = ""
         except Exception:
             pass
 
-    try:   # the hooks that depend on this computer (no Git Bash needed)
-        sys.path.insert(0, str(ROOT / "scripts"))
-        import hooks_setup
-        hooks_setup.ensure(ROOT)
-    except Exception:
-        pass
-
     final_ver = version or get_local_version()
     clean_res: Dict[str, Any] = {}
     try:
-        sys.path.insert(0, str(ROOT / "scripts"))
+        scripts_dir = str(ROOT / "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
         import clean as _clean_mod
+
+        local_clean = (ROOT / "scripts" / "clean.py").resolve()
+        clean_file = getattr(_clean_mod, "__file__", None)
+        if local_clean.is_file() and clean_file and Path(clean_file).resolve() == local_clean:
+            import importlib
+
+            _clean_mod = importlib.reload(_clean_mod)
         clean_res = _clean_mod.cleanup_after_update(root=ROOT, version=final_ver, prev_version=before_ver)
     except Exception:
         clean_res = {}
@@ -417,12 +422,11 @@ def ensure_latest_update(
     min_interval_hours: float = 0.0,
     timeout_sec: float = 45.0,
     quiet: bool = False,
-    sync_brain: bool = True,
 ) -> Dict[str, Any]:
     """Check Zeno Cloud and download + install any new software release automatically.
 
     - Zero Git / zero GitHub required on user machines.
-    - Never touches `.env`, `.zeno_session.json`, `.venv/`, `models/`, `tools/`, `work/`, `input/`, or outputs.
+    - Never touches `.env`, `.zeno_session.json`, `.zeno_owner_session.json`, `.venv/`, `models/`, `tools/`, `subtitles/node_modules/`, `work/`, `input/`, `output/`, `app/node_modules/`, or `app/dist/`.
     - Never overwrites the owner's dev copy (`.zeno-dev`).
     """
     if _is_offline_mode():
@@ -483,17 +487,6 @@ def ensure_latest_update(
             update_ok = False
             msg = f"Download failed ({type(exc).__name__}: {exc})"
 
-    brain_pulled = 0
-    if sync_brain:
-        try:
-            sys.path.insert(0, str(ROOT / "scripts"))
-            import brain_memory
-
-            b_res = brain_memory.sync_brain_memory_with_cloud("micronarrative")
-            brain_pulled = int(b_res.get("pulled") or 0)
-        except Exception:
-            pass
-
     iso_now = dt.datetime.now().isoformat(timespec="seconds")
     result = {
         "ok": update_ok,
@@ -503,7 +496,6 @@ def ensure_latest_update(
         "version": after_ver,
         "before_head": before_ver,
         "head": after_ver,
-        "brain_rules_pulled": brain_pulled,
         "last_checked_epoch": now,
         "last_checked_iso": iso_now,
         "message": msg,
@@ -517,8 +509,6 @@ def ensure_latest_update(
             print(f"  [Auto-Update] ✓ Up to date (v{after_ver})")
         else:
             print(f"  [Auto-Update] Note: {msg}")
-        if brain_pulled > 0:
-            print(f"  [Auto-Update] ✓ Pulled {brain_pulled} new team editorial rule(s) into brain_memory.json")
 
     return result
 

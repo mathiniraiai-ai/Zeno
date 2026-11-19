@@ -54,14 +54,14 @@ def fake_wav(mb: float) -> bytes:
 def live_transcription(url: str, token: str, audio: Path):
     """Use the repo's real client, as a team PC would: no local Gemini key, only the service address and personal key."""
     sys.path.insert(0, str(ROOT / "scripts"))
+    os.environ["ZENO_CLOUD_URL"], os.environ["ZENO_CLOUD_TOKEN"] = url, token
     os.environ["SCRIPTCUT_CLOUD_URL"], os.environ["SCRIPTCUT_CLOUD_TOKEN"] = url, token
     from align_engine.gemini_transcriber import GeminiTranscriber
+    from prepare import parse_script_file
 
-    sys.path.insert(0, str(ROOT / "scripts"))
-    from common import read_script_text
-    from learn_reference import dialogue
     script = ROOT / "input" / "script" / "micronarrative_ref_ml.txt"
-    lines = [l["text"] for l in dialogue(read_script_text(script))]
+    _, parsed = parse_script_file(script)
+    lines = [l["text"] for l in parsed if not l.get("beat") and l.get("text")]
     with tempfile.TemporaryDirectory() as tmp:
         t0 = time.time()
         res = GeminiTranscriber(api_keys=[]).transcribe(str(audio), language_hint="ml", target_script_lines=lines, work_dir=Path(tmp), use_cache=False)

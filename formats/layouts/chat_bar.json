@@ -1,0 +1,20 @@
+{
+  "id": "chat_bar",
+  "layout": "chat_bar",
+  "names": [
+    "chat bar",
+    "prompt bar",
+    "text bar",
+    "chat message",
+    "flashcard bar"
+  ],
+  "description": "Full-frame speaker with a frosted glass bar displaying the target phrase or flashcard prompt.",
+  "when": "language translation drills and flashcard phrase prompts",
+  "geometry": {
+    "canvas": "1080x1920",
+    "bar": "frosted glass prompt bar with label text",
+    "subs_y": 68
+  },
+  "confidence": "defined",
+  "source": "Zeno Pro layout specification (chat_bar)"
+}

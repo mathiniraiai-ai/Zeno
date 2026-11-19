@@ -12,11 +12,11 @@ Tracks and stores:
 3. Persists every run to:
    - `work/<project>/token_telemetry.json` & `work/<project>/token_report.md`
    - Local SQL database: `work/zeno_telemetry.db` (`job_runs` and `clip_runs` tables)
-   - Notable repo ledger: `TOKEN_LEDGER.md` (and `README.md` token usage log)
-   - Railway PostgreSQL database via `POST /v1/telemetry` (when `SCRIPTCUT_CLOUD_URL` + `SCRIPTCUT_CLOUD_TOKEN` are set)
+   - Local markdown ledger: `work/TOKEN_LEDGER.md`
+   - Railway PostgreSQL database via `POST /v1/telemetry` (when `.zeno_session.json` or `ZENO_CLOUD_URL` + `ZENO_CLOUD_TOKEN` are set)
 
 CLI usage:
-    .venv/bin/python scripts/token_tracker.py --project <project_name> [--refresh] [--sync-cloud]
+    .venv/bin/python scripts/token_tracker.py --project <project_name> [--refresh] [--no-cloud]
     .venv/bin/python scripts/token_tracker.py --list
 """
 from __future__ import annotations
@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import OUTPUT, ROOT, WORK, read_json, tc, write_json  # noqa: E402
 
-LEDGER_MD = ROOT / "TOKEN_LEDGER.md"
+LEDGER_MD = WORK / "TOKEN_LEDGER.md"
 LOCAL_DB = WORK / "zeno_telemetry.db"
 
 
@@ -49,7 +49,7 @@ def _iso_to_epoch(ts_str: str) -> float:
         return 0.0
 
 
-CODE_PATH_HINTS = ("/scripts/", "/tests/", "/service/", "/agent/", "/styles/", "/subtitles/")
+CODE_PATH_HINTS = ("/scripts/", "/tests/", "/service/", "/formats/", "/subtitles/")
 
 
 def claude_window_usage(lines: List[str], cutoff: float, ceiling: float) -> Optional[Dict[str, Any]]:
@@ -207,7 +207,7 @@ def detect_agent_usage(
             if not lines:
                 continue
             raw_sample = "\n".join(lines[-200:])
-            is_zeno = "Zeno" in raw_sample or "Claude Editor" in raw_sample or "zeno.py" in raw_sample
+            is_zeno = ROOT.name in raw_sample or "Zeno" in raw_sample or "zeno.py" in raw_sample
             if len(agy_files) > 1 and not is_zeno and (now - mtime > 300):
                 continue
 
@@ -229,9 +229,11 @@ def detect_agent_usage(
     claude_sid = os.getenv("CLAUDE_CODE_SESSION_ID", "") if os.getenv("CLAUDECODE") else ""
     claude_pattern = os.path.expanduser(f"~/.claude/projects/**/{claude_sid or '*'}.jsonl")
     claude_files = sorted(glob.glob(claude_pattern, recursive=True), key=os.path.getmtime, reverse=True)
-    for path_str in claude_files[:5]:
+    for path_str in claude_files[:20]:
         try:
             mtime = os.path.getmtime(path_str)
+            if not claude_sid and mtime < cutoff - 60:
+                continue
             lines = Path(path_str).read_text(encoding="utf-8", errors="ignore").splitlines()
             import agent_log
             if not agent_log.chat_size(path_str, ROOT):
@@ -554,6 +556,73 @@ def _init_local_db(conn: sqlite3.Connection) -> None:
     )""")
 
 
+def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
+    if not path.is_file():
+        return []
+    out: List[Dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            try:
+                val = json.loads(line)
+                if isinstance(val, dict):
+                    out.append(val)
+            except ValueError:
+                continue
+    except OSError:
+        pass
+    return out
+
+
+def _usage_from_requests(requests: List[Dict[str, Any]]) -> Dict[str, Any]:
+    inp = sum(int(r.get("input_tokens") or 0) for r in requests)
+    cached = sum(int(r.get("cached_input_tokens") or 0) for r in requests)
+    uncached = max(0, inp - cached)
+    out = sum(int(r.get("output_tokens") or 0) for r in requests)
+    return {
+        "token_precision": "exact" if requests else "unavailable",
+        "requests": requests,
+        "input_tokens": uncached,
+        "cached_tokens": cached,
+        "output_tokens": out,
+        "cache_write_tokens": sum(int(r.get("cache_write_input_tokens") or 0) for r in requests),
+        "reasoning_tokens": sum(int(r.get("reasoning_output_tokens") or 0) for r in requests),
+        "total_tokens": uncached + out,
+        "total_tokens_including_cache": uncached + cached + out,
+        "context_start": int(requests[0].get("context", 0) or 0) if requests else 0,
+        "context_end": int(requests[-1].get("context", 0) or 0) if requests else 0,
+        "steps_count": len(requests),
+        "turns": len(requests),
+    }
+
+
+def _stage_report(proj_dir: Path, agent: Dict[str, Any], since: float, until: float) -> List[Dict[str, Any]]:
+    import token_cost
+
+    transitions: List[Tuple[float, str]] = [(since, "intake")]
+    stages = {
+        "inspect_start": "measurement",
+        "inspect_done": "planning",
+        "check": "corrections/review",
+        "render_start": "render/review",
+        "render_done": "final review",
+    }
+    for ev in _read_jsonl(proj_dir / "stage_events.jsonl"):
+        at = float(ev.get("at") or 0)
+        if since <= at <= until and ev.get("kind") in stages:
+            transitions.append((at, stages[str(ev["kind"])]))
+    transitions.sort()
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for req in agent.get("requests") or []:
+        ts = float(req.get("timestamp") or since)
+        stage = str(req.get("stage") or next((name for at, name in reversed(transitions) if at <= ts), "intake"))
+        groups.setdefault(stage, []).append(req)
+    return [
+        {"stage": stage, **u, "cost": token_cost.estimate(u)}
+        for stage, reqs in groups.items()
+        for u in (_usage_from_requests(reqs),)
+    ]
+
+
 def finalize_job_telemetry(
     plan_path: Path,
     plan: Dict[str, Any],
@@ -568,17 +637,26 @@ def finalize_job_telemetry(
     snap_path = proj_dir / "token_telemetry.json"
     snap: Dict[str, Any] = read_json(snap_path) if snap_path.is_file() else {}
 
-    import cost_control
     if snap.get("job_start_epoch"):
         job_start = float(snap["job_start_epoch"])
     else:
-        direct_rows = cost_control.rows(proj_dir / "direct_usage.jsonl")
-        earliest_direct = min((float(r["timestamp"]) for r in direct_rows if r.get("timestamp")), default=0.0)
-        job_start = min(time.time() - 900.0, earliest_direct) if earliest_direct > 0 else (time.time() - 900.0)
+        started_at = 0.0
+        started_file = proj_dir / "job_started.json"
+        if started_file.is_file():
+            try:
+                started_at = float((read_json(started_file) or {}).get("start") or 0.0)
+            except Exception:
+                started_at = 0.0
+        if started_at <= 0:
+            try:
+                from common import job_start_epoch
+                started_at = float(job_start_epoch(create=False))
+            except Exception:
+                started_at = 0.0
+        job_start = started_at if started_at > 0 else (time.time() - 900.0)
     job_end = float(completed_at if completed_at is not None else snap.get("job_end_epoch") or time.time())
     agent = detect_agent_usage(since_epoch=job_start, until_epoch=job_end,
                                session_id=snap.get("agent_session_id") if str(snap.get("agent_name", "")).startswith("Codex") else None)
-    agent = cost_control.combine(agent, proj_dir, job_start, job_end)
 
     clips: List[Dict[str, Any]] = snap.get("clips") or []
     t_in = int(snap.get("transcribe_in_tokens") or sum(int(c.get("input_tokens") or 0) for c in clips))
@@ -633,20 +711,19 @@ def finalize_job_telemetry(
     except Exception:
         edl_diff = {}
 
-    try:
-        import brain_memory
-        # only what a person recorded on this PC: the rules that ship with Zeno are not "learned" and must not be re-uploaded
-        learned_rules = [r for r in brain_memory.load_brain_memory("micronarrative") if r.get("source") == "remember"]
-    except Exception:
-        learned_rules = []
+    learned_rules: List[Any] = []
 
     spec_tuning: Dict[str, Any] = {}
-    spec_path = ROOT / "styles" / "micronarrative" / "spec.json"
-    if spec_path.is_file():
-        try:
-            spec_tuning = (read_json(spec_path) or {}).get("tuning") or {}
-        except Exception:
-            spec_tuning = {}
+    try:
+        import style_config
+        spec_tuning = style_config.get_tuning(str(plan.get("style") or "micronarrative"), plan)
+    except Exception:
+        spec_path = ROOT / "formats" / "specs" / "micronarrative_spec.json"
+        if spec_path.is_file():
+            try:
+                spec_tuning = (read_json(spec_path) or {}).get("tuning") or {}
+            except Exception:
+                spec_tuning = {}
     assets_used = {
         "preset": str(plan.get("preset") or "auto"),
         "mark_pack": str(plan.get("mark_pack") or "flash"),
@@ -684,9 +761,9 @@ def finalize_job_telemetry(
         "transcribe_reused_total_tokens": reused_transcription,
         "transcribe_reuse_known": all(c.get("transcription_reused") is not None for c in clips),
         "cost_estimate": cost,
-        "cost_stages": cost_control.stage_report(proj_dir, agent, job_start, job_end),
+        "cost_stages": _stage_report(proj_dir, agent, job_start, job_end),
         "host_usage_unknown": agent.get("host_usage_unknown", False),
-        "direct_usage_unmerged": agent.get("direct_usage_unmerged", False),
+        "direct_usage_unmerged": bool(agent.get("direct_usage_unmerged", False)),
         "agent_context_start": agent.get("context_start", 0),
         "agent_context_end": agent.get("context_end", 0),
         "clips_count": clips_cnt,
@@ -788,7 +865,7 @@ def finalize_job_telemetry(
     except Exception as exc:
         print(f"  [telemetry] local SQL warning: {exc}", file=sys.stderr)
 
-    # 3. Update root TOKEN_LEDGER.md
+    # 3. Update work/TOKEN_LEDGER.md
     _update_ledger_md(record)
 
     _update_readme(record)
@@ -857,9 +934,15 @@ def _format_project_report_md(r: Dict[str, Any]) -> str:
 
 
 def _update_readme(r: Dict[str, Any]) -> None:
-    """Replace only this output's row, preserving all other README contents."""
+    """Replace only this output's row when README.md contains ledger markers; never fail or pollute a clean README."""
     path = ROOT / "README.md"
     if not path.is_file():
+        return
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if "## Token usage log" not in content and "<!-- zeno-output:" not in content and "<!-- zeno-ledger" not in content:
         return
     marker = f"<!-- zeno-output:{r['output_mp4']} -->"
     row = (f"| {r['date']} | **{r['language']} – {r['project']}** ({r['clips_count']} clips): "
@@ -867,21 +950,25 @@ def _update_readme(r: Dict[str, Any]) -> None:
            f"{r.get('agent_context_start', 0):,} → {r.get('agent_context_end', 0):,} | "
            f"{r['agent_total_tokens']:,} uncached input + output; {r['agent_cached_tokens']:,} cached "
            f"({r.get('agent_token_precision', 'unavailable')}) | unavailable | unavailable |")
-    content = path.read_text(encoding="utf-8")
     rows = content.splitlines()
     for i, line in enumerate(rows):
         if marker in line:
             rows[i] = row
             break
     else:
+        if "## Token usage log" not in content and "<!-- zeno-ledger" not in content:
+            return
         rows.append(row)
-    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    try:
+        path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _update_ledger_md(r: Dict[str, Any]) -> None:
     header = """# Zeno — Automated Token & Clip Telemetry Ledger
 
-Automatically updated by [`scripts/token_tracker.py`](scripts/token_tracker.py) after every video edit (`prepare.py` → `render.py`).
+Automatically updated by [`scripts/token_tracker.py`](../scripts/token_tracker.py) after every video edit (`prepare.py` → `render.py`).
 The latest record per output is also stored in local SQLite (`work/zeno_telemetry.db`) and synced to Railway PostgreSQL (`/admin`). Historical rows retain their original inline labels.
 
 ## 1. All Video Edit Runs (AI Agent Tokens & Gemini Transcription Registered Separately)
@@ -921,6 +1008,7 @@ The latest record per output is also stored in local SQLite (`work/zeno_telemetr
     clip_section.append("")
 
     content = header + "\n".join(existing_rows) + "\n" + "\n".join(clip_section)
+    LEDGER_MD.parent.mkdir(parents=True, exist_ok=True)
     LEDGER_MD.write_text(content, encoding="utf-8")
 
 
@@ -934,25 +1022,47 @@ def _version_headers() -> Dict[str, str]:
 
 
 def _sync_to_cloud(r: Dict[str, Any]) -> bool:
+    url = ""
+    token = ""
     try:
         import auth_session
         sess = auth_session.load_session()
         url = str(sess.get("cloud_url") or auth_session.get_cloud_url()).strip()
         token = str(sess.get("token") or "").strip()
     except Exception:
+        pass
+    if not url:
         url = (os.getenv("ZENO_CLOUD_URL") or os.getenv("SCRIPTCUT_CLOUD_URL") or "").strip()
+    if not token:
         token = (os.getenv("ZENO_CLOUD_TOKEN") or os.getenv("SCRIPTCUT_CLOUD_TOKEN") or "").strip()
     if not url or not token:
         return False
+    hdrs = {"Authorization": f"Bearer {token}", **_version_headers()}
+    payload = {**r, "zeno_version": hdrs["X-Zeno-Version"]}
     try:
         import httpx
         resp = httpx.post(
             url.rstrip("/") + "/v1/telemetry",
-            headers={"Authorization": f"Bearer {token}", **_version_headers()},
-            json={**r, "zeno_version": _version_headers()["X-Zeno-Version"]},
+            headers=hdrs,
+            json=payload,
             timeout=10.0,
         )
         return resp.status_code == 200
+    except ImportError:
+        pass
+    except Exception:
+        return False
+    try:
+        import urllib.request
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            url.rstrip("/") + "/v1/telemetry",
+            data=body,
+            headers={**hdrs, "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10.0) as resp:  # noqa: S310
+            return resp.status == 200
     except Exception:
         return False
 
@@ -1008,10 +1118,17 @@ def main() -> None:
                 return
         if not args.refresh:
             raise SystemExit("No completed report yet. Finish the render, or use --refresh explicitly.")
-        plan_path = pdir / "plan.json"
-        if not plan_path.is_file():
-            raise SystemExit(f"No plan.json found in {pdir}")
-        plan = read_json(plan_path)
+        plan_edl = pdir / "plan.edl"
+        plan_json = pdir / "plan.json"
+        if plan_edl.is_file() and (not plan_json.is_file() or plan_edl.stat().st_mtime >= plan_json.stat().st_mtime):
+            import edl_parser
+            plan_path = plan_edl
+            plan = edl_parser.load_edl(plan_edl)
+        elif plan_json.is_file():
+            plan_path = plan_json
+            plan = read_json(plan_json)
+        else:
+            raise SystemExit(f"No plan.edl or plan.json found in {pdir}")
         segs = plan.get("segments") or []
         vid_sec = sum(max(0.0, float(s.get("end", 0.0)) - float(s.get("start", 0.0))) for s in segs)
         out_mp4 = Path(str(plan.get("output") or (OUTPUT / f"{args.project}.mp4")))

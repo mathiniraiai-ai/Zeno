@@ -21,9 +21,14 @@ import hashlib
 import json
 import os
 import platform
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
 
 ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / "work"
@@ -111,7 +116,11 @@ def _feedback(proj_dir: Path) -> List[Dict[str, Any]]:
     try:
         for line in (Path(proj_dir) / FEEDBACK).read_text(encoding="utf-8").splitlines():
             try:
-                out.append(json.loads(line))
+                row = json.loads(line)
+                if isinstance(row, dict):
+                    if not row.get("text") and row.get("feedback"):
+                        row["text"] = str(row["feedback"])[:4000]
+                    out.append(row)
             except Exception:
                 continue
     except Exception:
@@ -255,6 +264,12 @@ def build_record(
 ) -> Dict[str, Any]:
     plan_path = Path(plan_path)
     proj = plan_path.parent
+    if plan is None and plan_path.is_file():
+        try:
+            from edl_parser import load_edl
+            plan = load_edl(plan_path)
+        except Exception:
+            plan = {}
     plan = plan or {}
     hist = proj / HISTORY
     try:
@@ -268,23 +283,30 @@ def build_record(
             files.append({"file": f, "stage": e.get("stage"), "at": e.get("at"), "text": _read(hist / f, 120_000)})
     files = files[:2] + files[2:][-(MAX_VERSIONS - 2):] if len(files) > MAX_VERSIONS else files   # always keep the first plans
 
-    segs = [s for s in (plan.get("segments") or []) if isinstance(s, dict)]
-    layouts: Dict[str, int] = {}
-    for s in segs:
-        lay = str(s.get("layout") or "single").split(":")[0]
-        layouts[lay] = layouts.get(lay, 0) + 1
-    script_file = None
-    try:
-        from common import resolve
-        script_file = resolve(plan["script"]) if plan.get("script") else None
-    except Exception:
-        script_file = None
-
     def _json(name: str) -> Any:
         try:
             return json.loads((proj / name).read_text(encoding="utf-8"))
         except Exception:
             return None
+
+    segs = [s for s in (plan.get("segments") or []) if isinstance(s, dict)]
+    preset = str(plan.get("preset") or "").strip()
+    default_layout = preset if preset and preset not in ("auto", "hybrid") else "single"
+    layouts: Dict[str, int] = {}
+    for s in segs:
+        lay = str(s.get("layout") or default_layout).split(":")[0]
+        layouts[lay] = layouts.get(lay, 0) + 1
+    script_raw = plan.get("script")
+    if not script_raw:
+        side = _json("plan.json")
+        if isinstance(side, dict):
+            script_raw = side.get("script")
+    script_file = None
+    try:
+        from common import resolve
+        script_file = resolve(script_raw) if script_raw else None
+    except Exception:
+        script_file = None
 
     out_name = Path(str(plan.get("output") or output_mp4 or proj.name)).stem
     timeline = ""
@@ -339,8 +361,6 @@ def build_record(
         "page_meta": _json("_page/page_meta.json"),
         "timeline": timeline,
         "tokens": _json("token_telemetry.json"),
-        "cost_checkpoint": _json("cost_checkpoint.json"),
-        "direct_planning": _json("direct_report.json"),
         "editing_packet_manifest": _json("editing_packet.json"),
         "feedback": _feedback(proj),
         "events": _events(proj),
@@ -398,13 +418,18 @@ def publish_progress(proj: Path, snapshot: Dict[str, Any]) -> bool:
 
 
 def _cloud() -> Optional[Dict[str, str]]:
+    url = ""
+    token = ""
     try:
         import auth_session
         sess = auth_session.load_session()
         url = str(sess.get("cloud_url") or auth_session.get_cloud_url()).strip()
         token = str(sess.get("token") or "").strip()
     except Exception:
+        pass
+    if not url:
         url = (os.getenv("ZENO_CLOUD_URL") or os.getenv("SCRIPTCUT_CLOUD_URL") or "").strip()
+    if not token:
         token = (os.getenv("ZENO_CLOUD_TOKEN") or os.getenv("SCRIPTCUT_CLOUD_TOKEN") or "").strip()
     return {"url": url.rstrip("/"), "token": token} if url and token else None
 

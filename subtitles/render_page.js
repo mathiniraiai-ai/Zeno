@@ -13,22 +13,99 @@ const { createCanvas, registerFont } = require('canvas');
 
 const here = __dirname;
 const fontDefs = JSON.parse(fs.readFileSync(path.join(here, 'fonts.json'), 'utf8'));
-for (const f of fontDefs) {
-  try { registerFont(path.join(here, 'fonts', f.file), { family: f.family, weight: String(f.weight) }); } catch (e) { /* optional font */ }
+
+/**
+ * Return true if the SFNT table directory contains a variable-font `fvar` table.
+ * Variable TTFs (e.g., Anek*-Bold, Montserrat-400, NotoSansGurmukhi-Bold, Baloo*-Bold)
+ * misreport static weights in Cairo/Pango on macOS and must be skipped.
+ */
+function isVariableFont(buf) {
+  if (!buf || buf.length < 12) return false;
+  const numTables = buf.readUInt16BE(4);
+  for (let i = 0; i < numTables; i++) {
+    const off = 12 + i * 16;
+    if (off + 4 > buf.length) break;
+    if (buf.toString('ascii', off, off + 4) === 'fvar') return true;
+  }
+  return false;
 }
-// Indic bold files also answer for the heavier weights, so a bold word never falls back to a system font.
-for (const f of fontDefs) {
-  if (/^(Anek\b|Noto Sans )/.test(f.family) && Number(f.weight) >= 700) {
-    for (const w of ['700', '800', '900']) {
-      try { registerFont(path.join(here, 'fonts', f.file), { family: f.family, weight: w }); } catch (e) { /* ignore */ }
+
+// Register each static TTF path at most ONCE (no variable `fvar` fonts and no
+// duplicate-path weight aliasing, which clobbers macOS CoreText weight matching).
+// Register canonical weights (400/700/800/900) BEFORE 600/500 so SemiBold never
+// shadows Bold (700) in macOS CoreText/Pango (e.g. Hind, Mukta, Barlow).
+const WEIGHT_REG_ORDER = { 400: 0, 700: 1, 800: 2, 900: 3, 600: 4, 500: 5, 300: 6 };
+const orderedFontDefs = [...fontDefs].sort(
+  (a, b) => (WEIGHT_REG_ORDER[Number(a.weight)] ?? 9) - (WEIGHT_REG_ORDER[Number(b.weight)] ?? 9)
+);
+const registeredPaths = new Set();
+const registeredWeightsByFamily = new Map();
+const hdrBuf = Buffer.alloc(4096);
+for (const f of orderedFontDefs) {
+  const fontPath = path.resolve(here, 'fonts', f.file);
+  if (registeredPaths.has(fontPath) || !fs.existsSync(fontPath)) continue;
+  let fd;
+  let isVar = false;
+  try {
+    fd = fs.openSync(fontPath, 'r');
+    const n = fs.readSync(fd, hdrBuf, 0, hdrBuf.length, 0);
+    isVar = isVariableFont(hdrBuf.subarray(0, n));
+  } catch (e) {
+    continue;
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch (e) {} }
+  }
+  if (isVar) continue;
+  registeredPaths.add(fontPath);
+  try {
+    registerFont(fontPath, { family: f.family, weight: String(f.weight) });
+    const key = String(f.family || '').trim().toLowerCase();
+    if (key) {
+      let rec = registeredWeightsByFamily.get(key);
+      if (!rec) {
+        rec = { family: f.family, weights: new Set() };
+        registeredWeightsByFamily.set(key, rec);
+      }
+      rec.weights.add(Number(f.weight) || 400);
+    }
+  } catch (e) { /* optional font */ }
+}
+
+function resolveRegisteredFamily(name) {
+  const raw = String(name || '').trim();
+  if (!raw) return 'Noto Sans';
+  const rec = registeredWeightsByFamily.get(raw.toLowerCase());
+  return rec ? rec.family : raw;
+}
+
+function snapFontWeight(family, requestedWeight) {
+  const req = Number(requestedWeight) || 400;
+  const rec = registeredWeightsByFamily.get(String(family || '').trim().toLowerCase());
+  if (!rec || rec.weights.size === 0) return req;
+  if (rec.weights.has(req)) return req;
+  const sorted = Array.from(rec.weights).sort((a, b) => a - b);
+  let best = sorted[0];
+  let bestDiff = Math.abs(best - req);
+  for (const w of sorted) {
+    const diff = Math.abs(w - req);
+    if (diff < bestDiff || (diff === bestDiff && req >= 600 && w > best)) {
+      best = w;
+      bestDiff = diff;
     }
   }
+  return best;
 }
 
 const SCRIPT_FONTS = [
-  [/[ಀ-೿]/, '"Noto Sans Kannada"'], [/[ഀ-ൿ]/, '"Noto Sans Malayalam"'], [/[஀-௿]/, '"Noto Sans Tamil"'],
-  [/[ఀ-౿]/, '"Noto Sans Telugu"'], [/[ऀ-ॿ]/, '"Noto Sans Devanagari"'], [/[ঀ-৿]/, '"Noto Sans Bengali"'],
-  [/[઀-૿]/, '"Noto Sans Gujarati"'], [/[਀-੿]/, '"Noto Sans Gurmukhi"'], [/[଀-୿]/, '"Anek Odia"'],
+  [/[ಀ-೿]/, '"Noto Sans Kannada"', new Set(['noto sans kannada', 'noto serif kannada', 'tiro kannada', 'anek kannada', 'baloo tamma 2'])],
+  [/[ഀ-ൿ]/, '"Noto Sans Malayalam"', new Set(['noto sans malayalam', 'noto serif malayalam', 'manjari', 'anek malayalam', 'baloo chettan 2', 'chilanka'])],
+  [/[஀-௿]/, '"Noto Sans Tamil"', new Set(['noto sans tamil', 'hind madurai', 'mukta malar', 'anek tamil', 'baloo thambi 2', 'catamaran', 'coiny', 'kavivanar'])],
+  [/[ఀ-౿]/, '"Noto Sans Telugu"', new Set(['noto sans telugu', 'hind guntur', 'noto serif telugu', 'anek telugu', 'ramabhadra', 'gidugu'])],
+  [/[ऀ-ॿ]/, '"Noto Sans Devanagari"', new Set(['noto sans devanagari', 'hind', 'mukta', 'teko', 'noto serif devanagari', 'anek devanagari', 'baloo 2', 'kalam', 'modak', 'rozha one'])],
+  [/[ঀ-৿]/, '"Noto Sans Bengali"', new Set(['noto sans bengali', 'hind siliguri', 'noto serif bengali', 'anek bangla', 'baloo da 2', 'atma', 'galada'])],
+  [/[઀-૿]/, '"Noto Sans Gujarati"', new Set(['noto sans gujarati', 'hind vadodara', 'mukta vaani', 'anek gujarati', 'baloo bhai 2', 'mogra'])],
+  [/[਀-੿]/, '"Noto Sans Gurmukhi"', new Set(['noto sans gurmukhi', 'mukta mahee', 'anek gurmukhi', 'baloo paaji 2'])],
+  [/[଀-୿]/, '"Noto Sans Oriya"', new Set(['noto sans oriya', 'baloo bhaina 2', 'noto serif oriya', 'anek odia'])],
 ];
 
 (async () => {
@@ -42,15 +119,31 @@ const SCRIPT_FONTS = [
   const padBottom = Number(job.padBottom) || 120;
   const paraGap = Math.round(rowH * (job.paraGap !== undefined ? Number(job.paraGap) : 0.35));
   const baseColor = job.color || '#2B2B2B';
-  const family = job.fontFamily || 'Noto Sans';
-  const weight = job.fontWeight || 500;
-  const boldWeight = job.boldWeight || 800;
+  const family = resolveRegisteredFamily(job.fontFamily || 'Noto Sans');
+  const familyLower = family.toLowerCase();
+  const weight = snapFontWeight(family, job.fontWeight || 500);
+  const boldWeight = snapFontWeight(family, job.boldWeight || 800);
   const maxX = W - padRight;
 
   const fontFor = (text, bold) => {
     let fam = `"${family}"`;
-    for (const [re, name] of SCRIPT_FONTS) { if (re.test(text)) { fam = `${name}, "${family}"`; break; } }
-    return `${bold ? boldWeight : weight} ${size}px ${fam}, "Noto Sans", sans-serif`;
+    let isIndic = false;
+    let familySupportsScript = false;
+    for (const [re, name, nativeSet] of SCRIPT_FONTS) {
+      if (re.test(text)) {
+        isIndic = true;
+        if (nativeSet.has(familyLower)) {
+          fam = `"${family}", ${name}`;
+          familySupportsScript = true;
+        } else {
+          fam = `${name}, "${family}"`;
+        }
+        break;
+      }
+    }
+    const baseW = bold ? boldWeight : weight;
+    const w = bold && isIndic && !familySupportsScript && Number(baseW) >= 700 ? 700 : baseW;
+    return `${w} ${size}px ${fam}, "Noto Sans", sans-serif`;
   };
 
   const probe = createCanvas(16, 16).getContext('2d');

@@ -1,45 +1,49 @@
-"""
-Claude Editor / ScriptCut-AI Alignment Engine (`scripts/align_engine`)
-3-Layer Multilingual Forced Alignment & Wave Boundary Refinement Stack:
-  - Layer 0: Gemini Flash-Lite / Flash Verbatim Transcriber + TranscriptionGuardian (`gemini_transcriber.py`, `guardian.py`)
-  - Layer 1: Indic G2P Phonetic Mapper (`phonetics/indic_phonemes.py`) + `uroman` + 22-Language Lexicon (`lexicon.py`)
-  - Layer 2: Meta Wav2Vec2 95M CTC Emission Extractor (`acoustic.py`)
-  - Layer 3: Viterbi Forced Aligner (`viterbi.py`) + Wave Onset/Offset Verifier & Tail Babble Detector (`onset_verifier.py`)
+"""Zeno Multilingual Forced Alignment Engine (`scripts/align_engine`).
+
+4-Stage Transcription & Acoustic Boundary Alignment Stack:
+  - Stage 0: Gemini / Zeno Cloud verbatim transcriber + orthographic guardian (`gemini_transcriber.py`, `guardian.py`)
+  - Stage 1: Indic G2P phonetic mapper (`phonetics/indic_phonemes.py`), `uroman`, and 22-language lexicon (`lexicon.py`)
+  - Stage 2: Meta Wav2Vec2 Base 95M CTC emission extractor (`acoustic.py`)
+  - Stage 3: Silence-masked Viterbi forced aligner (`viterbi.py`), Silero VAD (`vad.py`), and waveform onset/offset verifier (`onset_verifier.py`)
 """
 
 from __future__ import annotations
 
+import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
 import numpy as np
 
-from .pipeline import (
-    KaviooAcousticPipeline,
-    EditFlowAcousticPipeline,
-    ScriptCutAcousticPipeline,
-    get_shared_pipeline,
-    reset_shared_pipeline,
-)
 from .acoustic import AcousticModel, AudioCaptionAlignmentAgent
-from .viterbi import ViterbiAligner
-from .onset_verifier import AcousticOnsetVerifier
-from .phonetics.indic_phonemes import IndicPhoneticMapper
-from .lexicon import KaviooLexiconEngine, lexicon_engine
-from .guardian import TranscriptionGuardian, guardian_engine
 from .gemini_transcriber import (
     GeminiTranscriber,
     get_shared_transcriber,
-    transcribe_offline_fallback,
     normalize_lang_code,
+    transcribe_offline_fallback,
+)
+from .guardian import TranscriptionGuardian, guardian_engine
+from .lexicon import KaviooLexiconEngine, ZenoLexiconEngine, lexicon_engine
+from .onset_verifier import AcousticOnsetVerifier
+from .pipeline import (
+    EditFlowAcousticPipeline,
+    IndicPhoneticMapper,
+    KaviooAcousticPipeline,
+    ScriptCutAcousticPipeline,
+    ZenoAcousticPipeline,
+    get_shared_pipeline,
+    reset_shared_pipeline,
 )
 from .script_matcher import (
-    parse_target_script,
-    match_clips_to_script,
     compute_dual_span_similarity,
-    normalize_dual_tokens,
-    group_words_into_utterances,
     filter_fumbles_in_words,
+    group_words_into_utterances,
+    match_clips_to_script,
+    normalize_dual_tokens,
+    parse_target_script,
 )
+from .viterbi import ViterbiAligner
 
 
 def detect_untranscribed_tail_noise(
@@ -53,10 +57,7 @@ def detect_untranscribed_tail_noise(
     min_gap_after_word_sec: float = 0.20,
     min_tail_duration_sec: float = 0.30,
 ) -> List[Dict[str, Any]]:
-    """
-    Uses `AcousticOnsetVerifier` RMS energy envelope + Wav2Vec2 CTC non-blank emissions
-    to detect any untranscribed non-silent audio tails (such as AI babble after the last aligned word).
-    """
+    """Detect non-silent untranscribed audio islands (such as AI tail babble) after `last_word_end`."""
     if waveform is None or len(waveform) == 0 or duration_sec <= last_word_end + min_gap_after_word_sec:
         return []
 
@@ -76,7 +77,6 @@ def detect_untranscribed_tail_noise(
     post_times = rms_times[post_mask]
     post_rms = rms_env[post_mask]
 
-    # Combine with CTC non-blank emission activity if available
     active_mask = post_rms >= rms_thresh
     if log_probs is not None and len(log_probs) > 0:
         non_blank_prob = 1.0 - np.exp(log_probs[:, blank_id])
@@ -87,7 +87,6 @@ def detect_untranscribed_tail_noise(
     if not np.any(active_mask):
         return []
 
-    # Group active frames into contiguous islands (bridging short pauses <= 0.35s)
     active_indices = np.where(active_mask)[0]
     islands: List[Dict[str, Any]] = []
     cur_start_idx = int(active_indices[0])
@@ -103,14 +102,16 @@ def detect_untranscribed_tail_noise(
             t_e = float(post_times[cur_end_idx])
             if t_e - t_s >= min_tail_duration_sec:
                 mean_r = float(np.mean(post_rms[cur_start_idx : cur_end_idx + 1]))
-                islands.append({
-                    "start": round(t_s, 3),
-                    "end": round(t_e, 3),
-                    "duration": round(t_e - t_s, 3),
-                    "type": "TAIL_BABBLE",
-                    "label": "[TAIL_BABBLE]",
-                    "rms": round(mean_r, 3),
-                })
+                islands.append(
+                    {
+                        "start": round(t_s, 3),
+                        "end": round(t_e, 3),
+                        "duration": round(t_e - t_s, 3),
+                        "type": "TAIL_BABBLE",
+                        "label": "[TAIL_BABBLE]",
+                        "rms": round(mean_r, 3),
+                    }
+                )
             cur_start_idx = idx_int
             cur_end_idx = idx_int
 
@@ -118,14 +119,16 @@ def detect_untranscribed_tail_noise(
     t_e = float(post_times[cur_end_idx])
     if t_e - t_s >= min_tail_duration_sec:
         mean_r = float(np.mean(post_rms[cur_start_idx : cur_end_idx + 1]))
-        islands.append({
-            "start": round(t_s, 3),
-            "end": round(t_e, 3),
-            "duration": round(t_e - t_s, 3),
-            "type": "TAIL_BABBLE",
-            "label": "[TAIL_BABBLE]",
-            "rms": round(mean_r, 3),
-        })
+        islands.append(
+            {
+                "start": round(t_s, 3),
+                "end": round(t_e, 3),
+                "duration": round(t_e - t_s, 3),
+                "type": "TAIL_BABBLE",
+                "label": "[TAIL_BABBLE]",
+                "rms": round(mean_r, 3),
+            }
+        )
 
     return islands
 
@@ -135,11 +138,7 @@ def _strip_offscript_tail_babble(
     script_lines: Optional[List[str]],
     work_dir: Optional[Path] = None,
 ) -> List[str]:
-    """
-    If `work_dir` contains known tail babble transcripts (`tail_kannada.txt` / `tail_english.txt`)
-    or if trailing words match known gibberish tokens, strips them before forced alignment so
-    Viterbi aligns only the real dialogue and `detect_untranscribed_tail_noise` marks `[TAIL_BABBLE]`.
-    """
+    """Strip known trailing AI-generated gibberish tokens prior to Viterbi forced alignment."""
     if not words_list:
         return words_list
 
@@ -156,8 +155,17 @@ def _strip_offscript_tail_babble(
                 except Exception:
                     pass
 
-    # Also include known AI babble phonetic tokens if they appeared in raw transcript output
-    known_babble = {"sarakarika", "chinaru", "tarakanchana", "kaji", "antu", "ಸಾರಕರಕರಕಿ", "ಚಿನರು", "ಟೇರಗಂಚಾನ", "ಕಜಿಯಾನ್ಗು"}
+    known_babble = {
+        "sarakarika",
+        "chinaru",
+        "tarakanchana",
+        "kaji",
+        "antu",
+        "ಸಾರಕರಕರಕಿ",
+        "ಚಿನರು",
+        "ಟೇರಗಂಚಾನ",
+        "ಕಜಿಯಾನ್ಗು",
+    }
     tail_tokens |= known_babble
 
     trimmed = list(words_list)
@@ -172,7 +180,7 @@ def _strip_offscript_tail_babble(
 
 
 def _ensure_16k_wav(audio_path: str | Path, work_dir: Optional[str | Path] = None) -> Path:
-    """Ensure audio_path points to a valid 16kHz mono PCM WAV file, never an MP4/MOV container."""
+    """Ensure `audio_path` points to a 16 kHz mono PCM WAV file, extracting from video if needed."""
     raw_p = Path(audio_path)
     wdir = Path(work_dir) if work_dir else raw_p.parent
     if raw_p.suffix.lower() == ".wav" and raw_p.is_file():
@@ -181,13 +189,31 @@ def _ensure_16k_wav(audio_path: str | Path, work_dir: Optional[str | Path] = Non
     if candidate_wav.is_file() and candidate_wav.stat().st_size > 44:
         return candidate_wav
     if raw_p.is_file():
-        import subprocess
         wdir.mkdir(parents=True, exist_ok=True)
+        ffmpeg_bin = "ffmpeg"
+        try:
+            from common import FFMPEG
+
+            ffmpeg_bin = str(FFMPEG)
+        except Exception:
+            pass
         subprocess.run(
             [
-                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                "-i", str(raw_p), "-vn", "-ac", "1", "-ar", "16000",
-                "-c:a", "pcm_s16le", str(candidate_wav),
+                ffmpeg_bin,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(raw_p),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+                str(candidate_wav),
             ],
             check=False,
         )
@@ -197,8 +223,7 @@ def _ensure_16k_wav(audio_path: str | Path, work_dir: Optional[str | Path] = Non
 
 
 def _parse_script_path_to_lines(script_path: str | Path) -> List[str]:
-    """Read a script file and strip speaker prefixes (e.g. 'L1 Speaker:') and stage directions."""
-    import re
+    """Read a script file and strip line IDs, speaker prefixes, and stage directions."""
     sp = Path(script_path)
     if not sp.is_file():
         return parse_target_script(str(script_path))
@@ -208,7 +233,11 @@ def _parse_script_path_to_lines(script_path: str | Path) -> List[str]:
         s = raw_line.strip()
         if not s or s.startswith(("#", "//", "---", "--")):
             continue
-        if re.match(r"^(?:Concept|Visual)\s+(?:Reference|Brief)|^Characters?\s*:?$|^Scene\s+\d+|^\[?\s*Visual\s*:", s, re.I):
+        if re.match(
+            r"^(?:Concept|Visual)\s+(?:Reference|Brief)|^Characters?\s*:?$|^Scene\s+\d+|^\[?\s*Visual\s*:",
+            s,
+            re.I,
+        ):
             continue
         if re.match(r"^[A-Za-z][A-Za-z0-9_ .]{0,24}?\s*(?:\([^)]*\))?\s*:\s*$", s):
             continue
@@ -227,21 +256,12 @@ def _parse_script_path_to_lines(script_path: str | Path) -> List[str]:
 def transcribe_and_align_clip(
     wav_path: str | Path,
     lang: str = "auto",
-    script_lines: Optional[List[str]] = None,
+    script_lines: Optional[List[str] | str | Path] = None,
     script_path: Optional[str | Path] = None,
     work_dir: Optional[str | Path] = None,
     offline_fallback: bool = False,
 ) -> Dict[str, Any]:
-    """
-    High-level alignment pipeline for Claude Editor:
-      1. Gets the verbatim word list (via `gemini_transcriber` if key is available and not `offline_fallback`,
-         else `transcribe_offline_fallback`).
-      2. Runs `get_shared_pipeline().align(...)` using `WAV2VEC2_ASR_BASE_960H` + `uroman` +
-         `IndicPhoneticMapper` + `ViterbiAligner` + `AcousticOnsetVerifier` (`torch.set_num_threads(2)`).
-      3. Runs `AcousticOnsetVerifier` energy + CTC emission island check to detect any untranscribed
-         non-silent audio tails (`[TAIL_BABBLE]`).
-      4. Returns `{"words": [{"w": ..., "start": ..., "end": ..., "p": ...}], "language": lang, "tail_noise": [...]}`.
-    """
+    """Transcribe and force-align a single clip, returning word timestamps and detected tail babble."""
     raw_p = Path(wav_path)
     wdir = Path(work_dir) if work_dir else raw_p.parent
     wav_p = _ensure_16k_wav(raw_p, wdir)
@@ -255,7 +275,7 @@ def transcribe_and_align_clip(
     elif script_path:
         parsed_script_lines = _parse_script_path_to_lines(script_path)
 
-    # 1. Obtain verbatim word list
+    # 1. Verbatim word transcription
     if offline_fallback:
         trans_res = transcribe_offline_fallback(
             wav_path=str(wav_p),
@@ -274,9 +294,11 @@ def transcribe_and_align_clip(
 
     detected_lang = normalize_lang_code(trans_res.get("language") or lang)
     if detected_lang == "auto":
-        detected_lang = "kn" if parsed_script_lines and any(
-            IndicPhoneticMapper.is_pure_indic(s) for s in parsed_script_lines
-        ) else "en"
+        detected_lang = (
+            "kn"
+            if parsed_script_lines and any(IndicPhoneticMapper.is_pure_indic(s) for s in parsed_script_lines)
+            else "en"
+        )
 
     raw_words = [str(w) for w in (trans_res.get("words") or []) if str(w).strip()]
     raw_words = _strip_offscript_tail_babble(raw_words, parsed_script_lines, work_dir=wdir)
@@ -291,17 +313,20 @@ def transcribe_and_align_clip(
             "error": trans_res.get("error", ""),
         }
 
-    # 2. Forced alignment via Meta Wav2Vec2 95M + uroman + IndicPhoneticMapper + Viterbi + OnsetVerifier
-    # The device is chosen by `common.compute_device` (NVIDIA CUDA, else Apple Silicon MPS, else CPU). It used to be
-    # forced to the CPU here, which ran the model flat out on the processor and heated the computer.
-    align_kwargs = dict(audio_path=str(wav_p), word_list=raw_words, language_code=detected_lang, verify_onsets=True)
+    # 2. Forced alignment via Wav2Vec2 95M + IndicPhoneticMapper + uroman + Viterbi + OnsetVerifier
+    align_kwargs = dict(
+        audio_path=str(wav_p),
+        word_list=raw_words,
+        language_code=detected_lang,
+        verify_onsets=True,
+    )
     pipe = get_shared_pipeline()
     try:
         align_res = pipe.align(**align_kwargs)
     except Exception as gpu_err:
         if "cpu" in str(getattr(getattr(pipe, "acoustic_model", None), "device", "cpu")):
             raise
-        print(f"[Zeno Aligner] the GPU failed ({gpu_err}); running this clip on the CPU instead.")
+        print(f"[Zeno Aligner] GPU execution failed ({gpu_err}); retrying on CPU.")
         reset_shared_pipeline()
         align_res = get_shared_pipeline(device="cpu").align(**align_kwargs)
 
@@ -323,14 +348,16 @@ def transcribe_and_align_clip(
                 prev["end"] = max(round(prev["start"] + 0.03, 3), mid)
                 w_start = prev["end"]
                 w_end = max(round(w_start + 0.04, 3), w_end)
-        words_out.append({
-            "w": w_text,
-            "start": w_start,
-            "end": w_end,
-            "p": w_conf,
-        })
+        words_out.append(
+            {
+                "w": w_text,
+                "start": w_start,
+                "end": w_end,
+                "p": w_conf,
+            }
+        )
 
-    # 3. Detect untranscribed non-silent audio tails (e.g. [TAIL_BABBLE] after last aligned word)
+    # 3. Untranscribed tail noise / AI babble detection
     last_word_end = words_out[-1]["end"] if words_out else 0.0
     raw_waveform = align_res.get("_raw_waveform")
     log_probs = align_res.get("_log_probs")
@@ -358,15 +385,18 @@ def transcribe_and_align_clip(
 
 
 __all__ = [
+    "ZenoAcousticPipeline",
     "ScriptCutAcousticPipeline",
     "KaviooAcousticPipeline",
     "EditFlowAcousticPipeline",
     "get_shared_pipeline",
+    "reset_shared_pipeline",
     "AcousticModel",
     "AudioCaptionAlignmentAgent",
     "ViterbiAligner",
     "AcousticOnsetVerifier",
     "IndicPhoneticMapper",
+    "ZenoLexiconEngine",
     "KaviooLexiconEngine",
     "lexicon_engine",
     "TranscriptionGuardian",
@@ -374,6 +404,7 @@ __all__ = [
     "GeminiTranscriber",
     "get_shared_transcriber",
     "transcribe_offline_fallback",
+    "normalize_lang_code",
     "transcribe_and_align_clip",
     "detect_untranscribed_tail_noise",
     "parse_target_script",

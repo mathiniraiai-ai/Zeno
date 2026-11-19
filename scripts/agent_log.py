@@ -40,6 +40,24 @@ _AGY_MODEL_RE = re.compile(
 )
 
 
+_CODE_DIR_RE = re.compile(r"/(scripts|tests|service|formats|subtitles)/")
+_BASH_CODE_DIR_RE = re.compile(r"(?:^|[\s/])(scripts|tests|service|formats|subtitles)/")
+
+
+def _is_under_root(cwd: Any, root: Optional[Path]) -> bool:
+    if not root:
+        return True
+    raw = str(cwd or "").strip()
+    if not raw:
+        return False
+    try:
+        return Path(raw).resolve().is_relative_to(root.resolve())
+    except Exception:
+        r_s = str(root.resolve()).rstrip("/\\")
+        c_s = raw.rstrip("/\\")
+        return c_s == r_s or c_s.startswith(r_s + os.sep) or c_s.startswith(r_s + "/")
+
+
 def _mtime(path: str) -> float:
     try:
         return os.path.getmtime(path)
@@ -75,6 +93,21 @@ def _tool_summary(name: str, args: Any) -> str:
     return _cut(json.dumps(args, ensure_ascii=False), MAX_TOOL_CHARS)
 
 
+def _is_code_touch(step: Dict[str, Any]) -> bool:
+    if step.get("kind") != "tool":
+        return False
+    tool = str(step.get("tool") or "")
+    inp = str(step.get("input") or "")
+    if tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+        return bool(_CODE_DIR_RE.search(inp) or inp.endswith(".py"))
+    if tool == "Bash":
+        cleaned = inp.replace("scripts/zeno.py", "").replace("scripts/edit_packet.py", "")
+        return any(w in cleaned for w in ("git commit", "git push", "sed -i", ".write_text(", "unittest")) and bool(
+            _BASH_CODE_DIR_RE.search(cleaned) or ".py" in cleaned
+        )
+    return False
+
+
 def _counts(prompts: List[Dict[str, Any]], steps: List[Dict[str, Any]]) -> Dict[str, Any]:
     by_tool: Dict[str, int] = {}
     checks = renders = errors = 0
@@ -83,13 +116,12 @@ def _counts(prompts: List[Dict[str, Any]], steps: List[Dict[str, Any]]) -> Dict[
             by_tool[s["tool"]] = by_tool.get(s["tool"], 0) + 1
             cmd = s.get("input", "")
             checks += "--check-plan" in cmd
-            renders += "--execute" in cmd
+            renders += ("--execute" in cmd or "scripts/render.py" in cmd)
         elif s["kind"] == "error":
             errors += 1
     return {"prompts": len(prompts), "tool_calls": sum(by_tool.values()), "by_tool": by_tool, "errors": errors,
             "check_plan_runs": checks, "render_runs": renders,
-            "touched_zeno_code": any(s["kind"] == "tool" and s["tool"] in ("Edit", "Write", "MultiEdit", "NotebookEdit")
-                                     and re.search(r"/(scripts|service|agent|styles)/", s.get("input", "")) for s in steps)}
+            "touched_zeno_code": any(_is_code_touch(s) for s in steps)}
 
 
 # ---------------------------------------------------------------- Claude Code
@@ -109,7 +141,6 @@ def _safe_int(val: Any) -> int:
 
 
 def _claude_lines(since: float, until: float, root: Path) -> Iterable[Dict[str, Any]]:
-    root_s = str(root.resolve())
     files = [f for f in glob.glob(os.path.expanduser("~/.claude/projects/**/*.jsonl"), recursive=True)
              if _mtime(f) >= since - 60]
     rows = []
@@ -122,7 +153,7 @@ def _claude_lines(since: float, until: float, root: Path) -> Iterable[Dict[str, 
                     d = json.loads(line)
                 except Exception:
                     continue
-                if not str(d.get("cwd") or "").startswith(root_s):
+                if not _is_under_root(d.get("cwd"), root):
                     continue
                 t = _epoch(d.get("timestamp"))
                 if since <= t <= until:
@@ -195,7 +226,7 @@ def _is_zeno_transcript(tail: str, root: Path = ROOT) -> bool:
     return (
         marker in tail
         or "zeno.py" in tail
-        or (marker == "Zeno" and "Claude Editor" in tail)
+        or "Zeno" in tail
     )
 
 
@@ -453,10 +484,9 @@ def chat_size(path: str, root: Optional[Path] = None) -> Optional[Dict[str, Any]
             if size > TAIL_BYTES:
                 fh.seek(size - TAIL_BYTES)
             data = fh.read().decode("utf-8", errors="ignore")
-        root_s = str(root.resolve()) if root else ""
         last: Optional[Dict[str, Any]] = None
         ids = set()
-        ours = not root_s
+        ours = not root
         for line in data.splitlines():
             if '"usage"' not in line and '"cwd"' not in line:
                 continue
@@ -464,7 +494,7 @@ def chat_size(path: str, root: Optional[Path] = None) -> Optional[Dict[str, Any]
                 d = json.loads(line)
             except Exception:
                 continue
-            if root_s and str(d.get("cwd") or "").startswith(root_s):
+            if root and _is_under_root(d.get("cwd"), root):
                 ours = True
             m = d.get("message") if d.get("type") == "assistant" else None
             u = (m or {}).get("usage") if isinstance(m, dict) else None
@@ -485,8 +515,8 @@ def session_size(root: Path = ROOT, max_age: float = 300.0) -> Optional[Dict[str
     Every step the agent takes re-sends the whole chat (the "cache read" tokens), so a chat that already holds earlier
     videos makes every step of this one cost several times more. Finds the most recently written Claude Code log whose
     working folder is Zeno and returns the size of its last request: {"tokens", "steps", "session", "file"}. Inside Claude
-    Code (CLAUDECODE=1) it measures the chat named by CLAUDE_CODE_SESSION_ID; outside Claude Code (a terminal, Zeno's own
-    direct mode) there is no chat to protect, so it returns None. Returns None also when it cannot tell (another agent, no log, a read error): callers must then let the job go on."""
+    Code (CLAUDECODE=1) it measures the chat named by CLAUDE_CODE_SESSION_ID; outside Claude Code (e.g. a standalone
+    terminal run) there is no chat to protect, so it returns None. Returns None also when it cannot tell (another agent, no log, a read error): callers must then let the job go on."""
     try:
         if os.getenv("CODEX_THREAD_ID") and not os.getenv("CLAUDECODE"):
             import codex_usage

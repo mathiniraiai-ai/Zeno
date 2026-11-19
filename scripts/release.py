@@ -10,12 +10,13 @@ Usage:
     python3 scripts/release.py --no-bump "Sync current version to cloud"      # keeps current VERSION & uploads
     python3 scripts/release.py --bump minor "New subtitle engine"             # bumps minor (1.0.x -> 1.1.0) & uploads
     python3 scripts/release.py --mandatory "Critical fix"                     # marks update for auto-install immediately
-    python3 scripts/release.py --dry-run "Preview bundle size"                # builds ZIP locally in scratch without uploading
+    python3 scripts/release.py --dry-run "Preview bundle size"                # builds ZIP locally in work/ without uploading
     python3 scripts/release.py --status                                       # shows currently live cloud release
 """
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import io
 import json
@@ -31,38 +32,34 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 TOP_FILES = (
+    "README.md",
+    "CLAUDE.md",
+    "AGENTS.md",
     "VERSION",
     "requirements.txt",
-    "AGENTS.md",
-    "CLAUDE.md",
-    "ONBOARDING.md",
-    "README.md",
-    "LICENSE",
-    "LICENSES.md",
-    ".env.example",
-    ".mcp.json",
     "install.command",
     "install.bat",
     "update.command",
     "update.bat",
     "edit.command",
     "edit.bat",
-    "edit-codex.command",
-    "edit-codex.bat",
     "edit-7k.command",
     "edit-7k.bat",
-    "DEVELOPING.md",
-    "LOW_COST_WORKFLOW.md",
+    "edit-codex.command",
+    "edit-codex.bat",
+    ".env.example",
+    ".gitignore",
+    ".mcp.json",
+    "LICENSE",
+    "LICENSES.md",
 )
 
+# Keep gold/ excluded from client bundles so the OTA ZIP stays ~25 MB under Railway's 45 MB limit.
 BUNDLE_DIRS = (
-    "config",
     ".agent",
     ".claude",
     ".codex",
-    "agent",
     "scripts",
-    "styles",
     "formats",
     "subtitles",
     "assets",
@@ -79,6 +76,15 @@ APP_TOP_FILES = (
     "app/README.md",
 )
 
+APP_EXCLUDE = (
+    "node_modules",
+    "dist",
+    "__pycache__",
+    ".DS_Store",
+    "kavioo_lexicon.db",
+    "zeno_keys.db*",
+)
+
 SKIP_NAMES = {
     ".DS_Store",
     "Thumbs.db",
@@ -89,10 +95,11 @@ SKIP_NAMES = {
     ".zeno-dev",
     "zeno_telemetry.db",
     "zeno_keys.db",
+    "kavioo_lexicon.db",
     "settings.local.json",
 }
 
-SKIP_SUFFIXES = (".pyc", ".pyo", ".pyd", ".so", ".dylib", ".db", ".sqlite", ".log")
+SKIP_SUFFIXES = (".pyc", ".pyo", ".pyd", ".so", ".dylib", ".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".log")
 
 
 def read_version() -> str:
@@ -150,19 +157,70 @@ def git_short_sha() -> str:
 
 
 def _should_skip(rel_posix: str, name: str) -> bool:
-    if name in SKIP_NAMES or name.startswith("._"):
+    if name in SKIP_NAMES or name.startswith(("._", "zeno_keys.db")):
         return True
     if name.endswith(SKIP_SUFFIXES):
         return True
     parts = rel_posix.split("/")
+    if parts and parts[0] == "gold":
+        return True
+    if any(fnmatch.fnmatch(p, pat) for p in parts for pat in APP_EXCLUDE):
+        return True
     if any(p in SKIP_NAMES or p in ("node_modules", "dist", ".git", ".venv", "work", "models", "tools") for p in parts):
         return True
     return False
 
 
 MANIFEST_NAME = "_zeno_manifest.json"
-# Root paths removed cleanly if omitted by a future bundle
-OBSOLETE_PATHS: Tuple[str, ...] = ()
+# Deleted 1.x directories, docs, scripts, and tests pruned on client upgrades (1.0.x -> 2.0.0)
+OBSOLETE_PATHS: Tuple[str, ...] = (
+    # Deleted 1.x directories
+    "agent",
+    "styles",
+    "config",
+    "scratch",
+    "gold",
+    # Deleted 1.x top-level docs
+    "CONCEPT.md",
+    "LOW_COST_WORKFLOW.md",
+    "TOKEN_LEDGER.md",
+    "COST_OPTIMIZATION_REPORT.md",
+    "DEBUG_REPORT.md",
+    "DEVELOPING.md",
+    "ONBOARDING.md",
+    # Deleted 1.x scripts
+    "scripts/ai_director.py",
+    "scripts/zeno_mcp.py",
+    "scripts/direct_mode.py",
+    "scripts/sol_direct.py",
+    "scripts/request_budget.py",
+    "scripts/editorial_retrieval.py",
+    "scripts/cost_control.py",
+    "scripts/chat_guard.py",
+    "scripts/call_cap.py",
+    "scripts/hooks_setup.py",
+    "scripts/launch_edit.py",
+    "scripts/preproduce.py",
+    "scripts/session_check.py",
+    "scripts/eval_alignment.py",
+    "scripts/brain_memory.py",
+    "scripts/format_learning.py",
+    "scripts/style_readiness.py",
+    "scripts/team_patterns.py",
+    "scripts/knowledge_sync.py",
+    "scripts/editor_note.py",
+    "scripts/learn_reference.py",
+    # Deleted 1.x tests
+    "tests/test_cost_controls.py",
+    "tests/test_editorial_retrieval.py",
+    "tests/test_engine.py",
+    "tests/test_hooks_setup.py",
+    "tests/test_planner_context.py",
+    "tests/test_planner_stop_routing.py",
+    "tests/test_request_budget.py",
+    "tests/test_token_savings.py",
+    "tests/test_usage_budget_audit.py",
+)
 
 
 def build_bundle_bytes(version: str = "", clear_work_projects: bool = False) -> Tuple[bytes, int, str]:

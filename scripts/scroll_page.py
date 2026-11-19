@@ -1,50 +1,56 @@
-"""Scrolling-text page format (`#page scroll` in plan.edl): the two characters sit side by side in the top half, and the
-lower half is a white page on which the whole dialogue scrolls up as it is spoken. A box highlights the word being spoken,
-wrong phrases are red, right phrases are green, and a thin progress line runs across the very top.
+"""Scrolling-text page renderer (`#page scroll` in `plan.edl`).
 
-This file only measures and draws: `geometry` says where the three areas sit, `build_paragraphs` turns the spoken words of the
-finished timeline into paragraphs, and `build_page_video` writes the video of the progress strip plus the page. `render.py`
-renders the edit into the picture area and stacks the three areas.
+In the `#page scroll` layout, the speakers appear in the top video area above an accent divider
+line, while the lower half displays a white scrolling page of the full dialogue. A highlight box
+tracks the active word being spoken, incorrect phrases are rendered in bold red, correct phrases
+are rendered in bold green, and an optional progress bar can appear at the top edge.
+
+`geometry` computes the stacked region heights, `build_paragraphs` groups timeline cues into
+speaker turns, and `build_page_video` renders the scrolling page stream (`page.mkv`) that
+`render.py` stacks beneath the video track.
 """
 from __future__ import annotations
 
 import json
-import re
 import subprocess
+import sys
 import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
 import subtitles
 from common import FFMPEG
 
-SUB_DIR = Path(__file__).resolve().parent.parent / "subtitles"
+SUB_DIR = _HERE.parent / "subtitles"
 
 DEFAULTS: Dict[str, Any] = {
-    # Measured from the in-house reference ("Split screen = scrolling text - return back"): picture on top, a blue line under it,
-    # then a plain white page with black text, a blank line between turns. Zeno adds only the box on the word being spoken.
-    "bg": "#FFFFFF",            # the page
-    "color": "#111111",         # the words
-    "wrong": "#D0021B",         # wrong phrases (bold), only when the plan names them
-    "right": "#16A34A",         # right phrases (bold), only when the plan names them
-    "highlight": "#A9C1FF",     # the box behind the word being spoken
-    "accent": "#1F4DA1",        # the line under the picture (and the optional progress line)
-    "size": 44,                 # text size on a 1080-wide picture
-    "bar": False,               # optional progress strip at the top (`bar=on`)
-    "dash": False,              # optional dash before every speaker turn (`dash=on`)
-    "fade": False,              # optional soft top and bottom edges of the page (`fade=on`)
+    "bg": "#FFFFFF",            # Page background color
+    "color": "#111111",         # Default dialogue text color
+    "wrong": "#D0021B",         # Color for incorrect phrases (bold) when listed in the plan
+    "right": "#16A34A",         # Color for correct phrases (bold) when listed in the plan
+    "highlight": "#A9C1FF",     # Box color behind the currently spoken word
+    "accent": "#1F4DA1",        # Divider line below the video (and optional progress bar accent)
+    "size": 44,                 # Base font size in pixels on a 1080px-wide canvas
+    "bar": False,               # Optional top progress bar (`bar=on`)
+    "dash": False,              # Optional em-dash prefix on each speaker turn (`dash=on`)
+    "fade": False,              # Optional soft fade on top/bottom edges of the page (`fade=on`)
 }
-BAR_FRAC = 0.046                # optional progress strip height / full height
-VIDEO_FRAC = 0.4854             # picture (the two characters) height / full height
-DIVIDER_FRAC = 0.0104           # the line under the picture / full height
+BAR_FRAC = 0.046                # Optional top progress strip height / full canvas height
+VIDEO_FRAC = 0.4854             # Video region height (including optional bar) / full canvas height
+DIVIDER_FRAC = 0.0104           # Divider line height / full canvas height
 
 
 def even(v: float) -> int:
+    """Round `v` to the nearest even integer for YUV420-safe video dimensions."""
     return int(round(v / 2.0)) * 2
 
 
 def page_config(plan: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The plan's page settings merged over the defaults, or None when the plan has no `#page`."""
+    """Merge the plan's `#page` configuration over `DEFAULTS`, or return None when `#page` is absent."""
     raw = plan.get("page")
     if not raw:
         return None
@@ -57,13 +63,20 @@ def page_config(plan: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def geometry(width: int, height: int, cfg: Dict[str, Any]) -> Dict[str, int]:
-    """Heights of the three stacked areas of the full picture: progress strip, picture, page."""
+    """Compute even pixel heights for the stacked layout regions: `bar_h`, `video_h`, `divider_h`, `page_h`, and `below_h`."""
     bar_h = even(height * BAR_FRAC) if cfg.get("bar") else 0
     video_h = even(height * VIDEO_FRAC) - bar_h
     divider_h = even(height * DIVIDER_FRAC)
     page_h = height - bar_h - video_h - divider_h
-    return {"bar_h": bar_h, "video_h": video_h, "divider_h": divider_h, "page_h": page_h, "below_h": divider_h + page_h,
-            "width": width, "height": height}
+    return {
+        "bar_h": bar_h,
+        "video_h": video_h,
+        "divider_h": divider_h,
+        "page_h": page_h,
+        "below_h": divider_h + page_h,
+        "width": width,
+        "height": height,
+    }
 
 
 def _rgb(hexcol: str) -> Tuple[int, int, int]:
@@ -77,9 +90,11 @@ def _rgb(hexcol: str) -> Tuple[int, int, int]:
 
 
 def _norm(word: str) -> str:
-    """A word reduced to its letters and digits (case-folded), so phrases match whatever the punctuation."""
-    return "".join(ch for ch in unicodedata.normalize("NFC", str(word)).casefold()
-                   if unicodedata.category(ch)[0] in ("L", "N", "M"))
+    """Normalize a word to NFC case-folded letters, numbers, and combining marks for punctuation-agnostic phrase matching."""
+    return "".join(
+        ch for ch in unicodedata.normalize("NFC", str(word)).casefold()
+        if unicodedata.category(ch)[0] in ("L", "N", "M")
+    )
 
 
 def build_paragraphs(
@@ -87,8 +102,8 @@ def build_paragraphs(
     segs: Sequence[Dict[str, Any]],
     cfg: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
-    """One paragraph per speaker turn (the cuts of one script line stay together), every word with its time on the
-    finished timeline. Words inside a wrong / right phrase get that colour and are bold."""
+    """Group timeline cues into one paragraph per speaker turn (merging cuts of the same base script line),
+    and mark `wrong_phrases` / `right_phrases` with bold styling and their configured colors."""
     paras: List[Dict[str, Any]] = []
     last_key: Optional[str] = None
     for cue in cues:
@@ -103,13 +118,19 @@ def build_paragraphs(
             text = str(w["text"]).strip()
             if not text:
                 continue
-            if not any(ch.isalnum() for ch in text) and paras[-1]["words"]:   # a transcript "." / "," joins the word before it
+            # Standalone punctuation tokens (e.g. "." or ",") attach to the preceding word
+            if not any(ch.isalnum() for ch in text) and paras[-1]["words"]:
                 prev = paras[-1]["words"][-1]
-                prev["text"], prev["end"] = prev["text"].rstrip() + text, max(prev["end"], float(w["endTime"]))
+                prev["text"] = prev["text"].rstrip() + text
+                prev["end"] = max(prev["end"], float(w["endTime"]))
                 continue
-            paras[-1]["words"].append({"text": text, "start": float(w["startTime"]), "end": float(w["endTime"])})
+            paras[-1]["words"].append({
+                "text": text,
+                "start": float(w["startTime"]),
+                "end": float(w["endTime"]),
+            })
 
-    def _mark(phrases: Sequence[str], colour: str) -> None:
+    def _mark(phrases: Sequence[str], color: str) -> None:
         for phrase in phrases:
             want = [n for n in (_norm(p) for p in str(phrase).split()) if n]
             if not want:
@@ -119,7 +140,7 @@ def build_paragraphs(
                 for i in range(0, len(got) - len(want) + 1):
                     if got[i:i + len(want)] == want:
                         for w in para["words"][i:i + len(want)]:
-                            w["color"], w["bold"] = colour, True
+                            w["color"], w["bold"] = color, True
 
     _mark(cfg["wrong_phrases"], cfg["wrong"])
     _mark(cfg["right_phrases"], cfg["right"])
@@ -127,33 +148,49 @@ def build_paragraphs(
 
 
 def render_page_image(paras: List[Dict[str, Any]], width: int, cfg: Dict[str, Any], out_dir: Path) -> Dict[str, Any]:
-    """Draw the whole dialogue as one tall transparent PNG (Node, so Indic scripts are shaped correctly) and return the
-    layout: `{"png", "height", "rowHeight", "words": [{p, i, x, y, w, h, row}]}`."""
+    """Render the full dialogue into a single tall transparent PNG via `subtitles/render_page.js` (preserving Indic script shaping)
+    and return the word bounding-box layout `{"png", "height", "rowHeight", "words": [{p, i, x, y, w, h, row}]}`."""
     out_dir.mkdir(parents=True, exist_ok=True)
     scale = max(0.4, width / 1080.0)
     job = {
         "width": width,
         "fontSize": int(round(float(cfg.get("size", 44)) * scale)),
         "lineHeight": 1.32,
-        "paraGap": 1.0,                           # a blank line between speaker turns
-        "padLeft": int(round(216 * scale)),       # the reference starts its text a fifth of the way in
+        "paraGap": 1.0,
+        "padLeft": int(round(216 * scale)),
         "padRight": int(round(48 * scale)),
         "padTop": int(round(34 * scale)),
         "padBottom": int(round(160 * scale)),
-        "fontWeight": 500,                        # one even weight for Latin and Indic words
+        "fontWeight": 500,
         "color": cfg["color"],
         "dash": bool(cfg.get("dash", True)),
         "out": str(out_dir / "page.png"),
-        "paragraphs": [{"words": [{"text": w["text"], **({"color": w["color"], "bold": True} if w.get("bold") else {})}
-                                  for w in p["words"]]} for p in paras],
+        "paragraphs": [
+            {
+                "words": [
+                    {"text": w["text"], **({"color": w["color"], "bold": True} if w.get("bold") else {})}
+                    for w in p["words"]
+                ]
+            }
+            for p in paras
+        ],
     }
+    if cfg.get("font"):
+        resolved_font = subtitles.resolve_font(cfg["font"]) or str(cfg["font"]).strip()
+        if resolved_font:
+            job["fontFamily"] = resolved_font
     jf = out_dir / "page_job.json"
     jf.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
-    r = subprocess.run([subtitles.node_path(), str(SUB_DIR / "render_page.js"), str(jf)],
-                       capture_output=True, text=True, encoding="utf-8", timeout=600)
+    r = subprocess.run(
+        [subtitles.node_path(), str(SUB_DIR / "render_page.js"), str(jf)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=600,
+    )
     if r.returncode != 0:
         raise RuntimeError(f"page renderer failed: {(r.stderr or r.stdout).strip()[-400:]}")
-    layout = json.loads([l for l in r.stdout.splitlines() if l.startswith("{")][-1])
+    layout = json.loads([ln for ln in r.stdout.splitlines() if ln.startswith("{")][-1])
     layout["png"] = job["out"]
     return layout
 
@@ -165,8 +202,8 @@ def scroll_positions(
     fps: int,
     total: float,
 ) -> Tuple[List[float], List[int]]:
-    """For every output frame: how far the page has scrolled (pixels) and which word is highlighted (-1 = none).
-    The row being spoken is held about a third of the way down the page; the page glides, it never jumps."""
+    """Compute per-frame vertical scroll offsets (pixels) and active word indices (`-1` when idle).
+    Smoothly glides toward holding the spoken row ~34% down the page and releases highlights during pauses > 0.70s."""
     boxes = {(b["p"], b["i"]): b for b in layout["words"]}
     flat: List[Tuple[float, float, Dict[str, Any], int]] = []
     for p, para in enumerate(paras):
@@ -189,9 +226,8 @@ def scroll_positions(
         if k >= 0:
             row_mid = flat[k][2]["y"] + flat[k][2]["h"] / 2.0
             target = min(max_scroll, max(0.0, row_mid - anchor))
-        cur += (target - cur) * 0.085            # glide towards the row being spoken
+        cur += (target - cur) * 0.085
         scrolls.append(cur)
-        # the box stays on a word until the next one starts, but lets go in a pause longer than 0.7 s
         on = k >= 0 and (t <= flat[k][1] + 0.70 or (k + 1 < len(flat) and flat[k + 1][0] - flat[k][1] <= 0.70))
         active.append(k if on else -1)
     return scrolls, active
@@ -206,20 +242,19 @@ def build_page_video(
     out_dir: Path,
     draft: bool = False,
 ) -> Path:
-    """Write `page.mkv`: the optional progress strip (top `bar_h` rows) stacked on the line under the picture and the scrolling page
-    (`below_h` rows together)."""
+    """Encode `page.mkv` containing the optional top progress strip (`bar_h`) stacked above the divider and scrolling page (`below_h`)."""
     import cv2
     import numpy as np
 
-    W, bar_h, page_h, div_h = geo["width"], geo["bar_h"], geo["page_h"], geo.get("divider_h", 0)
-    layout = render_page_image(paras, W, cfg, out_dir)
-    png = cv2.imread(layout["png"], cv2.IMREAD_UNCHANGED)          # BGRA, text on transparent
+    w_px, bar_h, page_h, div_h = geo["width"], geo["bar_h"], geo["page_h"], geo.get("divider_h", 0)
+    layout = render_page_image(paras, w_px, cfg, out_dir)
+    png = cv2.imread(layout["png"], cv2.IMREAD_UNCHANGED)
     if png is None or png.shape[2] < 4:
-        raise RuntimeError("page picture could not be read")
-    pad = np.zeros((page_h, W, 4), dtype=np.uint8)                 # room to scroll past the last row
+        raise RuntimeError("Rendered page PNG could not be read.")
+    pad = np.zeros((page_h, w_px, 4), dtype=np.uint8)
     png = np.vstack([png, pad])
     alpha = png[:, :, 3:4].astype(np.uint16)
-    premult = (png[:, :, :3].astype(np.uint16) * alpha) // 255     # text colour x alpha
+    premult = (png[:, :, :3].astype(np.uint16) * alpha) // 255
     inv = 255 - alpha
 
     bg = np.array(_rgb(cfg["bg"])[::-1], dtype=np.uint16)
@@ -232,24 +267,32 @@ def build_page_video(
     ramp16 = None
     if cfg.get("fade"):
         fade_top, fade_bot = int(page_h * 0.045), int(page_h * 0.13)
-        ramp = np.ones((page_h, 1, 1), dtype=np.float32)           # 1 = text fully visible, 0 = page colour
+        ramp = np.ones((page_h, 1, 1), dtype=np.float32)
         ramp[:fade_top, 0, 0] = np.linspace(0.0, 1.0, fade_top)
         ramp[page_h - fade_bot:, 0, 0] = np.linspace(1.0, 0.0, fade_bot)
         ramp16 = (ramp * 256).astype(np.uint16)
-    divider = np.empty((div_h, W, 3), dtype=np.uint8)
+    divider = np.empty((div_h, w_px, 3), dtype=np.uint8)
     divider[:] = np.array(accent, dtype=np.uint8)
 
     out = out_dir / "page.mkv"
-    cmd = [str(FFMPEG), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{bar_h + div_h + page_h}", "-r", str(fps),
-           "-i", "-", "-c:v", "libx264", "-preset", "ultrafast" if draft else "veryfast", "-crf", "20" if draft else "14",
-           "-pix_fmt", "yuv420p", str(out)]
+    cmd = [
+        str(FFMPEG), "-v", "error", "-y",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-s", f"{w_px}x{bar_h + div_h + page_h}", "-r", str(fps),
+        "-i", "-",
+        "-c:v", "libx264",
+        "-preset", "ultrafast" if draft else "veryfast",
+        "-crf", "20" if draft else "14",
+        "-pix_fmt", "yuv420p",
+        str(out),
+    ]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     n_frames = len(scrolls)
-    x0, x1 = int(W * 0.115), int(W * 0.885)
+    x0, x1 = int(w_px * 0.115), int(w_px * 0.885)
     try:
         for f in range(n_frames):
             s = int(round(scrolls[f]))
-            page = np.empty((page_h, W, 3), dtype=np.uint16)
+            page = np.empty((page_h, w_px, 3), dtype=np.uint16)
             page[:] = bg
             page8 = page.astype(np.uint8)
             k = active[f]
@@ -259,24 +302,24 @@ def build_page_video(
                 padx, pady = int(b["h"] * 0.12), int(b["h"] * 0.06)
                 cv2.rectangle(page8, (b["x"] - padx, by + pady), (b["x"] + b["w"] + padx, by + b["h"] - pady), hi, -1, cv2.LINE_AA)
             page = page8.astype(np.uint16)
-            page = (premult[s:s + page_h] + (page * inv[s:s + page_h]) // 255)        # the text over page and box
-            if ramp16 is not None:                                                       # optional soft top and bottom edges
+            page = premult[s:s + page_h] + (page * inv[s:s + page_h]) // 255
+            if ramp16 is not None:
                 page = bg + ((page.astype(np.int32) - bg) * ramp16) // 256
             page = page.astype(np.uint8)
             if div_h:
                 page = np.vstack([divider, page])
             if bar_h:
-                bar = np.empty((bar_h, W, 3), dtype=np.uint8)
+                bar = np.empty((bar_h, w_px, 3), dtype=np.uint8)
                 bar[:] = bg.astype(np.uint8)
                 cy = bar_h // 2
                 prog = x0 + int((x1 - x0) * min(1.0, f / max(1.0, n_frames - 1.0)))
                 cv2.line(bar, (x0, cy), (x1, cy), track, max(2, bar_h // 22), cv2.LINE_AA)
                 cv2.line(bar, (x0, cy), (prog, cy), accent, max(3, bar_h // 16), cv2.LINE_AA)
                 cv2.circle(bar, (prog, cy), max(5, bar_h // 9), accent, -1, cv2.LINE_AA)
-                ch = max(8, bar_h // 6)                                                 # the back chevron
-                cx = int(W * 0.055)
-                cv2.polylines(bar, [np.array([[cx + ch // 2, cy - ch], [cx - ch // 2, cy], [cx + ch // 2, cy + ch]], np.int32)],
-                              False, accent, max(3, bar_h // 18), cv2.LINE_AA)
+                ch = max(8, bar_h // 6)
+                cx = int(w_px * 0.055)
+                chevron = np.array([[cx + ch // 2, cy - ch], [cx - ch // 2, cy], [cx + ch // 2, cy + ch]], np.int32)
+                cv2.polylines(bar, [chevron], False, accent, max(3, bar_h // 18), cv2.LINE_AA)
                 frame = np.vstack([bar, page])
             else:
                 frame = page
@@ -287,11 +330,17 @@ def build_page_video(
         err = proc.stderr.read().decode("utf-8", "ignore") if proc.stderr else ""
         proc.wait()
     if proc.returncode != 0 or not out.is_file():
-        raise RuntimeError(f"page video could not be written: {err[-300:]}")
-    (out_dir / "page_meta.json").write_text(json.dumps({
-        "frames": n_frames, "rows": max((b["row"] for b in layout["words"]), default=0) + 1,
-        "page_height": layout["height"], "words": len(layout["words"]), "geometry": geo,
-    }), encoding="utf-8")
+        raise RuntimeError(f"Scrolling page video encode failed: {err[-300:]}")
+    (out_dir / "page_meta.json").write_text(
+        json.dumps({
+            "frames": n_frames,
+            "rows": max((b["row"] for b in layout["words"]), default=0) + 1,
+            "page_height": layout["height"],
+            "words": len(layout["words"]),
+            "geometry": geo,
+        }),
+        encoding="utf-8",
+    )
     return out
 
 
@@ -308,13 +357,14 @@ def build(
     srt_path: Optional[Path] = None,
     draft: bool = False,
 ) -> Optional[Tuple[Path, Dict[str, int]]]:
-    """Everything `render.py` needs for a `#page scroll` plan: `(page video, geometry)`, or None when there is nothing to show."""
+    """Build `(page_video_path, geometry)` for a `#page scroll` plan, or return None if `#page` is disabled or empty."""
     cfg = page_config(plan)
     if cfg is None:
         return None
     if not subtitles.ensure_ready():
-        print("  [PAGE] Node.js or its caption package is missing, so the scrolling page cannot be drawn.")
+        print("  [PAGE] Node.js or node-canvas is unavailable; cannot render scrolling page.")
         return None
+
     script_lines: List[Dict[str, Any]] = []
     try:
         from prepare import parse_script_file
@@ -322,20 +372,25 @@ def build(
 
         if plan.get("script"):
             _, script_lines = parse_script_file(resolve(plan["script"]))
-    except Exception:   # noqa: BLE001
+    except Exception:  # noqa: BLE001
         script_lines = []
+
     base = Path(report_dir) if report_dir is not None else Path(work_dir)
     cache_hint = base if (base / "clip_caches.json").is_file() else Path(work_dir)
     cues = subtitles.build_cues(segs, starts, script_lines, work_dir=cache_hint)
     if not cues:
-        print("  [PAGE] no spoken words to show.")
+        print("  [PAGE] No spoken words found for scrolling page.")
         return None
     if srt_path is not None:
         subtitles.write_srt(cues, srt_path)
+
     paras = build_paragraphs(cues, segs, cfg)
     geo = geometry(full_w, full_h, cfg)
     out_dir = base / "_page"
     video = build_page_video(paras, cfg, geo, fps, total, out_dir, draft=draft)
-    print(f"  [PAGE] scrolling page: {len(paras)} turns, {sum(len(p['words']) for p in paras)} words; "
-          f"{len(cfg['wrong_phrases'])} wrong and {len(cfg['right_phrases'])} right phrases coloured.")
+    print(
+        f"  [PAGE] Scrolling page rendered: {len(paras)} turns, "
+        f"{sum(len(p['words']) for p in paras)} words; "
+        f"{len(cfg['wrong_phrases'])} wrong and {len(cfg['right_phrases'])} right phrases highlighted."
+    )
     return video, geo

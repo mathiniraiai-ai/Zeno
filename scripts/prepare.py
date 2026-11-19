@@ -1,25 +1,37 @@
-"""Measure the footage for the Director. This file makes no editing decision.
+"""Stages 1-3: Footage Scan, Voiceover Mux, Cached Transcription/Alignment, Face Tracking, Line Matching, Clip Sheet & Segregated Packet Generation.
+
+Measures the raw footage and prepares structured evidence for the Director without making editorial choices.
 
 Usage:
-    python3 scripts/prepare.py [clips...] --script <script> [--lang auto] [--project <name>]
+    python3 scripts/prepare.py [clips...] --script <script> [--lang auto] [--project <name>] [--name <VideoName>]
 
 Writes to work/<project>/:
-    line_map.md          the script in full; under each line, the clip stretches that say it
-    facts.md             every word with its time, pauses, faces, silent clips
-    clip_sheet_<n>.jpg   pictures of every clip
-    plan.edl             header only; the Director writes the segments (agent/EDIT_RULES.md)
+    line_map.md          full script with candidate clip windows under each spoken line
+    facts.md             word timestamps, pauses, VAD speech spans, faces, and silent clips
+    brief.md             job-scoped rules and format quick card
+    clip_sheet_<n>.jpg   contact sheets of every source clip
+    plan.edl             plan header skeleton; the Director writes the cut lines
+    plan.auto.edl        backup copy of the initial header skeleton
+    plan.json            machine-readable header metadata
+    director_packet.md   segregated Director packet combining rules, format card, line map, and facts
+    editing_packet.md    editing packet written alongside director_packet.md
 """
 from __future__ import annotations
+
+import os
+import sys
+
+sys.dont_write_bytecode = True
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 import argparse
 import array
 import glob
 import json
 import math
-import os
 import re
+import shutil
 import subprocess
-import sys
 import time
 import wave
 from difflib import SequenceMatcher
@@ -27,32 +39,35 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import common  # noqa: E402
 from common import (  # noqa: E402
-    ensure_cache_current,
+    DEFAULT_LOUDNESS_LUFS,
     DEFAULT_SFX,
     FFMPEG,
     OUTPUT,
     ROOT,
     WORK,
     clip_work_dir,
+    ensure_cache_current,
     ffmpeg,
     find_venv_python,
-    read_script_text,
     probe,
     read_json,
+    read_script_text,
     resolve,
     resolve_sfx_asset,
     tc,
     write_json,
 )
 
-# Optional Phonetic / Alignment / Vision / EDL modules from sibling agents
+# Optional Phonetic / Alignment / Vision / EDL modules
 IndicPhoneticMapper = None
 try:
     from align_engine.phonetics.indic_phonemes import IndicPhoneticMapper
 except Exception:
     try:
         import importlib.util
+
         _ip_path = Path(__file__).resolve().parent / "align_engine" / "phonetics" / "indic_phonemes.py"
         if _ip_path.is_file():
             _spec = importlib.util.spec_from_file_location("indic_phonemes", str(_ip_path))
@@ -78,13 +93,23 @@ try:
 except Exception:
     edl_parser = None
 
-import style_config  # noqa: E402
+try:
+    import style_config  # noqa: E402
 
-_TUNING = style_config.get_tuning("micronarrative")
-MACRO_SILENCE_DB = float(_TUNING["macro_silence_db"])
-MACRO_SILENCE_MIN_SEC = float(_TUNING["macro_silence_min_sec"])
-MICRO_DIP_DB = float(_TUNING["micro_dip_db"])
-MICRO_DIP_MIN_SEC = float(_TUNING["micro_dip_min_sec"])
+    _TUNING = style_config.get_tuning("micronarrative")
+except Exception:
+    style_config = None  # type: ignore[assignment]
+    _TUNING = {
+        "macro_silence_db": -35.0,
+        "macro_silence_min_sec": 0.25,
+        "micro_dip_db": -28.0,
+        "micro_dip_min_sec": 0.05,
+    }
+
+MACRO_SILENCE_DB = float(_TUNING.get("macro_silence_db", -35.0))
+MACRO_SILENCE_MIN_SEC = float(_TUNING.get("macro_silence_min_sec", 0.25))
+MICRO_DIP_DB = float(_TUNING.get("micro_dip_db", -28.0))
+MICRO_DIP_MIN_SEC = float(_TUNING.get("micro_dip_min_sec", 0.05))
 
 
 def _natural_clip_sort_key(p: Path) -> Tuple[int, int, str]:
@@ -114,14 +139,22 @@ def _phonetic_token(w: str) -> str:
             pass
     # Normalize long vowels and common transliteration variants for cross-script matching
     rom = re.sub(r"([aeiou])\1+", r"\1", rom)
-    rom = rom.replace("ph", "f").replace("bh", "b").replace("dh", "d").replace("th", "t").replace("kh", "k").replace("gh", "g")
+    rom = (
+        rom.replace("ph", "f")
+        .replace("bh", "b")
+        .replace("dh", "d")
+        .replace("th", "t")
+        .replace("kh", "k")
+        .replace("gh", "g")
+    )
     return rom
 
 
 def _indic_skeleton(u: str) -> str:
     """Strip Indic dependent vowel signs (matras), virama, and length marks to compare consonant skeletons."""
     return re.sub(
-        r"[\u093A-\u094F\u0951-\u0957\u09BC-\u09CD\u09D7\u0ABC-\u0ACD\u0B3C-\u0B4D\u0B56\u0B57\u0BBC-\u0BCD\u0BD7\u0C3E-\u0C4D\u0C55\u0C56\u0CBC-\u0CCD\u0CD5\u0CD6\u0D3B-\u0D4D\u0D57]",
+        r"[\u093A-\u094F\u0951-\u0957\u09BC-\u09CD\u09D7\u0ABC-\u0ACD\u0B3C-\u0B4D\u0B56\u0B57"
+        r"\u0BBC-\u0BCD\u0BD7\u0C3E-\u0C4D\u0C55\u0C56\u0CBC-\u0CCD\u0CD5\u0CD6\u0D3B-\u0D4D\u0D57]",
         "",
         u,
     )
@@ -138,15 +171,19 @@ def _word_similarity(w1: str, w2: str) -> float:
         return 0.96
     sim_u = SequenceMatcher(None, u1, u2).ratio()
     sim_p = SequenceMatcher(None, p1, p2).ratio() if (p1 and p2) else 0.0
-    # Compare Indic consonant skeletons (e.g. ಹಿಗನೆ vs ಹೀಗೆನೆ -> ಹಗನ == ಹಗನ)
+    # Compare Indic consonant skeletons
     sk1, sk2 = _indic_skeleton(u1), _indic_skeleton(u2)
-    sim_sk = SequenceMatcher(None, sk1, sk2).ratio() * 0.92 if (len(sk1) >= 2 and len(sk2) >= 2 and sk1 != u1) else 0.0
-    # Also compare vowel-skeleton lowered forms (e.g. higane vs higene)
+    sim_sk = (
+        SequenceMatcher(None, sk1, sk2).ratio() * 0.92
+        if (len(sk1) >= 2 and len(sk2) >= 2 and sk1 != u1)
+        else 0.0
+    )
+    # Also compare vowel-skeleton lowered forms
     c1 = re.sub(r"[aeiou]", "a", p1) if len(p1) >= 4 else p1
     c2 = re.sub(r"[aeiou]", "a", p2) if len(p2) >= 4 else p2
     sim_c = SequenceMatcher(None, c1, c2).ratio() * 0.92 if (c1 and c2) else 0.0
     best = max(sim_u, sim_p * 0.95, sim_sk, sim_c)
-    # Compound word check (e.g. ನಿಲ್ಸೋಧೇಗೆ containing ನಿಲ್ಲಿಸೋದು / ಹೇಗೆ)
+    # Compound word check
     if best < 0.72 and len(p1) >= 3 and len(p2) >= 3 and (len(p1) >= 7 or len(p2) >= 7):
         short_p, long_p = (p1, p2) if len(p1) <= len(p2) else (p2, p1)
         if len(short_p) >= 3 and (long_p.startswith(short_p[:3]) or long_p.endswith(short_p[-3:])):
@@ -190,9 +227,9 @@ def detect_two_tier_silences(
     rms_env: List[Tuple[float, float]],
     cached_silences_path: Optional[Path] = None,
 ) -> Tuple[List[Dict[str, float]], List[Dict[str, float]]]:
-    """Detect 2-tier silences:
-    - Tier 1 Macro-silences (-35dB / 0.30s) via ffmpeg silencedetect or cached silences.json
-    - Tier 2 Micro-dips (-28dB / 0.05s) + 10ms RMS minima from the 10ms wave envelope
+    """Detect two-tier silences:
+    - Tier 1 Macro-silences via FFmpeg `silencedetect` or cached `silences.json`
+    - Tier 2 Micro-dips and 10ms RMS minima from the 10ms wave envelope
     """
     macro_raw: List[Dict[str, float]] = []
     if cached_silences_path and cached_silences_path.is_file():
@@ -204,9 +241,13 @@ def detect_two_tier_silences(
     if not macro_raw and wav_path.is_file():
         try:
             r = ffmpeg(
-                "-i", wav_path,
-                "-af", f"silencedetect=noise={int(MACRO_SILENCE_DB)}dB:d={MACRO_SILENCE_MIN_SEC}",
-                "-f", "null", "-",
+                "-i",
+                wav_path,
+                "-af",
+                f"silencedetect=noise={int(MACRO_SILENCE_DB)}dB:d={MACRO_SILENCE_MIN_SEC}",
+                "-f",
+                "null",
+                "-",
             )
             starts = [float(x) for x in re.findall(r"silence_start: (-?[\d.]+)", r.stderr)]
             ends = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", r.stderr)]
@@ -216,7 +257,7 @@ def detect_two_tier_silences(
         except Exception:
             macro_raw = []
 
-    # Merge contiguous or near-contiguous macro silences (gap <= 0.04s, e.g. S2 1.512-2.759 & 2.759-3.493)
+    # Merge contiguous or near-contiguous macro silences (gap <= 0.04s)
     macro_merged: List[Dict[str, float]] = []
     for s in sorted(macro_raw, key=lambda x: float(x["start"])):
         st, en = float(s["start"]), float(s["end"])
@@ -225,7 +266,7 @@ def detect_two_tier_silences(
         else:
             macro_merged.append({"start": round(st, 3), "end": round(en, 3)})
 
-    # Tier 2 Micro-dips (-28dB for >= 0.05s = 5 frames of 10ms)
+    # Tier 2 Micro-dips (-28dB for >= MICRO_DIP_MIN_SEC)
     micro_dips: List[Dict[str, float]] = []
     min_frames = max(1, int(round(MICRO_DIP_MIN_SEC / 0.01)))
     cur_run: List[Tuple[float, float]] = []
@@ -265,7 +306,6 @@ def find_rms_minimum(
     if not cands:
         return round(0.5 * (t_start + t_end), 2), -40.0
     if prefer_center:
-        # Once inside the noise floor (<= -42 dB), pick the first frame reaching the noise floor
         floor_cands = [(t, db) for t, db in cands if db <= -42.0]
         if floor_cands:
             best_t, best_db = floor_cands[0]
@@ -277,16 +317,16 @@ def find_rms_minimum(
     return round(best_t, 2), best_db
 
 
-
-
 # --- Script cues that are directions or on-screen text, not spoken dialogue ---------------------------------------
 _URL_ONLY_RE = re.compile(r"^https?://\S+$", re.I)
 _META_LINE_RE = re.compile(r"^(?:visuals?(?:\s+changes?)?|reference(?:\s+link)?|ref\s+link|concept)\s*:", re.I)
-# Production notes that are never spoken: "First Frames (3 images)", "Dialogue scripts", "Scrolling text (all the dialogues ...)"
-_PRODUCTION_NOTE_RE = re.compile(r"^(?:first\s+frames?\b.*|dialogue\s+scripts?\s*:?|scrolling\s+text\s*(?:\([^)]*\))?\s*:?)\s*$", re.I)
-_SETUP_HEAD_RE = re.compile(r"^(?:set\s*-?\s*up|production\s+notes?)\s*:?\s*$", re.I)   # "Set up :" then numbered notes
+_PRODUCTION_NOTE_RE = re.compile(
+    r"^(?:first\s+frames?\b.*|dialogue\s+scripts?\s*:?|scrolling\s+text\s*(?:\([^)]*\))?\s*:?)\s*$",
+    re.I,
+)
+_SETUP_HEAD_RE = re.compile(r"^(?:set\s*-?\s*up|production\s+notes?)\s*:?\s*$", re.I)
 _NUMBERED_NOTE_RE = re.compile(r"^\d{1,2}[.)]\s+\S")
-_BULLET_RE = re.compile(r"^[*•●▪◦]\s+")   # Google Doc bullets exported as "* text"
+_BULLET_RE = re.compile(r"^[*•●▪◦]\s+")
 _CHAR_DEF_RE = re.compile(r"^Character\s*\d*\s*[-–—]\s*(.+)$", re.I)
 _SPEAKER_BIO_RE = re.compile(
     r"^([A-Za-z](?:[A-Za-z0-9_ .']|(?<=\w)-(?=\w)){0,28}?)\s+[-–—]\s+(.+)$"
@@ -294,37 +334,191 @@ _SPEAKER_BIO_RE = re.compile(
 
 
 def _split_speaker_bio(text: str) -> Tuple[str, str]:
-    """Split 'Wife - Early 30s, wearing a sari...' (spaced dash + descriptive bio > 12 chars) without touching 'Co-worker 3'."""
+    """Split 'Wife - Early 30s, wearing a sari...' without touching hyphenated names such as 'Co-worker 3'."""
     m = _SPEAKER_BIO_RE.match((text or "").strip())
     if not m:
         return "", ""
     cname, cdesc = m.group(1).strip(), m.group(2).strip()
-    if len(cdesc) <= 12 or cname.lower().startswith(("http", "concept", "visual", "scene", "character", "ref", "back to", "cut to", "flashback")):
+    if len(cdesc) <= 12 or cname.lower().startswith(
+        ("http", "concept", "visual", "scene", "character", "ref", "back to", "cut to", "flashback")
+    ):
         return "", ""
     return cname, cdesc
-# "Scene changes: ...", "Scene changes - ...", "Back to the site, ...", "Cut to ...", "Flashback ..."
+
+
 _SCENE_DIR_RE = re.compile(r"^(?:scene\s+chang(?:e|es|ed)|flash\s*back|(?:back|cut)\s+to)\b[\s:,\-–—]*(.*)$", re.I)
-_LAYOUT_CUE_RE = re.compile(r"^(?:rectangle\s+overlay|floating\s+window|(?:(?:horizontal|vertical)\s+)?split[\s-]*screen|picture[\s-]*in[\s-]*picture)\b", re.I)
-# "Ref for visual set up: https://..." / "Reference link : https://...": a label and a link, nothing to say
+
+
+def _unwrap_bracketed(text: str) -> str:
+    """Strip a single matching outer `(...)` or `[...]` pair without touching inner parentheses."""
+    s = (text or "").strip()
+    if len(s) >= 2 and ((s[0] == "[" and s[-1] == "]") or (s[0] == "(" and s[-1] == ")")):
+        return s[1:-1].strip()
+    return s
+
+
+def _apply_explicit_title(meta: Dict[str, Any], explicit_name: str) -> None:
+    """Inject explicit `--name` video title into `meta['title']` so format detection sees Notion titles."""
+    clean = str(explicit_name or "").strip()
+    if not clean or not isinstance(meta, dict):
+        return
+    cur = str(meta.get("title") or "").strip()
+    if not cur or cur.lower().startswith("gdoc_"):
+        meta["title"] = clean
+    elif clean.lower() not in cur.lower():
+        meta["title"] = f"{clean} — {cur}"
+
+
+_LAYOUT_CUE_RE = re.compile(
+    r"^(?:rectangle\s+overlay|floating\s+window|(?:(?:horizontal|vertical)\s+)?split[\s-]*screen|flash\s*cards?\s+split[\s-]*screen|picture[\s-]*in[\s-]*picture)\b",
+    re.I,
+)
+_FLASHCARD_CUE_RE = re.compile(
+    r"^(?:flash\s*card(?:\s+(?:text|prompt|overlay))?|card\s+text)\s*[:\-–—]\s*(.+)$",
+    re.I,
+)
+_SHORT_CARD_CUE_RE = re.compile(r"^card\s*:\s*(.+)$", re.I)
+_FLASHCARD_END_RE = re.compile(r"^(?:end\s+flash\s*cards?|flash\s*cards?\s+off|no\s+flash\s*cards?)\s*$", re.I)
+_BACKGROUND_CUE_RE = re.compile(
+    r"^(?:background(?:\s+(?:location|setting|visual|scene))?|location|setting)\s*:\s*(.+)$",
+    re.I,
+)
+_TAKEOVER_DIR_RE = re.compile(
+    r"^(?:(?P<sp>[A-Za-z][A-Za-z0-9 .'-]{0,24}?)\s+)?(?:takes?\s+over(?:\s+the)?\s+(?:full\s+)?screen|goes?\s+full[\s-]*screen)\b(.*)$",
+    re.I,
+)
+_FULLSCREEN_HINT_RE = re.compile(r"\bfull[\s-]*screen\b|\btakes?\s+over\b|\bselfie\s+style\b", re.I)
+_LATIN_CHAR_RE = re.compile(r"[A-Za-z]")
+_NON_LATIN_CHAR_RE = re.compile(r"[\u0900-\u0DFF\u0600-\u06FF\u0400-\u04FF\u4E00-\u9FFF]")
+_FLASHCARD_FALLBACK_SEPS = (
+    re.compile(r"\s*[—–]\s*"),
+    re.compile(r"\s+/\s+"),
+    re.compile(r"\s+-\s+"),
+    re.compile(r"\s*/\s*"),
+    re.compile(r"\s*-\s*"),
+)
 _LABELLED_URL_RE = re.compile(r"^[^:]{1,40}:\s*https?://\S+\s*$", re.I)
-# "Top: Robot | Bottom: Lady 1" or "Left: A | Right: B" after a split-screen note
 _PANELS_RE = re.compile(r"(top|left)\s*:\s*(.+?)\s*\|\s*(bottom|right)\s*:\s*(.+)$", re.I)
 _SIDE_NAME_RE = re.compile(r"([A-Za-z][A-Za-z0-9 .'-]{0,30}?)\s*[-–—:]\s*(left|right|top|bottom)\s+(?:screen|side|panel)\b", re.I)
 _CHAR_SIDE_RE = re.compile(r"\b(left|right|top|bottom)\s+(?:screen|side|panel)\b", re.I)
 _WRONG_MARKS = "❌✗✘❎"
 _RIGHT_MARKS = "✅✓✔☑"
-# a parenthetical that only describes what is happening while people talk, so it is not a silent beat
 _CONTEXT_DIR_RE = re.compile(r"\b(?:is|are)\s+(?:talking|speaking|saying)\b|\btalking\s+to\b|\bwhile\b", re.I)
-# "(X Sign and Text Strikethrough)" after a spoken line: show that line's text struck through in red
 _STRIKE_CUE_RE = re.compile(r"\s*[\(\[][^\)\]]*strike[^\)\]]*[\)\]]\s*$", re.I)
-# "[TEXT: \"phrase\" | strike | x]": explicit on-screen text cue (only the strike option is rendered so far)
 _TEXT_CUE_RE = re.compile(r"\s*\[\s*TEXT\s*:\s*(?P<body>[^\]]*)\]\s*$", re.I)
-# "horizontal split screen" means the divider line runs horizontally (top / bottom panels); "vertical split" is left / right
+# "horizontal split screen" has a horizontal divider (top / bottom panels = split_v); "vertical split" is left / right (split_h)
 SCRIPT_SPLIT_LAYOUT = {"horizontal": "split_v", "vertical": "split_h", "default": "split_v"}
 
 
+def _strip_outer_quotes(text: str) -> str:
+    s = (text or "").strip()
+    if len(s) >= 2 and (
+        (s[0] == '"' and s[-1] == '"')
+        or (s[0] == "'" and s[-1] == "'")
+        or (s[0] == "“" and s[-1] == "”")
+    ):
+        return s[1:-1].strip()
+    return s
+
+
+def _script_counts(text: str) -> Tuple[int, int]:
+    return len(_LATIN_CHAR_RE.findall(text)), len(_NON_LATIN_CHAR_RE.findall(text))
+
+
+def _is_pure_bilingual_pair(left: str, right: str) -> bool:
+    l_lat, l_non = _script_counts(left)
+    r_lat, r_non = _script_counts(right)
+    return (l_non == 0 and l_lat > 0 and r_lat == 0 and r_non > 0) or (
+        r_non == 0 and r_lat > 0 and l_lat == 0 and l_non > 0
+    )
+
+
+def _is_clearly_bilingual_pair(left: str, right: str) -> bool:
+    l_lat, l_non = _script_counts(left)
+    r_lat, r_non = _script_counts(right)
+    if (l_non > 0 and r_non == 0 and r_lat > 0) or (r_non > 0 and l_non == 0 and l_lat > 0):
+        return True
+    return (l_non > l_lat and r_lat > r_non) or (r_non > r_lat and l_lat > l_non)
+
+
+def parse_flashcard_text(raw: str) -> Dict[str, str]:
+    """Parse a bilingual flashcard string and normalize English (`en`, Line 1 TOP) vs native (`native`, Line 2 BOTTOM)."""
+    cleaned = _strip_outer_quotes(re.sub(r"\s+", " ", str(raw or "")).strip())
+    if not cleaned:
+        return {"text": "", "en": "", "native": ""}
+
+    left = ""
+    right = ""
+    if "|" in cleaned:
+        p0, p1 = cleaned.split("|", 1)
+        left, right = _strip_outer_quotes(p0), _strip_outer_quotes(p1)
+    else:
+        for sep_re in _FLASHCARD_FALLBACK_SEPS:
+            matches = list(sep_re.finditer(cleaned))
+            if not matches:
+                continue
+            chosen: Optional[Tuple[str, str]] = None
+            for m in matches:
+                cl = _strip_outer_quotes(cleaned[: m.start()])
+                cr = _strip_outer_quotes(cleaned[m.end() :])
+                if cl and cr and _is_pure_bilingual_pair(cl, cr):
+                    chosen = (cl, cr)
+                    break
+            if chosen is None:
+                for m in matches:
+                    cl = _strip_outer_quotes(cleaned[: m.start()])
+                    cr = _strip_outer_quotes(cleaned[m.end() :])
+                    if cl and cr and _is_clearly_bilingual_pair(cl, cr):
+                        chosen = (cl, cr)
+                        break
+            if chosen is not None:
+                left, right = chosen
+                break
+
+    if left and right:
+        l_lat, l_non = _script_counts(left)
+        r_lat, r_non = _script_counts(right)
+        if (
+            (l_non > 0 and r_non == 0 and r_lat > 0)
+            or (l_non > l_lat and r_lat >= r_non)
+            or (l_non > r_non and r_lat > l_lat)
+        ):
+            en, native = right, left
+        elif (
+            (r_non > 0 and l_non == 0 and l_lat > 0)
+            or (r_non > r_lat and l_lat >= l_non)
+            or (r_non > l_non and l_lat > r_lat)
+        ):
+            en, native = left, right
+        else:
+            en, native = left, right
+    else:
+        single = left or right or cleaned
+        s_lat, s_non = _script_counts(single)
+        if s_non > s_lat:
+            en, native = "", single
+        else:
+            en, native = single, ""
+
+    text = f"{en} | {native}" if (en and native) else (en or native)
+    return {"text": text, "en": en, "native": native}
+
+
+def _match_character_name(raw_name: str, characters: Dict[str, Any]) -> str:
+    clean = str(raw_name or "").strip()
+    if not clean:
+        return ""
+    low = clean.lower()
+    for cname in characters:
+        if cname.lower() == low:
+            return cname
+    words = set(low.split())
+    matches = [cname for cname in characters if words and words <= set(cname.lower().split())]
+    return matches[0] if len(matches) == 1 else clean
+
+
 def panels_from_text(text: str) -> Dict[str, str]:
-    """Who sits where, from any wording a script uses: "Top: Robot | Bottom: Lady 1" or "Woman - Right screen | Miss Nova - Left screen"."""
+    """Extract panel slot assignments from script notes like 'Top: Robot | Bottom: Lady 1' or 'Woman - Right screen'."""
     panels: Dict[str, str] = {}
     m = _PANELS_RE.search(text or "")
     if m:
@@ -336,7 +530,7 @@ def panels_from_text(text: str) -> Dict[str, str]:
 
 
 def split_layout_from_panels(panels: Dict[str, str]) -> str:
-    """Panels named left/right make a `split_h`; named top/bottom make a `split_v`; '' when nothing is named."""
+    """Panels named left/right map to `split_h`; named top/bottom map to `split_v`; `''` when unnamed."""
     if "left" in panels or "right" in panels:
         return "split_h"
     if "top" in panels or "bottom" in panels:
@@ -345,18 +539,18 @@ def split_layout_from_panels(panels: Dict[str, str]) -> str:
 
 
 def layout_hint_from_direction(text: str) -> str:
-    """Layout named in a script direction (`split_v`, `split_h`, `video_call`, `chat_bar`) or '' when it names none.
-    "split" wording wins ("floating window ... more like a horizontal split screen" is a split); other wording is looked up in
-    the format library (styles/formats/), and the older keyword rule stays as a fallback."""
+    """Resolve layout hint (`split_v`, `split_h`, `video_call`, `top_pip`, `chat_bar`) from a script direction, or `''`."""
     t = (text or "").lower()
     if re.search(r"\bsplit\b", t):
+        if re.search(r"\bflash\s*cards?\b", t) and not re.search(r"\bhorizontal\b", t):
+            return "split_h"
         key = "vertical" if re.search(r"\bvertical", t) else "horizontal" if re.search(r"\bhorizontal", t) else "default"
         return SCRIPT_SPLIT_LAYOUT[key]
     try:
         import format_library
 
         lib = format_library.best_layout(t)
-    except Exception:   # a broken recipe file must never stop an edit
+    except Exception:
         lib = ""
     if lib and lib != "single":
         return lib
@@ -366,11 +560,11 @@ def layout_hint_from_direction(text: str) -> str:
 
 
 def _drop_repeated_dialogue(lines: List[Dict[str, Any]], min_run: int = 3) -> List[Dict[str, Any]]:
-    """A script that lists the same dialogue twice (e.g. the scrolling-text list, then the dialogue script with speaker names)
-    keeps one copy: the run with more named speakers, else the first. A run is `min_run` or more consecutive lines whose
-    words match, so a single repeated phrase ("Hello?") is never dropped."""
-    def key(l):
+    """Deduplicate scripts that paste the dialogue list twice (e.g. scrolling-text preview followed by speaker-labelled lines).
+    Retains the run with more named speakers, preserving scene metadata on its lines."""
+    def key(l: Dict[str, Any]) -> Tuple[str, ...]:
         return tuple(l.get("tokens") or ())
+
     changed = True
     while changed:
         changed = False
@@ -383,18 +577,19 @@ def _drop_repeated_dialogue(lines: List[Dict[str, Any]], min_run: int = 3) -> Li
                 while i + k < j and j + k < n and key(lines[i + k]) and key(lines[i + k]) == key(lines[j + k]):
                     k += 1
                 if k >= min_run:
-                    first, second = lines[i:i + k], lines[j:j + k]
-                    named = lambda run: sum(1 for l in run if l.get("speaker"))
+                    first, second = lines[i : i + k], lines[j : j + k]
+                    named = lambda run: sum(1 for l in run if l.get("speaker"))  # noqa: E731
                     drop = range(i, i + k) if named(second) > named(first) else range(j, j + k)
-                    if named(second) > named(first):   # keep the speaker names, in the first copy's place in the order
+                    if named(second) > named(first):
                         for a, b in zip(first, second):
                             b["scene"], b["scene_visual"] = a.get("scene"), a.get("scene_visual")
-                    lines = [l for idx, l in enumerate(lines) if idx not in set(drop)]
+                    drop_set = set(drop)
+                    lines = [l for idx, l in enumerate(lines) if idx not in drop_set]
                     changed = True
                     break
             if changed:
                 break
-    if all(l["id"] == f"L{l['index']}" for l in lines):   # ids were numbered by the parser: number them again
+    if all(l["id"] == f"L{l['index']}" for l in lines):
         for idx, l in enumerate(lines, 1):
             l["id"], l["index"] = f"L{idx}", idx
     else:
@@ -404,24 +599,21 @@ def _drop_repeated_dialogue(lines: List[Dict[str, Any]], min_run: int = 3) -> Li
 
 
 def parse_script_file(script_path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """Parse script file into metadata header (concept_ref, visual_ref, characters, scenes) and structured script lines L1..LN.
-
-    Only spoken lines (and silent beats) become script lines. Reference/visual notes, character definitions, scene changes
-    ("Scene changes: ...", "Back to ...") and layout notes ("floating window ... split screen") are read as directions:
-    scene changes start a new scene (so a transition is placed), layout notes set `layout_hint` on the lines that follow,
-    and a trailing "(X Sign and Text Strikethrough)" strips the cue and sets `strike_text` on that line."""
+    """Parse script file into metadata header (`concept_brief`, `characters`, `scenes`) and structured lines `L1..LN`."""
     return _parse_script_raw(read_script_text(script_path), script_path.stem)
 
 
 def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """The parser behind parse_script_file, working on text so reference learning reads scripts exactly like a job does."""
+    """Core text parser shared by `parse_script_file` and reference format tools."""
     meta: Dict[str, Any] = {
         "title": title,
         "language": "auto",
         "header": "",
         "concept_brief": "",
+        "format_hint": "",
         "characters": {},
         "scenes": [],
+        "flashcards": [],
     }
     header_lines: List[str] = []
     lines: List[Dict[str, Any]] = []
@@ -432,6 +624,9 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
     current_visual = ""
     current_hint = ""
     current_panels: Dict[str, str] = {}
+    current_flashcard: Optional[Dict[str, str]] = None
+    card_started = False
+    scene_default_speaker = ""
     pending_speaker = ""
     pending_note = ""
     in_setup_block = False
@@ -440,9 +635,8 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
         s = _BULLET_RE.sub("", raw_line.strip()).strip()
         if not s:
             if in_characters_block and meta["characters"]:
-                in_characters_block = False   # the character list ends at the first blank line after it
+                in_characters_block = False
             continue
-        # Production notes and a "Set up :" block of numbered notes are directions, never spoken lines
         if _SETUP_HEAD_RE.match(s):
             in_setup_block, in_characters_block = True, False
             continue
@@ -466,7 +660,7 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
                 meta["concept_brief"] = m_cbrief.group(1).strip()
             continue
 
-        # 1. Ignore external Concept Reference / Visual Reference video URLs; only keep text concept descriptions
+        # 1. Keep non-URL concept/visual brief notes
         m_concept = re.match(r"^(?:Concept|Visual)\s+(?:Reference|Brief)(?:\s+link)?[^:]*:\s*(.+)$", s, re.I)
         if m_concept:
             val_c = m_concept.group(1).strip()
@@ -474,21 +668,33 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
                 meta["concept_brief"] = (meta["concept_brief"] + " | " + val_c).strip(" |")
             continue
 
-        # 1b. Other non-spoken header lines: a bare URL, "Reference link : ...", "Visuals: ..."
+        # 1b. Skip standalone URLs or non-spoken header labels
         if _URL_ONLY_RE.match(s) or _LABELLED_URL_RE.match(s):
             continue
         if _META_LINE_RE.match(s):
             val_m = s.split(":", 1)[1].strip()
             if re.match(r"visuals?\b", s, re.I) and val_m and not re.search(r"https?://", val_m, re.I):
                 meta["concept_brief"] = (meta["concept_brief"] + " | " + val_m).strip(" |")
+                if not current_visual and not meta["scenes"]:
+                    current_visual = val_m
             continue
 
-        # 2. Characters heading & character definitions (-- Name -- Description)
+        s_unwrapped = _unwrap_bracketed(s)
+
+        # 2. Characters heading & definitions
         if re.match(r"^Characters?\s*:?\s*$", s, re.I):
             in_characters_block = True
             continue
-        if (in_characters_block and not s.startswith("--") and not _CHAR_DEF_RE.match(s)
-                and not re.match(r"^Scene\s+\d+", s, re.I) and not _SCENE_DIR_RE.match(s)):   # "Lady 1: A lady in her 60s ..." or "Wife - Early 30s..."
+        if (
+            in_characters_block
+            and not s.startswith("--")
+            and not _CHAR_DEF_RE.match(s)
+            and not re.match(r"^Scene\s+\d+", s, re.I)
+            and not _SCENE_DIR_RE.match(s_unwrapped)
+            and not _FLASHCARD_CUE_RE.match(s_unwrapped)
+            and not _BACKGROUND_CUE_RE.match(s_unwrapped)
+            and not _TAKEOVER_DIR_RE.match(s_unwrapped)
+        ):
             b_name, b_desc = _split_speaker_bio(s)
             if b_name:
                 meta["characters"][b_name[:40]] = b_desc
@@ -503,62 +709,145 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             meta["characters"][cname] = cdesc
             continue
         m_char_def = _CHAR_DEF_RE.match(s)
-        if m_char_def:   # "Character 1 - A man(Suresh) in his late 20s ..." / "Character 2 - Boss, middle aged man"
+        if m_char_def:
             cdesc = m_char_def.group(1).strip()
             m_cname = re.search(r"\(([^)]+)\)", cdesc)
             cname = (m_cname.group(1).strip() if m_cname else re.split(r"[,(]", cdesc, 1)[0].strip()) or "Character"
             meta["characters"][cname] = cdesc
             continue
 
-        # 3. Scene heading (e.g. "Scene 1", "SCENE 2 - Canteen", "Scene 1: An Indian man...")
+        # 3. Scene heading
         m_scene = re.match(r"^(Scene\s+\d+)(?:\s*[-:–—]\s*(.*))?$", s, re.I)
         if m_scene:
             in_characters_block = False
             current_scene = m_scene.group(1).strip()
-            scene_no = int(re.search(r"\d+", current_scene).group())
+            m_num = re.search(r"\d+", current_scene)
+            scene_no = int(m_num.group()) if m_num else scene_no
             current_visual = (m_scene.group(2) or "").strip()
             current_panels = panels_from_text(current_visual)
             current_hint = split_layout_from_panels(current_panels) or layout_hint_from_direction(current_visual)
-            meta["scenes"].append({"scene": current_scene, "visual": current_visual})
+            current_flashcard = None
+            card_started = False
+            scene_default_speaker = ""
+            meta["scenes"].append({"scene": current_scene, "visual": current_visual, "layout_hint": current_hint})
             continue
 
-        # 3b. Scene-change direction ("Scene changes: ...", "Back to the site, ...", "Cut to ...", "Flashback ...") starts a new scene
-        m_scene_dir = _SCENE_DIR_RE.match(s)
-        if m_scene_dir and not (re.match(r"^(?:back|cut)\s+to\b", s, re.I) and ":" in s):
+        # 3b. Scene-change direction ("Scene changes: ...", "Back to ...", "Cut to ...", "Flashback ...")
+        m_scene_dir = _SCENE_DIR_RE.match(s_unwrapped)
+        if m_scene_dir and not (re.match(r"^(?:back|cut)\s+to\b", s_unwrapped, re.I) and ":" in s_unwrapped):
             in_characters_block = False
+            if not meta["scenes"] and (lines or current_visual or current_hint or meta.get("concept_brief")):
+                s1_visual = current_visual or meta.get("concept_brief", "")
+                s1_panels = current_panels or panels_from_text(s1_visual)
+                s1_hint = current_hint or split_layout_from_panels(s1_panels) or layout_hint_from_direction(s1_visual)
+                meta["scenes"].append({"scene": current_scene, "visual": s1_visual, "layout_hint": s1_hint})
             scene_no += 1
             current_scene = f"Scene {scene_no}"
-            current_visual = m_scene_dir.group(1).strip(" :-–—") or s
-            current_hint = layout_hint_from_direction(current_visual)
-            current_panels = {}
+            current_visual = m_scene_dir.group(1).strip(" :-–—") or s_unwrapped
+            current_panels = panels_from_text(current_visual)
+            current_hint = split_layout_from_panels(current_panels) or layout_hint_from_direction(current_visual)
+            current_flashcard = None
+            card_started = False
+            scene_default_speaker = ""
             pending_speaker = pending_note = ""
-            meta["scenes"].append({"scene": current_scene, "visual": current_visual})
+            meta["scenes"].append({"scene": current_scene, "visual": current_visual, "layout_hint": current_hint})
             continue
 
-        # 3c. Layout note ("Rectangle overlay, floating window ..., horizontal split screen ...") applies to the lines that follow
+        # 3b2. Full-screen takeover direction ("Robot Takes over the screen", "Miss Nova goes full screen")
+        m_takeover = _TAKEOVER_DIR_RE.match(s_unwrapped)
+        if m_takeover and (m_takeover.group("sp") or "").strip().lower() not in (
+            "i",
+            "we",
+            "you",
+            "they",
+            "he",
+            "she",
+            "it",
+        ):
+            in_characters_block = False
+            if not meta["scenes"] and (lines or current_visual or current_hint or meta.get("concept_brief")):
+                s1_visual = current_visual or meta.get("concept_brief", "")
+                s1_panels = current_panels or panels_from_text(s1_visual)
+                s1_hint = current_hint or split_layout_from_panels(s1_panels) or layout_hint_from_direction(s1_visual)
+                meta["scenes"].append({"scene": current_scene, "visual": s1_visual, "layout_hint": s1_hint})
+            scene_no += 1
+            current_scene = f"Scene {scene_no}"
+            current_flashcard = None
+            card_started = False
+            current_hint = "single"
+            current_panels = {}
+            current_visual = s_unwrapped
+            pending_speaker = pending_note = ""
+            raw_sp = (m_takeover.group("sp") or "").strip()
+            scene_default_speaker = _match_character_name(raw_sp, meta["characters"]) if raw_sp else ""
+            meta["scenes"].append({"scene": current_scene, "visual": current_visual, "layout_hint": current_hint})
+            continue
+
+        # 3c. Layout cue note
         if _LAYOUT_CUE_RE.match(s) and not re.match(r"^[A-Za-z][A-Za-z0-9_ ]{0,22}:\s", s):
             hint_l = layout_hint_from_direction(s)
             if hint_l:
+                if not meta["format_hint"] or re.search(r"\bflash\s*cards?\b", s, re.I):
+                    meta["format_hint"] = s
                 current_panels = panels_from_text(s)
                 current_hint = split_layout_from_panels(current_panels) or hint_l
+                if meta["scenes"]:
+                    meta["scenes"][-1]["layout_hint"] = current_hint
                 continue
 
-        # 4. Scene visual / camera direction block: "[Visual: ...]"
-        m_vis_dir = re.match(r"^\[?\s*Visual\s*:\s*(.+?)\]?\s*$", s, re.I)
+        # 3d. Flashcard cues ("Flashcard Text: ...", "Flashcard: ...", "Flash card: ...")
+        if _FLASHCARD_END_RE.match(s_unwrapped):
+            in_characters_block = False
+            current_flashcard = None
+            card_started = False
+            continue
+        m_fc = _FLASHCARD_CUE_RE.match(s_unwrapped)
+        if not m_fc:
+            m_sc = _SHORT_CARD_CUE_RE.match(s_unwrapped)
+            if m_sc and "card" not in {k.lower() for k in meta["characters"]}:
+                sc_val = m_sc.group(1).strip()
+                if "|" in sc_val or "—" in sc_val or "–" in sc_val or _NON_LATIN_CHAR_RE.search(sc_val):
+                    m_fc = m_sc
+        if m_fc:
+            in_characters_block = False
+            fc_parsed = parse_flashcard_text(m_fc.group(1))
+            if fc_parsed["text"]:
+                current_flashcard = fc_parsed
+                card_started = False
+                meta["flashcards"].append(dict(fc_parsed))
+            continue
+
+        # 3e. Background / location scene-context notes ("Background: ...", "Background Location: ...")
+        m_bg = _BACKGROUND_CUE_RE.match(s_unwrapped)
+        if m_bg:
+            bg_label = s_unwrapped.split(":", 1)[0].strip().lower()
+            if bg_label.startswith("background") or bg_label not in {k.lower() for k in meta["characters"]}:
+                in_characters_block = False
+                current_visual = m_bg.group(1).strip()
+                continue
+
+        # 4. Visual / camera direction block: "[Visual: ...]" or "(Visual: ...)"
+        m_vis_dir = re.match(r"^Visuals?\s*:\s*(.+)$", s_unwrapped, re.I)
         if m_vis_dir:
             in_characters_block = False
             current_visual = m_vis_dir.group(1).strip()
             vis_panels = panels_from_text(current_visual)
             vis_hint = split_layout_from_panels(vis_panels) or layout_hint_from_direction(current_visual)
-            if vis_hint:   # "[Visual: SCENE 3 - SPLIT SCREEN | Woman - Right screen | Miss Nova - Left screen]"
+            if vis_hint:
                 current_hint, current_panels = vis_hint, vis_panels
+            elif _FULLSCREEN_HINT_RE.search(current_visual):
+                current_hint, current_panels = "single", {}
+                current_flashcard = None
+                card_started = False
             if meta["scenes"]:
                 meta["scenes"][-1]["visual"] = current_visual
+                if current_hint:
+                    meta["scenes"][-1]["layout_hint"] = current_hint
             else:
-                meta["scenes"].append({"scene": current_scene, "visual": current_visual})
+                meta["scenes"].append({"scene": current_scene, "visual": current_visual, "layout_hint": current_hint})
             continue
 
-        # 5. Standalone speaker line (e.g. "Miss Nova:" or "Ravi (He's speaking in pauses...):" or "Wife - Early 30s, wearing a sari:")
+        # 5. Standalone speaker header line
         m_standalone_spk = re.match(r"^([A-Za-z](?:[A-Za-z0-9_ .']|(?<=\w)-(?=\w)){0,24}?)\s*(?:\(([^)]*)\))?\s*:\s*$", s)
         if m_standalone_spk:
             in_characters_block = False
@@ -577,7 +866,7 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
 
         in_characters_block = False
 
-        # 6. Match L1 Speaker (optional note): text [WRONG|RIGHT]
+        # 6. Spoken line or silent beat: L1 Speaker (optional note): text [WRONG|RIGHT]
         m_id = re.match(r"^(L\d+)\s*(?::\s*|\s+)(.*)$", s)
         if m_id:
             lid, rest = m_id.group(1), m_id.group(2).strip()
@@ -585,7 +874,6 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             lid = f"L{len(lines) + 1}"
             rest = s
 
-        # On-screen text cue at the end of a spoken line: strip it so the spoken text matches the transcript
         strike_cue = False
         strike_override = ""
         m_text_cue = _TEXT_CUE_RE.search(rest)
@@ -603,7 +891,7 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
 
         mark = None
         emoji_marks = [c for c in rest if c in _WRONG_MARKS + _RIGHT_MARKS]
-        if emoji_marks:   # "I am Delhi. ❌" / "I am from Delhi. ✅": the mark the line carries, removed from the spoken text
+        if emoji_marks:
             mark = "wrong" if emoji_marks[-1] in _WRONG_MARKS else "right"
             rest = re.sub("[" + _WRONG_MARKS + _RIGHT_MARKS + "]\ufe0f?", "", rest).strip()
         m_mark = re.search(r"\[(WRONG|RIGHT)\]\s*$", rest, re.I)
@@ -611,7 +899,6 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             mark = m_mark.group(1).lower()
             rest = rest[: m_mark.start()].strip()
         elif mark is None:
-            # Also check inline [WRONG] or [RIGHT] inside a composite line
             m_inline = re.search(r"\[(WRONG|RIGHT)\]", rest, re.I)
             if m_inline:
                 mark = m_inline.group(1).lower()
@@ -626,7 +913,6 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
         if m_beat and not speaker:
             ctx_text = next(g for g in m_beat.groups() if g).strip()
             if _CONTEXT_DIR_RE.search(ctx_text):
-                # "(Suresh is talking to his Partner on his phone)" describes the scene while people talk; it is not a silent beat
                 current_visual = ctx_text
                 if meta["scenes"]:
                     meta["scenes"][-1]["visual"] = ctx_text
@@ -650,7 +936,8 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
                 text = m_bio_spk.group(3).strip().lstrip(":").strip()
             else:
                 text = rest
-            # Extract inline stage directions like "(laughing)" after speaker colon into note
+                if not speaker and scene_default_speaker:
+                    speaker = scene_default_speaker
             m_inline_dir = re.match(r"^\(([^)]+)\)\s*(.+)$", text)
             if m_inline_dir:
                 dir_note = m_inline_dir.group(1).strip()
@@ -662,6 +949,11 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
         if beat:
             tokens = []
         phonetic_tokens = [_phonetic_token(w) for w in tokens if _phonetic_token(w)]
+
+        line_fc = dict(current_flashcard) if (current_flashcard and not beat) else None
+        line_fc_start = (not card_started) if line_fc else False
+        if line_fc:
+            card_started = True
 
         lines.append({
             "id": lid,
@@ -679,11 +971,13 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             "layout_hint": current_hint,
             "panels": dict(current_panels),
             "strike_text": (strike_override or text) if (strike_cue and not beat) else "",
+            "flashcard": line_fc,
+            "flashcard_start": line_fc_start,
         })
 
     lines = _drop_repeated_dialogue(lines)
 
-    char_side = {}
+    char_side: Dict[str, str] = {}
     for cname, cdesc in meta["characters"].items():
         m_side = _CHAR_SIDE_RE.search(cdesc or "")
         if m_side:
@@ -691,41 +985,80 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
     for l in lines:
         if l.get("layout_hint") and char_side:
             for cname, side in char_side.items():
-                if side not in l["panels"] and cname not in l["panels"].values() and split_layout_from_panels({side: cname}) == l["layout_hint"]:
+                if (
+                    side not in l["panels"]
+                    and cname not in l["panels"].values()
+                    and split_layout_from_panels({side: cname}) == l["layout_hint"]
+                ):
                     l["panels"][side] = cname
-    panel_names = {v for l in lines for v in (l.get("panels") or {}).values()}   # "Top: Robot" names a character too
-    names = sorted({l["speaker"] for l in lines if l.get("speaker")} | set(meta["characters"]) | panel_names, key=lambda n: -len(n.split()))
-    canon = {}
+    panel_names = {v for l in lines for v in (l.get("panels") or {}).values()}
+    names = sorted(
+        {l["speaker"] for l in lines if l.get("speaker")} | set(meta["characters"]) | panel_names,
+        key=lambda n: -len(n.split()),
+    )
+    canon: Dict[str, str] = {}
     for n in names:
         words = set(n.lower().split())
-        longer = next((m for m in names if m != n and len(m.split()) > len(n.split()) and words < set(m.lower().split())), None)
+        longer = next(
+            (m for m in names if m != n and len(m.split()) > len(n.split()) and words < set(m.lower().split())),
+            None,
+        )
         if longer:
             canon[n] = longer
     for l in lines:
         l["speaker"] = canon.get(l.get("speaker", ""), l.get("speaker", ""))
         l["panels"] = {k: canon.get(v, v) for k, v in l.get("panels", {}).items()}
 
-    # Auto-infer [WRONG] / [RIGHT] on student lines when followed by teacher feedback ("Almost", "Perfect!", "Nice!", "ನೀವು ಸಿಂಪಲ್ಲಾಗಿ")
+    # Auto-infer [WRONG] / [RIGHT] on student lines when followed by teacher feedback
     for idx in range(len(lines) - 1):
         curr_l = lines[idx]
         next_l = lines[idx + 1]
         if curr_l.get("mark") or len(curr_l.get("tokens", [])) > 12:
             continue
+        if curr_l.get("flashcard") or next_l.get("flashcard"):
+            continue
         if curr_l.get("speaker") and next_l.get("speaker") and curr_l["speaker"] != next_l["speaker"]:
             nxt_txt = next_l["text"].strip().lower()
-            if nxt_txt.startswith(("almost", "ನೀವು ಸಿಂಪಲ್ಲಾಗಿ", "ಹೀಗೆ ಹೇಳಿ", "no,", "not quite")):
-                curr_l["mark"] = "wrong"
+            nxt_clean = re.sub(r'^[\s"\'“”‘’]+', "", nxt_txt)
+            nxt_bare = re.sub(r"[^\w\u0900-\u0D7F\s]", "", nxt_clean).strip()
+            curr_quoted_bare = {
+                re.sub(r"[^\w\u0900-\u0D7F\s]", "", q.lower()).strip()
+                for q in (curr_l.get("quoted") or [])
+                if q and q.strip()
+            }
+            curr_quoted_bare.discard("")
+            if curr_quoted_bare and any(
+                nxt_bare == q or nxt_bare.startswith(q + " ") for q in curr_quoted_bare
+            ):
+                continue
+            nxt_tok_count = len(next_l.get("tokens") or [])
+            is_teach_prompt = "?" in (curr_l.get("text") or "") and bool(
+                re.search(
+                    r"english|translate|how\s+do\s+you\s+say|repeat\s+after|say\s+it\s+with\s+me|ಏನಂತಾರೆ|ಹಿಂದೇ?ನೆ\s*ಹೇಳಿ",
+                    curr_l.get("text") or "",
+                    re.I,
+                )
+            )
+            if nxt_txt.startswith("almost"):
+                if nxt_tok_count >= 3 and not is_teach_prompt:
+                    curr_l["mark"] = "wrong"
+            elif nxt_txt.startswith(("ನೀವು ಸಿಂಪಲ್ಲಾಗಿ", "ಹೀಗೆ ಹೇಳಿ", "no,", "not quite")):
+                if not is_teach_prompt:
+                    curr_l["mark"] = "wrong"
             elif nxt_txt.startswith(("perfect", "nice", "great", "correct", "ನಿಜ", "ಸರಿ")):
-                curr_l["mark"] = "right"
+                if not is_teach_prompt:
+                    curr_l["mark"] = "right"
 
     brief_parts: List[str] = []
     if meta["characters"]:
         brief_parts.append("Characters: " + "; ".join(f"{k} ({v})" for k, v in meta["characters"].items()))
     if meta["scenes"]:
-        brief_parts.append(" | ".join(f"{sc['scene']}: {sc['visual']}" if sc.get("visual") else sc["scene"] for sc in meta["scenes"]))
+        brief_parts.append(
+            " | ".join(f"{sc['scene']}: {sc['visual']}" if sc.get("visual") else sc["scene"] for sc in meta["scenes"])
+        )
     if brief_parts and not meta["concept_brief"]:
         meta["concept_brief"] = " — ".join(brief_parts)
-    if meta.get("setup"):   # the writer's numbered set-up notes (layout, sides) travel with the brief
+    if meta.get("setup"):
         meta["concept_brief"] = (meta["concept_brief"] + " | Set up: " + " ".join(meta["setup"])).strip(" |")
     meta["header"] = " | ".join(header_lines)
     return meta, lines
@@ -739,11 +1072,11 @@ def ensure_clip_transcribed(
     script_path: Optional[Path],
     clean_raw_json: bool = True,
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Ensure info.json, audio16k.wav, and hq_words.json / words.json exist for a clip."""
+    """Ensure `info.json`, `audio16k.wav`, and `hq_words.json` / `words.json` exist for a clip."""
     work_dir.mkdir(parents=True, exist_ok=True)
     stale = ensure_cache_current(work_dir)
     if stale:
-        print(f"  [cache] {clip_stem}: rebuilding {', '.join(stale)} (code changed or file damaged)")
+        print(f"  [cache] {clip_stem}: rebuilding {', '.join(stale)} (code changed or cache invalid)")
     info_path = work_dir / "info.json"
     wav_path = work_dir / "audio16k.wav"
     hq_path = work_dir / "hq_words.json"
@@ -757,16 +1090,22 @@ def ensure_clip_transcribed(
         info = probe(resolved_src)
         write_json(info_path, info)
     else:
-        info = {"path": str(clip_src), "duration": 10.0, "width": 720, "height": 1280, "fps": 24.0, "has_audio": True}
+        info = {
+            "path": str(clip_src),
+            "duration": 10.0,
+            "width": 720,
+            "height": 1280,
+            "fps": 24.0,
+            "has_audio": True,
+        }
 
     if not wav_path.is_file() and resolved_src.is_file() and info.get("has_audio", True):
         ffmpeg("-i", resolved_src, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav_path)
 
-    # Measure VAD speech spans up front so an empty cached transcript on a clip with real speech (>= 0.8s) is never trusted.
+    # Measure VAD speech spans up front so an empty cached transcript on a clip with real speech (>= 0.8s) is never trusted
     spoken_spans = _speech_spans_of({"work_dir": work_dir}) if wav_path.is_file() else []
     active_speech_sec = sum(max(0.0, float(b) - float(a)) for a, b in spoken_spans)
 
-    # Check if alignment/transcription already exists
     hq_words: List[Dict[str, Any]] = []
     base_words: List[Dict[str, Any]] = []
     if align_path.is_file():
@@ -786,7 +1125,6 @@ def ensure_clip_transcribed(
         except Exception:
             pass
 
-    # Guard against stale/poisoned empty word caches when VAD hears >= 0.8s of active speech
     gem_cache_path = work_dir / "gemini_transcript.json"
     if not hq_words and not base_words and active_speech_sec >= 0.8:
         for stale_empty in (align_path, hq_path, words_path, gem_cache_path):
@@ -796,12 +1134,17 @@ def ensure_clip_transcribed(
                 except OSError:
                     pass
 
-    # A clip with no sound at all has nothing to transcribe: Gemini would only invent words from the script reference.
-    no_sound = not hq_words and not base_words and wav_path.is_file() and active_speech_sec < 0.8 and clip_has_no_sound(wav_path)
+    # Skip transcription on clips with no real sound so the transcriber cannot hallucinate script lines over silence
+    no_sound = (
+        not hq_words
+        and not base_words
+        and wav_path.is_file()
+        and active_speech_sec < 0.8
+        and clip_has_no_sound(wav_path)
+    )
     if no_sound:
-        print(f"  [{clip_stem}] no sound in this clip: not sent for transcription")
+        print(f"  [{clip_stem}] no sound in this clip: skipping transcription")
 
-    # If neither hq_words nor base_words is cached, invoke align_engine or transcribe scripts
     transcript_err = ""
     if not hq_words and not base_words and wav_path.is_file() and not no_sound:
         max_tries = 2 if active_speech_sec >= 0.8 else 1
@@ -843,26 +1186,26 @@ def ensure_clip_transcribed(
                 )
 
         if not hq_words and not base_words and not transcript_err:
-            # Fallback to transcribe.py
-            venv_py = find_venv_python()
-            cmd = [str(venv_py), str(ROOT / "scripts" / "transcribe.py"), str(resolved_src), "--lang", lang]
-            if script_path:
-                cmd += ["--script", str(script_path)]
-            try:
-                proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
-                if words_path.is_file():
-                    base_words = read_json(words_path)
-                elif proc.returncode != 0:
-                    transcript_err = (proc.stderr or proc.stdout or f"transcribe.py exit {proc.returncode}").strip()[:250]
-            except Exception as exc:
-                transcript_err = f"{type(exc).__name__}: {exc}"
+            transcribe_script = ROOT / "scripts" / "transcribe.py"
+            if transcribe_script.is_file():
+                venv_py = find_venv_python()
+                cmd = [str(venv_py), str(transcribe_script), str(resolved_src), "--lang", lang]
+                if script_path:
+                    cmd += ["--script", str(script_path)]
+                try:
+                    proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
+                    if words_path.is_file():
+                        base_words = read_json(words_path)
+                    elif proc.returncode != 0:
+                        transcript_err = (proc.stderr or proc.stdout or f"transcribe.py exit {proc.returncode}").strip()[:250]
+                except Exception as exc:
+                    transcript_err = f"{type(exc).__name__}: {exc}"
 
-        # Never persist an empty `words: []` cache as valid when >= 0.8s of speech was measured or an error occurred
         if not hq_words and not base_words and (active_speech_sec >= 0.8 or transcript_err):
             print(
                 f"  [WARN] {clip_stem}: 0 words transcribed"
                 + (f" ({transcript_err[:120]})" if transcript_err else f" despite {active_speech_sec:.2f}s of active speech")
-                + "; marking transcript cache incomplete so next run retries without --fresh"
+                + "; marking transcript cache incomplete so next run retries automatically"
             )
             for empty_f in (align_path, hq_path, words_path, gem_cache_path):
                 if empty_f.is_file():
@@ -886,13 +1229,17 @@ def ensure_clip_transcribed(
     try:
         import events
 
-        events.emit("speech", f"{clip_stem}: {len(hq_words)} words transcribed and aligned" if hq_words else f"{clip_stem}: no speech found", clip=clip_stem, words=len(hq_words))
+        events.emit(
+            "speech",
+            f"{clip_stem}: {len(hq_words)} words transcribed and aligned" if hq_words else f"{clip_stem}: no speech found",
+            clip=clip_stem,
+            words=len(hq_words),
+        )
     except Exception:
         pass
     if not base_words:
         base_words = hq_words
 
-    # Normalize word entries
     def _norm_w(wlist: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out = []
         for item in wlist:
@@ -918,73 +1265,24 @@ def _clip_tokens(clip: Dict[str, Any]) -> List[str]:
     return [_clean_token(w["w"]) for w in clip.get("hq_words", []) if _clean_token(w["w"])]
 
 
-
-
 SAME_TAKE_THRESHOLD = 0.72
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-REACTION_RE = re.compile(r"laugh|chuckl|giggl|smirk|cry|cries|crying|sob|tears|sigh|gasp|shock|smile|grin|react|scream|hug|cheer", re.I)
-EMOTION_RE = re.compile(r"cry|cries|crying|sob|tears|sad|heartbroken|emotional|overwhelm|longing|lost in thought|hurt|embarrass|hides? (?:his|her|their)? ?face|looks? down", re.I)
+REACTION_RE = re.compile(
+    r"laugh|chuckl|giggl|smirk|cry|cries|crying|sob|tears|sigh|gasp|shock|smile|grin|react|scream|hug|cheer",
+    re.I,
+)
+EMOTION_RE = re.compile(
+    r"cry|cries|crying|sob|tears|sad|heartbroken|emotional|overwhelm|longing|lost in thought|hurt|embarrass|hides? (?:his|her|their)? ?face|looks? down",
+    re.I,
+)
 PAUSE_NOTE_RE = re.compile(r"pause|silen|stare|staring|awkward", re.I)
 
-
-
-
-
-
-
-
-
-
-LISTENER_LOOK_MAX_DISTANCE = 0.40   # colour-signature distance (0 same look, about 0.1-0.25 same character, 1 clearly different)
-LISTENER_LOOK_MARGIN = 0.15         # the best match must beat the next character by this much
-
-
-
-
-
-
-
-
-
-
+LISTENER_LOOK_MAX_DISTANCE = 0.40
+LISTENER_LOOK_MARGIN = 0.15
 
 
 def clip_is_silent(c: Dict[str, Any]) -> bool:
-    """A measurement: this clip has (almost) no speech. Steady room noise that Gemini heard as words counts as silent."""
+    """Return True when a clip contains no meaningful speech (including stationary ambient noise)."""
     ws = c.get("hq_words") or []
     dur = float((c.get("info") or {}).get("duration") or 1.0)
     dbs = sorted(db for _, db in (c.get("rms_env") or []))
@@ -997,9 +1295,12 @@ def clip_is_silent(c: Dict[str, Any]) -> bool:
     return sum(float(w["end"]) - float(w["start"]) for w in ws) / max(0.1, dur) < 0.08
 
 
-def voiced_spans(rms_env: List[Tuple[float, float]], floor_db: float = -48.0, merge_gap: float = 0.25) -> List[Tuple[float, float]]:
-    """Where there is real sound: stretches louder than `floor_db`, merged across gaps shorter than `merge_gap`. Measured from the audio,
-    so it stays right when a word time from the aligner is off."""
+def voiced_spans(
+    rms_env: List[Tuple[float, float]],
+    floor_db: float = -48.0,
+    merge_gap: float = 0.25,
+) -> List[Tuple[float, float]]:
+    """Measured stretches of real audio energy above `floor_db`, merged across gaps shorter than `merge_gap`."""
     spans: List[List[float]] = []
     for t, db in rms_env:
         if db > floor_db:
@@ -1011,8 +1312,7 @@ def voiced_spans(rms_env: List[Tuple[float, float]], floor_db: float = -48.0, me
 
 
 def clip_has_no_sound(wav_path: Path, rms_env: Optional[List[Tuple[float, float]]] = None) -> bool:
-    """True only when the audio holds nothing: no stretch of real sound, and the voice detector (when installed) hears no speech. Quiet speech
-    still counts as sound, so a real take is never treated as empty."""
+    """Return True only when the audio holds neither voiced energy spans nor VAD speech spans."""
     env = rms_env if rms_env is not None else compute_10ms_rms_envelope(wav_path)
     if not env or voiced_spans(env):
         return False
@@ -1020,8 +1320,7 @@ def clip_has_no_sound(wav_path: Path, rms_env: Optional[List[Tuple[float, float]
 
 
 def silent_word_runs(words: List[Dict[str, Any]], flagged: List[Dict[str, Any]]) -> List[str]:
-    """One line per unbroken run of words sitting in silence. The words and their times are already listed above, so naming the first
-    and the last word of each run says exactly which ones are wrong."""
+    """Summarize each unbroken run of aligned words sitting in measured silence."""
     bad = {id(w) for w in flagged}
     lines: List[str] = []
     run: List[Dict[str, Any]] = []
@@ -1031,15 +1330,18 @@ def silent_word_runs(words: List[Dict[str, Any]], flagged: List[Dict[str, Any]])
             continue
         if run:
             a, b = run[0], run[-1]
-            who = f"'{a['w']}' at {float(a['start']):.2f}-{float(a['end']):.2f}" if len(run) == 1 else (
-                f"{len(run)} words from '{a['w']}' ({float(a['start']):.2f}) to '{b['w']}' ({float(b['end']):.2f})")
+            who = (
+                f"'{a['w']}' at {float(a['start']):.2f}-{float(a['end']):.2f}"
+                if len(run) == 1
+                else f"{len(run)} words from '{a['w']}' ({float(a['start']):.2f}) to '{b['w']}' ({float(b['end']):.2f})"
+            )
             lines.append(f"  ! TIMING WRONG: {who}: that stretch is silent; the real place is in a nearby voiced span")
             run = []
     return lines
 
 
 def no_speech_word_runs(words: List[Dict[str, Any]], flagged: List[Dict[str, Any]]) -> List[str]:
-    """Group consecutive words outside VAD speech spans into one summary warning per unbroken run."""
+    """Group consecutive words outside VAD speech spans into summary warnings."""
     bad = {id(w) for w in flagged}
     lines: List[str] = []
     run: List[Dict[str, Any]] = []
@@ -1063,8 +1365,12 @@ def no_speech_word_runs(words: List[Dict[str, Any]], flagged: List[Dict[str, Any
     return lines
 
 
-def words_in_silence(words: List[Dict[str, Any]], rms_env: List[Tuple[float, float]], floor_db: float = -55.0) -> List[Dict[str, Any]]:
-    """Words whose aligned time holds no sound at all: the aligner put them in the wrong place."""
+def words_in_silence(
+    words: List[Dict[str, Any]],
+    rms_env: List[Tuple[float, float]],
+    floor_db: float = -55.0,
+) -> List[Dict[str, Any]]:
+    """Return words whose aligned span holds no audio energy above `floor_db`."""
     out = []
     for w in words:
         a, b = float(w["start"]), float(w["end"])
@@ -1075,7 +1381,7 @@ def words_in_silence(words: List[Dict[str, Any]], rms_env: List[Tuple[float, flo
 
 
 def _speech_spans_of(c: Dict[str, Any]) -> List[Tuple[float, float]]:
-    """Where someone talks in this clip, cached next to its audio. [] when the voice detector is not installed."""
+    """VAD speech intervals in a clip, cached in `speech_spans.json` alongside `audio16k.wav`."""
     wav = Path(c.get("work_dir") or "") / "audio16k.wav"
     if not wav.is_file():
         return []
@@ -1102,7 +1408,7 @@ def _speech_spans_of(c: Dict[str, Any]) -> List[Tuple[float, float]]:
 
 
 def _silent_clip_owner(c: Dict[str, Any], clips_data: List[Dict[str, Any]]) -> str:
-    """For a silent clip: which speaking clip shows the same person and place, by colour layout (a measurement, not a decision)."""
+    """Measure visual colour-layout distance from a silent clip to speaking clips."""
     if vision_tracker is None:
         return ""
     try:
@@ -1125,9 +1431,13 @@ def _silent_clip_owner(c: Dict[str, Any], clips_data: List[Dict[str, Any]]) -> s
         return ""
 
 
-def emphasis_words(rms_env: List[Tuple[float, float]], words: List[Dict[str, Any]], max_n: int = 6, min_delta_db: float = 4.0) -> List[Dict[str, Any]]:
-    """The words the speaker stressed: each word's peak loudness against the median loudness of the clip's speech. A measurement the
-    Director uses to place a rapid zoom or an effect on the exact word. In a noisy clip the median is high, so weak peaks do not show."""
+def emphasis_words(
+    rms_env: List[Tuple[float, float]],
+    words: List[Dict[str, Any]],
+    max_n: int = 6,
+    min_delta_db: float = 4.0,
+) -> List[Dict[str, Any]]:
+    """Identify vocally stressed words whose peak dB exceeds the clip's median voiced speech by `min_delta_db`."""
     voiced = sorted(db for _, db in rms_env if db > -34.0)
     if not voiced or not words:
         return []
@@ -1146,8 +1456,7 @@ def emphasis_words(rms_env: List[Tuple[float, float]], words: List[Dict[str, Any
 
 
 def safe_zoom_focus(spans: List[Tuple[float, float]], z: float) -> Optional[Tuple[float, float]]:
-    """For a zoom of `z` the visible window is [(1-1/z)*fx, (1-1/z)*fx + 1/z] of the frame width. The focus x range that keeps every face span
-    (x0, x1) inside it, clamped to the 0.05-0.95 the renderer allows; None when no focus keeps them all (use z=1)."""
+    """Compute the focus-x range `[lo, hi]` that keeps every face span `(x0, x1)` inside the frame at zoom `z`."""
     k = 1.0 - 1.0 / z
     if k <= 0 or not spans:
         return None
@@ -1162,11 +1471,13 @@ _SCAN_LAUNCHED: set = set()
 
 
 def _start_background_scan() -> None:
-    """Scan every clip frame by frame for the desktop app's Scan view in ONE separate low-priority process, so the job itself never waits for it."""
+    """Launch background frame scan if `vision_scan.py` and `events.py` are enabled."""
     try:
         if os.environ.get("ZENO_EVENTS", "").lower() == "off" or not _SCAN_QUEUE:
             return
-        import subprocess
+        scan_script = Path(__file__).resolve().parent / "vision_scan.py"
+        if not scan_script.is_file():
+            return
         import events
 
         project = events._project_dir()
@@ -1176,23 +1487,42 @@ def _start_background_scan() -> None:
         if not paths:
             return
         _SCAN_LAUNCHED.update(paths)
-        cmd = [sys.executable, str(Path(__file__).resolve().parent / "vision_scan.py"), *paths, "--step", "0.5", "--max", "24", "--project", project.name, "--thumb", "220"]
-        kw: Dict[str, Any] = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "stdin": subprocess.DEVNULL}
+        cmd = [
+            sys.executable,
+            str(scan_script),
+            *paths,
+            "--step",
+            "0.5",
+            "--max",
+            "24",
+            "--project",
+            project.name,
+            "--thumb",
+            "220",
+        ]
+        kw: Dict[str, Any] = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "stdin": subprocess.DEVNULL,
+        }
         if os.name == "nt":
-            kw["creationflags"] = 0x00000008 | 0x00004000          # detached, below normal priority
+            kw["creationflags"] = 0x00000008 | 0x00004000
         else:
             kw["start_new_session"] = True
             kw["preexec_fn"] = lambda: os.nice(10)
         subprocess.Popen(cmd, **kw)
-    except Exception:   # noqa: BLE001  (the display pass must never stop a job)
+    except Exception:
         pass
 
 
 def format_facts(clips_data: List[Dict[str, Any]], script_lines: Optional[List[Dict[str, Any]]] = None) -> str:
-    """Everything measured about each clip, as text for the Director: `start word` for every word, a line break at each gap."""
+    """Format all per-clip measurements (`start word`, pauses, VAD spans, emphasis, face geometry) into `facts.md`."""
     import script_order
 
-    out = ["# FACTS: measured by Zeno. Times are seconds in the clip. `1.20 word` = the word starts at 1.20; `|2.31` = speech stops at 2.31.", ""]
+    out = [
+        "# FACTS: measured by Zeno. Times are seconds in the clip. `1.20 word` = the word starts at 1.20; `|2.31` = speech stops at 2.31.",
+        "",
+    ]
     for c in clips_data:
         info = c.get("info") or {}
         name = Path(str(c["src"])).name
@@ -1208,7 +1538,7 @@ def format_facts(clips_data: List[Dict[str, Any]], script_lines: Optional[List[D
                 tags.append(f"{key}={vis[key]}")
         bb = vis.get("bbox_norm")
         if bb and len(bb) >= 4:
-            tags.append(f"face_top-bottom={float(bb[1]):.2f}-{float(bb[3]):.2f}")     # keep text and graphics below this line
+            tags.append(f"face_top-bottom={float(bb[1]):.2f}-{float(bb[3]):.2f}")
         if clip_is_silent(c):
             tags.append("SILENT")
             owner = _silent_clip_owner(c, clips_data)
@@ -1218,31 +1548,56 @@ def format_facts(clips_data: List[Dict[str, Any]], script_lines: Optional[List[D
         try:
             import events
 
-            _fs = [(round(float(f['bbox_norm'][0]), 2), round(float(f['bbox_norm'][2]), 2)) for f in (vis.get('faces') or []) if f.get('bbox_norm') and len(f['bbox_norm']) >= 4]
-            if (name, vis.get("face_count"), vis.get("shot_type")) in _FACE_SEEN:
-                raise StopIteration                  # the same clip was already reported in this run
-            _FACE_SEEN.add((name, vis.get("face_count"), vis.get("shot_type")))
-            events.emit("face", f"{name}: {vis.get('face_count', 0)} face(s), {vis.get('shot_type', 'unknown')}" + (", silent clip" if clip_is_silent(c) else ""), clip=name, faces=_fs, shot=vis.get('shot_type'), silent=clip_is_silent(c))
+            _fs = [
+                (round(float(f["bbox_norm"][0]), 2), round(float(f["bbox_norm"][2]), 2))
+                for f in (vis.get("faces") or [])
+                if f.get("bbox_norm") and len(f["bbox_norm"]) >= 4
+            ]
+            if (name, vis.get("face_count"), vis.get("shot_type")) not in _FACE_SEEN:
+                _FACE_SEEN.add((name, vis.get("face_count"), vis.get("shot_type")))
+                events.emit(
+                    "face",
+                    f"{name}: {vis.get('face_count', 0)} face(s), {vis.get('shot_type', 'unknown')}"
+                    + (", silent clip" if clip_is_silent(c) else ""),
+                    clip=name,
+                    faces=_fs,
+                    shot=vis.get("shot_type"),
+                    silent=clip_is_silent(c),
+                )
         except Exception:
             pass
-        _SCAN_QUEUE.append(str(resolve(c["src"])))       # shown in the app's Scan view; scanned in the background after the facts are written
-        spans = [(float(f["bbox_norm"][0]), float(f["bbox_norm"][2])) for f in (vis.get("faces") or []) if f.get("bbox_norm") and len(f["bbox_norm"]) >= 4]
+        _SCAN_QUEUE.append(str(resolve(c["src"])))
+        spans = [
+            (float(f["bbox_norm"][0]), float(f["bbox_norm"][2]))
+            for f in (vis.get("faces") or [])
+            if f.get("bbox_norm") and len(f["bbox_norm"]) >= 4
+        ]
         if len(spans) >= 2:
             parts = []
             for z in (1.05, 1.08, 1.10):
                 r = safe_zoom_focus(spans, z)
                 parts.append(f"{z:g}: focus x {r[0]:.2f}-{r[1]:.2f}" if r else f"{z:g}: none (keep z=1)")
-            out.append("  faces x " + ", ".join(f"{a:.2f}-{b:.2f}" for a, b in spans) + " | zoom that keeps every face in frame: " + "; ".join(parts))
+            out.append(
+                "  faces x "
+                + ", ".join(f"{a:.2f}-{b:.2f}" for a, b in spans)
+                + " | zoom that keeps every face in frame: "
+                + "; ".join(parts)
+            )
         phrase: List[str] = []
         ws = c.get("hq_words") or []
         env = c.get("rms_env") or []
         spoken = _speech_spans_of(c)
         is_sil = clip_is_silent(c)
         silent_flagged = words_in_silence(ws, env) if env else []
-        no_speech_flagged = [
-            w for w in ws
-            if not any(a - 0.08 <= 0.5 * (float(w["start"]) + float(w["end"])) <= b + 0.08 for a, b in spoken)
-        ] if spoken else []
+        no_speech_flagged = (
+            [
+                w
+                for w in ws
+                if not any(a - 0.08 <= 0.5 * (float(w["start"]) + float(w["end"])) <= b + 0.08 for a, b in spoken)
+            ]
+            if spoken
+            else []
+        )
         bad_ids = {id(w) for w in silent_flagged} | {id(w) for w in no_speech_flagged}
         dbs = sorted(db for _, db in env)
         stationary_noise = bool(dbs) and (
@@ -1274,7 +1629,11 @@ def format_facts(clips_data: List[Dict[str, Any]], script_lines: Optional[List[D
                 out.append("  pauses: " + " ".join(pauses))
             if spoken:
                 out.append("  speech (voice detector, works over noise): " + " ".join(f"{a:.2f}-{b:.2f}" for a, b in spoken))
-                gaps = [(spoken[i][1], spoken[i + 1][0]) for i in range(len(spoken) - 1) if spoken[i + 1][0] - spoken[i][1] >= 0.25]
+                gaps = [
+                    (spoken[i][1], spoken[i + 1][0])
+                    for i in range(len(spoken) - 1)
+                    if spoken[i + 1][0] - spoken[i][1] >= 0.25
+                ]
                 if gaps:
                     out.append("  speech gaps: " + " ".join(f"{a:.2f}-{b:.2f}({b - a:.2f}s)" for a, b in gaps))
                 out.extend(no_speech_word_runs(ws, no_speech_flagged))
@@ -1313,7 +1672,7 @@ def format_facts(clips_data: List[Dict[str, Any]], script_lines: Optional[List[D
 
 
 def discover_clips(raw_args: List[str]) -> List[Tuple[str, str, Path]]:
-    """Resolve input clip arguments or auto-discover work/S1..SN into (stem, src_str, work_dir) tuples."""
+    """Resolve input clip arguments, footage directories, or `input/footage/*.mp4` into `(stem, src_str, work_dir)` tuples."""
     expanded: List[str] = []
     for pat in raw_args:
         matches = glob.glob(str(resolve(pat))) or glob.glob(pat)
@@ -1323,24 +1682,43 @@ def discover_clips(raw_args: List[str]) -> List[Tuple[str, str, Path]]:
             expanded.append(pat)
 
     items: List[Tuple[str, str, Path]] = []
+    video_exts = (".mp4", ".mov", ".m4v", ".mkv", ".webm")
     for item in expanded:
         p = Path(item)
-        stem = p.stem if p.suffix else p.name
-        wdir = clip_work_dir(p) if p.is_file() else WORK / stem
+        rp = resolve(item)
         if p.is_file():
-            items.append((stem, str(p), wdir))
-        elif wdir.is_dir() and (wdir / "info.json").is_file():
-            info = read_json(wdir / "info.json")
-            src_str = str(info.get("path") or f"input/footage/{stem}.mp4").replace("\\", "/")
-            items.append((stem, src_str, wdir))
+            items.append((p.stem, str(p), clip_work_dir(p)))
+        elif rp.is_file():
+            items.append((rp.stem, str(rp), clip_work_dir(rp)))
+        elif rp.is_dir() and not (rp / "info.json").is_file():
+            dir_vids = sorted(
+                [f for f in rp.iterdir() if f.is_file() and f.suffix.lower() in video_exts],
+                key=_natural_clip_sort_key,
+            )
+            for vf in dir_vids:
+                items.append((vf.stem, str(vf), clip_work_dir(vf)))
+        else:
+            stem = p.stem if p.suffix else p.name
+            wdir = WORK / stem
+            if wdir.is_dir() and (wdir / "info.json").is_file():
+                info = read_json(wdir / "info.json")
+                src_str = str(info.get("path") or f"input/footage/{stem}.mp4").replace("\\", "/")
+                items.append((stem, src_str, wdir))
 
     if not items:
-        # Auto-discover from input/footage/*.mp4 first, then work/S*
-        footage_files = sorted((ROOT / "input" / "footage").glob("*.mp4"), key=_natural_clip_sort_key)
+        footage_dir = ROOT / "input" / "footage"
+        footage_files = (
+            sorted(
+                [f for f in footage_dir.iterdir() if f.is_file() and f.suffix.lower() in video_exts],
+                key=_natural_clip_sort_key,
+            )
+            if footage_dir.is_dir()
+            else []
+        )
         if footage_files:
             for fp in footage_files:
                 items.append((fp.stem, f"input/footage/{fp.name}", clip_work_dir(fp)))
-        else:
+        elif WORK.is_dir():
             work_dirs = sorted(
                 [d for d in WORK.iterdir() if d.is_dir() and (d / "info.json").is_file() and re.match(r"^S\d+$", d.name)],
                 key=_natural_clip_sort_key,
@@ -1350,7 +1728,7 @@ def discover_clips(raw_args: List[str]) -> List[Tuple[str, str, Path]]:
                 src_str = str(info.get("path") or f"input/footage/{wd.name}.mp4").replace("\\", "/")
                 items.append((wd.name, src_str, wd))
 
-    # Two different clips with the same file name (S1.mp4 from two folders) both stay in the job under distinct names
+    # Deduplicate clip stems when clips from different folders share the same filename
     seen: Dict[str, int] = {}
     unique: List[Tuple[str, str, Path]] = []
     for stem, src_str, wdir in items:
@@ -1360,7 +1738,7 @@ def discover_clips(raw_args: List[str]) -> List[Tuple[str, str, Path]]:
 
 
 def annotate_clip_voice_hints(clips_data: List[Dict[str, Any]], script_lines: List[Dict[str, Any]]) -> None:
-    """Fast O(N) pre-inspect voice clustering (<0.3s CPU) so `build_line_map` tags each candidate with `[voice=...]`."""
+    """Fast O(N) pre-inspect voice clustering so `build_line_map` tags each candidate with `[voice=...]`."""
     from collections import Counter
     import script_order
     import speaker_check
@@ -1368,7 +1746,11 @@ def annotate_clip_voice_hints(clips_data: List[Dict[str, Any]], script_lines: Li
     speaking = [c for c in clips_data if not c.get("is_listening") and not c.get("dropped_take") and (c.get("hq_words") or [])]
     if len(speaking) < 2 or not script_lines:
         return
-    speakers_named = {str(l.get("speaker") or "").strip() for l in script_lines if l.get("speaker") and " / " not in str(l.get("speaker"))}
+    speakers_named = {
+        str(l.get("speaker") or "").strip()
+        for l in script_lines
+        if l.get("speaker") and " / " not in str(l.get("speaker"))
+    }
     if len(speakers_named) < 2:
         return
 
@@ -1390,7 +1772,12 @@ def annotate_clip_voice_hints(clips_data: List[Dict[str, Any]], script_lines: Li
             turns = speaker_check.build_units(ws, [None] * len(ws))
             exp: List[Optional[str]] = [None] * len(ws)
             for a, b in turns:
-                utoks = [_clean_token(t) for k in range(a, b + 1) for t in str(ws[k].get("w") or "").split() if _clean_token(t)]
+                utoks = [
+                    _clean_token(t)
+                    for k in range(a, b + 1)
+                    for t in str(ws[k].get("w") or "").split()
+                    if _clean_token(t)
+                ]
                 if len(utoks) < min(3, min_toks):
                     continue
                 uset = set(utoks)
@@ -1412,7 +1799,14 @@ def annotate_clip_voice_hints(clips_data: List[Dict[str, Any]], script_lines: Li
                 dom, cnt = anchored.most_common(1)[0]
                 if cnt / sum(anchored.values()) >= 0.75:
                     exp = [s if (s and anchored[s] >= 2) else dom for s in exp]
-                cand_items.append({"id": idx_c, "clip": c, "wav": wav, "words": ws, "expected": exp, "rms_env": c.get("rms_env") or []})
+                cand_items.append({
+                    "id": idx_c,
+                    "clip": c,
+                    "wav": wav,
+                    "words": ws,
+                    "expected": exp,
+                    "rms_env": c.get("rms_env") or [],
+                })
         if len({sp for it in cand_items for sp in it["expected"] if sp}) >= 2:
             items = cand_items
             break
@@ -1434,60 +1828,162 @@ def annotate_clip_voice_hints(clips_data: List[Dict[str, Any]], script_lines: Li
         dom_heard = counts.most_common(1)[0][0] if counts else ""
         c["clip_voice_hint"] = {
             "speaker": dom_heard,
-            "spans": [(float(ws[k]["start"]), float(ws[k]["end"]), h, dis) for k, (h, dis) in enumerate(word_voices) if h],
+            "spans": [
+                (float(ws[k]["start"]), float(ws[k]["end"]), h, dis)
+                for k, (h, dis) in enumerate(word_voices)
+                if h
+            ],
         }
 
 
 def common_unique_output(name: str) -> Path:
-    from common import unique_job_output
-
-    return unique_job_output(name)
+    """Resolve the job's output reel MP4 path: `~/Downloads/Zeno Outs/<Name>/reel_<Name>.mp4` (or `ZENO_OUTPUT_DIR` if overridden)."""
+    if hasattr(common, "unique_job_output"):
+        return Path(common.unique_job_output(name))
+    raw_override = os.environ.get("ZENO_OUTPUT_DIR", "").strip()
+    base_dir = Path(raw_override).expanduser() if raw_override else (Path.home() / "Downloads" / "Zeno Outs").expanduser()
+    clean_fn = getattr(common, "job_folder_name", None)
+    if callable(clean_fn):
+        clean_name = str(clean_fn(name))
+    else:
+        s = re.sub(r"^(?:reel|sq)[\s_-]+", "", str(name or "").strip(), flags=re.IGNORECASE).strip() or str(name or "").strip()
+        clean_name = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", s).strip().strip(".")
+        clean_name = re.sub(r"\s+", " ", clean_name)[:180].strip() or "Zeno Edit"
+    folder, n = base_dir / clean_name, 2
+    while folder.is_dir() and any(f.suffix.lower() in (".mp4", ".prproj") for f in folder.iterdir()):
+        folder = base_dir / f"{clean_name} ({n})"
+        n += 1
+    return folder / f"reel_{folder.name}.mp4"
 
 
 def common_job_start(identity: str = "") -> float:
-    from common import job_begin, job_start_epoch
+    if identity and hasattr(common, "job_begin"):
+        return float(common.job_begin(reuse_minutes=30.0, identity=identity))
+    if hasattr(common, "job_start_epoch"):
+        return float(common.job_start_epoch())
+    return time.time()
 
-    return job_begin(reuse_minutes=30.0, identity=identity) if identity else job_start_epoch()
+
+def _atomic_write_text(target: Path, text: str) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, target)
+
+
+def _format_edl_fallback(plan: Dict[str, Any]) -> str:
+    """Minimal header formatter used only if `edl_parser` is not yet importable."""
+    canvas = plan.get("canvas") or {}
+    lines = [
+        f'#output "{plan.get("output", "")}"',
+        f'#script "{plan.get("script", "")}"',
+        f'#canvas {canvas.get("width", 1080)}x{canvas.get("height", 1920)}@{canvas.get("fps", 30)}',
+        f'#preset {plan.get("preset", "hybrid")}',
+        f'#mark_pack {plan.get("mark_pack", "flash")}',
+    ]
+    if plan.get("style"):
+        lines.append(f'#style {plan["style"]}')
+    if isinstance(plan.get("page"), dict) and plan["page"].get("mode"):
+        lines.append(f'#page {plan["page"]["mode"]}')
+    elif isinstance(plan.get("subs"), dict):
+        subs = plan["subs"]
+        lines.append(f'#subs {subs.get("style", "auto")} y={subs.get("y", 68)}')
+    audio = plan.get("audio") or {}
+    lines.append(f'#audio loudness={audio.get("loudness", DEFAULT_LOUDNESS_LUFS)}')
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _write_fallback_brief(proj_dir: Path, meta: Dict[str, Any], plan: Dict[str, Any], style: str) -> None:
+    """Ensure `brief.md` exists even when `edit_brief` is unavailable."""
+    brief_path = proj_dir / "brief.md"
+    if brief_path.is_file():
+        return
+    parts = [f"# Brief — {meta.get('title') or proj_dir.name}"]
+    if style:
+        parts.append(f"- Style: `{style}`")
+    if meta.get("concept_brief"):
+        parts.append(f"- Concept & Set-up: {meta['concept_brief']}")
+    if meta.get("characters"):
+        chars = "; ".join(f"{k}: {v}" for k, v in meta["characters"].items())
+        parts.append(f"- Characters: {chars}")
+    if meta.get("scenes"):
+        sc_txt = " | ".join(
+            f"{sc['scene']}: {sc['visual']}" if sc.get("visual") else sc["scene"]
+            for sc in meta["scenes"]
+        )
+        parts.append(f"- Scenes: {sc_txt}")
+    parts.append(f"- Preset: `{plan.get('preset', 'hybrid')}` | Mark pack: `{plan.get('mark_pack', 'flash')}`")
+    _atomic_write_text(brief_path, "\n".join(parts) + "\n")
+
+
+def _select_canvas_fps(clips_data: List[Dict[str, Any]]) -> int:
+    """Select the modal standard canvas FPS (`24`/`25`/`30`) across valid clips,
+    breaking exact ties in favor of the higher standard FPS so mixed-FPS shoots stay smooth.
+    """
+    std_rates = (24, 25, 30)
+    valid_clips = [c for c in clips_data if not c.get("dropped_take")] or list(clips_data)
+    counts: Dict[int, int] = {}
+    for c in valid_clips:
+        raw_fps = (c.get("info") or {}).get("fps")
+        try:
+            fps_f = float(raw_fps)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(fps_f) or fps_f <= 0.0:
+            continue
+        snapped = min(std_rates, key=lambda r: (abs(r - fps_f), -r))
+        counts[snapped] = counts.get(snapped, 0) + 1
+    if not counts:
+        return 24
+    return max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Deterministic token-saving pre-processor for Claude Editor.")
-    ap.add_argument("clips", nargs="*", help="Input footage clips or work/<clip> directories")
-    ap.add_argument("--script", required=False, help="Path to script file in input/script/")
+    ap = argparse.ArgumentParser(
+        description="Stages 1-3 pre-processor: footage scan, cached transcription/alignment, face tracking, line matching, clip sheets, and Director packet."
+    )
+    ap.add_argument("clips", nargs="*", help="Input footage clips, footage directory, or work/<clip> directories")
+    ap.add_argument("--script", required=False, help="Path to script file in input/script/ or local disk")
     ap.add_argument("--lang", default="auto", help="Spoken language code (auto, en, kn, ta, hi, te, ml)")
     ap.add_argument("--project", default=None, help="Project folder name under work/<project>")
     ap.add_argument(
         "--preset",
         default="auto",
-        choices=["auto", "single", "split_v", "split_h", "chat_bar", "video_call", "hybrid"],
+        choices=["auto", "single", "split_v", "split_h", "chat_bar", "video_call", "top_pip", "hybrid"],
         help="Layout preset mode",
     )
-    ap.add_argument("--mark-pack", default="flash", help="Swappable ✓/✗ mark overlay pack (flash, vignette, default, glossy)")
-    ap.add_argument("--name", default="", help="Notion name for this video; its outputs go to Zeno Outputs/<name>/ (reel_<name>.mp4 and SQ_<name>.mp4)")
-    ap.add_argument("--style", default="", help="Style this job follows (a folder under styles/, for example micronarrative). Written into the plan as '#style <name>' so the job counts toward that style's readiness and the team's learning")
+    ap.add_argument(
+        "--mark-pack",
+        default="flash",
+        help="Swappable right/wrong mark overlay pack (flash, vignette, default, glossy)",
+    )
+    ap.add_argument(
+        "--name",
+        default="",
+        help="Video delivery name; outputs go to ~/Downloads/Zeno Outs/<name>/reel_<name>.mp4 (or ZENO_OUTPUT_DIR/<name>/)",
+    )
+    ap.add_argument(
+        "--style",
+        default="",
+        help="Format or style name written into the plan header as '#style <name>'",
+    )
     ap.add_argument("--subs", default=None, help="Burn-in subtitle style (default: 'auto' at y=68; pass 'off' to disable)")
     ap.add_argument("--no-subs", action="store_true", help="Do not write default '#subs auto y=68' into initial plan.edl")
     ap.add_argument(
         "--fresh",
         action="store_true",
-        help="Rebuild every cached transcript and alignment for these clips (rarely needed: caches update themselves when the code changes)",
+        help="Rebuild cached transcripts and alignments for these clips",
     )
     ap.add_argument(
         "--clean-raw-json",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Keep work/ lean by preventing raw intermediate JSON bloat",
+        help="Keep work/ lean by avoiding raw intermediate JSON clutter",
     )
     args = ap.parse_args()
     if args.fresh:
         os.environ["ZENO_FRESH"] = "1"
-
-    # Auto git pull once per new job (throttled to 15 min so if zeno.py --inspect just pulled, it doesn't repeat)
-    try:
-        import auto_updater
-        auto_updater.ensure_latest_update(force=False, min_interval_hours=0.25, quiet=False)
-    except Exception:
-        pass
 
     # Resolve script file
     if args.script:
@@ -1498,19 +1994,23 @@ def main() -> None:
             raise SystemExit("No script file specified and none found in input/script/*.txt")
         script_path = scripts_found[0]
 
-    # Downstream tools (transcribe.py, aligner) read plain text, so hand them a normalised .txt copy of non-text scripts.
+    # Convert non-plain-text scripts (.docx, etc.) to UTF-8 .txt for downstream aligners/transcribers
     if script_path.suffix.lower() not in (".txt", ".md"):
         cache_dir = WORK / "_script_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
         converted = cache_dir / f"{script_path.stem}.txt"
         converted.write_text(read_script_text(script_path), encoding="utf-8")
-        print(f"  Script: converted {script_path.name} -> {converted.relative_to(ROOT)}")
+        rel_label = converted.relative_to(ROOT) if converted.is_relative_to(ROOT) else converted
+        print(f"  Script: converted {script_path.name} -> {rel_label}")
         script_path = converted
 
     meta, script_lines = parse_script_file(script_path)
-    from common import resolve_user_project_name, stamp_job_owner
-    project_name = args.project or resolve_user_project_name(meta.get("project_name") or script_path.stem)
-    job_start_epoch = common_job_start(project_name)
+    if args.name:
+        _apply_explicit_title(meta, args.name)
+    resolve_proj_fn = getattr(common, "resolve_user_project_name", None)
+    raw_proj = meta.get("project_name") or script_path.stem
+    project_name = args.project or (resolve_proj_fn(raw_proj) if callable(resolve_proj_fn) else raw_proj)
+    common_job_start(project_name)
     lang = args.lang if args.lang != "auto" else meta.get("language", "auto")
 
     clip_entries = discover_clips(args.clips)
@@ -1532,8 +2032,7 @@ def main() -> None:
             hq_words, base_words = [], []
         clips_data.append({
             "stem": stem,
-            "transcription_reused": (before == transcript_path.stat().st_mtime_ns)
-                if transcript_path.exists() else True,
+            "transcription_reused": (before == transcript_path.stat().st_mtime_ns) if transcript_path.exists() else True,
             "src": src_str,
             "work_dir": wdir,
             "info": info,
@@ -1564,12 +2063,19 @@ def main() -> None:
                 c["dropped_take"] = True
                 c["anomalies"].append(f"[VO_PAIRED] paired voiceover audio/words into {base_c['stem']}")
                 base_wdir = Path(base_c["work_dir"])
+                vo_wav = Path(c["work_dir"]) / "audio16k.wav"
                 if base_wdir.is_dir() and not base_had_speech:
+                    base_wav = base_wdir / "audio16k.wav"
+                    if vo_wav.is_file():
+                        try:
+                            shutil.copy2(vo_wav, base_wav)
+                        except OSError:
+                            pass
                     write_json(base_wdir / "hq_words.json", c["hq_words"])
                     write_json(base_wdir / "words.json", c["hq_words"])
+                    write_json(base_wdir / "silences.json", c["macro_silences"])
                     vo_spans = _speech_spans_of(c)
                     if vo_spans:
-                        base_wav = base_wdir / "audio16k.wav"
                         sig = [base_wav.stat().st_size, int(base_wav.stat().st_mtime)] if base_wav.is_file() else [0, 0]
                         write_json(base_wdir / "speech_spans.json", {"sig": sig, "spans": [list(sp) for sp in vo_spans]})
 
@@ -1589,7 +2095,6 @@ def main() -> None:
         )
         raise SystemExit(2)
 
-    # Zeno stops here: it has measured. Every editing decision is the Director's (see agent/EDIT_RULES.md).
     for c in clips_data:
         c["is_listening"] = clip_is_silent(c)
         c["matched_lines"] = []
@@ -1598,22 +2103,32 @@ def main() -> None:
     canvas = {
         "width": int(first_info.get("width") or 720),
         "height": int(first_info.get("height") or 1280),
-        "fps": int(round(float(first_info.get("fps") or 24))),
+        "fps": _select_canvas_fps(clips_data),
     }
     no_subs_env = os.environ.get("ZENO_NO_SUBS", "").strip().lower() in ("1", "true", "yes", "on")
-    subs_arg = (str(args.subs).strip() if getattr(args, "subs", None) is not None else "")
-    subs_disabled = bool(getattr(args, "no_subs", False)) or no_subs_env or subs_arg.lower() in ("off", "none", "false", "no", "0")
+    subs_arg = str(args.subs).strip() if getattr(args, "subs", None) is not None else ""
+    subs_disabled = (
+        bool(getattr(args, "no_subs", False))
+        or no_subs_env
+        or subs_arg.lower() in ("off", "none", "false", "no", "0")
+    )
     subs_header: Optional[Dict[str, Any]] = None
     if not subs_disabled:
         subs_style = subs_arg if (subs_arg and subs_arg.lower() not in ("on", "true", "yes", "1")) else "auto"
         subs_header = {"style": subs_style, "y": 68}
 
-    # A script that asks for scrolling text ("Split screen + scrolling text") gets the scrolling-text page format.
     page_header: Optional[Dict[str, Any]] = None
     try:
-        if re.search(r"scroll(?:ing)?[\s-]*(?:text|subtitle|caption|transcript)", script_path.read_text(encoding="utf-8", errors="ignore"), re.I):
+        if re.search(
+            r"scroll(?:ing)?[\s-]*(?:text|subtitle|caption|transcript)",
+            script_path.read_text(encoding="utf-8", errors="ignore"),
+            re.I,
+        ):
             page_header = {"mode": "scroll"}
-            print("  Script asks for scrolling text: the plan starts with `#page scroll` (two characters on top, the dialogue scrolling on a white page below).")
+            print(
+                "  Script asks for scrolling text: the plan starts with `#page scroll` "
+                "(two characters on top, the dialogue scrolling on a white page below)."
+            )
     except OSError:
         page_header = None
 
@@ -1628,14 +2143,16 @@ def main() -> None:
         **({"page": page_header} if page_header is not None else {}),
         "segments": [],
         "marks": [],
-        "audio": {"loudness": -11.5},
+        "audio": {"loudness": DEFAULT_LOUDNESS_LUFS},
     }
     proj_dir = WORK / project_name
     proj_dir.mkdir(parents=True, exist_ok=True)
-    stamp_job_owner(proj_dir)
+    stamp_fn = getattr(common, "stamp_job_owner", None)
+    if callable(stamp_fn):
+        stamp_fn(proj_dir)
 
     # Persist per-clip cache directory mapping so subtitles.py, script_order.py, and verify.py
-    # resolve exact caches even when generic filenames (S1.mp4, v1.mp4) are later moved offline.
+    # resolve exact caches even when generic filenames (S1.mp4, v1.mp4) are moved later.
     clip_cache_map: Dict[str, str] = {}
     for c in clips_data:
         c_path = Path(str(c["src"]))
@@ -1649,17 +2166,20 @@ def main() -> None:
             clip_cache_map[str(c["stem"])] = cache_name
     write_json(proj_dir / "clip_caches.json", clip_cache_map)
 
-    skeleton = edl_parser.format_edl(plan)
+    skeleton = (
+        edl_parser.format_edl(plan)
+        if (edl_parser is not None and hasattr(edl_parser, "format_edl"))
+        else _format_edl_fallback(plan)
+    )
     folders = {str(Path(str(c["src"])).parent) for c in clips_data}
     if len(folders) == 1 and "#src_dir" not in skeleton:
-        lines = skeleton.split("\n")
-        lines.insert(1, f'#src_dir "{folders.pop()}"')
-        skeleton = "\n".join(lines)
+        sk_lines = skeleton.split("\n")
+        sk_lines.insert(1, f'#src_dir "{folders.pop()}"')
+        skeleton = "\n".join(sk_lines)
     for name in ("plan.edl", "plan.auto.edl"):
         (proj_dir / name).write_text(skeleton, encoding="utf-8")
     write_json(proj_dir / "plan.json", plan)
 
-    import clip_sheet
     import script_order
 
     facts = format_facts(clips_data, script_lines)
@@ -1668,50 +2188,77 @@ def main() -> None:
         annotate_clip_voice_hints(clips_data, script_lines)
     except Exception:
         pass
-    import edit_packet
-    edit_packet.refresh_line_map(proj_dir, script_order.build_line_map(script_lines, clips_data))
-    try:   # the job's rules, cut from agent/EDIT_RULES.md + FORMATS.md (the style's learned rules go here, not in line_map.md)
+
+    line_map_text = script_order.build_line_map(script_lines, clips_data)
+    try:
+        import edit_packet as _ep_mod
+    except Exception:
+        _ep_mod = None  # type: ignore[assignment]
+
+    if _ep_mod is not None and hasattr(_ep_mod, "refresh_line_map"):
+        _ep_mod.refresh_line_map(proj_dir, line_map_text)
+    else:
+        (proj_dir / "line_map.md").write_text(line_map_text, encoding="utf-8")
+
+    try:
         import edit_brief
 
-        edit_brief.write(proj_dir, meta, plan, style=args.style or "micronarrative")
-    except Exception as exc:   # noqa: BLE001  (the brief is a convenience; the rule files remain)
-        print(f"  [BRIEF] could not write brief.md ({exc}); read agent/EDIT_RULES.md instead")
+        edit_brief.write(proj_dir, meta, plan, style=args.style or "")
+    except Exception as exc:
+        print(f"  [BRIEF] fallback brief.md written ({exc})")
+        _write_fallback_brief(proj_dir, meta, plan, style=args.style or "")
+
     try:
+        import clip_sheet
+
         sheets = clip_sheet.build(proj_dir, [str(resolve(c["src"])) for c in clips_data])
-    except Exception as exc:   # noqa: BLE001  (a picture is a help, not a requirement)
+    except Exception as exc:
         sheets = []
         print(f"  ! clip sheet not made: {exc}")
 
-    import edit_packet
-    print(f"[PACKET] {edit_packet.write(proj_dir)}")
-    parts = edit_packet.packet_parts(proj_dir)
-    if len(parts) > 1:
-        print(f"[PACKET_PARTS] {' '.join(p.name for p in parts)}")
+    dir_packet_path = proj_dir / "director_packet.md"
+    edit_packet_path = proj_dir / "editing_packet.md"
+    if _ep_mod is not None and hasattr(_ep_mod, "write"):
+        dir_before_ns = dir_packet_path.stat().st_mtime_ns if dir_packet_path.is_file() else None
+        edt_before_ns = edit_packet_path.stat().st_mtime_ns if edit_packet_path.is_file() else None
 
-    segments: List[Dict[str, Any]] = []
-    marks: List[Dict[str, Any]] = []
+        pkt_written = Path(_ep_mod.write(proj_dir))
+        if hasattr(_ep_mod, "write_director_packet"):
+            dir_changed = dir_packet_path.is_file() and dir_packet_path.stat().st_mtime_ns != dir_before_ns
+            if not dir_changed:
+                _ep_mod.write_director_packet(proj_dir)
+
+        dir_changed = dir_packet_path.is_file() and dir_packet_path.stat().st_mtime_ns != dir_before_ns
+        edt_changed = edit_packet_path.is_file() and edit_packet_path.stat().st_mtime_ns != edt_before_ns
+        if not dir_changed and edit_packet_path.is_file():
+            _atomic_write_text(dir_packet_path, edit_packet_path.read_text(encoding="utf-8"))
+        elif not edt_changed and dir_packet_path.is_file():
+            _atomic_write_text(edit_packet_path, dir_packet_path.read_text(encoding="utf-8"))
+
+        primary_pkt = dir_packet_path if dir_packet_path.is_file() else pkt_written
+        print(f"[PACKET] {primary_pkt}")
+        if hasattr(_ep_mod, "packet_parts"):
+            parts = _ep_mod.packet_parts(proj_dir)
+            if len(parts) > 1:
+                print(f"[PACKET_PARTS] {' '.join(p.name for p in parts)}")
+    else:
+        fallback_packet = "\n\n".join(
+            p.read_text(encoding="utf-8")
+            for p in (proj_dir / "brief.md", proj_dir / "plan.edl", proj_dir / "line_map.md", proj_dir / "facts.md")
+            if p.is_file()
+        )
+        _atomic_write_text(edit_packet_path, fallback_packet + "\n")
+        _atomic_write_text(dir_packet_path, fallback_packet + "\n")
+        print(f"[PACKET] {dir_packet_path}")
+
     print(f"Measured {len(clips_data)} clips. Nothing is decided yet: the Director writes plan.edl.")
+    print(f"  Director packet        : {dir_packet_path}")
+    print(f"  Editing packet         : {edit_packet_path}")
     print(f"  Rules for this job     : {proj_dir / 'brief.md'}")
     print(f"  Script + clips per line: {proj_dir / 'line_map.md'}")
-    print(f"  Every word, pause, face : {proj_dir / 'facts.md'} (~{len(facts) // 3} tokens)")
-    print(f"  Clip pictures           : {len(sheets)} sheet(s) in {proj_dir}")
-    print(f"  Plan to write           : {proj_dir / 'plan.edl'}")
-    try:
-        import token_tracker
-        snap = token_tracker.save_prepare_snapshot(
-            project_name=project_name,
-            lang=lang,
-            clips_data=clips_data,
-            segments=segments,
-            marks=marks,
-            job_start_epoch=job_start_epoch,
-        )
-        print(
-            f"  Tokens: {snap['transcribe_in_tokens']:,} in / {snap['transcribe_out_tokens']:,} out "
-            f"({snap['transcribe_total_tokens']:,} transcription total) | Agent: {snap['agent_name']} ({snap['agent_model']})"
-        )
-    except Exception:
-        pass
+    print(f"  Every word, pause, face: {proj_dir / 'facts.md'}")
+    print(f"  Clip pictures          : {len(sheets)} sheet(s) in {proj_dir}")
+    print(f"  Plan to write          : {(proj_dir / 'plan.edl').as_posix()}")
 
 
 if __name__ == "__main__":

@@ -1,17 +1,18 @@
 #!/bin/bash
-# Start a lean Zeno edit session (Mac): Claude Code in this folder with Notion & Meta connectors kept enabled,
-# while global ~/.claude/skills/synced bloat and Chrome browser tools are stripped.
-# Double-click (first time: right-click > Open), then answer what /zeno asks or queue multiple edits (up to 1M context).
+# Zeno v2.0.0 — Minimal Cache-Read Launcher for Claude Code (macOS, zero MCPs, Bash-only, effort=low)
 cd "$(dirname "$0")" || exit 1
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
-if [ ! -x .venv/bin/python ]; then
-  echo "First-time setup: installing Zeno Python 3.12 environment and tools..."
-  bash ./install.command || exit $?
-fi
+unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
+export ENABLE_CLAUDEAI_MCP_SERVERS="false"
+
 if ! command -v claude >/dev/null 2>&1; then
-  echo "Claude Code is not installed. Get it from https://claude.com/claude-code, then run this again."
-  read -r -p "Press Return to close."
+  echo "Claude Code ('claude') is not installed. Install it from https://claude.com/claude-code and run again."
+  [ -t 0 ] && read -r -p "Press Return to close."
   exit 1
 fi
-echo "Starting a lean Zeno edit session (Notion & Meta connectors active; global skill/Chrome bloat off)..."
-exec claude --setting-sources project,local --no-chrome "$@" "/zeno"
+
+SYS_PROMPT="$(cat CLAUDE.md)"
+echo "Starting Zeno v2.0.0 (Claude Code, zero-MCP minimal cache mode) — drop 1 video or a multi-video queue -> ~/Downloads/Zeno Outs/<VideoName>/..."
+exec claude --setting-sources project,local --no-chrome --effort low \
+  --system-prompt "$SYS_PROMPT" --tools "Bash" --disable-slash-commands --strict-mcp-config "$@" \
+  "Zeno v2.0.0 ready. Share 1 video or a queue of videos (footage folder, script link/file, and video name) to edit sequentially into ~/Downloads/Zeno Outs/<VideoName>/."

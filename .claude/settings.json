@@ -1,28 +1,53 @@
 {
+  "enableAllProjectMcpServers": false,
+  "disabledMcpjsonServers": [
+    "hostinger-agency-hosting",
+    "hostinger-billing",
+    "hostinger-dns",
+    "hostinger-domains",
+    "hostinger-hosting",
+    "hostinger-reach",
+    "hostinger-vps",
+    "hostinger-wordpress",
+    "hostinger-wordpress-sites"
+  ],
   "env": {
     "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
-    "MCP_TOOL_TIMEOUT": "5700000"
+    "CLAUDE_CODE_EFFORT_LEVEL": "low",
+    "MAX_THINKING_TOKENS": "1024",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
   },
   "permissions": {
-    "deny": [
-      "Read(./.env)",
-      "Read(./.env.*.local)",
-      "Read(./**/.env)",
-      "Edit(./.env)",
-      "Read(./.zeno_session.json)",
-      "Read(./.zeno_owner_session.json)",
-      "Edit(./.zeno_session.json)",
-      "Edit(./.zeno_owner_session.json)",
-      "Read(./work/_clips/**)",
-      "Read(./work/_segments/**)",
-      "Read(./work/_logs/**)",
-      "Read(./work/*/events.jsonl)",
-      "Read(./work/*/_conversation.json)",
-      "Read(./styles/*/map.json)",
-      "Read(./styles/*/refs/**)"
-    ],
     "allow": [
-      "Read(./.env.example)"
+      "Read(.env.example)",
+      "Bash(.venv/bin/python scripts/zeno.py:*)",
+      "Bash(.venv/bin/python scripts/edit_packet.py:*)",
+      "Bash(.venv/bin/python scripts/progress.py:*)",
+      "Bash(.venv\\Scripts\\python.exe scripts/zeno.py:*)",
+      "Bash(.venv\\Scripts\\python.exe scripts/edit_packet.py:*)",
+      "Bash(.venv\\Scripts\\python.exe scripts/progress.py:*)",
+      "Write(work/**)",
+      "Edit(work/**)",
+      "Read(work/**/editing_packet.md)",
+      "Read(work/**/editing_packet_p*.md)",
+      "Read(work/**/director_packet.md)",
+      "Read(work/**/clip_sheet_*.jpg)",
+      "Read(work/queue.json)"
+    ],
+    "deny": [
+      "mcp__*",
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(**/.env)",
+      "Edit(.env)",
+      "Read(.zeno_session.json)",
+      "Read(.zeno_owner_session.json)",
+      "Edit(.zeno_session.json)",
+      "Edit(.zeno_owner_session.json)",
+      "Read(work/_clips/**)",
+      "Read(work/_segments/**)",
+      "Read(work/_logs/**)",
+      "Read(models/**)"
     ]
   }
 }

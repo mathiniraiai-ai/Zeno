@@ -1,38 +1,53 @@
-"""Multi-Layout Segment Compositor, Auto-Peer Resolver & Layout-Aware Mark/SFX Engine (`layouts.py`).
+"""Multi-Layout Segment Compositor, Auto-Peer Resolver, and Layout-Aware Mark/SFX Engine (`layouts.py`).
 
-Supports all 5 layout families:
-  1. `single`                      — Full-screen speaker with static or eased cosine push-in zoom
-                                     and eye-anchored headroom focus (`14%` headroom, `38%` eyeline).
-  2. `split_v` / `top_bottom`      — Vertical 50/50 split (`vstack`) with active speaker live in their
-                                     slot and listener holding on a mouth-closed idle window (`MAR < 0.08`).
-  3. `split_h` / `left_right`      — Horizontal 50/50 split (`hstack`) with active speaker live and
-                                     listener holding on a mouth-closed idle window.
-  4. `chat_bar` / `texting`        — Top texting/chat bar (`"floating_overlay"` or `"docked"` strip)
-                                     with multi-script incoming/outgoing bubbles & ❌/✅ accents.
-  5. `video_call` / `pip_call` /   — Mobile Video Call Chrome (status bar, caller header, live timer,
-     `gmeet_grid`                    `alphamerge` rounded/circle PiP or dual grid tiles, and bottom call bar).
+Supports all six Zeno layout modes across 9:16 Master (`1080x1920`, `720x1280`)
+and 1:1 Square (`1080x1080`, `720x720`) canvases:
+  1. `single`                      — Full-frame speaker (static, cosine `1.0->1.06` push-in,
+                                     `sudden_in:1.08@t`, `sudden_out`, `flash_zoom:1.12@t`, `focus=x,y`)
+                                     or pre-stitched baked split (`slot=top|bottom|left|right`).
+  2. `split_v` / `top_bottom`      — Vertical 50/50 split (`vstack`) locked at `z=1` with `14%`
+                                     headroom, background-registered stationary frames, colour matching,
+                                     and sequential silent listener `peer=` advancing.
+  3. `split_h` / `left_right`      — Horizontal 50/50 split (`hstack`) locked at `z=1` with `14%`
+                                     headroom, background-registered stationary frames, colour matching,
+                                     and sequential silent listener `peer=` advancing.
+  4. `top_pip` / `floating_top`    — Full-frame lower speaker (`25.8%` headroom) with a clean
+                                     top-center rounded-rectangle floating window (`alphamerge`),
+                                     locked at `z=1`.
+  5. `chat_bar` / `texting`        — Top frosted chat overlay (`"floating_overlay"` or `"docked"` strip)
+                                     with multi-script incoming/outgoing bubbles and `'wrong'/'right'` badges.
+  6. `video_call` / `pip_call` /   — Mobile video call chrome (status bar, caller header, live timer,
+     `gmeet_grid`                    `alphamerge` rounded/circle PiP or dual grid tiles, and call bar).
 """
 from __future__ import annotations
 
 import array
 import hashlib
+import inspect
 import json
 import math
+import os
 import re
 import subprocess
 import sys
+import threading
 import wave
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+import common as _common
 from common import (
     DEFAULT_LOUDNESS_LUFS,
     DEFAULT_PEAK_CAP_DB,
     FFMPEG,
     MARKS_DIR,
+    ROOT,
     SFX_DIR,
     WORK,
-    _normalize_mark_type,
     clip_work_dir,
     ffmpeg,
     ffmpeg_encode,
@@ -43,28 +58,618 @@ from common import (
 )
 from ui_generator import (
     UI_CACHE_DIR,
-     get_video_call_geometry,
+    get_video_call_geometry,
     render_chat_overlay_png,
     render_pip_mask_png,
     render_stop_saying_banner_png,
     render_video_call_chrome_png,
 )
+import vision_tracker as _vision_tracker
 from vision_tracker import (
     TARGET_HEADROOM_PCT,
     analyze_clip_vision,
     compute_paired_split_crop_filters,
     compute_slot_crop_filter,
     derive_registered_crop,
-    register_background,
     find_listening_idle_window,
+    register_background,
 )
 
-EDGE_FADE: float = 0.012  # 12ms audio fade at segment edges to prevent clicks
-SPLIT_MAX_ZOOM: float = 1.0  # Split panels (split_h, split_v, top_pip, baked splits) never zoom
+EDGE_FADE: float = 0.012       # 12ms audio fade at segment edges to prevent clicks
+SPLIT_MAX_ZOOM: float = 1.0    # Split panels (split_h, split_v, top_pip, baked splits) stay locked at z=1
+DEFAULT_BANNER_BEAT_DURATION: float = 0.48  # Crisp ~0.48s post-word beat duration for phrase banners
+FLASHCARD_SPLIT_HEADROOM: float = 0.24  # Elevated split_h headroom cap (naturally bounded by source ceiling)
+_SPLIT_HEADROOM_LOCK = threading.Lock()
+
+
+def _has_flashcards(
+    seg: Optional[Dict[str, Any]] = None,
+    plan: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Return True when `seg` or `plan` carries active flashcards (and cards are not disabled)."""
+    if isinstance(plan, dict):
+        if plan.get("cards_off") or plan.get("cards") is False or plan.get("flashcards") is False:
+            return False
+    if isinstance(seg, dict):
+        if seg.get("cards_off") or seg.get("cards") is False or seg.get("flashcards") is False:
+            return False
+        if seg.get("flashcards") or seg.get("cards"):
+            return True
+    if isinstance(plan, dict):
+        if plan.get("flashcards"):
+            return True
+        if isinstance(plan.get("cards"), list) and len(plan["cards"]) > 0:
+            return True
+        for s in plan.get("segments") or ():
+            if isinstance(s, dict) and not s.get("cards_off") and (s.get("flashcards") or s.get("cards")):
+                return True
+    return False
+
+
+def _is_flashcard_item(item: Any) -> bool:
+    """Return True when `item` represents a bilingual flashcard dict (never a Stop-Saying banner)."""
+    if not isinstance(item, dict):
+        return False
+    kind = str(item.get("type") or item.get("kind") or "").strip().lower()
+    if kind in ("flashcard", "card", "bilingual_card"):
+        return True
+    if "native" in item or "en" in item:
+        return True
+    return False
+
+
+def _estimate_clip_head_top_y0(
+    clip_path: Union[str, Path],
+    fallback_focus: Optional[Sequence[float]] = None,
+) -> Optional[float]:
+    """Estimate normalized face crown `y0` in `[0.04, 0.65]` using the canonical split clip."""
+    try:
+        p = resolve(clip_path)
+        canon_fn = getattr(_vision_tracker, "_canonical_split_clip", None)
+        canon = canon_fn(p) if callable(canon_fn) else p
+        if canon.is_file():
+            vis = analyze_clip_vision(canon) or {}
+            bbox = vis.get("bbox_norm")
+            if bbox and len(bbox) >= 4:
+                x0, y0, x1, y1 = [min(1.0, max(0.0, float(v))) for v in bbox[:4]]
+                if x1 > x0 and y1 > y0:
+                    return max(0.04, min(0.65, y0))
+    except Exception:
+        pass
+    if fallback_focus and len(fallback_focus) >= 2:
+        fy = max(0.10, min(0.75, float(fallback_focus[1])))
+        return max(0.06, fy - 0.14)
+    return None
+
+
+def _natural_flashcard_split_headroom(
+    live_src: Union[str, Path],
+    peer_src: Union[str, Path],
+    src_w: int,
+    src_h: int,
+    peer_w: int,
+    peer_h: int,
+    live_slot_w: int,
+    live_slot_h: int,
+    peer_slot_w: int,
+    peer_slot_h: int,
+    live_focus: Optional[Sequence[float]] = None,
+    peer_focus: Optional[Sequence[float]] = None,
+) -> float:
+    """Compute a flashcard-friendly `split_h` headroom target in `[0.14, 0.24]`, naturally
+    capped by what both source clips actually contain above each face so zero black bars
+    or top border smear are ever introduced.
+    """
+    default_hr = round(TARGET_HEADROOM_PCT / 100.0, 4)
+    s0_a = max(max(16, live_slot_w) / float(max(16, src_w)), max(16, live_slot_h) / float(max(16, src_h)))
+    s0_b = max(max(16, peer_slot_w) / float(max(16, peer_w)), max(16, peer_slot_h) / float(max(16, peer_h)))
+    hr_ratio_a = (max(16, src_h) * s0_a) / float(max(16, live_slot_h))
+    hr_ratio_b = (max(16, peer_h) * s0_b) / float(max(16, peer_slot_h))
+
+    y0_a = _estimate_clip_head_top_y0(live_src, live_focus)
+    y0_b = _estimate_clip_head_top_y0(peer_src, peer_focus)
+    avail: List[float] = []
+    if y0_a is not None:
+        avail.append(y0_a * hr_ratio_a)
+    if y0_b is not None:
+        avail.append(y0_b * hr_ratio_b)
+    if not avail:
+        avail.append(0.18 * min(hr_ratio_a, hr_ratio_b))
+
+    natural_cap = min(avail)
+    return round(max(default_hr, min(FLASHCARD_SPLIT_HEADROOM, natural_cap)), 4)
+
+
+def _parse_offset_y(val: Any) -> float:
+    """Parse and clamp per-panel vertical framing `offset_y` to `[-0.25, 0.25]`
+    (positive shifts the character downward in the panel).
+    """
+    if val is None or val == "":
+        return 0.0
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(v):
+        return 0.0
+    return round(max(-0.25, min(0.25, v)), 4)
+
+
+def _apply_crop_offset_y_fallback(crop: Dict[str, Any], offset_y: float) -> Dict[str, Any]:
+    """Fallback vertical panel shift used only when `vision_tracker.compute_paired_split_crop_filters`
+    does not yet accept `live_offset_y` / `peer_offset_y`.
+    """
+    oy_shift = _parse_offset_y(offset_y)
+    if abs(oy_shift) <= 1e-4:
+        return dict(crop, offset_y=0.0)
+    geom = crop.get("geom")
+    slot_size = crop.get("slot_size")
+    slot_fn = getattr(_vision_tracker, "slot_filter_from_origin", None)
+    if not isinstance(geom, dict) or not slot_size or not callable(slot_fn):
+        return dict(crop, offset_y=oy_shift)
+    w_in, h_in = int(geom["src"][0]), int(geom["src"][1])
+    slot_w, slot_h = int(slot_size[0]), int(slot_size[1])
+    oy_new = float(geom["oy"]) - oy_shift * float(slot_h)
+    shifted = slot_fn(w_in, h_in, slot_w, slot_h, float(geom["s"]), float(geom["ox"]), oy_new)
+    shifted["common_headroom_pct"] = crop.get("common_headroom_pct")
+    shifted["extra_zoom"] = crop.get("extra_zoom")
+    sf = list(crop.get("slot_focus") or [0.5, 0.36])
+    shifted["slot_focus"] = [sf[0], round(min(0.75, max(0.15, float(sf[1]) + oy_shift)), 4)]
+    shifted["offset_y"] = oy_shift
+    return shifted
+
+
+def _call_paired_split_crop_filters(
+    *,
+    live_offset_y: float = 0.0,
+    peer_offset_y: float = 0.0,
+    **kwargs: Any,
+) -> Any:
+    """Invoke `compute_paired_split_crop_filters`, passing `live_offset_y` / `peer_offset_y`
+    when supported by its signature, and falling back safely otherwise.
+    """
+    live_oy = _parse_offset_y(live_offset_y)
+    peer_oy = _parse_offset_y(peer_offset_y)
+    fn = compute_paired_split_crop_filters
+    accepts_offset = False
+    try:
+        params = inspect.signature(fn).parameters
+        accepts_offset = (
+            ("live_offset_y" in params and "peer_offset_y" in params)
+            or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        )
+    except (TypeError, ValueError):
+        accepts_offset = False
+
+    if accepts_offset:
+        try:
+            res = fn(live_offset_y=live_oy, peer_offset_y=peer_oy, **kwargs)
+            if isinstance(res, tuple) and len(res) >= 2:
+                lc = dict(res[0])
+                pc = dict(res[1])
+                lc.setdefault("offset_y", live_oy)
+                pc.setdefault("offset_y", peer_oy)
+                if len(res) >= 4:
+                    return lc, pc, res[2], res[3]
+                return lc, pc
+            return res
+        except TypeError:
+            pass
+
+    res = fn(**kwargs)
+    if isinstance(res, tuple) and len(res) >= 2:
+        lc = _apply_crop_offset_y_fallback(res[0], live_oy)
+        pc = _apply_crop_offset_y_fallback(res[1], peer_oy)
+        if len(res) >= 4:
+            return lc, pc, list(lc["slot_focus"]), list(pc["slot_focus"])
+        return lc, pc
+    return res
+
+
+def _compute_paired_split_crop_filters_for_layout(
+    *,
+    lay: str,
+    seg: Optional[Dict[str, Any]],
+    plan: Optional[Dict[str, Any]],
+    live_src: Union[str, Path],
+    peer_src: Union[str, Path],
+    src_w: int,
+    src_h: int,
+    peer_w: int,
+    peer_h: int,
+    live_slot_w: int,
+    live_slot_h: int,
+    peer_slot_w: int,
+    peer_slot_h: int,
+    live_focus: Optional[Sequence[float]] = None,
+    peer_focus: Optional[Sequence[float]] = None,
+    return_focus: bool = False,
+    live_offset_y: float = 0.0,
+    peer_offset_y: float = 0.0,
+    force_flashcards: Optional[bool] = None,
+) -> Any:
+    """Invoke `compute_paired_split_crop_filters`, cleanly raising `split_h` headroom up to
+    `0.24` (naturally capped by source clip ceiling so `pad_top == 0` / zero black bars) when
+    `seg` or `plan` carries flashcards, and forwarding per-panel `live_offset_y` / `peer_offset_y`.
+    """
+    default_hr = round(TARGET_HEADROOM_PCT / 100.0, 4)
+    live_oy = _parse_offset_y(live_offset_y)
+    peer_oy = _parse_offset_y(peer_offset_y)
+    has_fc = bool(force_flashcards) if force_flashcards is not None else _has_flashcards(seg, plan)
+    elevate = (
+        lay == "split_h"
+        and has_fc
+        and "ZENO_SPLIT_HEADROOM" not in os.environ
+    )
+    if not elevate:
+        return _call_paired_split_crop_filters(
+            live_src=live_src,
+            peer_src=peer_src,
+            src_w=src_w,
+            src_h=src_h,
+            peer_w=peer_w,
+            peer_h=peer_h,
+            live_slot_w=live_slot_w,
+            live_slot_h=live_slot_h,
+            peer_slot_w=peer_slot_w,
+            peer_slot_h=peer_slot_h,
+            live_focus=live_focus,
+            peer_focus=peer_focus,
+            return_focus=return_focus,
+            live_offset_y=live_oy,
+            peer_offset_y=peer_oy,
+        )
+
+    target_hr = _natural_flashcard_split_headroom(
+        live_src=live_src,
+        peer_src=peer_src,
+        src_w=src_w,
+        src_h=src_h,
+        peer_w=peer_w,
+        peer_h=peer_h,
+        live_slot_w=live_slot_w,
+        live_slot_h=live_slot_h,
+        peer_slot_w=peer_slot_w,
+        peer_slot_h=peer_slot_h,
+        live_focus=live_focus,
+        peer_focus=peer_focus,
+    )
+    if target_hr <= default_hr + 1e-4:
+        return _call_paired_split_crop_filters(
+            live_src=live_src,
+            peer_src=peer_src,
+            src_w=src_w,
+            src_h=src_h,
+            peer_w=peer_w,
+            peer_h=peer_h,
+            live_slot_w=live_slot_w,
+            live_slot_h=live_slot_h,
+            peer_slot_w=peer_slot_w,
+            peer_slot_h=peer_slot_h,
+            live_focus=live_focus,
+            peer_focus=peer_focus,
+            return_focus=return_focus,
+            live_offset_y=live_oy,
+            peer_offset_y=peer_oy,
+        )
+
+    with _SPLIT_HEADROOM_LOCK:
+        prev_env = os.environ.get("ZENO_SPLIT_HEADROOM")
+        try:
+            os.environ["ZENO_SPLIT_HEADROOM"] = f"{target_hr:.4f}"
+            res = _call_paired_split_crop_filters(
+                live_src=live_src,
+                peer_src=peer_src,
+                src_w=src_w,
+                src_h=src_h,
+                peer_w=peer_w,
+                peer_h=peer_h,
+                live_slot_w=live_slot_w,
+                live_slot_h=live_slot_h,
+                peer_slot_w=peer_slot_w,
+                peer_slot_h=peer_slot_h,
+                live_focus=live_focus,
+                peer_focus=peer_focus,
+                return_focus=return_focus,
+                live_offset_y=live_oy,
+                peer_offset_y=peer_oy,
+            )
+            live_crop, peer_crop = res[0], res[1]
+            pad_a = int(live_crop.get("pad_top") or 0)
+            pad_b = int(peer_crop.get("pad_top") or 0)
+            excess = max(
+                max(0.0, pad_a / float(max(1, live_slot_h)) - max(0.0, live_oy)),
+                max(0.0, pad_b / float(max(1, peer_slot_h)) - max(0.0, peer_oy)),
+            )
+            if excess > 0.001:
+                safe_hr = round(max(default_hr, target_hr - excess - 0.002), 4)
+                os.environ["ZENO_SPLIT_HEADROOM"] = f"{safe_hr:.4f}"
+                res = _call_paired_split_crop_filters(
+                    live_src=live_src,
+                    peer_src=peer_src,
+                    src_w=src_w,
+                    src_h=src_h,
+                    peer_w=peer_w,
+                    peer_h=peer_h,
+                    live_slot_w=live_slot_w,
+                    live_slot_h=live_slot_h,
+                    peer_slot_w=peer_slot_w,
+                    peer_slot_h=peer_slot_h,
+                    live_focus=live_focus,
+                    peer_focus=peer_focus,
+                    return_focus=return_focus,
+                    live_offset_y=live_oy,
+                    peer_offset_y=peer_oy,
+                )
+            return res
+        finally:
+            if prev_env is None:
+                os.environ.pop("ZENO_SPLIT_HEADROOM", None)
+            else:
+                os.environ["ZENO_SPLIT_HEADROOM"] = prev_env
+
+FORMATS_LAYOUTS_DIR: Path = ROOT / "formats" / "layouts"
+
+_SILENT_CLIP_NAME_RE = re.compile(r"(?:listen|listening|idle|silent|\bsv\b|\bsfv\b|extra)", re.I)
+
+
+def _segment_hold_tail(seg: Optional[Dict[str, Any]]) -> float:
+    """Return frozen post-speech tail duration (seconds) from `common.segment_hold_tail` with standalone fallback."""
+    fn = getattr(_common, "segment_hold_tail", None)
+    if callable(fn):
+        return float(fn(seg))
+    if not isinstance(seg, dict):
+        return 0.0
+    try:
+        return max(0.0, float(seg.get("hold_tail") or seg.get("hold") or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _segment_speed(seg: Optional[Dict[str, Any]]) -> float:
+    """Return clamped playback speed factor (`0.25..4.0`, default `1.0`) via `common.segment_speed`."""
+    fn = getattr(_common, "segment_speed", None)
+    if callable(fn):
+        try:
+            val = float(fn(seg))
+            if math.isfinite(val) and val > 0.0:
+                return max(0.25, min(4.0, val))
+        except (TypeError, ValueError):
+            pass
+    if not isinstance(seg, dict):
+        return 1.0
+    raw = seg.get("speed")
+    if raw is None:
+        raw = seg.get("rate")
+    if raw is None and seg.get("slomo"):
+        raw = 0.5
+    if raw is None:
+        return 1.0
+    try:
+        s_val = str(raw).strip().lower()
+        if s_val.endswith("x"):
+            s_val = s_val[:-1].strip()
+        val = float(s_val)
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(val) or val <= 0.0:
+        return 1.0
+    return max(0.25, min(4.0, val))
+
+
+def _segment_is_muted(seg: Optional[Dict[str, Any]]) -> bool:
+    """Return True when source audio is explicitly muted via `common.segment_is_muted`."""
+    fn = getattr(_common, "segment_is_muted", None)
+    if callable(fn):
+        return bool(fn(seg))
+    if not isinstance(seg, dict):
+        return False
+    raw = seg.get("mute")
+    if isinstance(raw, bool):
+        if raw:
+            return True
+    elif isinstance(raw, (int, float)):
+        if raw != 0:
+            return True
+    elif isinstance(raw, str):
+        if raw.strip().lower() in ("1", "true", "yes", "on", "mute", "muted"):
+            return True
+    audio_mode = str(seg.get("audio_mode") or seg.get("audio") or "").strip().lower()
+    return audio_mode in ("mute", "muted", "off", "none", "silent")
+
+
+def _segment_is_beat(seg: Optional[Dict[str, Any]]) -> bool:
+    """Return True for non-spoken visual beats via `common.segment_is_beat`."""
+    fn = getattr(_common, "segment_is_beat", None)
+    if callable(fn):
+        return bool(fn(seg))
+    if not isinstance(seg, dict):
+        return False
+    raw = seg.get("beat")
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return raw != 0
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("1", "true", "yes", "on", "beat")
+    return False
+
+
+def _segment_play_duration(seg: Dict[str, Any]) -> float:
+    """Return rendered moving duration `(end - start) / speed` (excluding `hold_tail`)."""
+    fn = getattr(_common, "segment_play_duration", None)
+    if callable(fn):
+        try:
+            val = float(fn(seg))
+            if math.isfinite(val) and val > 0.0:
+                return max(0.08, val)
+        except (TypeError, ValueError):
+            pass
+    src_dur = max(0.04, float(seg["end"]) - float(seg["start"]))
+    spd = _segment_speed(seg)
+    return max(0.08, src_dur / spd)
+
+
+def _segment_duration(seg: Dict[str, Any]) -> float:
+    """Return full rendered segment duration (`play_duration + hold_tail`) via `common.segment_duration`."""
+    if callable(getattr(_common, "segment_play_duration", None)):
+        fn = getattr(_common, "segment_duration", None)
+        if callable(fn):
+            return float(fn(seg))
+    return max(0.08, _segment_play_duration(seg) + _segment_hold_tail(seg))
+
+
+def _normalize_mark_type(mark_type: str) -> str:
+    """Normalize mark classification strings into `'right'` or `'wrong'`."""
+    fn = getattr(_common, "_normalize_mark_type", None) or getattr(_common, "normalize_mark_type", None)
+    if callable(fn):
+        return str(fn(mark_type))
+    low = str(mark_type or "wrong").strip().lower()
+    return "right" if low in ("right", "check", "tick", "correct", "ok", "green") else "wrong"
+
+
+def resolve_format_layouts_dir() -> Path:
+    """Return the active format layouts directory (`ROOT / 'formats' / 'layouts'`)."""
+    return FORMATS_LAYOUTS_DIR
+
+
+def load_layout_format_spec(layout_id: str) -> Dict[str, Any]:
+    """Load `<layout_id>.json` from `ROOT / 'formats' / 'layouts'`.
+    Returns an empty dictionary when absent.
+    """
+    clean_id = re.sub(r"[^a-zA-Z0-9_-]", "", str(layout_id or "").strip())
+    if not clean_id:
+        return {}
+    cand = FORMATS_LAYOUTS_DIR / f"{clean_id}.json"
+    if cand.is_file():
+        try:
+            data = read_json(cand)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return {}
 
 
 def even(x: float) -> int:
+    """Round `x` to the nearest positive even integer (>= 2) for YUV420p compatibility."""
     return max(2, int(round(float(x) / 2.0)) * 2)
+
+
+def is_square_canvas(W: int, H: int) -> bool:
+    """Return True when `(W, H)` represents a ~1:1 Square canvas (`1080x1080`, `720x720`)."""
+    w_i, h_i = max(2, int(W)), max(2, int(H))
+    return abs(w_i - h_i) <= w_i * 0.15
+
+
+def get_square_1x1_geometry(sq_size: int = 1080, blur_sigma: float = 18.0) -> Dict[str, Any]:
+    """Return exact 1:1 Square (`1080x1080`) framing geometry for compositing a 9:16 master
+    reel over a 1:1 center-cropped Gaussian-blurred background.
+    """
+    sq = even(sq_size)
+    fg_w = even(sq * 9.0 / 16.0)
+    bg_h = even(sq * 16.0 / 9.0)
+    blur_scale = 4
+    sq_small = even(sq // blur_scale)
+    bg_h_small = even(bg_h // blur_scale)
+    sigma_small = max(1.0, float(blur_sigma) / float(blur_scale))
+    return {
+        "sq_size": sq,
+        "fg_w": fg_w,
+        "fg_h": sq,
+        "fg_x": (sq - fg_w) // 2,
+        "fg_y": 0,
+        "bg_w": sq,
+        "bg_h": bg_h,
+        "blur_scale": blur_scale,
+        "sq_small": sq_small,
+        "bg_h_small": bg_h_small,
+        "sigma_small": round(sigma_small, 3),
+    }
+
+
+def get_layout_geometry(
+    layout: Optional[str],
+    W: int = 1080,
+    H: int = 1920,
+    seg: Optional[Dict[str, Any]] = None,
+    plan: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Return normalized pixel geometry for `layout` on either a 9:16 Master or 1:1 Square canvas."""
+    W_e, H_e = even(W), even(H)
+    lay = normalize_layout_name(layout)
+    square = is_square_canvas(W_e, H_e)
+
+    if lay == "split_v":
+        top_h = even(H_e // 2)
+        return {
+            "layout": "split_v",
+            "canvas": (W_e, H_e),
+            "is_square": square,
+            "top": {"x": 0, "y": 0, "w": W_e, "h": top_h},
+            "bottom": {"x": 0, "y": top_h, "w": W_e, "h": H_e - top_h},
+            "divider_h": 4,
+            "headroom_pct": TARGET_HEADROOM_PCT,
+        }
+    if lay == "split_h":
+        left_w = even(W_e // 2)
+        has_page = isinstance((plan or {}).get("page"), dict)
+        return {
+            "layout": "split_h",
+            "canvas": (W_e, H_e),
+            "is_square": square,
+            "left": {"x": 0, "y": 0, "w": left_w, "h": H_e},
+            "right": {"x": left_w, "y": 0, "w": W_e - left_w, "h": H_e},
+            "divider_w": 0 if has_page else 4,
+            "headroom_pct": round(FLASHCARD_SPLIT_HEADROOM * 100.0, 2) if _has_flashcards(seg, plan) else TARGET_HEADROOM_PCT,
+        }
+    if lay == "top_pip":
+        if square:
+            pw = even(W_e * 0.52)
+            ph = even(H_e * 0.26)
+            py = int(round(H_e * 0.0185))
+            prad = max(12, int(round(30 * (W_e / 1080.0))))
+        else:
+            pw = even(W_e * 0.6944)
+            ph = even(H_e * 0.2188)
+            py = int(round(H_e * 0.0104))
+            prad = max(12, int(round(36 * (W_e / 1080.0))))
+        px = (W_e - pw) // 2
+        return {
+            "layout": "top_pip",
+            "canvas": (W_e, H_e),
+            "is_square": square,
+            "pip": {"x": px, "y": py, "w": pw, "h": ph, "radius": prad},
+            "bg": {"x": 0, "y": 0, "w": W_e, "h": H_e, "headroom_pct": 25.8},
+        }
+    if lay in ("video_call", "pip_call", "gmeet_grid"):
+        peer = (seg or {}).get("peer") if isinstance((seg or {}).get("peer"), dict) else {}
+        pip_shape = str((seg or {}).get("pip_shape") or peer.get("shape") or "rounded")
+        variant = "gmeet_grid" if lay == "gmeet_grid" else "pip_call"
+        vc_geo = get_video_call_geometry(W_e, H_e, variant=variant, pip_shape=pip_shape)
+        vc_geo["layout"] = lay
+        vc_geo["canvas"] = (W_e, H_e)
+        vc_geo["is_square"] = square
+        return vc_geo
+    if lay == "chat_bar":
+        chat_spec = (seg or {}).get("chat") if isinstance((seg or {}).get("chat"), dict) else {}
+        mode = str(chat_spec.get("mode") or "floating_overlay")
+        dock_frac = 0.22
+        dock_h = even(H_e * dock_frac) if mode.lower() in ("docked", "dock", "top_strip") else 0
+        return {
+            "layout": "chat_bar",
+            "canvas": (W_e, H_e),
+            "is_square": square,
+            "mode": mode,
+            "dock_h": dock_h,
+            "video_h": H_e - dock_h,
+        }
+    return {
+        "layout": "single",
+        "canvas": (W_e, H_e),
+        "is_square": square,
+        "headroom_pct": TARGET_HEADROOM_PCT,
+    }
 
 
 def _resolve_active_slot(seg: Optional[Dict[str, Any]], default: str = "") -> str:
@@ -131,7 +736,7 @@ def _resolve_baked_split_spec(
 ) -> Optional[Dict[str, Any]]:
     """Return `{'kind': 'split_v'|'split_h', 'active': 'top'|'bottom'|'left'|'right',
     'seam_frac': float, 'seam_band_frac': [lo, hi], 'vis': dict}` when a `single` segment
-    represents a pre-stitched / baked split clip with a known active panel; else `None`.
+    represents a pre-stitched / baked split clip with a known active panel; otherwise `None`.
     """
     if normalize_layout_name(seg.get("layout")) != "single":
         return None
@@ -203,7 +808,7 @@ def _resolve_baked_split_spec(
 
 
 def normalize_layout_name(layout: Optional[str]) -> str:
-    """Normalize layout aliases into canonical layout identifiers."""
+    """Normalize layout aliases into canonical Zeno layout identifiers."""
     raw = str(layout or "single").strip().lower()
     if ":" in raw:
         raw = raw.split(":", 1)[0].strip()
@@ -267,7 +872,7 @@ def _extract_dialogue_from_note(note: str) -> str:
     """Extract clean dialogue text or quoted phrase from a segment note."""
     if not note:
         return ""
-    quotes = re.findall(r"\"([^\"]{2,120})\"", note)
+    quotes = re.findall(r'"([^"]{2,120})"', note)
     if quotes:
         return " ".join(quotes)
     cleaned = re.sub(r"^L\d+[a-z]?\s+", "", note.strip())
@@ -296,10 +901,46 @@ def _speaker_display_name(sp_key: str, plan: Dict[str, Any]) -> str:
     return sp_key.title()
 
 
+def _advance_listener_span(
+    peer_src: Any,
+    base_span: Sequence[float],
+    seg_dur: float,
+    cursors: Dict[str, float],
+) -> Tuple[List[float], float]:
+    """Walk sequentially through a silent listener clip or idle window turn after turn
+    so listener footage never restarts from the exact same frame on consecutive turns.
+    """
+    peer_path = resolve(peer_src) if peer_src else None
+    key = str(peer_path or peer_src)
+    s_lo = max(0.0, float(base_span[0]) if len(base_span) >= 1 else 0.0)
+    s_hi = max(s_lo + 0.30, float(base_span[1]) if len(base_span) >= 2 else s_lo + 3.0)
+
+    if peer_path is not None and peer_path.is_file() and _SILENT_CLIP_NAME_RE.search(peer_path.stem):
+        try:
+            clip_dur = float(probe(peer_path).get("duration") or 0.0)
+            if clip_dur >= 0.5:
+                s_lo = 0.02 if clip_dur > 0.4 else 0.0
+                s_hi = max(s_lo + 0.30, clip_dur - 0.02)
+        except Exception:
+            pass
+
+    avail = max(0.30, s_hi - s_lo)
+    cur = cursors.get(key, s_lo)
+    if cur < s_lo or cur >= s_hi - 0.15:
+        cur = s_lo
+    elif cur + seg_dur > s_hi + 0.05 and seg_dur <= avail:
+        cur = s_lo
+
+    end_t = min(s_hi, cur + max(0.30, seg_dur))
+    cursors[key] = end_t if end_t < s_hi - 0.15 else s_lo
+    return [round(cur, 4), round(end_t, 4)], round(cur, 4)
+
+
 def resolve_auto_peers(plan: Dict[str, Any]) -> Dict[str, Any]:
     """Automatically pair `peer` from adjacent speaker turns when a segment uses
-    `split_v`, `split_h`, `video_call`, `pip_call`, or `gmeet_grid` without an explicit
-    `peer` dict, and auto-generate `chat` bubbles for `chat_bar` segments if omitted.
+    `split_v`, `split_h`, `top_pip`, `video_call`, `pip_call`, or `gmeet_grid` without an
+    explicit `peer` dict, advance silent listener spans sequentially across turns, and
+    auto-populate `chat` bubbles for `chat_bar` segments if omitted.
     """
     segs: List[Dict[str, Any]] = plan.get("segments") or []
     if not segs:
@@ -311,7 +952,7 @@ def resolve_auto_peers(plan: Dict[str, Any]) -> Dict[str, Any]:
         if sid:
             marks_by_seg.setdefault(str(sid), []).append(m)
 
-    # First pass: normalize layouts and infer speakers
+    # Pass 1: Normalize layout names and infer speaker keys
     speaker_order: List[str] = []
     for i, s in enumerate(segs):
         s.setdefault("id", f"S{i + 1}")
@@ -327,8 +968,7 @@ def resolve_auto_peers(plan: Dict[str, Any]) -> Dict[str, Any]:
             if sp.lower() not in speaker_order:
                 speaker_order.append(sp.lower())
 
-    # Assign stable default slot per speaker so speakers never flip-flop slots mid-scene
-    # Coach / first speaker -> top (split_v) or left (split_h); second speaker -> bottom / right
+    # Assign stable default slot per speaker so characters never flip panels mid-scene
     speaker_slot_v: Dict[str, str] = {}
     speaker_slot_h: Dict[str, str] = {}
     for idx, sp_low in enumerate(speaker_order):
@@ -338,24 +978,25 @@ def resolve_auto_peers(plan: Dict[str, Any]) -> Dict[str, Any]:
         speaker_slot_v["nova"], speaker_slot_v["ravi"] = "top", "bottom"
         speaker_slot_h["nova"], speaker_slot_h["ravi"] = "left", "right"
 
-    # Second pass: resolve auto-peers and auto-chat bubbles
+    listener_cursors: Dict[str, float] = {}
+
+    # Pass 2: Resolve auto-peers, advance silent listener cursors, and build chat bubbles
     for i, s in enumerate(segs):
         lay = s["layout"]
         sp = str(s.get("speaker") or "").lower()
+        seg_dur = max(0.10, _segment_play_duration(s))
 
         if lay in ("split_v", "split_h", "video_call", "pip_call", "gmeet_grid", "top_pip"):
             resolved_slot = _resolve_active_slot(s)
             if resolved_slot:
                 s["slot"] = resolved_slot
+            elif lay == "split_h":
+                s["slot"] = speaker_slot_h.get(sp, "left" if i % 2 == 0 else "right")
             else:
-                if lay == "split_h":
-                    s["slot"] = speaker_slot_h.get(sp, "left" if i % 2 == 0 else "right")
-                else:
-                    s["slot"] = speaker_slot_v.get(sp, "top" if i % 2 == 0 else "bottom")
+                s["slot"] = speaker_slot_v.get(sp, "top" if i % 2 == 0 else "bottom")
 
             peer = s.get("peer")
             if not isinstance(peer, dict) or not peer.get("src"):
-                # Search outward (i-1, i+1, i-2, i+2, ...) for the other speaker's turn
                 cand_seg: Optional[Dict[str, Any]] = None
                 for dist in range(1, len(segs) + 1):
                     for j in (i - dist, i + dist):
@@ -377,16 +1018,16 @@ def resolve_auto_peers(plan: Dict[str, Any]) -> Dict[str, Any]:
                 peer_src = cand_seg["src"]
                 peer_sp = str(cand_seg.get("speaker") or ("ravi" if sp == "nova" else "nova"))
 
-                # Find a clean mouth-closed listening window on peer_src
-                # If peer_src is the same clip file as s["src"], exclude s's active speaking span
                 avoid_spans = [(float(s.get("start", 0.0)), float(s.get("end", 5.0)))]
                 if cand_seg is not s and cand_seg.get("src") == peer_src:
                     avoid_spans.append((float(cand_seg.get("start", 0.0)), float(cand_seg.get("end", 5.0))))
 
                 idle_win = find_listening_idle_window(peer_src, speech_spans=avoid_spans)
+                adv_span, adv_still = _advance_listener_span(
+                    peer_src, idle_win["idle_span"], seg_dur, listener_cursors
+                )
                 peer_focus = list(cand_seg.get("focus") or [0.5, 0.38])
 
-                # If peer is in the same 2-shot frame, pick the opposite horizontal face focus
                 if peer_src == s.get("src") and abs(peer_focus[0] - float((s.get("focus") or [0.5, 0.38])[0])) < 0.05:
                     vis = analyze_clip_vision(peer_src)
                     if vis.get("face_count", 1) >= 2 and len(vis.get("faces", [])) >= 2:
@@ -403,17 +1044,29 @@ def resolve_auto_peers(plan: Dict[str, Any]) -> Dict[str, Any]:
                 merged_peer = dict(peer) if isinstance(peer, dict) else {}
                 merged_peer.setdefault("src", peer_src)
                 merged_peer.setdefault("speaker", peer_sp)
-                merged_peer.setdefault("still_at", idle_win["still_at"])
-                merged_peer.setdefault("idle_span", idle_win["idle_span"])
+                merged_peer.setdefault("still_at", adv_still)
+                merged_peer.setdefault("idle_span", adv_span)
                 merged_peer.setdefault("focus", peer_focus)
                 merged_peer.setdefault("slot", opp_slot)
+                if abs(_parse_offset_y(cand_seg.get("offset_y"))) > 1e-4:
+                    merged_peer.setdefault("offset_y", _parse_offset_y(cand_seg.get("offset_y")))
                 s["peer"] = merged_peer
             else:
-                # Ensure existing peer dict has still_at and focus filled in
-                if peer.get("still_at") is None:
+                has_explicit_span = (
+                    isinstance(peer.get("idle_span"), (list, tuple)) and len(peer["idle_span"]) >= 2
+                )
+                if has_explicit_span:
+                    p_key = str(resolve(peer["src"]) if peer.get("src") else "")
+                    if p_key:
+                        listener_cursors[p_key] = float(peer["idle_span"][1])
+                    peer.setdefault("still_at", round(float(peer["idle_span"][0]), 4))
+                elif peer.get("still_at") is None:
                     idle_win = find_listening_idle_window(peer["src"])
-                    peer["still_at"] = idle_win["still_at"]
-                    peer.setdefault("idle_span", idle_win["idle_span"])
+                    adv_span, adv_still = _advance_listener_span(
+                        peer["src"], idle_win["idle_span"], seg_dur, listener_cursors
+                    )
+                    peer["still_at"] = adv_still
+                    peer.setdefault("idle_span", adv_span)
                 peer.setdefault("focus", [0.5, 0.38])
 
         elif lay == "chat_bar":
@@ -433,7 +1086,6 @@ def resolve_auto_peers(plan: Dict[str, Any]) -> Dict[str, Any]:
                         status = "right"
 
                 messages: List[Dict[str, Any]] = []
-                # Include previous turn as incoming context bubble if available
                 if i > 0:
                     prev = segs[i - 1]
                     prev_sp = _speaker_display_name(_infer_segment_speaker(prev, plan), plan)
@@ -448,9 +1100,9 @@ def resolve_auto_peers(plan: Dict[str, Any]) -> Dict[str, Any]:
                         })
 
                 cur_sp = _speaker_display_name(sp or "ravi", plan)
-                cur_txt = _extract_dialogue_from_note(note_txt) or "..."
+                cur_txt = str(s.get("label") or "") or _extract_dialogue_from_note(note_txt) or "..."
                 pop_at = float(seg_marks[0].get("at", 0.15)) if seg_marks else 0.10
-                pop_at = max(0.0, min(pop_at, max(0.0, (float(s["end"]) - float(s["start"])) * 0.4)))
+                pop_at = max(0.0, min(pop_at, max(0.0, _segment_play_duration(s) * 0.4)))
                 messages.append({
                     "speaker": cur_sp,
                     "role": "incoming" if "nova" in cur_sp.lower() else "outgoing",
@@ -486,8 +1138,8 @@ def detect_static_camera_motion(
 ) -> float:
     """Measure peripheral background camera motion (0-255 grayscale delta) using OpenCV.
 
-    Masks out the center speaker region (`x in [0.22..0.78], y in [0.12..0.88]`) so a talking
-    speaker on a locked tripod still registers as a static camera (`score < 2.8`).
+    Masks out the central speaker region (`x in [0.22..0.78], y in [0.12..0.88]`) so a
+    talking speaker on a locked tripod registers as a static camera (`score < 2.8`).
     """
     resolved = resolve(video_path)
     key = f"{resolved}:{start_sec:.2f}-{end_sec:.2f}"
@@ -541,8 +1193,8 @@ _COLOR_MATCH_CACHE: Dict[str, Optional[str]] = {}
 
 
 def _measure_clip_rms_gain_db(src: Path, target_dbfs: float = -18.0) -> float:
-    """Measure active-speech RMS of `src` and return a 1-number per-clip gain offset in dB
-    so natural intra-sentence dynamics are preserved without double loudnorm/dynaudnorm.
+    """Measure active-speech RMS of `src` and return a single per-clip gain offset in dB
+    so natural intra-sentence dynamics are preserved without double loudness normalization.
     """
     sig = _file_mtime_sig(src)
     if sig in _RMS_GAIN_CACHE:
@@ -589,10 +1241,9 @@ def compute_face_color_match_filter(
     target_rg: float = 1.08,
     target_bg: float = 0.92,
 ) -> Optional[str]:
-    """Measure exposure (Y) and white balance (R/G, B/G) strictly inside the inner 60% of
-    the speaker's face ROI and return a tightly clamped FFmpeg `eq` + `colorbalance` filter
-    (plus optional `.cube` LUT) ONLY when explicitly requested (`color_match=True` or `lut` set).
-    OFF by default so raw clip colours are never altered unintentionally.
+    """Measure exposure (Y) and white balance (R/G, B/G) inside the inner 60% of the
+    speaker's face ROI and return a clamped FFmpeg `eq` + `colorbalance` filter (plus
+    optional `.cube` LUT) ONLY when explicitly requested (`color_match=True` or `lut` set).
     """
     lut_spec = seg.get("lut") or (plan or {}).get("lut") or ((plan or {}).get("canvas") or {}).get("lut")
     color_enabled = bool(seg.get("color_match") is True or (plan or {}).get("color_match") is True)
@@ -665,6 +1316,93 @@ def compute_face_color_match_filter(
     return res
 
 
+def parse_zoom_spec(spec: Any) -> Dict[str, Any]:
+    """Parse a compact zoom specification string or number into `{'z0': float, 'z1': float, 'style': str}`."""
+    if isinstance(spec, (int, float)):
+        v = float(spec)
+        return {"z0": v, "z1": v, "style": "smooth"}
+    raw = str(spec or "1.0").strip()
+    style = "smooth"
+    if ":" in raw:
+        st_part, rhs = raw.split(":", 1)
+        st_low = st_part.strip().lower()
+        if st_low in ("punch_in", "sudden_in", "push", "in"):
+            style = "sudden_in"
+        elif st_low in ("punch_out", "sudden_out", "pull", "out"):
+            style = "sudden_out"
+        elif st_low in ("zoom_in", "mild_in"):
+            style = "zoom_in"
+        elif st_low in ("zoom_out", "mild_out"):
+            style = "zoom_out"
+        else:
+            style = st_low or "smooth"
+        raw = rhs.split("@", 1)[0].strip()
+    else:
+        raw = raw.split("@", 1)[0].strip()
+        if raw.lower() == "bell":
+            return {"z0": 1.20, "z1": 1.00, "zpeak": 1.55, "style": "bell"}
+    if style == "bell":
+        parts = [p.strip() for p in raw.split("->")] if raw else []
+        try:
+            if len(parts) >= 3:
+                z0_v = float(parts[0]) if parts[0] else 1.20
+                zp_v = float(parts[1]) if parts[1] else 1.55
+                z1_v = float(parts[2]) if parts[2] else 1.00
+                return {"z0": z0_v, "z1": z1_v, "zpeak": zp_v, "style": "bell"}
+            if len(parts) == 2:
+                z0_v = float(parts[0]) if parts[0] else 1.20
+                z1_v = float(parts[1]) if parts[1] else 1.00
+                return {"z0": z0_v, "z1": z1_v, "zpeak": max(1.55, z0_v, z1_v), "style": "bell"}
+            if len(parts) == 1 and parts[0]:
+                zp_v = float(parts[0])
+                return {"z0": 1.20, "z1": 1.00, "zpeak": zp_v, "style": "bell"}
+        except ValueError:
+            pass
+        return {"z0": 1.20, "z1": 1.00, "zpeak": 1.55, "style": "bell"}
+    if "->" in raw:
+        a, b = raw.split("->", 1)
+        try:
+            z0_v = float(a.strip()) if a.strip() else 1.0
+            z1_v = float(b.strip()) if b.strip() else z0_v
+            out_style = "smooth" if style in ("zoom_in", "zoom_out") else style
+            return {"z0": z0_v, "z1": z1_v, "style": out_style}
+        except ValueError:
+            pass
+    try:
+        v = float(raw)
+        if style in ("sudden_in", "flash_zoom"):
+            return {"z0": 1.0, "z1": v, "style": style}
+        if style == "sudden_out":
+            return {"z0": v, "z1": 1.0, "style": style}
+        if style == "zoom_in":
+            return {"z0": 1.0, "z1": v, "style": "smooth"}
+        if style == "zoom_out":
+            return {"z0": v, "z1": 1.0, "style": "smooth"}
+        return {"z0": v, "z1": v, "style": style}
+    except ValueError:
+        return {"z0": 1.0, "z1": 1.0, "style": "smooth"}
+
+
+def _resolve_zoom_peak(
+    seg: Optional[Dict[str, Any]],
+    z0: float,
+    z1: float,
+    zoom_style: str,
+) -> Optional[float]:
+    """Return peak zoom scale for `bell` curves (default `1.55`, clamped `>= 1.0`), or `None`."""
+    if str(zoom_style or "").strip().lower() != "bell":
+        return None
+    raw_peak = seg.get("zoom_peak") if isinstance(seg, dict) else None
+    if raw_peak is not None:
+        try:
+            zp = float(raw_peak)
+            if math.isfinite(zp):
+                return max(1.0, zp)
+        except (TypeError, ValueError):
+            pass
+    return max(1.0, 1.55, float(z0), float(z1))
+
+
 def _clamp_split_zoom_spec(
     z0: float,
     z1: float,
@@ -674,9 +1412,8 @@ def _clamp_split_zoom_spec(
     exact_dur: float,
     max_zoom: float = SPLIT_MAX_ZOOM,
 ) -> Tuple[float, float, str, float, float]:
-    """Split panels never zoom (owner's rule): a zoom on one turn makes the same character jump
-    in size when the panel switches between the speaking clip and the silent clip. Whatever the
-    plan asks for, a split panel is rendered still at 1.0.
+    """Split panels never zoom (`z=1` lock): zooming a panel would cause the character's
+    scale and background to jump when switching between speaking and silent listener clips.
     """
     return 1.0, 1.0, "none", 0.0, exact_dur
 
@@ -685,10 +1422,12 @@ def resolve_segment_zoom_spec(
     seg: Dict[str, Any],
     exact_dur: float,
 ) -> Tuple[float, float, str, float, float]:
-    """Return `(z0, z1, zoom_style, zoom_at, zoom_dur)` for `seg`, applying transcript-intent
-    zooms (push-ins on questions/hooks, pull-outs on resolutions/answers, and emphasis-word
-    punch-ins) when no explicit zoom is set. Split layouts (`split_h`, `split_v`, `top_pip`)
-    and baked-split sub-panels support active-panel zooms clamped to `[1.0, 1.12]`.
+    """Return `(z0, z1, zoom_style, zoom_at, zoom_dur)` for `seg`.
+
+    Split panels (`split_h`, `split_v`, `top_pip`, and baked splits with `slot=`/`active=`)
+    are strictly locked to `z=1.0`. Full-frame `single` segments preserve static punch-ins,
+    smooth cosine `1.0->1.06` push-ins / pull-outs, `sudden_in:1.08@t`, `sudden_out`,
+    `flash_zoom:1.12@t`, and 3-phase cosine `bell` curves.
     """
     lay = normalize_layout_name(seg.get("layout"))
     is_split_panel = lay in ("split_h", "split_v", "top_pip") or (
@@ -704,37 +1443,60 @@ def resolve_segment_zoom_spec(
     ) -> Tuple[float, float, str, float, float]:
         if is_split_panel:
             return _clamp_split_zoom_spec(rz0, rz1, rstyle, rat, rdur, exact_dur)
-        return rz0, rz1, rstyle, rat, rdur
+        return max(1.0, rz0), max(1.0, rz1), rstyle, rat, rdur
 
     z0_raw = seg.get("zoom")
-    z1_raw = seg.get("zoom_to")
+    z1_raw = seg.get("zoom_end") if seg.get("zoom_end") is not None else seg.get("zoom_to")
     style = str(seg.get("zoom_style") or "").strip().lower()
     zoom_at = float(seg.get("zoom_at") or 0.0)
     zoom_dur = float(seg.get("zoom_dur") or 0.0)
 
+    if style == "bell" or (not style and seg.get("zoom_peak") is not None):
+        z0 = max(1.0, float(z0_raw if z0_raw is not None else 1.20))
+        z1 = max(1.0, float(z1_raw if z1_raw is not None else 1.00))
+        return _finish(z0, z1, "bell", 0.0, exact_dur)
+
     if style in ("sudden_in", "punch_in"):
-        z0 = float(z0_raw if z0_raw is not None else 1.0)
-        z1 = float(z1_raw if z1_raw is not None else (z0 if z0 > 1.01 else 1.10))
+        z0 = max(1.0, float(z0_raw if z0_raw is not None else 1.0))
+        z1 = max(1.0, float(z1_raw if z1_raw is not None else (z0 if z0 > 1.01 else 1.10)))
         if abs(z1 - z0) < 0.005:
             z0, z1 = 1.0, max(1.08, z1)
         return _finish(z0, z1, "sudden_in", max(0.0, zoom_at), (zoom_dur if zoom_dur > 0.02 else 0.18))
 
     if style in ("sudden_out", "punch_out"):
-        z0 = float(z0_raw if z0_raw is not None else 1.10)
-        z1 = float(z1_raw if z1_raw is not None else 1.0)
+        z0 = max(1.0, float(z0_raw if z0_raw is not None else 1.10))
+        z1 = max(1.0, float(z1_raw if z1_raw is not None else 1.0))
         if abs(z0 - z1) < 0.005:
             z0, z1 = max(1.08, z0), 1.0
         return _finish(z0, z1, "sudden_out", max(0.0, zoom_at), (zoom_dur if zoom_dur > 0.02 else 0.20))
 
     if style == "flash_zoom":
-        z0 = float(z0_raw if z0_raw is not None else 1.0)
-        z1 = float(z1_raw if z1_raw is not None else (z0 if z0 > 1.01 else 1.12))
+        z0 = max(1.0, float(z0_raw if z0_raw is not None else 1.0))
+        z1 = max(1.0, float(z1_raw if z1_raw is not None else (z0 if z0 > 1.01 else 1.12)))
         if abs(z1 - z0) < 0.005:
             z0, z1 = 1.0, max(1.10, z1)
         return _finish(z0, z1, "flash_zoom", max(0.0, zoom_at), (zoom_dur if zoom_dur > 0.02 else 0.16))
 
-    z0 = float(z0_raw if z0_raw is not None else 1.0)
-    z1 = float(z1_raw if z1_raw is not None else z0)
+    if style in ("zoom_in", "mild_in"):
+        z0 = max(1.0, float(z0_raw if z0_raw is not None else 1.0))
+        z1 = max(1.0, float(z1_raw if z1_raw is not None else (z0 if z0 > 1.01 else 1.06)))
+        if abs(z1 - z0) < 0.005:
+            z0, z1 = 1.0, max(1.06, z1)
+        if seg.get("zoom_at") is not None:
+            return _finish(z0, z1, "sudden_in", max(0.0, zoom_at), (zoom_dur if zoom_dur > 0.02 else 0.18))
+        return _finish(z0, z1, "smooth", 0.0, exact_dur)
+
+    if style in ("zoom_out", "mild_out"):
+        z0 = max(1.0, float(z0_raw if z0_raw is not None else 1.06))
+        z1 = max(1.0, float(z1_raw if z1_raw is not None else 1.0))
+        if abs(z0 - z1) < 0.005:
+            z0, z1 = max(1.06, z0), 1.0
+        if seg.get("zoom_at") is not None:
+            return _finish(z0, z1, "sudden_out", max(0.0, zoom_at), (zoom_dur if zoom_dur > 0.02 else 0.20))
+        return _finish(z0, z1, "smooth", 0.0, exact_dur)
+
+    z0 = max(1.0, float(z0_raw if z0_raw is not None else 1.0))
+    z1 = max(1.0, float(z1_raw if z1_raw is not None else z0))
 
     if seg.get("zoom_at") is not None and abs(z1 - z0) >= 0.005:
         inferred_style = "sudden_out" if z1 < z0 else "sudden_in"
@@ -758,18 +1520,17 @@ def resolve_segment_zoom_spec(
             callout_re = re.compile(
                 r"(supernova|miss\s*nova|\bnova\b|ai\s*tutor|spoken\s*english|improve|two\s*weeks|2\s*weeks|"
                 r"15\s*minutes|fifteen|daily\s*speaking|daily\s*practice|stop\s*saying|secret|important|"
-                r"mistake|professional|fluent|confidence|ನಿಲ್ಲಿಸಿ|ಎರಡು\s*ವಾರ|ತೋರಿಸ್ತೀನಿ\s*ನೋಡಿ|ಅಭ್ಯಾಸ|ಸುಲಭ)",
+                r"mistake|professional|fluent|confidence)",
                 re.I,
             )
-            # 1. High preference for the first rapid zoom-in (sudden_in) on opening single-character segments
             if sid_str in ("S1", "S1a", "L1", "L1a"):
                 return _finish(1.0, 1.08, "sudden_in", 0.25, 0.18)
-            # 2. Sudden zoom-in on Supernova callouts or strong teaching/value points inside segment word timings
             seg_words = seg.get("words") or []
             seg_start = float(seg.get("start", 0.0))
+            spd = _segment_speed(seg)
             for w in seg_words:
                 wt = str(w.get("w") or "")
-                rel_t = float(w.get("start", seg_start)) - seg_start
+                rel_t = (float(w.get("start", seg_start)) - seg_start) / spd
                 if 0.08 <= rel_t <= exact_dur - 0.35 and (
                     callout_re.search(wt)
                     or re.search(r"\b(stop|never|wrong|don't|instead|correct|right|always|actually|remember|secret)\b", wt, re.I)
@@ -777,17 +1538,14 @@ def resolve_segment_zoom_spec(
                     return _finish(1.0, 1.08, "sudden_in", round(rel_t, 3), 0.18)
             if callout_re.search(note):
                 return _finish(1.0, 1.08, "sudden_in", 0.12, 0.18)
-            # 3. Questions / Hooks -> smooth push-in (1.0 -> 1.06)
             if "?" in note or sid_str in ("S2", "S2a", "L2") or re.search(
                 r"\b(why|what|how|when|where|who|stop\s+saying|mistake|wrong)\b", note, re.I
             ):
                 return _finish(1.0, 1.06, "smooth", 0.0, exact_dur)
-            # 4. Follow-up / Release beats -> rapid zoom-out (sudden_out) or smooth pull-out
             if sid_str.endswith(("b", "c")) and exact_dur <= 3.2:
                 return _finish(1.08, 1.0, "sudden_out", 0.10, 0.20)
             if re.search(r"\[(?:right|correct)\]|\b(perfect|correct|exactly|instead|better|right\s+way|means|install|download)\b", note, re.I):
                 return _finish(1.06, 1.0, "smooth", 0.0, exact_dur)
-            # 5. Default by segment duration
             if exact_dur >= 3.5:
                 return _finish(1.0, 1.05, "smooth", 0.0, exact_dur)
             return _finish(1.05, 1.0, "smooth", 0.0, exact_dur)
@@ -809,24 +1567,45 @@ def _build_subpixel_zoom_filter(
     zoom_dur: float = 0.18,
     fx1: Optional[float] = None,
     fy1: Optional[float] = None,
+    zoom_peak: Optional[float] = None,
 ) -> List[str]:
-    """Build a supersampled sub-pixel `zoompan` filter chain free of 2px stair-stepping jitter."""
+    """Build a 2x-supersampled sub-pixel `zoompan` filter chain free of 2px stair-stepping jitter."""
     fx1_v = fx if fx1 is None else max(0.05, min(0.95, float(fx1)))
     fy1_v = fy if fy1 is None else max(0.08, min(0.85, float(fy1)))
     has_pan = math.hypot(fx1_v - fx, fy1_v - fy) > 0.04
+    z0_c = max(1.0, float(z0))
+    z1_c = max(1.0, float(z1))
+    style_norm = str(zoom_style or "").strip().lower()
 
-    if abs(z0 - 1.0) <= 0.004 and abs(z1 - 1.0) <= 0.004 and zoom_style in ("none", "static", "") and not has_pan:
-        return []
+    zpeak_c: Optional[float] = None
+    if style_norm == "bell":
+        zpeak_c = max(1.0, float(zoom_peak if zoom_peak is not None else max(1.55, z0_c, z1_c)))
+        bell_has_motion = (
+            abs(zpeak_c - z0_c) > 0.004
+            or abs(zpeak_c - z1_c) > 0.004
+            or abs(z1_c - z0_c) > 0.004
+        )
+        if not bell_has_motion and abs(z0_c - 1.0) <= 0.004 and not has_pan:
+            return []
+        if not bell_has_motion and z0_c > 1.004 and not has_pan:
+            zw = even(slot_w * z0_c)
+            zh = even(slot_h * z0_c)
+            return [
+                f"scale={zw}:{zh}:flags=lanczos",
+                f"crop={slot_w}:{slot_h}:x='(iw-{slot_w})*{fx:.4f}':y='(ih-{slot_h})*{fy:.4f}'",
+            ]
+    else:
+        if abs(z0_c - 1.0) <= 0.004 and abs(z1_c - 1.0) <= 0.004 and style_norm in ("none", "static", "") and not has_pan:
+            return []
 
-    # Fast zero-heat path for static punch-in zooms (e.g. zoom=1.08 with no zoom_to and no pan):
-    # uses direct lanczos scale + crop instead of per-frame 4K zoompan evaluation.
-    if abs(z1 - z0) <= 0.004 and zoom_style in ("none", "static", "") and z0 > 1.004 and not has_pan:
-        zw = even(slot_w * z0)
-        zh = even(slot_h * z0)
-        return [
-            f"scale={zw}:{zh}:flags=lanczos",
-            f"crop={slot_w}:{slot_h}:x='(iw-{slot_w})*{fx:.4f}':y='(ih-{slot_h})*{fy:.4f}'",
-        ]
+        # Fast zero-overhead path for static punch-in zooms (e.g. z=1.08 with no pan)
+        if abs(z1_c - z0_c) <= 0.004 and style_norm in ("none", "static", "") and z0_c > 1.004 and not has_pan:
+            zw = even(slot_w * z0_c)
+            zh = even(slot_h * z0_c)
+            return [
+                f"scale={zw}:{zh}:flags=lanczos",
+                f"crop={slot_w}:{slot_h}:x='(iw-{slot_w})*{fx:.4f}':y='(ih-{slot_h})*{fy:.4f}'",
+            ]
 
     total_frames = max(2, int(round(exact_dur * fps)))
     n_minus_1 = max(1, total_frames - 1)
@@ -835,17 +1614,37 @@ def _build_subpixel_zoom_filter(
     sw_super = even(slot_w * ss_factor)
     sh_super = even(slot_h * ss_factor)
 
-    if zoom_style in ("sudden_in", "sudden_out", "flash_zoom"):
+    if style_norm == "bell" and zpeak_c is not None:
+        # 3-phase cosine bell curve over segment duration T:
+        # Phase 1 (0..0.30*T): cosine ease-in z0 -> zpeak
+        # Phase 2 (0.30*T..0.52*T): hold at zpeak
+        # Phase 3 (0.52*T..T): cosine ease-out zpeak -> z1
+        p_norm = f"min(on/{n_minus_1},1)"
+        u1 = f"clip(({p_norm})/0.30,0,1)"
+        u3 = f"clip((({p_norm})-0.52)/0.48,0,1)"
+        ease1 = f"((1-cos(PI*{u1}))/2)"
+        ease3 = f"((1-cos(PI*{u3}))/2)"
+        z_expr = (
+            f"max(1.0,{z0_c:.4f}"
+            f"+({zpeak_c - z0_c:+.4f})*{ease1}"
+            f"+({z1_c - zpeak_c:+.4f})*{ease3})"
+        )
+    elif style_norm in ("sudden_in", "sudden_out", "flash_zoom"):
         t0 = max(0.0, min(exact_dur - 0.05, float(zoom_at)))
         d_snap = max(0.08, min(1.20, float(zoom_dur or 0.18)))
         u_expr = f"clip((on/{fps:.4f}-{t0:.4f})/{d_snap:.4f},0,1)"
         ease_expr = f"(1-pow(1-{u_expr},3))"
-        drift_sign = "+" if z1 >= z0 else "-"
         post_u = f"clip((on/{fps:.4f}-{t0 + d_snap:.4f})/{max(0.2, exact_dur - t0 - d_snap):.4f},0,1)"
-        z_expr = f"({z0:.4f}+({z1 - z0:+.4f})*{ease_expr}{drift_sign}0.015*{post_u})"
+        if z1_c < z0_c:
+            # Settle sudden_out smoothly to z_settle then breathe down to z1_c, clamped >= 1.0 (zero black borders)
+            drift_amp = min(0.015, max(0.0, (z0_c - z1_c) * 0.25))
+            z_settle = z1_c + drift_amp
+            z_expr = f"max(1.0,{z0_c:.4f}+({z_settle - z0_c:+.4f})*{ease_expr}-{drift_amp:.4f}*{post_u})"
+        else:
+            z_expr = f"max(1.0,{z0_c:.4f}+({z1_c - z0_c:+.4f})*{ease_expr}+0.015*{post_u})"
     else:
         p_expr = f"(1-cos(PI*min(on/{n_minus_1},1)))/2"
-        z_expr = f"({z0:.4f}+({z1 - z0:+.4f})*{p_expr})"
+        z_expr = f"max(1.0,{z0_c:.4f}+({z1_c - z0_c:+.4f})*{p_expr})"
 
     if has_pan:
         pan_p = f"(1-cos(PI*min(on/{n_minus_1},1)))/2"
@@ -861,61 +1660,156 @@ def _build_subpixel_zoom_filter(
         f"scale={sw_super}:{sh_super}:flags=bicubic",
         f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={slot_w}x{slot_h}:fps={fps}",
     ]
-    if zoom_style == "flash_zoom":
+    if style_norm == "flash_zoom":
         t0 = max(0.0, float(zoom_at))
         pulse = f"max(0,1-abs((t-{t0 + 0.04:.4f})/0.09))"
         filters.append(f"eq=brightness='0.12*{pulse}':contrast='1+0.08*{pulse}':eval=frame")
     return filters
 
 
-def banner_stack_top(seg: Dict[str, Any]) -> float:
-    """Where the "Stop saying" stack starts, as a fraction of the frame height: just below the measured face (with the segment's own zoom),
-    never on it. Falls back to the standard chest-level position when the face cannot be measured."""
-    try:
-        import vision_tracker
+def banner_stack_top(seg: Dict[str, Any], num_rows: Optional[int] = None) -> float:
+    """Pick the vertical start fraction of a 'Stop Saying' banner stack that avoids
+    overlapping any prominent face box (accounting for zoom and crop) while favoring the
+    natural chest/collar belt (`0.55..0.64`) and staying clear of the `y=0.68..0.80` caption band.
+    """
+    candidates = (0.55, 0.60, 0.64, 0.50, 0.45, 0.20, 0.26, 0.72)
+    if num_rows is None:
+        raw_banners = seg.get("banners") or seg.get("stop_saying") or []
+        if isinstance(raw_banners, str):
+            rows = 1
+        elif isinstance(raw_banners, dict):
+            rows = 0 if _is_flashcard_item(raw_banners) else 1
+        elif isinstance(raw_banners, (list, tuple)):
+            rows = max(1, sum(1 for item in raw_banners if not _is_flashcard_item(item)))
+        else:
+            rows = 1
+        rows = max(1, rows)
+    else:
+        rows = max(1, int(num_rows))
+    banner_h_frac = 0.045 * rows
 
-        vis = vision_tracker.analyze_clip_vision(resolve(seg["src"]))
+    try:
+        vis = analyze_clip_vision(resolve(seg["src"]))
+        raw_faces = [
+            f for f in (vis.get("faces") or [])
+            if isinstance(f, dict)
+            and isinstance(f.get("bbox_norm"), (list, tuple))
+            and len(f["bbox_norm"]) >= 4
+            and not ("confidence" in f and float(f.get("confidence") or 0.0) <= 0.0)
+        ]
+        faces = [f["bbox_norm"] for f in raw_faces]
         bb = vis.get("bbox_norm")
-        if bb and len(bb) >= 4:
-            fy = float(seg["focus"][1]) if isinstance(seg.get("focus"), (list, tuple)) and len(seg["focus"]) >= 2 else float((vis.get("focus") or [0.5, 0.4])[1])
-            zmax = max(float(seg.get("zoom") or 1.0), float(seg.get("zoom_to") or 1.0))
-            chin = fy + (float(bb[3]) - fy) * zmax          # the chin moves down when the picture is zoomed in around the focus point
-            return round(min(0.66, max(0.445, chin + 0.03)), 3)
+        if not faces and not (vis.get("faces")) and bb and len(bb) >= 4:
+            faces = [bb]
+        if not faces:
+            return candidates[0]
+
+        foc = (
+            seg["focus"]
+            if isinstance(seg.get("focus"), (list, tuple)) and len(seg["focus"]) >= 2
+            else (vis.get("focus") or [0.5, 0.4])
+        )
+        fx, fy = float(foc[0]), float(foc[1])
+        zmax = max(
+            float(seg.get("zoom") or 1.0),
+            float(seg.get("zoom_to") or 1.0),
+            float(seg.get("zoom_end") or 1.0),
+            float(seg.get("zoom_peak") or 1.0),
+        )
+        ar_raw = vis.get("aspect_ratio")
+        ar = float(ar_raw) if ar_raw else 0.5625
+        canvas_ar = 9.0 / 16.0
+
+        zoomed_faces: List[Tuple[float, float, float, float]] = []
+        for fb in faces:
+            x0, y0, x1, y1 = float(fb[0]), float(fb[1]), float(fb[2]), float(fb[3])
+            if ar > canvas_ar + 0.02:
+                rx = ar / canvas_ar
+                x0 = x0 * rx - fx * (rx - 1.0)
+                x1 = x1 * rx - fx * (rx - 1.0)
+            elif ar < canvas_ar - 0.02:
+                ry = canvas_ar / max(0.1, ar)
+                y0 = y0 * ry - fy * (ry - 1.0)
+                y1 = y1 * ry - fy * (ry - 1.0)
+            zx0 = max(0.0, min(1.0, fx + (x0 - fx) * zmax))
+            zx1 = max(0.0, min(1.0, fx + (x1 - fx) * zmax))
+            zy0 = max(0.0, min(1.0, fy + (y0 - fy) * zmax))
+            zy1 = max(0.0, min(1.0, fy + (y1 - fy) * zmax))
+            if zx1 > zx0 + 0.01 and zy1 > zy0 + 0.01:
+                zoomed_faces.append((zx0, zy0, zx1, zy1))
+
+        if not zoomed_faces:
+            return candidates[0]
+
+        bx0, bx1 = 0.12, 0.88
+        best_cand = candidates[0]
+        best_score: Optional[Tuple[float, float, int]] = None
+        for idx, cand_y in enumerate(candidates):
+            span_y0 = cand_y
+            span_y1 = min(0.96, cand_y + banner_h_frac)
+            max_ov = 0.0
+            for fx0_z, fy0_z, fx1_z, fy1_z in zoomed_faces:
+                ix = max(0.0, min(fx1_z, bx1) - max(fx0_z, bx0))
+                iy = max(0.0, min(fy1_z, span_y1) - max(fy0_z, span_y0))
+                f_area = max(1e-6, (fx1_z - fx0_z) * (fy1_z - fy0_z))
+                ov = (ix * iy) / f_area
+                if ov > max_ov:
+                    max_ov = ov
+            cap_ov = max(0.0, min(span_y1, 0.82) - max(span_y0, 0.69)) / max(1e-6, span_y1 - span_y0)
+            score = (round(max_ov, 4), round(cap_ov, 3), idx)
+            if best_score is None or score < best_score:
+                best_score = score
+                best_cand = cand_y
+        return round(best_cand, 3)
     except Exception:
-        pass
-    return 0.445
+        return candidates[0]
 
 
 def parse_banners(seg: Dict[str, Any], exact: float) -> List[Tuple[str, float, float, bool]]:
-    """The segment's banners as (text, start, duration, is_header), times relative to the cut. A banner `header:<text>` is a title above the
-    stack that is never struck through."""
+    """Parse segment banners into `[(text, start_sec, duration_sec, is_header), ...]`.
+    A `header:<text>` entry renders as a static title above the struck phrase stack;
+    phrase banners default to a crisp `DEFAULT_BANNER_BEAT_DURATION` (`0.48s`) beat.
+    Strictly ignores `seg["flashcards"]` / `seg["cards"]` and any flashcard-typed dicts.
+    """
     banners = seg.get("banners") or seg.get("stop_saying") or []
     if isinstance(banners, (str, dict)):
         banners = [banners]
     out: List[Tuple[str, float, float, bool]] = []
     for b_idx, b_item in enumerate(banners):
+        if _is_flashcard_item(b_item):
+            continue
         if isinstance(b_item, str):
-            b_text, b_at, b_dur = b_item, round(0.15 + b_idx * 0.65, 3), exact
+            b_text = b_item
+            b_at = round(0.15 + b_idx * 0.65, 3)
+            raw_dur = None
         elif isinstance(b_item, dict):
             b_text = str(b_item.get("text") or b_item.get("phrase") or "STOP SAYING")
             b_at = float(b_item.get("at", round(0.15 + b_idx * 0.65, 3)))
-            b_dur = float(b_item.get("duration", max(0.4, exact - b_at)))
+            raw_dur = b_item.get("duration")
         else:
             continue
         is_header = b_text.lower().startswith("header:")
+        if raw_dur is not None:
+            b_dur = float(raw_dur)
+        elif is_header:
+            b_dur = max(0.4, exact - b_at)
+        elif b_at + DEFAULT_BANNER_BEAT_DURATION <= exact + 0.02:
+            b_dur = DEFAULT_BANNER_BEAT_DURATION
+        else:
+            b_dur = max(0.24, exact - b_at)
         out.append((b_text[7:].strip() if is_header else b_text, b_at, b_dur, is_header))
     return out
 
 
 def banner_stack_rows(seg: Dict[str, Any], parsed: List[Tuple[str, float, float, bool]]) -> Tuple[float, float]:
-    """(header row, first phrase row) as fractions of the frame height: the stack starts below the face; phrases follow the header."""
-    stack_top = banner_stack_top(seg)
+    """Return `(header_row_frac, first_phrase_row_frac)` as fractions of canvas height."""
+    stack_top = banner_stack_top(seg, num_rows=max(1, len(parsed)))
     has_header = any(pb[3] for pb in parsed)
-    return stack_top, stack_top + (0.075 if has_header else max(0.0, 0.52 - 0.445))
+    return stack_top, (stack_top + 0.075 if has_header else stack_top)
 
 
 def banner_boxes(seg: Dict[str, Any], W: int, H: int, exact: float) -> List[Dict[str, Any]]:
-    """Where each banner pill sits on the finished frame, in pixels, and when (seconds relative to the cut). Same geometry as the renderer."""
+    """Return exact pixel bounding boxes and active time spans for each banner pill on `(W, H)`."""
     parsed = parse_banners(seg, exact)
     if not parsed:
         return []
@@ -932,7 +1826,7 @@ def banner_boxes(seg: Dict[str, Any], W: int, H: int, exact: float) -> List[Dict
                 cw, ch = im.size
         except Exception:
             cw, ch = 560, 76
-        over = 36 * scale                                        # transparent margin on each side of the pill
+        over = 36 * scale
         pill_w, pill_h = max(10.0, cw * scale - 2 * over), ch * scale
         x0 = (W - cw * scale) / 2.0 + over
         if is_header:
@@ -940,13 +1834,53 @@ def banner_boxes(seg: Dict[str, Any], W: int, H: int, exact: float) -> List[Dict
         else:
             y0 = int(round(H * (phrase_base + phrase_idx * 0.068)))
             phrase_idx += 1
-        boxes.append({"text": text, "header": is_header, "x0": x0, "y0": float(y0), "x1": x0 + pill_w, "y1": y0 + pill_h,
-                      "t0": b_at, "t1": min(exact, b_at + b_dur)})
+        boxes.append({
+            "text": text,
+            "header": is_header,
+            "x0": x0,
+            "y0": float(y0),
+            "x1": x0 + pill_w,
+            "y1": y0 + pill_h,
+            "t0": b_at,
+            "t1": min(exact, b_at + b_dur),
+        })
     return boxes
 
 
+def _build_strikethrough_png(
+    strike_items: Sequence[str],
+    out_png: Union[str, Path],
+    strike_last: bool = True,
+    width: int = 1080,
+    height: int = 1920,
+) -> Path:
+    """Composite a transparent full-frame PNG stacking `strike_items` for NLE/Premiere export."""
+    from PIL import Image
+
+    out_path = Path(out_png)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas = Image.new("RGBA", (int(width), int(height)), (0, 0, 0, 0))
+    scale = width / 1080.0
+    base_y = 0.52
+
+    for idx, phrase in enumerate(strike_items):
+        is_last = idx == len(strike_items) - 1
+        do_strike = strike_last if is_last else True
+        pill_path = render_stop_saying_banner_png(str(phrase), with_strike=do_strike, strike_px=7)
+        with Image.open(pill_path) as pill_im:
+            pw = max(2, int(round(pill_im.width * scale)))
+            ph = max(2, int(round(pill_im.height * scale)))
+            resized = pill_im.convert("RGBA").resize((pw, ph), resample=Image.Resampling.LANCZOS)
+        px = (int(width) - pw) // 2
+        py = int(round(height * (base_y + idx * 0.068)))
+        canvas.alpha_composite(resized, (px, max(0, min(int(height) - ph, py))))
+
+    canvas.save(out_path, format="PNG")
+    return out_path
+
+
 # ---------------------------------------------------------------------------
-# Split panel lock: each panel keeps ONE frame for the whole split
+# Split Panel Lock: Stationary Background Registration & Colour Consistency
 # ---------------------------------------------------------------------------
 _SPLIT_LOCK_CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -963,14 +1897,22 @@ def _split_peer_time(peer: Dict[str, Any]) -> float:
 def _split_seg_sig(seg: Dict[str, Any]) -> str:
     peer = seg.get("peer") if isinstance(seg.get("peer"), dict) else {}
     return json.dumps([
-        normalize_layout_name(seg.get("layout")), str(seg.get("src")),
-        round(float(seg.get("start") or 0.0), 3), round(float(seg.get("end") or 0.0), 3),
-        str(peer.get("src")), _split_peer_time(peer), _resolve_active_slot(seg),
+        normalize_layout_name(seg.get("layout")),
+        str(seg.get("src")),
+        round(float(seg.get("start") or 0.0), 3),
+        round(float(seg.get("end") or 0.0), 3),
+        str(peer.get("src")),
+        _split_peer_time(peer),
+        _resolve_active_slot(seg),
+        str(seg.get("speaker") or ""),
+        str(peer.get("speaker") or ""),
+        _parse_offset_y(seg.get("offset_y")),
+        _parse_offset_y(peer.get("offset_y")),
     ], default=str)
 
 
 def _split_slots(lay: str, seg: Dict[str, Any], W: int, H: int) -> Tuple[str, str, Tuple[int, int], Tuple[int, int]]:
-    """(live slot, peer slot, live slot size, peer slot size) of a split segment."""
+    """Return `(live_slot, peer_slot, live_slot_size, peer_slot_size)` for a split segment."""
     if lay == "split_v":
         top_h = even(H // 2)
         sizes = {"top": (W, top_h), "bottom": (W, H - top_h)}
@@ -985,10 +1927,11 @@ def _split_slots(lay: str, seg: Dict[str, Any], W: int, H: int) -> Tuple[str, st
 
 
 def _panel_colour_stats(path: Path, crop: Dict[str, Any], t0: float, top_skip: int) -> Optional[Tuple[List[float], List[float]]]:
-    """Mean and spread of R, G, B of what a clip shows inside its locked panel crop (three frames)."""
+    """Measure RGB mean and standard deviation of `path` inside its locked panel crop across three frames."""
     try:
         import cv2
         import numpy as np
+
         g = crop["geom"]
         slot_w, slot_h = crop["slot_size"]
         k = 0.25
@@ -1005,19 +1948,19 @@ def _panel_colour_stats(path: Path, crop: Dict[str, Any], t0: float, top_skip: i
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
-            view = cv2.warpAffine(frame, mat, size, flags=cv2.INTER_AREA)[int(top_skip * k):]
+            view = cv2.warpAffine(frame, mat, size, flags=cv2.INTER_AREA)[int(top_skip * k) :]
             px.append(view.reshape(-1, 3).astype(np.float32))
         cap.release()
         if not px:
             return None
-        allpx = np.concatenate(px, axis=0)[:, ::-1]                      # BGR -> RGB
+        allpx = np.concatenate(px, axis=0)[:, ::-1]  # BGR -> RGB
         return [float(v) for v in allpx.mean(axis=0)], [float(max(1.0, v)) for v in allpx.std(axis=0)]
     except Exception:
         return None
 
 
 def _panel_colour_filter(ref: Tuple[List[float], List[float]], clip: Tuple[List[float], List[float]]) -> Tuple[str, str]:
-    """(FFmpeg filter, note) that brings `clip`'s colour to `ref`'s. Empty filter when they already match."""
+    """Return `(ffmpeg_lutrgb_filter, diagnostic_note)` matching `clip`'s colour to `ref`."""
     gains, offs, capped = [], [], False
     for c in range(3):
         a = ref[1][c] / clip[1][c]
@@ -1031,25 +1974,49 @@ def _panel_colour_filter(ref: Tuple[List[float], List[float]], clip: Tuple[List[
     if shift < 1.2 and all(abs(a - 1.0) < 0.015 for a in gains):
         return "", ""
     parts = [f"{ch}='clip(val*{gains[i]:.4f}+{offs[i]:.2f},0,255)'" for i, ch in enumerate("rgb")]
-    note = f"colour matched to the talking clip (was off by {shift:.0f} of 255)"
+    note = f"colour matched to speaking clip (shifted by {shift:.0f}/255)"
     if capped:
-        note += "; [SPLIT_COLOUR] the difference is larger than the safe limit, matched as far as allowed: regenerate the clip if it still shows"
+        note += "; [SPLIT_COLOUR] colour offset exceeds clamped threshold; matched within safe bounds"
     return "format=gbrp,lutrgb=" + ":".join(parts) + ",format=yuv420p", note
 
 
 def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]:
-    """Work out, for every split segment of the plan, the crop of both panels so that a panel's
-    background never moves: one reference clip per panel (the silent clip when there is one) fixes
-    the frame, and every other clip of that panel is lined up to it by its background.
+    """Compute background-registered stationary panel crops across all `split_h` and `split_v`
+    segments in `plan`. One reference clip per panel (the silent listener clip when present)
+    fixes the panel frame, and every speaking/listening clip in that panel is aligned to it.
     """
-    segs = [s for s in (plan.get("segments") or []) if isinstance(s, dict)
-            and normalize_layout_name(s.get("layout")) in ("split_h", "split_v") and s.get("src")]
+    segs = [
+        s for s in (plan.get("segments") or [])
+        if isinstance(s, dict)
+        and normalize_layout_name(s.get("layout")) in ("split_h", "split_v")
+        and s.get("src")
+    ]
     out: Dict[str, Any] = {"segs": {}, "report": []}
     if not segs:
         return out
 
-    uses: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}   # (layout, slot) -> appearances in order
+    uses: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     rows: List[Dict[str, Any]] = []
+    src_to_speaker: Dict[str, str] = {}
+    slot_speakers: Dict[Tuple[str, str], set] = {}
+
+    for s_any in (plan.get("segments") or []):
+        if not isinstance(s_any, dict) or not s_any.get("src"):
+            continue
+        sp_any = (str(s_any.get("speaker") or s_any.get("sp") or "").strip() or _infer_segment_speaker(s_any, plan)).strip().lower()
+        if sp_any:
+            try:
+                src_to_speaker.setdefault(str(resolve(s_any["src"])), sp_any)
+            except Exception:
+                pass
+        p_any = s_any.get("peer") if isinstance(s_any.get("peer"), dict) else {}
+        p_sp_any = str(p_any.get("speaker") or p_any.get("sp") or "").strip().lower()
+        if p_sp_any and p_any.get("src"):
+            try:
+                src_to_speaker.setdefault(str(resolve(p_any["src"])), p_sp_any)
+            except Exception:
+                pass
+
     for seg in segs:
         lay = normalize_layout_name(seg.get("layout"))
         peer = seg.get("peer") if isinstance(seg.get("peer"), dict) else {}
@@ -1058,13 +2025,123 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
         if not live_src.is_file() or not peer_src.is_file():
             continue
         live_slot, peer_slot, live_size, peer_size = _split_slots(lay, seg, W, H)
+        live_sp = (str(seg.get("speaker") or seg.get("sp") or "").strip() or _infer_segment_speaker(seg, plan)).strip().lower()
+        peer_sp = str(peer.get("speaker") or peer.get("sp") or "").strip().lower()
+        if not live_sp:
+            live_sp = src_to_speaker.get(str(live_src), "")
+        if not peer_sp:
+            peer_sp = src_to_speaker.get(str(peer_src), "")
+        if live_sp:
+            slot_speakers.setdefault((lay, live_slot), set()).add(live_sp)
+        if peer_sp:
+            slot_speakers.setdefault((lay, peer_slot), set()).add(peer_sp)
         row = {
-            "sig": _split_seg_sig(seg), "lay": lay,
-            "live": {"slot": live_slot, "src": live_src, "t": float(seg.get("start") or 0.0), "size": live_size, "role": "live"},
-            "peer": {"slot": peer_slot, "src": peer_src, "t": _split_peer_time(peer), "size": peer_size, "role": "peer"},
+            "sig": _split_seg_sig(seg),
+            "seg": seg,
+            "lay": lay,
+            "live": {
+                "slot": live_slot,
+                "src": live_src,
+                "t": float(seg.get("start") or 0.0),
+                "size": live_size,
+                "role": "live",
+                "speaker": live_sp,
+                "offset_y_raw": _parse_offset_y(seg.get("offset_y")),
+            },
+            "peer": {
+                "slot": peer_slot,
+                "src": peer_src,
+                "t": _split_peer_time(peer),
+                "size": peer_size,
+                "role": "peer",
+                "speaker": peer_sp,
+                "offset_y_raw": _parse_offset_y(peer.get("offset_y")),
+            },
         }
         rows.append(row)
+
+    # Infer missing speaker on unlabeled silent peer cuts from single-speaker slot ownership
+    for row in rows:
+        lay = row["lay"]
         for part in (row["live"], row["peer"]):
+            if not part["speaker"]:
+                sps = slot_speakers.get((lay, part["slot"]), set())
+                if len(sps) == 1:
+                    part["speaker"] = next(iter(sps))
+
+    # Build speaker-consistent per-panel offset_y maps across ALL dialogue & silent cuts
+    offset_by_lay_slot_sp: Dict[Tuple[str, str, str], float] = {}
+    offset_by_lay_sp: Dict[Tuple[str, str], float] = {}
+    offset_by_sp: Dict[str, float] = {}
+    offset_by_lay_slot: Dict[Tuple[str, str], float] = {}
+    unlabeled_offset_by_lay_slot: Dict[Tuple[str, str], float] = {}
+    offset_by_lay_src: Dict[Tuple[str, str], float] = {}
+
+    for row in rows:
+        lay = row["lay"]
+        for part in (row["live"], row["peer"]):
+            oy = float(part.get("offset_y_raw") or 0.0)
+            if abs(oy) <= 1e-4:
+                continue
+            slot = part["slot"]
+            sp = part.get("speaker") or ""
+            offset_by_lay_slot.setdefault((lay, slot), oy)
+            offset_by_lay_src.setdefault((lay, str(part["src"])), oy)
+            if sp:
+                offset_by_lay_slot_sp.setdefault((lay, slot, sp), oy)
+                offset_by_lay_sp.setdefault((lay, sp), oy)
+                offset_by_sp.setdefault(sp, oy)
+            else:
+                unlabeled_offset_by_lay_slot.setdefault((lay, slot), oy)
+
+    # Lowest-priority speaker fallback from non-split cuts or plan['speakers'] metadata
+    for s_any in (plan.get("segments") or []):
+        if not isinstance(s_any, dict):
+            continue
+        oy_any = _parse_offset_y(s_any.get("offset_y"))
+        if abs(oy_any) > 1e-4:
+            sp_any = (str(s_any.get("speaker") or s_any.get("sp") or "").strip() or _infer_segment_speaker(s_any, plan)).strip().lower()
+            if sp_any:
+                offset_by_sp.setdefault(sp_any, oy_any)
+    speakers_cfg = plan.get("speakers")
+    if isinstance(speakers_cfg, dict):
+        for sp_k, sp_v in speakers_cfg.items():
+            if isinstance(sp_v, dict):
+                oy_cfg = _parse_offset_y(sp_v.get("offset_y"))
+                if abs(oy_cfg) > 1e-4:
+                    offset_by_sp.setdefault(str(sp_k).strip().lower(), oy_cfg)
+
+    def _resolve_part_offset_y(lay: str, part: Dict[str, Any]) -> float:
+        slot = part["slot"]
+        sp = part.get("speaker") or ""
+        src_k = str(part["src"])
+        if sp:
+            if (lay, slot, sp) in offset_by_lay_slot_sp:
+                return offset_by_lay_slot_sp[(lay, slot, sp)]
+            if (lay, sp) in offset_by_lay_sp:
+                return offset_by_lay_sp[(lay, sp)]
+            if sp in offset_by_sp:
+                return offset_by_sp[sp]
+        if (lay, src_k) in offset_by_lay_src:
+            return offset_by_lay_src[(lay, src_k)]
+        if not sp:
+            if (lay, slot) in offset_by_lay_slot:
+                return offset_by_lay_slot[(lay, slot)]
+        else:
+            if (lay, slot) in unlabeled_offset_by_lay_slot:
+                return unlabeled_offset_by_lay_slot[(lay, slot)]
+            if len(slot_speakers.get((lay, slot), set())) <= 1 and (lay, slot) in offset_by_lay_slot:
+                return offset_by_lay_slot[(lay, slot)]
+        return float(part.get("offset_y_raw") or 0.0)
+
+    def _part_clip_key(part: Dict[str, Any]) -> str:
+        return f"{part['src']}|{float(part.get('offset_y') or 0.0):+.4f}"
+
+    for row in rows:
+        lay = row["lay"]
+        for part in (row["live"], row["peer"]):
+            part["offset_y"] = _resolve_part_offset_y(lay, part)
+            part["clip_key"] = _part_clip_key(part)
             uses.setdefault((lay, part["slot"]), []).append(part)
 
     def _bbox(path: Path) -> Optional[List[float]]:
@@ -1083,25 +2160,31 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
         first_t: Dict[str, float] = {}
         peer_n: Dict[str, int] = {}
         live_n: Dict[str, int] = {}
-        order: List[Path] = []
+        key_to_path: Dict[str, Path] = {}
+        key_to_oy: Dict[str, float] = {}
+        order: List[str] = []
         for part in parts:
-            k = str(part["src"])
+            k = part["clip_key"]
             if k not in first_t:
                 first_t[k] = part["t"]
-                order.append(part["src"])
+                key_to_path[k] = part["src"]
+                key_to_oy[k] = float(part.get("offset_y") or 0.0)
+                order.append(k)
             peer_n[k] = peer_n.get(k, 0) + (1 if part["role"] == "peer" else 0)
             live_n[k] = live_n.get(k, 0) + (1 if part["role"] == "live" else 0)
-        order.sort(key=lambda q: -peer_n.get(str(q), 0))          # the silent clip fixes the frame
+        order.sort(key=lambda q: -peer_n.get(q, 0))  # silent listener clip anchors the panel frame
         clusters[key] = []
-        for path in order:
-            k = str(path)
+        for k in order:
+            path = key_to_path[k]
+            oy_k = key_to_oy[k]
             bb, dims = _bbox(path), _dims(path)
             placed = False
             for cl in clusters[key]:
+                if abs(float(cl.get("offset_y") or 0.0) - oy_k) > 1e-4:
+                    continue
                 reg = register_background(cl["ref"], cl["ref_t"], path, first_t[k], cl["bbox"], bb)
                 how = "background"
                 if reg is None and dims == cl["dims"] and bb and cl["bbox"]:
-                    # Same size and the head in the same place: the same picture, nothing to move.
                     dx = abs(0.5 * (bb[0] + bb[2]) - 0.5 * (cl["bbox"][0] + cl["bbox"][2]))
                     dy = abs(bb[1] - cl["bbox"][1])
                     if dx <= 0.06 and dy <= 0.06:
@@ -1112,20 +2195,53 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
                     placed = True
                     break
             if not placed:
-                cl = {"ref": path, "ref_t": first_t[k], "bbox": bb, "dims": dims, "geom": None, "slot": key[1],
-                      "clips": {k: {"path": path, "t": first_t[k], "live_n": live_n.get(k, 0)}}, "colour": None}
+                cl = {
+                    "ref": path,
+                    "ref_t": first_t[k],
+                    "bbox": bb,
+                    "dims": dims,
+                    "geom": None,
+                    "slot": key[1],
+                    "offset_y": oy_k,
+                    "clips": {k: {"path": path, "t": first_t[k], "live_n": live_n.get(k, 0)}},
+                    "colour": None,
+                }
                 clusters[key].append(cl)
                 member[(key[0], key[1], k)] = (cl, {"a": 1.0, "tx": 0.0, "ty": 0.0}, "reference")
 
+    def _geom_crop(lay: str, part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        cl, reg, how = member[(lay, part["slot"], part["clip_key"])]
+        if cl.get("geom") is None:
+            return None
+        w_in, h_in = _dims(part["src"])
+        s_c = cl["geom"]["geom"]["s"] / max(0.01, reg["a"])
+        if abs(reg["a"] - 1.0) < 0.003 and abs(s_c * reg["tx"]) < 1.0 and abs(s_c * reg["ty"]) < 1.0:
+            reg = {"a": 1.0, "tx": 0.0, "ty": 0.0}
+        if (w_in, h_in) != cl["dims"] and how == "assumed":
+            crop = derive_registered_crop(cl["geom"], None, w_in, h_in)
+        else:
+            crop = derive_registered_crop(cl["geom"], reg, w_in, h_in)
+        crop["offset_y"] = round(float(cl["geom"].get("offset_y", cl.get("offset_y", 0.0))), 4)
+        crop["lock"] = {
+            "how": how,
+            "scale": round(reg["a"], 4),
+            "shift_px": [round(s_c * reg["tx"], 1), round(s_c * reg["ty"], 1)],
+        }
+        return crop
+
     def _colour_for(lay: str, slot: str, cl: Dict[str, Any], k: str) -> Tuple[str, str]:
-        """The same character must not change colour when the panel switches between the talking
-        and the silent clip: the talking clip keeps its colour, the other clips are matched to it."""
         if len(cl["clips"]) < 2:
             return "", ""
         if cl.get("colour") is None:
-            geo = {kk: _geom_crop(lay, {"slot": slot, "src": c["path"]}) for kk, c in cl["clips"].items()}
-            top_skip = max(int(g.get("pad_top") or 0) for g in geo.values())
-            stats = {kk: _panel_colour_stats(c["path"], geo[kk], c["t"], top_skip) for kk, c in cl["clips"].items()}
+            geo = {
+                kk: _geom_crop(lay, {"slot": slot, "src": c["path"], "clip_key": kk})
+                for kk, c in cl["clips"].items()
+            }
+            top_skip = max(int((g or {}).get("pad_top") or 0) for g in geo.values())
+            stats = {
+                kk: (_panel_colour_stats(c["path"], geo[kk], c["t"], top_skip) if geo[kk] else None)
+                for kk, c in cl["clips"].items()
+            }
             ref_k = max(cl["clips"], key=lambda kk: cl["clips"][kk]["live_n"])
             cl["colour"] = {}
             for kk in cl["clips"]:
@@ -1139,46 +2255,69 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
         crop = _geom_crop(lay, part)
         if crop is None:
             return None
-        cl = member[(lay, part["slot"], str(part["src"]))][0]
-        flt, note = _colour_for(lay, part["slot"], cl, str(part["src"]))
+        cl = member[(lay, part["slot"], part["clip_key"])][0]
+        flt, note = _colour_for(lay, part["slot"], cl, part["clip_key"])
         if flt:
             crop = dict(crop, filter=crop["filter"] + "," + flt, colour_note=note)
-        return crop
-
-    def _geom_crop(lay: str, part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        cl, reg, how = member[(lay, part["slot"], str(part["src"]))]
-        if cl.get("geom") is None:
-            return None
-        w_in, h_in = _dims(part["src"])
-        s_c = cl["geom"]["geom"]["s"] / max(0.01, reg["a"])
-        if abs(reg["a"] - 1.0) < 0.003 and abs(s_c * reg["tx"]) < 1.0 and abs(s_c * reg["ty"]) < 1.0:
-            reg = {"a": 1.0, "tx": 0.0, "ty": 0.0}                     # measuring noise, not a real shift
-        if (w_in, h_in) != cl["dims"] and how == "assumed":
-            crop = derive_registered_crop(cl["geom"], None, w_in, h_in)
-        else:
-            crop = derive_registered_crop(cl["geom"], reg, w_in, h_in)
-        crop["lock"] = {"how": how, "scale": round(reg["a"], 4),
-                        "shift_px": [round(s_c * reg["tx"], 1), round(s_c * reg["ty"], 1)]}
         return crop
 
     seen: set = set()
     for row in rows:
         lay = row["lay"]
-        cl_live = member[(lay, row["live"]["slot"], str(row["live"]["src"]))][0]
-        cl_peer = member[(lay, row["peer"]["slot"], str(row["peer"]["src"]))][0]
+        cl_live = member[(lay, row["live"]["slot"], row["live"]["clip_key"])][0]
+        cl_peer = member[(lay, row["peer"]["slot"], row["peer"]["clip_key"])][0]
         if cl_live.get("geom") is None or cl_peer.get("geom") is None:
             lw, lh = cl_live["dims"]
             pw, ph = cl_peer["dims"]
-            g_live, g_peer = compute_paired_split_crop_filters(
-                live_src=cl_live["ref"], peer_src=cl_peer["ref"],
-                src_w=lw, src_h=lh, peer_w=pw, peer_h=ph,
-                live_slot_w=row["live"]["size"][0], live_slot_h=row["live"]["size"][1],
-                peer_slot_w=row["peer"]["size"][0], peer_slot_h=row["peer"]["size"][1],
+            comp_ids = {id(cl_live), id(cl_peer)}
+            changed = True
+            while changed:
+                changed = False
+                for r in rows:
+                    if r["lay"] != lay:
+                        continue
+                    c_l = member[(lay, r["live"]["slot"], r["live"]["clip_key"])][0]
+                    c_p = member[(lay, r["peer"]["slot"], r["peer"]["clip_key"])][0]
+                    if id(c_l) in comp_ids or id(c_p) in comp_ids:
+                        if id(c_l) not in comp_ids:
+                            comp_ids.add(id(c_l))
+                            changed = True
+                        if id(c_p) not in comp_ids:
+                            comp_ids.add(id(c_p))
+                            changed = True
+            cluster_rows = [
+                r for r in rows
+                if r["lay"] == lay
+                and (
+                    id(member[(lay, r["live"]["slot"], r["live"]["clip_key"])][0]) in comp_ids
+                    or id(member[(lay, r["peer"]["slot"], r["peer"]["clip_key"])][0]) in comp_ids
+                )
+            ]
+            cluster_has_fc = any(_has_flashcards(r.get("seg") or {}, plan) for r in cluster_rows)
+            live_oy = float(cl_live.get("offset_y") or 0.0)
+            peer_oy = float(cl_peer.get("offset_y") or 0.0)
+            g_live, g_peer = _compute_paired_split_crop_filters_for_layout(
+                lay=lay,
+                seg=row.get("seg"),
+                plan=plan,
+                live_src=cl_live["ref"],
+                peer_src=cl_peer["ref"],
+                src_w=lw,
+                src_h=lh,
+                peer_w=pw,
+                peer_h=ph,
+                live_slot_w=row["live"]["size"][0],
+                live_slot_h=row["live"]["size"][1],
+                peer_slot_w=row["peer"]["size"][0],
+                peer_slot_h=row["peer"]["size"][1],
+                live_offset_y=live_oy,
+                peer_offset_y=peer_oy,
+                force_flashcards=cluster_has_fc,
             )
             if cl_live.get("geom") is None:
-                cl_live["geom"] = g_live
+                cl_live["geom"] = dict(g_live, offset_y=live_oy)
             if cl_peer.get("geom") is None:
-                cl_peer["geom"] = g_peer
+                cl_peer["geom"] = dict(g_peer, offset_y=peer_oy)
         live_crop, peer_crop = _crop_for(lay, row["live"]), _crop_for(lay, row["peer"])
         if live_crop is None or peer_crop is None:
             continue
@@ -1190,32 +2329,51 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
             seen.add(tag)
             lk = crop["lock"]
             if lk["how"] == "reference":
-                note = "fixes the frame"
+                note = "anchors panel frame"
             elif lk["how"] == "assumed":
-                note = "same picture, same frame"
+                note = "identical framing"
             else:
-                note = f"lined up by background (moved {lk['shift_px'][0]:+.0f},{lk['shift_px'][1]:+.0f} px, size x{1.0 / max(0.01, lk['scale']):.3f})"
+                note = (
+                    f"aligned by background (shift {lk['shift_px'][0]:+.0f},{lk['shift_px'][1]:+.0f} px, "
+                    f"scale x{1.0 / max(0.01, lk['scale']):.3f})"
+                )
             if crop.get("colour_note"):
                 note += "; " + crop["colour_note"]
             if crop.get("clamp_px", 0) > 2.0:
-                note += f"; [SPLIT_ALIGN] {crop['clamp_px']:.0f} px short of a perfect match (the clip shows less of the scene)"
+                note += f"; [SPLIT_ALIGN] {crop['clamp_px']:.0f} px clamped at frame edge"
             out["report"].append(f"{part['slot']:>6}: {part['src'].name} - {note}")
     for key, cls in clusters.items():
         if len(cls) > 1:
             names = ", ".join(c["ref"].name for c in cls)
-            out["report"].append(f"{key[1]:>6}: [SPLIT_ALIGN] different backgrounds in one panel ({names}); each keeps its own frame")
+            out["report"].append(
+                f"{key[1]:>6}: [SPLIT_ALIGN] distinct backgrounds in panel ({names}); each retains its own frame"
+            )
     return out
 
 
 def split_panel_lock(seg: Dict[str, Any], plan: Optional[Dict[str, Any]], W: int, H: int) -> Optional[Dict[str, Any]]:
-    """The locked crops (`live`, `peer`) of one split segment, or None when it cannot be locked."""
+    """Return locked crops `{'live': ..., 'peer': ...}` for a split segment, or `None`."""
     if not isinstance(plan, dict) or not plan.get("segments"):
         return None
     try:
-        key = hashlib.md5(json.dumps(
-            [[_split_seg_sig(s), _file_mtime_sig(s["src"])] for s in plan["segments"] if isinstance(s, dict)
-             and normalize_layout_name(s.get("layout")) in ("split_h", "split_v") and s.get("src")] + [W, H],
-            default=str).encode("utf-8")).hexdigest()
+        sp_offsets = [
+            [str(s.get("speaker") or s.get("sp") or ""), _parse_offset_y(s.get("offset_y"))]
+            for s in plan["segments"]
+            if isinstance(s, dict) and abs(_parse_offset_y(s.get("offset_y"))) > 1e-4
+        ]
+        key = hashlib.md5(
+            json.dumps(
+                [
+                    [_split_seg_sig(s), _file_mtime_sig(s["src"]), bool(_has_flashcards(s, plan))]
+                    for s in plan["segments"]
+                    if isinstance(s, dict)
+                    and normalize_layout_name(s.get("layout")) in ("split_h", "split_v")
+                    and s.get("src")
+                ]
+                + [W, H, bool(_has_flashcards(None, plan)), sp_offsets, plan.get("speakers")],
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
         if key not in _SPLIT_LOCK_CACHE:
             _SPLIT_LOCK_CACHE[key] = _compute_split_locks(plan, W, H)
         plan_locks = _SPLIT_LOCK_CACHE[key]
@@ -1225,14 +2383,16 @@ def split_panel_lock(seg: Dict[str, Any], plan: Optional[Dict[str, Any]], W: int
 
 
 def split_lock_report(plan: Optional[Dict[str, Any]], W: int, H: int) -> List[str]:
-    """Plain lines saying how each clip of each split panel was framed (printed once per render)."""
+    """Return human-readable diagnostic lines describing how each split panel clip was locked."""
     for seg in ((plan or {}).get("segments") or []):
         if isinstance(seg, dict) and normalize_layout_name(seg.get("layout")) in ("split_h", "split_v"):
             split_panel_lock(seg, plan, W, H)
             break
     for val in _SPLIT_LOCK_CACHE.values():
         if val.get("report") is not None and any(
-            _split_seg_sig(s) in val["segs"] for s in ((plan or {}).get("segments") or []) if isinstance(s, dict) and s.get("src")
+            _split_seg_sig(s) in val["segs"]
+            for s in ((plan or {}).get("segments") or [])
+            if isinstance(s, dict) and s.get("src")
         ):
             return list(val["report"])
     return []
@@ -1246,7 +2406,7 @@ def build_segment_cache_key(
     fps: int,
     draft: bool,
 ) -> str:
-    """Compute a deterministic 16-char MD5 hex cache key for a segment and its layout."""
+    """Compute a deterministic 16-character MD5 hex cache key for a segment and its layout."""
     lay = normalize_layout_name(seg.get("layout"))
     peer = seg.get("peer") if isinstance(seg.get("peer"), dict) else None
     peer_sig = None
@@ -1259,15 +2419,25 @@ def build_segment_cache_key(
             "mode": peer.get("mode", "loop"),
             "focus": peer.get("focus"),
             "slot": peer.get("slot"),
+            "offset_y": _parse_offset_y(peer.get("offset_y")),
         }
 
     eff_fps = int(fps or 24)
-    seg_dur = max(0.08, float(seg["end"]) - float(seg["start"]))
-    exact_dur = max(1, round(seg_dur * eff_fps)) / float(eff_fps)
-    rz0, rz1, rz_style, rz_at, rz_dur = resolve_segment_zoom_spec(seg, exact_dur)
+    spd = _segment_speed(seg)
+    is_muted = _segment_is_muted(seg)
+    is_beat = _segment_is_beat(seg)
+    play_dur = _segment_play_duration(seg)
+    hold_tail = _segment_hold_tail(seg)
+    play_exact = max(1, int(math.ceil(play_dur * eff_fps - 1e-6))) / float(eff_fps)
+    rz0, rz1, rz_style, rz_at, rz_dur = resolve_segment_zoom_spec(seg, play_exact)
+    rz_peak = _resolve_zoom_peak(seg, rz0, rz1, rz_style)
     active_panel = _resolve_active_slot(seg)
     baked_sig = None
-    if lay == "single" and (abs(rz0 - 1.0) > 0.004 or abs(rz1 - 1.0) > 0.004 or rz_style == "flash_zoom"):
+    if lay == "single" and (
+        abs(rz0 - 1.0) > 0.004
+        or abs(rz1 - 1.0) > 0.004
+        or rz_style in ("flash_zoom", "bell")
+    ):
         src_p = resolve(seg["src"]) if seg.get("src") else None
         bspec = _resolve_baked_split_spec(seg, src_p)
         if bspec is not None:
@@ -1282,27 +2452,47 @@ def build_segment_cache_key(
     if lay in ("split_h", "split_v"):
         lock = split_panel_lock(seg, plan, W, H)
         if lock:
-            split_lock_sig = [lock["live"]["filter"], lock["peer"]["filter"]]
+            split_lock_sig = [
+                lock["live"]["filter"],
+                lock["peer"]["filter"],
+                lock["live"].get("offset_y", 0.0),
+                lock["peer"].get("offset_y", 0.0),
+            ]
 
     plan_loudness = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
     payload = {
-        "v": 15,
+        "v": 18,
         "src": _file_mtime_sig(seg["src"]),
         "start": round(float(seg["start"]), 4),
         "end": round(float(seg["end"]), 4),
+        "speed": round(spd, 4),
+        "mute": bool(is_muted),
+        "beat": bool(is_beat),
+        "hold_tail": round(hold_tail, 4),
         "layout": lay,
         "slot": seg.get("slot"),
         "active": active_panel,
+        "offset_y": _parse_offset_y(seg.get("offset_y")),
         "framing": seg.get("framing"),
         "divider": seg.get("divider"),
         "zoom": seg.get("zoom"),
         "zoom_to": seg.get("zoom_to"),
+        "zoom_end": seg.get("zoom_end"),
+        "zoom_peak": seg.get("zoom_peak"),
         "zoom_style": seg.get("zoom_style"),
         "zoom_at": seg.get("zoom_at"),
         "zoom_dur": seg.get("zoom_dur"),
-        "resolved_zoom": [round(rz0, 4), round(rz1, 4), rz_style, round(rz_at, 4), round(rz_dur, 4)],
+        "resolved_zoom": [
+            round(rz0, 4),
+            round(rz1, 4),
+            round(rz_peak, 4) if rz_peak is not None else None,
+            rz_style,
+            round(rz_at, 4),
+            round(rz_dur, 4),
+        ],
         "baked_split": baked_sig,
         "split_lock": split_lock_sig,
+        "split_flashcard_hr": bool(lay == "split_h" and _has_flashcards(seg, plan)),
         "page": bool(isinstance((plan or {}).get("page"), dict)),
         "focus": seg.get("focus"),
         "focus_end": seg.get("focus_end"),
@@ -1321,6 +2511,57 @@ def build_segment_cache_key(
     }
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.md5(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _build_speed_video_prefix(
+    speed: float,
+    fps: int,
+    play_frames: int,
+    src_dur: float,
+) -> List[str]:
+    """Build video retiming and motion-blended frame-synthesis prefix filters preceding scaling/zoompan."""
+    if abs(speed - 1.0) <= 1e-3:
+        return ["setpts=PTS-STARTPTS", f"fps={fps}"]
+    # Retain slight lookahead past src_dur so `framerate` can blend cleanly through the final frame
+    trim_span = max(0.08, float(src_dur) + 0.15)
+    chain: List[str] = [
+        "setpts=PTS-STARTPTS",
+        f"trim=0:{trim_span:.6f}",
+        f"setpts=(PTS-STARTPTS)/{speed:.6f}",
+    ]
+    if speed < 0.999:
+        chain.append(f"framerate=fps={fps}:interp_start=0:interp_end=255:scene=100")
+    else:
+        chain.append(f"fps={fps}")
+    chain.extend([
+        f"trim=end_frame={max(1, int(play_frames))}",
+        "settb=AVTB",
+        f"setpts=N/({fps}*TB)",
+    ])
+    return chain
+
+
+def _build_atempo_chain(speed: float) -> List[str]:
+    """Build chained FFmpeg `atempo` filters (each stage in `[0.5, 2.0]`) for `speed != 1.0`."""
+    if abs(speed - 1.0) <= 1e-3:
+        return []
+    spd = max(0.0625, min(16.0, float(speed)))
+    if 0.5 <= spd <= 2.0:
+        return [f"atempo={spd:.6f}"]
+    if 0.25 <= spd < 0.5 or 2.0 < spd <= 4.0:
+        stage = math.sqrt(spd)
+        return [f"atempo={stage:.6f}", f"atempo={stage:.6f}"]
+    stages: List[str] = []
+    rem = spd
+    while rem < 0.5:
+        stages.append("atempo=0.500000")
+        rem /= 0.5
+    while rem > 2.0:
+        stages.append("atempo=2.000000")
+        rem /= 2.0
+    if abs(rem - 1.0) > 1e-4:
+        stages.append(f"atempo={rem:.6f}")
+    return stages
 
 
 def _build_slot_video_chain(
@@ -1344,9 +2585,13 @@ def _build_slot_video_chain(
     color_filter: Optional[str] = None,
     prebuilt_crop_filter: Optional[str] = None,
     headroom_pct: float = TARGET_HEADROOM_PCT,
+    zoom_peak: Optional[float] = None,
+    speed: float = 1.0,
+    src_dur: Optional[float] = None,
+    play_frames: Optional[int] = None,
 ) -> str:
-    """Build an FFmpeg video filter chain that scales and crops `input_label` into
-    `(slot_w, slot_h)` with eye-anchored headroom (`14%`) and sub-pixel supersampled zoom.
+    """Build an FFmpeg video filter chain scaling and cropping `input_label` into
+    `(slot_w, slot_h)` with eye-anchored headroom (`14%`), speed retiming, and sub-pixel zoom.
     """
     slot_w, slot_h = even(slot_w), even(slot_h)
     fx = max(0.05, min(0.95, float(focus[0]) if len(focus) >= 1 else 0.5))
@@ -1354,21 +2599,35 @@ def _build_slot_video_chain(
     fx1 = float(focus_end[0]) if focus_end and len(focus_end) >= 1 else fx
     fy1 = float(focus_end[1]) if focus_end and len(focus_end) >= 2 else fy
     has_pan = math.hypot(fx1 - fx, fy1 - fy) > 0.04
+    style_norm = str(zoom_style or "").strip().lower()
+    is_bell_active = style_norm == "bell" and (
+        zoom_peak is None
+        or abs(float(zoom_peak) - float(z0)) > 0.004
+        or abs(float(zoom_peak) - float(z1)) > 0.004
+        or abs(float(zoom_peak) - 1.0) > 0.004
+    )
     is_static_1x = (
         abs(z0 - 1.0) <= 0.004
         and abs(z1 - 1.0) <= 0.004
-        and zoom_style in ("none", "static", "")
+        and style_norm in ("none", "static", "")
+        and not is_bell_active
         and not has_pan
     )
+    pf = play_frames if play_frames is not None else max(1, int(round(exact_dur * fps)))
+    sd = src_dur if src_dur is not None else max(0.04, exact_dur * speed)
+    speed_prefix = _build_speed_video_prefix(speed, fps, pf, sd)
 
     if exact and abs((src_w / max(1, src_h)) / (slot_w / max(1, slot_h)) - 1.0) < 0.03:
         if is_static_1x:
             cf_part = f",{color_filter}" if color_filter else ""
-            return f"{input_label}setpts=PTS-STARTPTS,fps={fps},scale={slot_w}:{slot_h}:flags=lanczos{cf_part},setsar=1,format=yuv420p{output_label}"
-        chain = ["setpts=PTS-STARTPTS", f"fps={fps}", f"scale={slot_w}:{slot_h}:flags=lanczos"]
+            return (
+                f"{input_label}{','.join(speed_prefix)},"
+                f"scale={slot_w}:{slot_h}:flags=lanczos{cf_part},setsar=1,format=yuv420p{output_label}"
+            )
+        chain = [*speed_prefix, f"scale={slot_w}:{slot_h}:flags=lanczos"]
         z_fx, z_fy, z_fx1, z_fy1 = fx, fy, fx1, fy1
     else:
-        chain = ["setpts=PTS-STARTPTS", f"fps={fps}"]
+        chain = list(speed_prefix)
         if prebuilt_crop_filter:
             chain.append(prebuilt_crop_filter)
             z_fx, z_fy, z_fx1, z_fy1 = fx, fy, fx1, fy1
@@ -1411,6 +2670,7 @@ def _build_slot_video_chain(
             zoom_dur=zoom_dur,
             fx1=z_fx1,
             fy1=z_fy1,
+            zoom_peak=zoom_peak,
         )
     )
     if color_filter:
@@ -1435,6 +2695,85 @@ def _extract_peer_still_png(peer_src: Path, still_at: float) -> Path:
     return out_png
 
 
+def _append_peer_video_input(
+    peer: Dict[str, Any],
+    peer_src: Path,
+    peer_dur: float,
+    dur: float,
+    exact: float,
+    fps: int,
+    inputs: List[Any],
+    fc: List[str],
+    peer_idx: int,
+    default_still: bool = False,
+) -> str:
+    """Append FFmpeg input arguments and optional seamless loop filter for a listener `peer` clip.
+    Returns the FFmpeg filtergraph input label (`'[1:v]'` or `'[peer_loop_in]'`).
+    """
+    still_at = float(peer.get("still_at") if peer.get("still_at") is not None else 0.5)
+    idle_span = peer.get("idle_span")
+    has_span = isinstance(idle_span, (list, tuple)) and len(idle_span) >= 2
+    default_mode = "still" if (default_still and not has_span and not _SILENT_CLIP_NAME_RE.search(peer_src.stem)) else "loop"
+    mode = str(peer.get("mode") or default_mode).lower()
+    peer_loop_filter = ""
+
+    if peer_src.is_file() and mode == "live":
+        p_start = max(0.0, float(peer.get("start", 0.0) or 0.0))
+        target_dur = max(float(dur), float(exact))
+        avail_live = max(0.0, peer_dur - p_start)
+        if avail_live >= target_dur - 0.10:
+            inputs.extend(["-ss", f"{p_start:.3f}", "-t", f"{target_dur + 0.5:.3f}", "-i", peer_src])
+        elif peer_dur >= 0.30:
+            safe_s0 = p_start if avail_live >= 0.30 else 0.0
+            safe_span = max(0.30, peer_dur - safe_s0)
+            inputs.extend(["-ss", f"{safe_s0:.3f}", "-t", f"{safe_span:.3f}", "-i", peer_src])
+            loop_frames = max(2, int(round(safe_span * fps)))
+            peer_loop_filter = (
+                f"fps={fps},loop=loop=-1:size={loop_frames}:start=0,"
+                f"setpts=N/({fps}*TB),trim=0:{target_dur:.4f},setpts=PTS-STARTPTS"
+            )
+        else:
+            inputs.extend([
+                "-ss", f"{min(p_start, max(0.0, peer_dur - 0.08)):.3f}",
+                "-t", f"{target_dur + 0.5:.3f}", "-i", peer_src,
+            ])
+    elif peer_src.is_file() and mode != "still":
+        if has_span and (float(idle_span[1]) - float(idle_span[0])) >= 0.30:
+            s0 = max(0.0, float(idle_span[0]))
+            s1 = float(idle_span[1])
+            s_dur = max(0.30, s1 - s0)
+        else:
+            s0 = float(peer.get("start", 0.0) or 0.0) % max(0.5, peer_dur)
+            s1 = peer_dur
+            s_dur = max(0.30, peer_dur - s0)
+
+        is_dedicated_silent = (s0 <= 0.15 and abs(s1 - peer_dur) <= 0.25) or bool(
+            _SILENT_CLIP_NAME_RE.search(peer_src.stem)
+        )
+        if s_dur >= exact - 0.15 and (s0 + exact <= peer_dur - 0.10 or not is_dedicated_silent):
+            inputs.extend(["-ss", f"{s0:.3f}", "-t", f"{exact + 0.5:.3f}", "-i", peer_src])
+        elif is_dedicated_silent:
+            inputs.extend(["-stream_loop", "-1", "-ss", f"{s0:.3f}", "-i", peer_src])
+            peer_loop_filter = f"trim=0:{exact:.4f},setpts=PTS-STARTPTS"
+        else:
+            inputs.extend(["-ss", f"{s0:.3f}", "-t", f"{s_dur:.3f}", "-i", peer_src])
+            loop_frames = max(2, int(round(s_dur * fps)))
+            peer_loop_filter = (
+                f"fps={fps},loop=loop=-1:size={loop_frames}:start=0,"
+                f"setpts=N/({fps}*TB),trim=0:{exact:.4f},setpts=PTS-STARTPTS"
+            )
+    elif peer_src.is_file():
+        still_png = _extract_peer_still_png(peer_src, still_at)
+        inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", still_png])
+    else:
+        inputs.extend(["-ss", f"{still_at:.3f}", "-t", f"{exact:.4f}", "-i", peer_src])
+
+    if peer_loop_filter:
+        fc.append(f"[{peer_idx}:v]{peer_loop_filter}[peer_loop_in]")
+        return "[peer_loop_in]"
+    return f"[{peer_idx}:v]"
+
+
 def build_segment_ffmpeg_args(
     seg: Dict[str, Any],
     plan: Optional[Dict[str, Any]],
@@ -1444,76 +2783,100 @@ def build_segment_ffmpeg_args(
     out: Union[str, Path],
     draft: bool = False,
 ) -> Tuple[List[Any], float, int]:
-    """Construct the complete FFmpeg argument list for rendering `seg` in any of the 5 layouts.
+    """Construct the complete FFmpeg argument list for rendering `seg` in any layout mode.
 
     Returns `(ffmpeg_args, exact_duration_sec, frames_count)`.
     """
     plan = plan or {}
     W, H = even(W), even(H)
     fps = int(fps or 24)
-    dur = max(0.08, float(seg["end"]) - float(seg["start"]))
-    frames = max(1, round(dur * fps))
+    src_dur = max(0.04, float(seg["end"]) - float(seg["start"]))
+    spd = _segment_speed(seg)
+    is_retimed = abs(spd - 1.0) > 1e-3
+    is_muted = _segment_is_muted(seg)
+    play_dur = _segment_play_duration(seg) if is_retimed else max(0.08, src_dur)
+    hold_tail = _segment_hold_tail(seg)
+    play_frames = max(1, int(math.ceil(play_dur * fps - 1e-6)))
+    play_exact = play_frames / float(fps)
+    hold_frames = max(0, int(round(hold_tail * fps)))
+    frames = play_frames + hold_frames
     exact = frames / float(fps)
+    dur = play_dur
 
     lay = normalize_layout_name(seg.get("layout"))
-    z0, z1, zoom_style, zoom_at, zoom_dur = resolve_segment_zoom_spec(seg, exact)
+    z0, z1, zoom_style, zoom_at, zoom_dur = resolve_segment_zoom_spec(seg, play_exact)
+    zoom_peak = _resolve_zoom_peak(seg, z0, z1, zoom_style)
     focus = list(seg.get("focus") or [0.5, 0.38])
     focus_end = list(seg.get("focus_end") or focus)
     fx, fy = float(focus[0]), float(focus[1])
     fx1, fy1 = float(focus_end[0]), float(focus_end[1])
 
     src = resolve(seg["src"])
-    src_info = probe(src) if src.is_file() else {"width": W, "height": H, "has_audio": True, "duration": dur + 1.0}
+    src_info = probe(src) if src.is_file() else {"width": W, "height": H, "has_audio": True, "duration": src_dur + 1.0}
     src_w = int(src_info.get("width") or W)
     src_h = int(src_info.get("height") or H)
     has_audio = bool(src_info.get("has_audio", True))
+    use_silence = is_muted or (not has_audio)
     color_filter = compute_face_color_match_filter(seg, plan)
 
-    plan_loud = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
-    seg_loud = float(seg.get("loudness") if seg.get("loudness") is not None else plan_loud)
-    seg_gain_db = float(seg.get("gain_db") or 0.0)
-    clip_gain_db = _measure_clip_rms_gain_db(src) if has_audio else 0.0
-    total_gain_db = round(clip_gain_db + seg_gain_db, 2)
+    if not use_silence:
+        seg_gain_db = float(seg.get("gain_db") or 0.0)
+        clip_gain_db = _measure_clip_rms_gain_db(src)
+        total_gain_db = round(clip_gain_db + seg_gain_db, 2)
 
-    af_parts = [
-        f"atrim=0:{exact:.6f}",
-        "asetpts=PTS-STARTPTS",
-        "highpass=f=70",
-    ]
-    if abs(total_gain_db) >= 0.05:
-        af_parts.append(f"volume={total_gain_db:+.2f}dB")
-    af_parts.extend([
-        "alimiter=limit=0.891:level=false",
-        "aresample=48000",
-        "aformat=channel_layouts=stereo",
-        "apad",
-        f"atrim=0:{exact:.6f}",
-        "asetpts=PTS-STARTPTS",
-        f"afade=t=in:d={EDGE_FADE}",
-        f"afade=t=out:st={max(0.0, exact - EDGE_FADE):.6f}:d={EDGE_FADE}",
-    ])
-    af_chain = ",".join(af_parts)
+        af_parts = [
+            "asetpts=PTS-STARTPTS",
+            f"atrim=0:{(src_dur if is_retimed else play_exact):.6f}",
+            "asetpts=PTS-STARTPTS",
+        ]
+        if is_retimed:
+            af_parts.extend(_build_atempo_chain(spd))
+            af_parts.append("asetpts=PTS-STARTPTS")
+        af_parts.append("highpass=f=70")
+        if abs(total_gain_db) >= 0.05:
+            af_parts.append(f"volume={total_gain_db:+.2f}dB")
+        af_parts.extend([
+            "alimiter=limit=0.891:level=false",
+            "aresample=48000",
+            "aformat=channel_layouts=stereo",
+            "apad",
+            f"atrim=0:{play_exact:.6f}",
+            "asetpts=PTS-STARTPTS",
+            f"afade=t=in:d={EDGE_FADE}",
+            f"afade=t=out:st={max(0.0, play_exact - EDGE_FADE):.6f}:d={EDGE_FADE}",
+        ])
+        if hold_tail > 0.001:
+            af_parts.extend([
+                "apad",
+                f"atrim=0:{exact:.6f}",
+                "asetpts=PTS-STARTPTS",
+            ])
+        af_chain = ",".join(af_parts)
+    else:
+        af_chain = f"atrim=0:{exact:.6f},asetpts=PTS-STARTPTS"
 
-    inputs: List[Any] = ["-ss", f"{float(seg['start']):.3f}", "-t", f"{dur + 0.5:.3f}", "-i", src]
-    audio_input_idx: Optional[int] = 0 if has_audio else None
+    inputs: List[Any] = ["-ss", f"{float(seg['start']):.3f}", "-t", f"{src_dur + 0.5:.3f}", "-i", src]
+    audio_input_idx: Optional[int] = 0 if not use_silence else None
     next_idx = 1
 
     fc: List[str] = []
     v_curr = "[vbase]"
 
     # ------------------------------------------------------------------
-    # Layout 1: SINGLE (Full-screen or Pre-Stitched Baked Split Sub-Panel)
+    # Layout 1: SINGLE (Full-frame or Pre-Stitched Baked Split Sub-Panel)
     # ------------------------------------------------------------------
     if lay == "single":
         has_active_zoom = (
             abs(z0 - 1.0) > 0.004
             or abs(z1 - 1.0) > 0.004
-            or zoom_style == "flash_zoom"
+            or zoom_style in ("flash_zoom", "bell")
         )
         baked_spec = _resolve_baked_split_spec(seg, src) if has_active_zoom else None
+        speed_prefix = _build_speed_video_prefix(spd, fps, play_frames, src_dur)
+        speed_prefix_str = ",".join(speed_prefix)
         if baked_spec is not None:
             bz0, bz1, b_style, b_at, b_dur = _clamp_split_zoom_spec(
-                z0, z1, zoom_style, zoom_at, zoom_dur, exact
+                z0, z1, zoom_style, zoom_at, zoom_dur, play_exact
             )
             b_kind = str(baked_spec["kind"])
             b_active = str(baked_spec["active"])
@@ -1567,7 +2930,7 @@ def build_segment_ffmpeg_args(
                 top_h = max(16, min(H - 16, even(H * split_frac)))
                 bot_h = H - top_h
                 fc.append(
-                    f"[0:v]setpts=PTS-STARTPTS,fps={fps},"
+                    f"[0:v]{speed_prefix_str},"
                     f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
                     f"crop={W}:{H}:x='(iw-{W})*0.5':y='(ih-{H})*0.5',split=2[vb_top_in][vb_bot_in]"
                 )
@@ -1576,7 +2939,7 @@ def build_segment_ffmpeg_args(
                 if b_active == "top":
                     top_ops.extend(
                         _build_subpixel_zoom_filter(
-                            slot_w=W, slot_h=top_h, fps=fps, exact_dur=exact,
+                            slot_w=W, slot_h=top_h, fps=fps, exact_dur=play_exact,
                             fx=fx_p, fy=fy_p, z0=bz0, z1=bz1,
                             zoom_style=b_style, zoom_at=b_at, zoom_dur=b_dur,
                         )
@@ -1584,7 +2947,7 @@ def build_segment_ffmpeg_args(
                 else:
                     bot_ops.extend(
                         _build_subpixel_zoom_filter(
-                            slot_w=W, slot_h=bot_h, fps=fps, exact_dur=exact,
+                            slot_w=W, slot_h=bot_h, fps=fps, exact_dur=play_exact,
                             fx=fx_p, fy=fy_p, z0=bz0, z1=bz1,
                             zoom_style=b_style, zoom_at=b_at, zoom_dur=b_dur,
                         )
@@ -1601,7 +2964,7 @@ def build_segment_ffmpeg_args(
                 left_w = max(16, min(W - 16, even(W * split_frac)))
                 right_w = W - left_w
                 fc.append(
-                    f"[0:v]setpts=PTS-STARTPTS,fps={fps},"
+                    f"[0:v]{speed_prefix_str},"
                     f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
                     f"crop={W}:{H}:x='(iw-{W})*0.5':y='(ih-{H})*0.5',split=2[vb_left_in][vb_right_in]"
                 )
@@ -1610,7 +2973,7 @@ def build_segment_ffmpeg_args(
                 if b_active == "left":
                     left_ops.extend(
                         _build_subpixel_zoom_filter(
-                            slot_w=left_w, slot_h=H, fps=fps, exact_dur=exact,
+                            slot_w=left_w, slot_h=H, fps=fps, exact_dur=play_exact,
                             fx=fx_p, fy=fy_p, z0=bz0, z1=bz1,
                             zoom_style=b_style, zoom_at=b_at, zoom_dur=b_dur,
                         )
@@ -1618,7 +2981,7 @@ def build_segment_ffmpeg_args(
                 else:
                     right_ops.extend(
                         _build_subpixel_zoom_filter(
-                            slot_w=right_w, slot_h=H, fps=fps, exact_dur=exact,
+                            slot_w=right_w, slot_h=H, fps=fps, exact_dur=play_exact,
                             fx=fx_p, fy=fy_p, z0=bz0, z1=bz1,
                             zoom_style=b_style, zoom_at=b_at, zoom_dur=b_dur,
                         )
@@ -1632,8 +2995,7 @@ def build_segment_ffmpeg_args(
                 fc.append(f"[vb_left][vb_right]{','.join(post_ops)}{v_curr}")
         else:
             vf = [
-                "setpts=PTS-STARTPTS",
-                f"fps={fps}",
+                *speed_prefix,
                 f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos",
                 f"crop={W}:{H}:x='(iw-{W})*{fx:.4f}':y='(ih-{H})*{fy:.4f}'",
             ]
@@ -1642,7 +3004,7 @@ def build_segment_ffmpeg_args(
                     slot_w=W,
                     slot_h=H,
                     fps=fps,
-                    exact_dur=exact,
+                    exact_dur=play_exact,
                     fx=fx,
                     fy=fy,
                     z0=z0,
@@ -1652,6 +3014,7 @@ def build_segment_ffmpeg_args(
                     zoom_dur=zoom_dur,
                     fx1=fx1,
                     fy1=fy1,
+                    zoom_peak=zoom_peak,
                 )
             )
             if color_filter:
@@ -1660,59 +3023,22 @@ def build_segment_ffmpeg_args(
             fc.append(f"[0:v]{','.join(vf)}{v_curr}")
 
     # ------------------------------------------------------------------
-    # Layout 2 & 3: SPLIT_V (top_bottom) & SPLIT_H (left_right)
+    # Layout 2 & 3: SPLIT_V (`top_bottom`) & SPLIT_H (`left_right`)
     # ------------------------------------------------------------------
     elif lay in ("split_v", "split_h"):
-        peer = seg.get("peer") or {}
+        peer = seg.get("peer") if isinstance(seg.get("peer"), dict) else {}
         peer_src = resolve(peer.get("src") or seg["src"])
         peer_info = probe(peer_src) if peer_src.is_file() else {"width": src_w, "height": src_h, "duration": 6.0}
         peer_w = int(peer_info.get("width") or src_w)
         peer_h = int(peer_info.get("height") or src_h)
         peer_focus = list(peer.get("focus") or [0.5, 0.38])
-        still_at = float(peer.get("still_at") if peer.get("still_at") is not None else 0.5)
-        idle_span = peer.get("idle_span")
+        peer_dur = float(peer_info.get("duration") or 6.0)
 
-        # Always use live moving listening video when peer_src is a video file (never static screenshot unless mode == "still")
         peer_idx = next_idx
         next_idx += 1
-        peer_loop_filter = ""
-        peer_dur = float(peer_info.get("duration") or 6.0)
-        if peer_src.is_file() and peer.get("mode") == "live":
-            # Both panels play their own clip in sync; audio still comes from the main clip.
-            inputs.extend(["-ss", f"{float(peer.get('start', 0.0)):.3f}", "-t", f"{dur + 0.5:.3f}", "-i", peer_src])
-        elif peer_src.is_file() and peer.get("mode", "loop") != "still":
-            if isinstance(idle_span, (list, tuple)) and len(idle_span) >= 2 and (float(idle_span[1]) - float(idle_span[0])) >= 0.30:
-                s0 = max(0.0, float(idle_span[0]))
-                s1 = float(idle_span[1])
-                s_dur = max(0.30, s1 - s0)
-            else:
-                # Dedicated listening clip: play from 0.0 across full clip duration and wrap seamlessly
-                s0 = float(peer.get("start", 0.0) or 0.0) % max(0.5, peer_dur)
-                s1 = peer_dur
-                s_dur = max(0.30, peer_dur - s0)
-
-            is_full_listening_clip = (s0 <= 0.15 and abs(s1 - peer_dur) <= 0.25) or ("listen" in peer_src.stem.lower() or "idle" in peer_src.stem.lower())
-            if s_dur >= exact - 0.15:
-                inputs.extend(["-ss", f"{s0:.3f}", "-t", f"{exact + 0.5:.3f}", "-i", peer_src])
-            elif is_full_listening_clip:
-                # Dedicated listening video clip shorter than segment: native demuxer -stream_loop -1 + filter trim
-                inputs.extend(["-stream_loop", "-1", "-ss", f"{s0:.3f}", "-i", peer_src])
-                peer_loop_filter = f"trim=0:{exact:.4f},setpts=PTS-STARTPTS"
-            else:
-                # Sub-span inside a combined talking+listening clip: loop only [s0, s1] so mouth never opens
-                inputs.extend(["-ss", f"{s0:.3f}", "-t", f"{s_dur:.3f}", "-i", peer_src])
-                loop_frames = max(2, int(round(s_dur * fps)))
-                peer_loop_filter = f"fps={fps},loop=loop=-1:size={loop_frames}:start=0,setpts=N/({fps}*TB),trim=0:{exact:.4f},setpts=PTS-STARTPTS"
-        elif peer_src.is_file():
-            still_png = _extract_peer_still_png(peer_src, still_at)
-            inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", still_png])
-        else:
-            inputs.extend(["-ss", f"{still_at:.3f}", "-t", f"{exact:.4f}", "-i", peer_src])
-
-        peer_in_label = f"[{peer_idx}:v]"
-        if peer_loop_filter:
-            fc.append(f"[{peer_idx}:v]{peer_loop_filter}[peer_loop_in]")
-            peer_in_label = "[peer_loop_in]"
+        peer_in_label = _append_peer_video_input(
+            peer, peer_src, peer_dur, dur, exact, fps, inputs, fc, peer_idx, default_still=False
+        )
 
         has_explicit_pan = seg.get("focus_end") is not None and math.hypot(fx1 - fx, fy1 - fy) > 0.04
 
@@ -1724,25 +3050,31 @@ def build_segment_ffmpeg_args(
             live_h = slot_h_top if active_top else slot_h_bot
             peer_h_slot = slot_h_bot if active_top else slot_h_top
 
-            live_crop, peer_crop, live_slot_focus, peer_slot_focus = compute_paired_split_crop_filters(
-                live_src=src,
-                peer_src=peer_src,
-                src_w=src_w,
-                src_h=src_h,
-                peer_w=peer_w,
-                peer_h=peer_h,
-                live_slot_w=slot_w,
-                live_slot_h=live_h,
-                peer_slot_w=slot_w,
-                peer_slot_h=peer_h_slot,
-                live_focus=[fx, fy],
-                peer_focus=peer_focus,
-                return_focus=True,
-            )
             _lock = split_panel_lock(seg, plan, W, H)
-            if _lock:   # one frame per panel for the whole split: no jump between speaking and silent clip
+            if _lock:
                 live_crop, peer_crop = _lock["live"], _lock["peer"]
                 live_slot_focus, peer_slot_focus = list(live_crop["slot_focus"]), list(peer_crop["slot_focus"])
+            else:
+                live_crop, peer_crop, live_slot_focus, peer_slot_focus = _compute_paired_split_crop_filters_for_layout(
+                    lay="split_v",
+                    seg=seg,
+                    plan=plan,
+                    live_src=src,
+                    peer_src=peer_src,
+                    src_w=src_w,
+                    src_h=src_h,
+                    peer_w=peer_w,
+                    peer_h=peer_h,
+                    live_slot_w=slot_w,
+                    live_slot_h=live_h,
+                    peer_slot_w=slot_w,
+                    peer_slot_h=peer_h_slot,
+                    live_focus=[fx, fy],
+                    peer_focus=peer_focus,
+                    return_focus=True,
+                    live_offset_y=_parse_offset_y(seg.get("offset_y")),
+                    peer_offset_y=_parse_offset_y(peer.get("offset_y")),
+                )
             live_slot_focus_end = (
                 [
                     min(0.80, max(0.20, live_slot_focus[0] + (fx1 - fx))),
@@ -1753,11 +3085,12 @@ def build_segment_ffmpeg_args(
             )
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[live_slot]", src_w, src_h, slot_w, live_h, fps, exact,
+                    "[0:v]", "[live_slot]", src_w, src_h, slot_w, live_h, fps, play_exact,
                     live_slot_focus, z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=live_slot_focus_end,
                     color_filter=color_filter, prebuilt_crop_filter=live_crop["filter"],
+                    zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
             fc.append(
@@ -1784,25 +3117,31 @@ def build_segment_ffmpeg_args(
             peer_w_slot = slot_w_right if active_left else slot_w_left
 
             exact_fit = str(seg.get("framing") or "").lower() == "exact"
-            live_crop, peer_crop, live_slot_focus, peer_slot_focus = compute_paired_split_crop_filters(
-                live_src=src,
-                peer_src=peer_src,
-                src_w=src_w,
-                src_h=src_h,
-                peer_w=peer_w,
-                peer_h=peer_h,
-                live_slot_w=live_w,
-                live_slot_h=slot_h,
-                peer_slot_w=peer_w_slot,
-                peer_slot_h=slot_h,
-                live_focus=[fx, fy],
-                peer_focus=peer_focus,
-                return_focus=True,
-            )
             _lock = split_panel_lock(seg, plan, W, H)
-            if _lock:   # one frame per panel for the whole split: no jump between speaking and silent clip
+            if _lock:
                 live_crop, peer_crop = _lock["live"], _lock["peer"]
                 live_slot_focus, peer_slot_focus = list(live_crop["slot_focus"]), list(peer_crop["slot_focus"])
+            else:
+                live_crop, peer_crop, live_slot_focus, peer_slot_focus = _compute_paired_split_crop_filters_for_layout(
+                    lay="split_h",
+                    seg=seg,
+                    plan=plan,
+                    live_src=src,
+                    peer_src=peer_src,
+                    src_w=src_w,
+                    src_h=src_h,
+                    peer_w=peer_w,
+                    peer_h=peer_h,
+                    live_slot_w=live_w,
+                    live_slot_h=slot_h,
+                    peer_slot_w=peer_w_slot,
+                    peer_slot_h=slot_h,
+                    live_focus=[fx, fy],
+                    peer_focus=peer_focus,
+                    return_focus=True,
+                    live_offset_y=_parse_offset_y(seg.get("offset_y")),
+                    peer_offset_y=_parse_offset_y(peer.get("offset_y")),
+                )
             live_slot_focus_end = (
                 [
                     min(0.80, max(0.20, live_slot_focus[0] + (fx1 - fx))),
@@ -1813,12 +3152,13 @@ def build_segment_ffmpeg_args(
             )
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[live_slot]", src_w, src_h, live_w, slot_h, fps, exact,
+                    "[0:v]", "[live_slot]", src_w, src_h, live_w, slot_h, fps, play_exact,
                     live_slot_focus, z0, z1,
                     exact=exact_fit,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=live_slot_focus_end,
                     color_filter=color_filter, prebuilt_crop_filter=live_crop["filter"],
+                    zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
             fc.append(
@@ -1833,18 +3173,18 @@ def build_segment_ffmpeg_args(
 
             stack_order = "[live_slot][peer_slot]" if active_left else "[peer_slot][live_slot]"
             dv = seg.get("divider")
-            if isinstance(dv, dict):   # measured divider: thin line on the left slot's right edge
+            if isinstance(dv, dict):
                 dw = max(2, round(W * float(dv.get("w_frac", 0.004))))
                 dx = round(W * float(dv.get("x_frac", 0.5)))
                 divider = f"drawbox=x={dx}:y=0:w={dw}:h={H}:color=0x{dv.get('color', 'FFFFFF')}@{dv.get('alpha', 1.0)}:t=fill,"
             elif isinstance((plan or {}).get("page"), dict):
-                divider = ""   # scrolling-text page format: the two clips are stitched edge to edge, as in the reference
+                divider = ""  # Scrolling-text page format stitches the two panels edge to edge
             else:
                 divider = f"drawbox=x={slot_w_left - 2}:y=0:w=4:h={H}:color=white@0.85:t=fill,"
             fc.append(f"{stack_order}hstack=inputs=2:shortest=1,{divider}format=yuv420p{v_curr}")
 
     # ------------------------------------------------------------------
-    # Layout 4: CHAT_BAR / TEXTING (floating_overlay or docked)
+    # Layout 4: CHAT_BAR / TEXTING (`floating_overlay` or `docked`)
     # ------------------------------------------------------------------
     elif lay == "chat_bar":
         chat_spec = seg.get("chat") or {}
@@ -1861,21 +3201,22 @@ def build_segment_ffmpeg_args(
             vid_h = H - dock_h
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[v_sp]", src_w, src_h, W, vid_h, fps, exact, [fx, fy], z0, z1,
+                    "[0:v]", "[v_sp]", src_w, src_h, W, vid_h, fps, play_exact, [fx, fy], z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1], color_filter=color_filter,
+                    zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
             fc.append(f"[v_sp]pad={W}:{H}:0:{dock_h}:color=#0f172a[v_padded]")
             fc.append(f"[{chat_idx}:v]scale={W}:{H},format=rgba[chat_ov]")
             fc.append(f"[v_padded][chat_ov]overlay=0:0:eof_action=pass,format=yuv420p{v_curr}")
         else:
-            # Floating overlay: speaker fills W x H, chat bar overlays top with smooth fade-in
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[v_sp]", src_w, src_h, W, H, fps, exact, [fx, fy], z0, z1,
+                    "[0:v]", "[v_sp]", src_w, src_h, W, H, fps, play_exact, [fx, fy], z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1], color_filter=color_filter,
+                    zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
             fc.append(f"[{chat_idx}:v]scale={W}:{H},format=rgba,fade=t=in:st=0:d=0.15:alpha=1[chat_ov]")
@@ -1885,21 +3226,19 @@ def build_segment_ffmpeg_args(
     # Layout 5: VIDEO_CALL / PIP_CALL / GMEET_GRID
     # ------------------------------------------------------------------
     elif lay in ("video_call", "pip_call", "gmeet_grid"):
-        peer = seg.get("peer") or {}
+        peer = seg.get("peer") if isinstance(seg.get("peer"), dict) else {}
         peer_src = resolve(peer.get("src") or seg["src"])
         peer_info = probe(peer_src) if peer_src.is_file() else {"width": src_w, "height": src_h, "duration": 6.0}
         peer_w = int(peer_info.get("width") or src_w)
         peer_h = int(peer_info.get("height") or src_h)
         peer_focus = list(peer.get("focus") or [0.5, 0.38])
-        still_at = float(peer.get("still_at") if peer.get("still_at") is not None else 0.5)
+        peer_dur = float(peer_info.get("duration") or 6.0)
 
         peer_idx = next_idx
         next_idx += 1
-        if peer_src.is_file():
-            still_png = _extract_peer_still_png(peer_src, still_at)
-            inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", still_png])
-        else:
-            inputs.extend(["-ss", f"{still_at:.3f}", "-t", f"{exact:.4f}", "-i", peer_src])
+        peer_in_label = _append_peer_video_input(
+            peer, peer_src, peer_dur, dur, exact, fps, inputs, fc, peer_idx, default_still=True
+        )
 
         pip_shape = str(seg.get("pip_shape") or peer.get("shape") or "rounded")
         variant = "gmeet_grid" if lay == "gmeet_grid" else "pip_call"
@@ -1928,14 +3267,15 @@ def build_segment_ffmpeg_args(
             fc.append(f"color=c=#14161c:s={W}x{H}:r={fps}:d={exact:.4f}[bg]")
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[v_live]", src_w, src_h, tw, th, fps, exact, [fx, fy], z0, z1,
+                    "[0:v]", "[v_live]", src_w, src_h, tw, th, fps, play_exact, [fx, fy], z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1], color_filter=color_filter,
+                    zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
             fc.append(
                 _build_slot_video_chain(
-                    f"[{peer_idx}:v]", "[v_peer]", peer_w, peer_h, tw, th, fps, exact, peer_focus, 1.0, 1.0,
+                    peer_in_label, "[v_peer]", peer_w, peer_h, tw, th, fps, exact, peer_focus, 1.0, 1.0,
                     zoom_style="none",
                 )
             )
@@ -1968,14 +3308,15 @@ def build_segment_ffmpeg_args(
 
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[v_main]", src_w, src_h, W, H, fps, exact, [fx, fy], z0, z1,
+                    "[0:v]", "[v_main]", src_w, src_h, W, H, fps, play_exact, [fx, fy], z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1], color_filter=color_filter,
+                    zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
             fc.append(
                 _build_slot_video_chain(
-                    f"[{peer_idx}:v]", "[v_pip_raw]", peer_w, peer_h, pw, ph, fps, exact, peer_focus, 1.0, 1.0,
+                    peer_in_label, "[v_pip_raw]", peer_w, peer_h, pw, ph, fps, exact, peer_focus, 1.0, 1.0,
                     zoom_style="none",
                 )
             )
@@ -1986,62 +3327,26 @@ def build_segment_ffmpeg_args(
             fc.append(f"[v_with_pip][chrome]overlay=0:0:eof_action=pass,format=yuv420p{v_curr}")
 
     # ------------------------------------------------------------------
-    # Layout 6: TOP_PIP (Clean Top-Center Floating Rounded Rectangle Window)
+    # Layout 6: TOP_PIP (Top-Center Floating Rounded Rectangle Window)
     # ------------------------------------------------------------------
     elif lay == "top_pip":
-        peer = seg.get("peer") or {}
+        peer = seg.get("peer") if isinstance(seg.get("peer"), dict) else {}
         peer_src = resolve(peer.get("src") or seg["src"])
         peer_info = probe(peer_src) if peer_src.is_file() else {"width": src_w, "height": src_h, "duration": 6.0}
         peer_w = int(peer_info.get("width") or src_w)
         peer_h = int(peer_info.get("height") or src_h)
         peer_focus = list(peer.get("focus") or [0.5, 0.38])
-        still_at = float(peer.get("still_at") if peer.get("still_at") is not None else 0.5)
-        idle_span = peer.get("idle_span")
+        peer_dur = float(peer_info.get("duration") or 6.0)
 
         peer_idx = next_idx
         next_idx += 1
-        peer_loop_filter = ""
-        peer_dur = float(peer_info.get("duration") or 6.0)
-        if peer_src.is_file() and peer.get("mode") == "live":
-            inputs.extend(["-ss", f"{float(peer.get('start', 0.0)):.3f}", "-t", f"{dur + 0.5:.3f}", "-i", peer_src])
-        elif peer_src.is_file() and peer.get("mode", "loop") != "still":
-            if isinstance(idle_span, (list, tuple)) and len(idle_span) >= 2 and (float(idle_span[1]) - float(idle_span[0])) >= 0.30:
-                s0 = max(0.0, float(idle_span[0]))
-                s1 = float(idle_span[1])
-                s_dur = max(0.30, s1 - s0)
-            else:
-                s0 = float(peer.get("start", 0.0) or 0.0) % max(0.5, peer_dur)
-                s1 = peer_dur
-                s_dur = max(0.30, peer_dur - s0)
+        peer_in_label = _append_peer_video_input(
+            peer, peer_src, peer_dur, dur, exact, fps, inputs, fc, peer_idx, default_still=False
+        )
 
-            is_full_listening_clip = (s0 <= 0.15 and abs(s1 - peer_dur) <= 0.25) or (
-                "listen" in peer_src.stem.lower() or "idle" in peer_src.stem.lower() or "extra" in peer_src.stem.lower()
-            )
-            if s_dur >= exact - 0.15:
-                inputs.extend(["-ss", f"{s0:.3f}", "-t", f"{exact + 0.5:.3f}", "-i", peer_src])
-            elif is_full_listening_clip:
-                inputs.extend(["-stream_loop", "-1", "-ss", f"{s0:.3f}", "-i", peer_src])
-                peer_loop_filter = f"trim=0:{exact:.4f},setpts=PTS-STARTPTS"
-            else:
-                inputs.extend(["-ss", f"{s0:.3f}", "-t", f"{s_dur:.3f}", "-i", peer_src])
-                loop_frames = max(2, int(round(s_dur * fps)))
-                peer_loop_filter = f"fps={fps},loop=loop=-1:size={loop_frames}:start=0,setpts=N/({fps}*TB),trim=0:{exact:.4f},setpts=PTS-STARTPTS"
-        elif peer_src.is_file():
-            still_png = _extract_peer_still_png(peer_src, still_at)
-            inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", still_png])
-        else:
-            inputs.extend(["-ss", f"{still_at:.3f}", "-t", f"{exact:.4f}", "-i", peer_src])
-
-        peer_in_label = f"[{peer_idx}:v]"
-        if peer_loop_filter:
-            fc.append(f"[{peer_idx}:v]{peer_loop_filter}[peer_loop_in]")
-            peer_in_label = "[peer_loop_in]"
-
-        pw = even(W * 0.6944)
-        ph = even(H * 0.2188)
-        px = (W - pw) // 2
-        py = int(round(H * 0.0104))
-        prad = max(12, int(round(36 * (W / 1080.0))))
+        tpip_geo = get_layout_geometry("top_pip", W, H, seg=seg, plan=plan)
+        pip_box = tpip_geo["pip"]
+        pw, ph, px, py, prad = pip_box["w"], pip_box["h"], pip_box["x"], pip_box["y"], pip_box["radius"]
 
         mask_png = render_pip_mask_png(pw, ph, radius=prad, shape="rounded")
         mask_idx = next_idx
@@ -2061,10 +3366,11 @@ def build_segment_ffmpeg_args(
             )
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[v_pip_raw]", src_w, src_h, pw, ph, fps, exact, [fx, fy], z0, z1,
+                    "[0:v]", "[v_pip_raw]", src_w, src_h, pw, ph, fps, play_exact, [fx, fy], z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1],
                     bbox_norm=pip_vis.get("bbox_norm"), color_filter=color_filter,
+                    zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
         else:
@@ -2072,10 +3378,11 @@ def build_segment_ffmpeg_args(
             pip_vis = analyze_clip_vision(peer_src) if peer_src.is_file() else {}
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[v_bg]", src_w, src_h, W, H, fps, exact, [fx, fy], z0, z1,
+                    "[0:v]", "[v_bg]", src_w, src_h, W, H, fps, play_exact, [fx, fy], z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1],
                     bbox_norm=bg_vis.get("bbox_norm"), color_filter=color_filter, headroom_pct=25.8,
+                    zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
             fc.append(
@@ -2090,10 +3397,26 @@ def build_segment_ffmpeg_args(
         fc.append("[v_pip_raw]format=yuva420p[v_pip_a];[v_pip_a][pip_mask]alphamerge[v_pip]")
         fc.append(f"[v_bg][v_pip]overlay=x={px}:y={py}:eof_action=pass,format=yuv420p{v_curr}")
 
-    # ------------------------------------------------------------------
-    # Optional "Stop Saying" Hook Banners on any segment (21132 3-stack chest-centered style)
-    # ------------------------------------------------------------------
+    # Freeze trailing speech frame across `hold_tail` BEFORE overlaying banners so banners stay sharp during the beat
     parsed_banners = parse_banners(seg, exact)
+    freeze_pad_frames = max(3, int(round(fps * (hold_tail + 1.25))))
+    pre_bn_label = "[vprebn]" if parsed_banners else "[vout]"
+    if hold_tail > 0.001:
+        fc.append(
+            f"{v_curr}trim=end_frame={play_frames},setpts=PTS-STARTPTS,"
+            f"tpad=stop_mode=clone:stop={freeze_pad_frames},"
+            f"settb=AVTB,setpts=N/({fps}*TB),fps={fps}{pre_bn_label}"
+        )
+    else:
+        fc.append(
+            f"{v_curr}tpad=stop_mode=clone:stop={freeze_pad_frames},"
+            f"settb=AVTB,setpts=N/({fps}*TB),fps={fps}{pre_bn_label}"
+        )
+    v_curr = pre_bn_label
+
+    # ------------------------------------------------------------------
+    # Optional Stacked "Stop Saying" Hook Banners on Any Segment
+    # ------------------------------------------------------------------
     if parsed_banners:
         stack_top, phrase_base = banner_stack_rows(seg, parsed_banners)
         phrase_idx = 0
@@ -2101,43 +3424,45 @@ def build_segment_ffmpeg_args(
             b_end = min(exact, b_at + b_dur)
             bx_expr = f"trunc(({W}-overlay_w)/2)"
             if is_header:
-                # Static "STOP SAYING X" title one row above the stacked phrases; fades out with them
                 in_h = next_idx
                 next_idx += 1
-                inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", render_stop_saying_banner_png(b_text, with_strike=False, cross_icon=True)])
+                hdr_png = render_stop_saying_banner_png(b_text, with_strike=False, cross_icon=True)
+                inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", hdr_png])
                 hy = int(round(H * stack_top))
                 fc.append(
                     f"[{in_h}:v]scale=w='trunc(iw*{W}/1080/2)*2':h=-1,format=rgba,"
-                    f"fade=t=in:st={b_at:.3f}:d=0.10:alpha=1,fade=t=out:st={max(b_at + 0.1, b_end - 0.18):.3f}:d=0.18:alpha=1[bn_h{b_idx}]"
+                    f"fade=t=in:st={b_at:.3f}:d=0.10:alpha=1,"
+                    f"fade=t=out:st={max(b_at + 0.1, b_end - 0.18):.3f}:d=0.18:alpha=1[bn_h{b_idx}]"
                 )
-                fc.append(f"{v_curr}[bn_h{b_idx}]overlay=x={bx_expr}:y={hy}:enable='between(t,{b_at:.3f},{b_end:.3f})':eof_action=pass,format=yuv420p[vb{b_idx}h]")
+                fc.append(
+                    f"{v_curr}[bn_h{b_idx}]overlay=x={bx_expr}:y={hy}:"
+                    f"enable='between(t,{b_at:.3f},{b_end:.3f})':eof_action=pass,format=yuv420p[vb{b_idx}h]"
+                )
                 v_curr = f"[vb{b_idx}h]"
                 continue
-            strike_at = min(b_end - 0.05, b_at + 0.16)
-            # Phase 1: Un-struck red pill pops in when phrase begins (b_at -> strike_at)
-            # Phase 2: Struck-through red pill holds from strike_at -> b_end (with fade-out)
+
+            strike_at = min(max(b_at + 0.04, b_end - 0.12), b_at + 0.08)
             png_plain = render_stop_saying_banner_png(b_text, with_strike=False)
-            png_struck = render_stop_saying_banner_png(b_text, with_strike=True)
+            png_struck = render_stop_saying_banner_png(b_text, with_strike=True, strike_px=7)
             in_plain = next_idx
             in_struck = next_idx + 1
             next_idx += 2
             inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", png_plain])
             inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", png_struck])
 
-            # Centered horizontally (x=0.50*W), stacked at lower-chest level (y=0.52*H + idx*0.068*H)
             by_expr = int(round(H * (phrase_base + phrase_idx * 0.068)))
             phrase_idx += 1
-            fade_out_st = max(strike_at + 0.05, b_end - 0.18)
+            fade_out_st = max(strike_at + 0.08, b_end - 0.08)
 
             v_mid = f"[vb{b_idx}a]"
             v_next = f"[vb{b_idx}b]"
             fc.append(
                 f"[{in_plain}:v]scale=w='trunc(iw*{W}/1080/2)*2':h=-1,format=rgba,"
-                f"fade=t=in:st={b_at:.3f}:d=0.08:alpha=1[bn_p{b_idx}]"
+                f"fade=t=in:st={b_at:.3f}:d=0.04:alpha=1[bn_p{b_idx}]"
             )
             fc.append(
                 f"[{in_struck}:v]scale=w='trunc(iw*{W}/1080/2)*2':h=-1,format=rgba,"
-                f"fade=t=out:st={fade_out_st:.3f}:d=0.18:alpha=1[bn_s{b_idx}]"
+                f"fade=t=out:st={fade_out_st:.3f}:d=0.08:alpha=1[bn_s{b_idx}]"
             )
             fc.append(
                 f"{v_curr}[bn_p{b_idx}]overlay=x={bx_expr}:y={by_expr}:"
@@ -2149,22 +3474,21 @@ def build_segment_ffmpeg_args(
             )
             v_curr = v_next
 
-    # Final video label -> [vout]
-    # Clone trailing frame up to 1.25s if the cut holds an extra ~1s tail after speech for a wrong/right flash mark + SFX
-    fc.append(f"{v_curr}tpad=stop_mode=clone:stop={max(3, int(round(fps * 1.25)))}[vout]")
+        fc.append(f"{v_curr}null[vout]")
 
-    # Audio input & chain (always from active segment, or anullsrc if clip has no audio)
-    if not has_audio:
-        audio_input_idx = next_idx
-        next_idx += 1
-        inputs.extend(["-f", "lavfi", "-t", f"{exact:.4f}", "-i", "anullsrc=r=48000:cl=stereo"])
-    fc.append(f"[{audio_input_idx}:a]{af_chain}[aout]")
+    # Audio chain from active segment (or clean digital silence when muted or source clip lacks audio)
+    if use_silence:
+        fc.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{exact:.6f},asetpts=PTS-STARTPTS[aout]")
+    else:
+        fc.append(f"[{audio_input_idx}:a]{af_chain}[aout]")
 
     args: List[Any] = [
         *inputs,
         "-filter_complex", ";".join(fc),
         "-map", "[vout]",
         "-map", "[aout]",
+        "-r", str(fps),
+        "-fps_mode", "cfr",
         "-frames:v", str(frames),
         "-c:v", "libx264",
         "-preset", "ultrafast" if draft else "veryfast",
@@ -2180,7 +3504,7 @@ _VT_AVAILABLE: Optional[bool] = None
 
 
 def _has_videotoolbox() -> bool:
-    """Return True if macOS Apple Silicon `h264_videotoolbox` hardware encoder is available."""
+    """Return True if macOS `h264_videotoolbox` hardware encoding is available."""
     global _VT_AVAILABLE
     if _VT_AVAILABLE is not None:
         return _VT_AVAILABLE
@@ -2204,15 +3528,14 @@ def render_segment_layout(
     out: Union[str, Path],
     draft: bool = False,
 ) -> float:
-    """Render `seg` with its configured layout into normalized intermediate `.mkv` `out`.
-    Uses Apple Silicon `h264_videotoolbox` hardware acceleration when enabled for 3-4x faster
-    encoding and lower CPU thermal load, with automatic fallback to `libx264`.
+    """Render `seg` with its configured layout into normalized intermediate `.mkv` `out`
+    using CPU H.264 decode + GPU hardware encode (VideoToolbox / NVENC / QSV / AMF) with
+    `libx264` fallback.
     """
     args, exact, _ = build_segment_ffmpeg_args(seg, plan, W, H, fps, out, draft)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     use_hw = bool((plan or {}).get("use_hw_accel", True))
-    # GPU encoder for this computer (VideoToolbox, NVENC, Quick Sync, AMF) with automatic fallback to libx264.
-    ffmpeg_encode(*args, draft=draft, hardware=use_hw)
+    ffmpeg_encode(*args, draft=draft, hardware=use_hw, hw_decode=False, allow_bframes=False)
     return exact
 
 
@@ -2223,14 +3546,10 @@ def place_mark_for_segment(
     H: int,
     size: int,
 ) -> Tuple[str, str]:
-    """Layout-aware `(x, y)` placement for ✓ / ✗ marks so badges never collide with
-    split-screen listener slots, top chat bars, or video-call PiP windows.
+    """Compute layout-aware `(x, y)` FFmpeg overlay expressions for right/wrong marks so
+    badges never collide with split-screen listener slots, top chat bars, or PiP windows.
     """
-    if isinstance(mark, dict):
-        pos = mark.get("position", "top-right")
-    else:
-        pos = mark or "top-right"
-
+    pos = mark.get("position", "top-right") if isinstance(mark, dict) else (mark or "top-right")
     if isinstance(pos, (list, tuple)) and len(pos) >= 2:
         return f"{float(pos[0])}*{W}-{size}/2", f"{float(pos[1])}*{H}-{size}/2"
 
@@ -2240,9 +3559,7 @@ def place_mark_for_segment(
     lay = normalize_layout_name(seg.get("layout") if isinstance(seg, dict) else "single")
     slot = _resolve_active_slot(seg, default="top" if lay != "single" else "") if isinstance(seg, dict) else "top"
 
-    # Determine the active bounding box (x0, y0, box_w, box_h) for the badge
     x0, y0, bw, bh = 0, 0, W, H
-
     if lay in ("split_v", "gmeet_grid") or (lay == "single" and slot in ("top", "bottom")):
         half_h = H // 2
         if slot in ("bottom", "slot_b", "b", "1"):
@@ -2255,12 +3572,17 @@ def place_mark_for_segment(
             x0, bw = half_w, W - half_w
         else:
             x0, bw = 0, half_w
+    elif lay == "top_pip":
+        tpip = get_layout_geometry("top_pip", W, H, seg=seg)["pip"]
+        if slot in ("bottom", "slot_b", "b", "1", "bg", "main"):
+            top_clear = tpip["y"] + tpip["h"] + max(8, m // 2)
+            y0, bh = top_clear, max(size + 2 * m, H - top_clear)
+        else:
+            x0, y0, bw, bh = tpip["x"], tpip["y"], tpip["w"], tpip["h"]
     elif lay == "chat_bar":
-        # Push top margin below the top chat overlay / docked bar
         chat_top_clear = int(round(H * 0.25))
         y0, bh = chat_top_clear, H - chat_top_clear
     elif lay in ("video_call", "pip_call"):
-        # Avoid top-right PiP window and top status bar
         y0 = int(round(H * 0.09))
         bh = int(round(H * 0.68))
         if pos_str == "top-right":
@@ -2281,11 +3603,9 @@ def collect_layout_auto_sfx(
     plan: Dict[str, Any],
     seg_start: Union[Dict[str, float], Sequence[float]],
 ) -> List[Tuple[str, float, float]]:
-    """Auto-inject layout sound effects:
+    """Auto-inject layout sound effects when no explicit SFX or mark sits nearby:
       - `pop.wav` (`-2.5 dB`) when chat bubbles appear in `chat_bar` segments
       - `click.wav` (`-3.5 dB`) when video-call turns switch in `video_call` / `pip_call` / `gmeet_grid`
-      - `pop.wav` (`-3.0 dB`) on `split_h` / `split_v` / `top_pip` / baked-split punch-in beats
-        (`sudden_in` or instant step zoom `>= 1.06`) when no explicit SFX or mark sits within `±0.20s`.
     Returns `[(sfx_filename, output_time_sec, gain_db), ...]`.
     """
     if plan.get("auto_sfx") is False or (plan.get("canvas") or {}).get("auto_sfx") is False:
@@ -2321,7 +3641,6 @@ def collect_layout_auto_sfx(
                 sid_item = str(segs[idx].get("id") or f"S{idx + 1}")
                 start_by_id[sid_item] = t_v
 
-    # Collect existing explicit SFX and mark timestamps to avoid double-triggering
     existing_times: List[float] = []
     for e in plan.get("sfx") or []:
         sid_e = str(e.get("segment") or "")
@@ -2335,16 +3654,10 @@ def collect_layout_auto_sfx(
             existing_times.append(float(start_by_id[sid_m]) + float(m.get("at", 0.0)))
 
     auto_sfx: List[Tuple[str, float, float]] = []
-    whoosh_transitions = {
-        "whip_left", "whip_right", "flash_zoom", "zoom_burst",
-        "slide_up", "smoothleft", "smoothright", "warm_flash",
-    }
 
     prev_lay = None
     prev_speaker = None
-    prev_was_split = False
-    prev_split_z_end = 1.0
-    prev_active_slot = ""
+
     for idx, s in enumerate(segs):
         sid = str(s.get("id") or f"S{idx + 1}")
         t_base_opt = start_by_idx.get(idx, start_by_id.get(sid))
@@ -2353,14 +3666,15 @@ def collect_layout_auto_sfx(
         t_base = float(t_base_opt)
         lay = normalize_layout_name(s.get("layout"))
         sp = str(s.get("speaker") or "")
-        seg_dur = max(0.08, float(s.get("end", 1.0)) - float(s.get("start", 0.0)))
-        z0, z1, z_style, z_at, _ = resolve_segment_zoom_spec(s, seg_dur)
 
         if lay == "chat_bar":
             chat_spec = s.get("chat") or {}
-            msgs = chat_spec.get("messages", []) if isinstance(chat_spec, dict) else (chat_spec if isinstance(chat_spec, list) else [])
+            msgs = (
+                chat_spec.get("messages", [])
+                if isinstance(chat_spec, dict)
+                else (chat_spec if isinstance(chat_spec, list) else [])
+            )
             if msgs:
-                # Trigger pop on the latest bubble (or bubbles with at > 0)
                 active_msgs = [m for m in msgs if isinstance(m, dict) and float(m.get("at", 0.0)) > 0.0] or msgs[-1:]
                 for m in active_msgs:
                     at_rel = float(m.get("at", 0.08)) if isinstance(m, dict) else 0.08
@@ -2373,67 +3687,13 @@ def collect_layout_auto_sfx(
                 if not any(abs(t_pop - et) < 0.12 for et in existing_times):
                     auto_sfx.append((pop_file, t_pop, -2.5))
                     existing_times.append(t_pop)
-            prev_was_split = False
-            prev_split_z_end = 1.0
-            prev_active_slot = ""
 
         elif lay in ("video_call", "pip_call", "gmeet_grid"):
-            # Trigger subtle UI click when entering video_call or switching speaker turns inside video_call
             if prev_lay not in ("video_call", "pip_call", "gmeet_grid") or (sp and prev_speaker and sp != prev_speaker):
                 t_click = round(max(0.0, t_base), 4)
                 if not any(abs(t_click - et) < 0.12 for et in existing_times):
                     auto_sfx.append((click_file, t_click, -3.5))
                     existing_times.append(t_click)
-            prev_was_split = False
-            prev_split_z_end = 1.0
-            prev_active_slot = ""
-
-        else:
-            is_split_seg = lay in ("split_h", "split_v", "top_pip")
-            bspec_sfx = None
-            if not is_split_seg and lay == "single" and (
-                abs(z0 - 1.0) > 0.004 or abs(z1 - 1.0) > 0.004 or z_style == "flash_zoom"
-            ):
-                src_p = resolve(s["src"]) if s.get("src") else None
-                bspec_sfx = _resolve_baked_split_spec(s, src_p)
-                is_split_seg = bspec_sfx is not None
-
-            if is_split_seg:
-                if bspec_sfx is not None:
-                    cur_active_slot = str(bspec_sfx.get("active") or "")
-                else:
-                    cur_active_slot = _resolve_active_slot(
-                        s, default=("left" if lay == "split_h" else "top")
-                    )
-                t_zoom_beat: Optional[float] = None
-                if z_style in ("sudden_in", "flash_zoom") and (z1 - z0) >= 0.02:
-                    t_zoom_beat = round(max(0.0, t_base + float(z_at or 0.0)), 4)
-                elif z_style == "static" and z0 >= 1.06 and (
-                    not prev_was_split
-                    or cur_active_slot != prev_active_slot
-                    or abs(z0 - prev_split_z_end) >= 0.02
-                ):
-                    t_zoom_beat = round(max(0.0, t_base + float(z_at or 0.0)), 4)
-                elif float(z_at or 0.0) > 0.0 and z1 >= 1.06 and (z1 - z0) >= 0.02:
-                    t_zoom_beat = round(max(0.0, t_base + float(z_at)), 4)
-
-                if t_zoom_beat is not None:
-                    tr_name = str(s.get("transition") or "cut").strip().lower()
-                    has_whoosh_tr = (
-                        idx > 0
-                        and tr_name in whoosh_transitions
-                        and abs(t_zoom_beat - t_base) <= 0.15
-                    )
-                    if not has_whoosh_tr and not any(abs(t_zoom_beat - et) <= 0.20 for et in existing_times):
-                        auto_sfx.append((pop_file, t_zoom_beat, -3.0))
-                        existing_times.append(t_zoom_beat)
-                prev_was_split = True
-                prev_split_z_end = z1
-                prev_active_slot = cur_active_slot
-            else:
-                prev_was_split = False
-                prev_split_z_end = 1.0
-                prev_active_slot = ""
 
         prev_lay = lay
         prev_speaker = sp

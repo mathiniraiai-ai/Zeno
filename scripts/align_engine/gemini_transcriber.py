@@ -1,81 +1,101 @@
-"""
-Self-contained Gemini Flash-Lite / Flash Verbatim Transcriber + Offline Fallback
-for Claude Editor (`scripts/align_engine/gemini_transcriber.py`).
+"""Gemini and Zeno Cloud verbatim audio transcriber with offline fallback.
 
-- Reads `GEMINI_API_KEY` / `GEMINI_API_KEY_1..4` (or `SCRIPTCUT_CLOUD_URL` + `SCRIPTCUT_CLOUD_TOKEN`)
-  from environment, `.env`, or `../ScriptCut-AI/.env`.
-- Uses `google-genai` (`gemini-3.5-flash-lite` / `gemini-2.5-flash` fallback) to transcribe a 16kHz WAV file
-  with `target_script_lines` hint, returning verbatim spoken words (including retakes, repeated words, and fumbles),
-  and runs `guardian_engine` healing.
-- Includes `transcribe_offline_fallback` if no Gemini API key or internet connection is available,
-  using existing `hq_words.json`/`words.json` or direct script-line forced alignment.
+- Resolves credentials (`ZENO_CLOUD_URL` + `ZENO_CLOUD_TOKEN` or `GEMINI_API_KEY` / `GEMINI_API_KEY_1..4`)
+  via `common.load_dotenv()`, `.env`, `.zeno_session.json`, or read-only fallback to sibling `ScriptCut-AI`.
+- Transcribes 16 kHz mono WAV audio verbatim (preserving stutters, repeated words, false starts, and retakes)
+  with optional `target_script_lines` vocabulary reference and `guardian_engine` loanword healing.
+- Falls back to `transcribe_offline_fallback` when offline or unconfigured.
 """
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
+import platform
 import random
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
 import threading
 import time
+import wave
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .guardian import guardian_engine
 
-
-def zeno_client_headers() -> dict:
-    """X-Zeno-Version / X-Zeno-Platform, so the server knows which version every editor runs."""
-    import platform as _platform
-    try:
-        ver = (Path(__file__).resolve().parents[2] / "VERSION").read_text(encoding="utf-8").strip()[:40]
-    except Exception:
-        ver = ""
-    return {"X-Zeno-Version": ver, "X-Zeno-Platform": f"{_platform.system()} {_platform.machine()}"[:80]}
-
-
 logger = logging.getLogger("align_engine.gemini_transcriber")
 
 THIS_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = THIS_DIR.parent.parent
+SCRIPTS_DIR = THIS_DIR.parent
+PROJECT_ROOT = SCRIPTS_DIR.parent
 SIBLING_SCRIPTCUT = PROJECT_ROOT.parent / "ScriptCut-AI"
 
 
+def zeno_client_headers() -> Dict[str, str]:
+    """Return `X-Zeno-Version` and `X-Zeno-Platform` request headers for Zeno Cloud."""
+    ver = ""
+    ver_path = PROJECT_ROOT / "VERSION"
+    if ver_path.is_file():
+        try:
+            ver = ver_path.read_text(encoding="utf-8", errors="ignore").strip()[:40]
+        except OSError:
+            pass
+    return {
+        "X-Zeno-Version": ver,
+        "X-Zeno-Platform": f"{platform.system()} {platform.machine()}"[:80],
+    }
+
+
+def _parse_env_file_readonly(env_path: Path) -> None:
+    """Read key=value pairs from `env_path` into `os.environ` without overriding set variables."""
+    if not env_path.is_file():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if not k or k in os.environ:
+            continue
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+            v = v[1:-1]
+        elif "#" in v:
+            v = v.split("#", 1)[0].strip()
+        if k == "FFMPEG_PATH" and not Path(v).is_absolute():
+            continue
+        os.environ[k] = v
+
+
 def _load_env_files() -> None:
-    """Loads `.env` from Claude Editor root or sibling `../ScriptCut-AI/.env` without overriding set env vars."""
-    candidates = [
+    """Load `.env` and `.zeno_session.json` via `common` with read-only fallback to sibling directories."""
+    if str(SCRIPTS_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        from common import load_dotenv as _common_load_dotenv
+
+        _common_load_dotenv()
+    except Exception:
+        pass
+
+    for env_cand in (
         PROJECT_ROOT / ".env",
         SIBLING_SCRIPTCUT / ".env",
-    ]
-    try:
-        from dotenv import load_dotenv
-        for env_path in candidates:
-            if env_path.is_file():
-                load_dotenv(env_path, override=False)
-    except ImportError:
-        for env_path in candidates:
-            if not env_path.is_file():
-                continue
-            try:
-                for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    k, v = line.split("=", 1)
-                    k = k.strip()
-                    v = v.strip().strip('"').strip("'")
-                    if k and k not in os.environ:
-                        os.environ[k] = v
-            except Exception:
-                pass
+    ):
+        _parse_env_file_readonly(env_cand)
 
-    # Auto-load local zero-copy OAuth session from .zeno_session.json if present
+    # Read-only session lookup: Zeno/.zeno_session.json
     session_path = PROJECT_ROOT / ".zeno_session.json"
     if session_path.is_file():
         try:
@@ -108,7 +128,7 @@ _load_env_files()
 
 
 def get_gemini_api_keys() -> List[str]:
-    """Collects all configured Gemini API keys from environment / `.env`."""
+    """Collect configured Gemini API keys from environment variables."""
     _load_env_files()
     keys: List[str] = []
     for var in (
@@ -126,7 +146,7 @@ def get_gemini_api_keys() -> List[str]:
 
 
 def normalize_lang_code(lang: Optional[str]) -> str:
-    """Maps language names ('kannada', 'tamil', 'telugu', 'hindi', 'english', 'auto') to 2-letter ISO codes."""
+    """Normalize language names (`'kannada'`, `'tamil'`, `'telugu'`, `'malayalam'`, `'hindi'`, `'english'`, `'auto'`) to ISO codes."""
     if not lang:
         return "auto"
     s = str(lang).strip().lower()
@@ -148,13 +168,21 @@ def normalize_lang_code(lang: Optional[str]) -> str:
         "mr": "mr",
         "gujarati": "gu",
         "gu": "gu",
+        "punjabi": "pa",
+        "pa": "pa",
+        "odia": "or",
+        "or": "or",
         "english": "en",
         "en": "en",
     }
     return mapping.get(s, s[:2] if len(s) >= 2 else "en")
 
 
-def build_transcribe_prompt(target_script_lines: Optional[List[str]] = None, language_hint: str = "auto") -> str:
+def build_transcribe_prompt(
+    target_script_lines: Optional[List[str]] = None,
+    language_hint: str = "auto",
+) -> str:
+    """Build the verbatim multilingual transcription prompt with bilingual code-switching rules."""
     script_context = ""
     if target_script_lines:
         clean_lines = [str(x).strip() for x in target_script_lines if str(x).strip()][:40]
@@ -166,11 +194,16 @@ def build_transcribe_prompt(target_script_lines: Optional[List[str]] = None, lan
             )
 
     scripts = {
-        "ml": ("Malayalam", "Malayalam script (മലയാളം)"), "kn": ("Kannada", "Kannada script (ಕನ್ನಡ)"),
-        "ta": ("Tamil", "Tamil script (தமிழ்)"), "te": ("Telugu", "Telugu script (తెలుగు)"),
-        "hi": ("Hindi", "Devanagari script (हिन्दी)"), "mr": ("Marathi", "Devanagari script (मराठी)"),
-        "bn": ("Bengali", "Bengali script (বাংলা)"), "gu": ("Gujarati", "Gujarati script (ગુજરાતી)"),
-        "pa": ("Punjabi", "Gurmukhi script (ਪੰਜਾਬੀ)"), "or": ("Odia", "Odia script (ଓଡ଼ିଆ)"),
+        "ml": ("Malayalam", "Malayalam script (മലയാളം)"),
+        "kn": ("Kannada", "Kannada script (ಕನ್ನಡ)"),
+        "ta": ("Tamil", "Tamil script (தமிழ்)"),
+        "te": ("Telugu", "Telugu script (తెలుగు)"),
+        "hi": ("Hindi", "Devanagari script (हिन्दी)"),
+        "mr": ("Marathi", "Devanagari script (मराठी)"),
+        "bn": ("Bengali", "Bengali script (বাংলা)"),
+        "gu": ("Gujarati", "Gujarati script (ગુજરાતી)"),
+        "pa": ("Punjabi", "Gurmukhi script (ਪੰਜਾਬੀ)"),
+        "or": ("Odia", "Odia script (ଓଡ଼ିଆ)"),
     }
     hint = (language_hint or "auto").strip().lower()
     for code, (lname, _) in scripts.items():
@@ -220,6 +253,8 @@ Rules:
 
 
 class GeminiRateLimiter:
+    """Thread-safe RPM rate limiter for direct Gemini API requests."""
+
     _instance: Optional["GeminiRateLimiter"] = None
     _lock = threading.Lock()
 
@@ -251,19 +286,13 @@ class GeminiRateLimiter:
 
 
 class GeminiTranscriber:
-    """
-    Self-contained Gemini audio transcriber with multi-key rotation, cloud endpoint support,
-    `guardian_engine` healing, and offline fallback.
-    """
+    """Audio transcriber supporting Zeno Cloud, multi-key Gemini rotation, and offline fallback."""
 
     def __init__(self, api_keys: Optional[List[str]] = None):
         _load_env_files()
-        self.api_keys = api_keys if api_keys is not None else get_gemini_api_keys()
-        primary = (
-            os.getenv("GEMINI_FORCE_MODEL", "").strip()
-            or "gemini-3.1-flash-lite"
-        )
-        # Put fast, audio-capable models with healthy quota pools in rotation:
+        self._explicit_keys = api_keys is not None
+        self.api_keys = list(api_keys) if api_keys is not None else get_gemini_api_keys()
+        primary = os.getenv("GEMINI_FORCE_MODEL", "").strip() or "gemini-3.1-flash-lite"
         default_models = [
             "gemini-3.1-flash-lite",
             "gemini-3.5-flash-lite",
@@ -288,12 +317,27 @@ class GeminiTranscriber:
         self._client = None
         self._client_key: Optional[str] = None
 
+    def _refresh_credentials_if_empty(self) -> None:
+        if self.api_keys or (self.cloud_url and self.cloud_token):
+            return
+        _load_env_files()
+        if not self._explicit_keys:
+            self.api_keys = get_gemini_api_keys()
+        self.cloud_url = (
+            os.getenv("ZENO_CLOUD_URL", "").strip()
+            or os.getenv("SCRIPTCUT_CLOUD_URL", "").strip()
+        )
+        self.cloud_token = (
+            os.getenv("ZENO_CLOUD_TOKEN", "").strip()
+            or os.getenv("SCRIPTCUT_CLOUD_TOKEN", "").strip()
+        )
+
     @property
     def is_configured(self) -> bool:
-        if os.getenv("CLAUDE_EDITOR_OFFLINE", "").lower() in ("1", "true", "yes"):
-            return False
-        if os.getenv("SCRIPTCUT_OFFLINE", "").lower() in ("1", "true", "yes"):
-            return False
+        for flag in ("ZENO_OFFLINE", "CLAUDE_EDITOR_OFFLINE", "SCRIPTCUT_OFFLINE"):
+            if os.getenv(flag, "").lower() in ("1", "true", "yes"):
+                return False
+        self._refresh_credentials_if_empty()
         return len(self.api_keys) > 0 or bool(self.cloud_url and self.cloud_token)
 
     def _get_client(self):
@@ -304,7 +348,6 @@ class GeminiTranscriber:
             raise RuntimeError("No GEMINI_API_KEY configured")
         key = self.api_keys[self._key_idx % len(self.api_keys)]
         if self._client is None or self._client_key != key:
-            # Allow 120s (120000ms) for gemini-3.5-flash audio transcription
             self._client = genai.Client(api_key=key, http_options=types.HttpOptions(timeout=120000))
             self._client_key = key
         return self._client
@@ -343,26 +386,35 @@ class GeminiTranscriber:
         if lang_code == "auto":
             lang_code = fallback_lang
 
-        # Strip hallucinated cues whose start timestamp is at or past the physical clip duration
+        # Drop cues whose start timestamp lies past the physical clip duration
         raw_cues = data.get("cues") or []
         if clip_duration_sec and clip_duration_sec > 1.0 and isinstance(raw_cues, list) and raw_cues:
             valid_cues = [
-                c for c in raw_cues
+                c
+                for c in raw_cues
                 if isinstance(c, dict) and float(c.get("start") or 0.0) < (clip_duration_sec - 0.15)
             ]
             if valid_cues and len(valid_cues) < len(raw_cues):
                 raw_cues = valid_cues
                 cue_words = []
                 for c in valid_cues:
-                    for w in (c.get("words") or str(c.get("text") or "").split()):
-                        w_str = str(w.get("word") or w.get("w") or w.get("text") or "").strip() if isinstance(w, dict) else str(w).strip()
+                    for w in c.get("words") or str(c.get("text") or "").split():
+                        w_str = (
+                            str(w.get("word") or w.get("w") or w.get("text") or "").strip()
+                            if isinstance(w, dict)
+                            else str(w).strip()
+                        )
                         if w_str:
                             cue_words.append(w_str)
                 if cue_words:
                     data = dict(data)
                     data["cues"] = valid_cues
                     data["words"] = cue_words
-                    data["full_transcript"] = " ".join(str(c.get("text") or "").strip() for c in valid_cues if str(c.get("text") or "").strip())
+                    data["full_transcript"] = " ".join(
+                        str(c.get("text") or "").strip()
+                        for c in valid_cues
+                        if str(c.get("text") or "").strip()
+                    )
 
         raw_words = data.get("words") or []
         if not raw_words and data.get("full_transcript"):
@@ -376,11 +428,14 @@ class GeminiTranscriber:
         fallback_words = [
             w_str
             for w in raw_words
-            for w_str in [str(w.get("word") or w.get("w") or w.get("text") or "").strip() if isinstance(w, dict) else str(w).strip()]
+            for w_str in [
+                str(w.get("word") or w.get("w") or w.get("text") or "").strip()
+                if isinstance(w, dict)
+                else str(w).strip()
+            ]
             if w_str
         ]
         healed_words = [w["word"] for w in (audit.healed_words or [])] or fallback_words
-        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
         return {
             "status": "success",
             "model_used": model_used,
@@ -388,11 +443,6 @@ class GeminiTranscriber:
             "full_transcript": audit.healed_text or " ".join(healed_words),
             "words": healed_words,
             "cues": raw_cues,
-            "usage": {
-                "input_tokens": int(usage.get("input_tokens") or 0),
-                "output_tokens": int(usage.get("output_tokens") or 0),
-                "total_tokens": int(usage.get("total_tokens") or (int(usage.get("input_tokens") or 0) + int(usage.get("output_tokens") or 0))),
-            },
         }
 
     def _transcribe_via_cloud(
@@ -425,7 +475,6 @@ class GeminiTranscriber:
                     break
                 if attempt >= max_attempts - 1:
                     break
-                # Official Gemini/HTTP guidance: respect Retry-After + truncated exponential backoff with full jitter
                 retry_hdr = resp.headers.get("retry-after") if getattr(resp, "headers", None) else None
                 try:
                     hdr_wait = float(retry_hdr) if retry_hdr else 0.0
@@ -458,7 +507,12 @@ class GeminiTranscriber:
         if data.get("warning"):
             print(f"[transcribe] WARNING from service: {data['warning']}", file=sys.stderr)
         dur_sec = (Path(wav_path).stat().st_size / 32000.0) if Path(wav_path).is_file() else None
-        return self._heal_result(data, language_hint, model_used=str(data.get("model_used") or "cloud"), clip_duration_sec=dur_sec)
+        return self._heal_result(
+            data,
+            language_hint,
+            model_used=str(data.get("model_used") or "cloud"),
+            clip_duration_sec=dur_sec,
+        )
 
     def transcribe(
         self,
@@ -468,10 +522,7 @@ class GeminiTranscriber:
         work_dir: Optional[Path] = None,
         use_cache: bool = True,
     ) -> Dict[str, Any]:
-        """
-        Transcribes a 16kHz WAV file via Gemini (or cloud endpoint), caches the result in `work_dir`,
-        and heals loanwords via `guardian_engine`. Falls back to `transcribe_offline_fallback` on failure.
-        """
+        """Transcribe a 16 kHz WAV file via Zeno Cloud or Gemini, cache in `work_dir`, and heal loanwords."""
         wav_p = Path(wav_path)
         wdir = Path(work_dir) if work_dir else wav_p.parent
         cache_file = wdir / "gemini_transcript.json"
@@ -488,7 +539,6 @@ class GeminiTranscriber:
                             "full_transcript": cached.get("full_transcript", ""),
                             "words": cached.get("words", []),
                             "cues": cached.get("cues", []),
-                            "usage": cached.get("usage") or {},
                         },
                         language_hint=language_hint,
                         model_used=cached.get("model_used", "cached_gemini"),
@@ -512,9 +562,9 @@ class GeminiTranscriber:
                 if res.get("words"):
                     self._save_cache(cache_file, wav_p, res)
                 return res
-            except Exception as e:
-                last_error = f"{type(e).__name__}: {e}"
-                logger.warning("Cloud transcription failed: %s", e)
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                logger.warning("Cloud transcription failed: %s", exc)
                 if not self.api_keys:
                     print(
                         f"[transcribe] ERROR: transcription service failed ({last_error}); "
@@ -531,7 +581,7 @@ class GeminiTranscriber:
                         "cues": [],
                     }
                 print(
-                    f"[transcribe] WARNING: cloud transcription failed ({type(e).__name__}); "
+                    f"[transcribe] WARNING: cloud transcription failed ({type(exc).__name__}); "
                     "falling back to local Gemini API key rotation.",
                     file=sys.stderr,
                 )
@@ -570,21 +620,15 @@ class GeminiTranscriber:
                     ),
                 )
                 data = self._parse_json_lenient(resp.text or "{}")
-                um = getattr(resp, "usage_metadata", None)
-                if um is not None:
-                    in_tok = int(getattr(um, "prompt_token_count", 0) or 0)
-                    out_tok = int(getattr(um, "candidates_token_count", 0) or 0) + int(getattr(um, "thoughts_token_count", 0) or 0)
-                    tot_tok = int(getattr(um, "total_token_count", 0) or (in_tok + out_tok))
-                    data["usage"] = {"input_tokens": in_tok, "output_tokens": out_tok, "total_tokens": tot_tok}
                 res = self._heal_result(data, language_hint, model_used=model_name, clip_duration_sec=dur_sec)
                 if res.get("words"):
                     self._save_cache(cache_file, wav_p, res)
                     return res
                 last_empty_res = res
                 self._rotate()
-            except Exception as e:
-                err_str = str(e)
-                last_error = f"{type(e).__name__}: {err_str[:250]}"
+            except Exception as exc:
+                err_str = str(exc)
+                last_error = f"{type(exc).__name__}: {err_str[:250]}"
                 self._rotate()
                 if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "503" in err_str or "UNAVAILABLE" in err_str:
                     backoff = min(30.0, (2.0 ** min(attempt, 4)) + random.uniform(0.5, 2.5))
@@ -621,7 +665,6 @@ class GeminiTranscriber:
                 "full_transcript": res.get("full_transcript", ""),
                 "words": res.get("words", []),
                 "cues": res.get("cues", []),
-                "usage": res.get("usage") or {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
             }
             cache_file.parent.mkdir(parents=True, exist_ok=True)
             tmp = cache_file.with_name(cache_file.name + ".tmp")
@@ -635,11 +678,7 @@ MIN_SEND_SECONDS = 1.2
 
 
 def _pad_short_wav(data: bytes) -> bytes:
-    """A line like "Perfect!" or "सच में?" can be well under a second, and the server refuses audio under 0.5 s. Append silence so
-    every clip is sent; the words are found in the speech and the aligner still works on the original audio."""
-    import io
-    import wave
-
+    """Pad sub-second WAV buffers with trailing silence so cloud endpoints accept short utterances."""
     try:
         with wave.open(io.BytesIO(data)) as w:
             params, frames = w.getparams(), w.readframes(w.getnframes())
@@ -664,21 +703,13 @@ def transcribe_offline_fallback(
     script_lines: Optional[List[str]] = None,
     work_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """
-    Offline fallback transcription when no Gemini API key or internet connection is available:
-      1. Uses existing `hq_words.json` or `words.json` in `work_dir` (if present),
-         healing loanwords with `guardian_engine`.
-      2. Else uses `script_lines` for direct script-line forced alignment with Wav2Vec2 + uroman.
-    """
+    """Offline fallback using cached word files (`hq_words.json`/`words.json`) or single-line script text."""
     wav_p = Path(wav_path)
     wdir = Path(work_dir) if work_dir else wav_p.parent
     lang_code = normalize_lang_code(lang)
     if lang_code == "auto":
-        lang_code = "kn" if any(
-            re.search(r"[\u0C80-\u0CFF]", s) for s in (script_lines or [])
-        ) else "en"
+        lang_code = "kn" if any(re.search(r"[\u0C80-\u0CFF]", s) for s in (script_lines or [])) else "en"
 
-    # 1. Check existing work_dir word files (hq_words.json preferred over words.json)
     for fname in ("hq_words.json", "words.json"):
         fpath = wdir / fname
         if fpath.is_file():
@@ -718,17 +749,24 @@ def transcribe_offline_fallback(
             except Exception:
                 pass
 
-    # 2. Direct script-line forced alignment fallback
     if script_lines:
         from .script_matcher import parse_target_script
 
         parsed = parse_target_script("\n".join(script_lines))
         if len(parsed) > 1:
-            # Without Gemini nothing says WHICH of the script's lines this clip speaks. Aligning the whole script onto a short clip
-            # produced one "clip" with hundreds of words that then won every take comparison. Leave it untranscribed instead.
-            print(f"[transcribe] WARNING: cannot tell which of the {len(parsed)} script lines {wav_p.name} says without Gemini; "
-                  "leaving it untranscribed instead of guessing. Check the Zeno server connection and run again.", file=sys.stderr)
-            return {"status": "no_transcript", "model_used": "none", "language": lang_code, "full_transcript": "", "words": [], "cues": []}
+            print(
+                f"[transcribe] WARNING: cannot determine which of the {len(parsed)} script lines "
+                f"{wav_p.name} speaks without transcription; leaving untranscribed.",
+                file=sys.stderr,
+            )
+            return {
+                "status": "no_transcript",
+                "model_used": "none",
+                "language": lang_code,
+                "full_transcript": "",
+                "words": [],
+                "cues": [],
+            }
         words_from_script = [w for line in parsed for w in line.split() if w.strip()]
         if words_from_script:
             return {

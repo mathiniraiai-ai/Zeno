@@ -1,48 +1,64 @@
-"""Burn-in subtitles for a rendered edit, only when the plan asks for them (`#subs <style> [y=72]` in plan.edl).
+"""Burn-in subtitle engine for rendered edits (`#subs <style> [y=68]` in `plan.edl`).
 
-The words come from what the clips actually say (the aligned transcript, with each word's time), shifted onto the finished timeline,
-with script-line + speech-span synthesis as a zero-blank safety net when an edit cut lacks word-level alignment.
-They are never translated: Kannada stays Kannada, English stays English. The pictures are drawn by the Premiere-grade caption renderer
-(`subtitles/caption-renderer.js`, eight curated styles in `subtitles/styles.json`) running on node-canvas, cropped to an optical horizontal
-caption band with 3-subframe active-word karaoke pop. `render.py` overlays them in the final mix as one image sequence.
+Spoken words are mapped from each clip's aligned word timestamps onto the finished timeline,
+with script-line + speech-span synthesis as a zero-blank fallback whenever an edit cut lacks
+word-level alignment. Words are never translated: Indic scripts stay in their native script and
+English words stay in English. Caption cards are rendered by `subtitles/render_cues.js` and
+`subtitles/caption-renderer.js` (curated styles in `subtitles/styles.json`) on `node-canvas`,
+cropped to a horizontal band with 3-subframe active-word karaoke pop, and composited by
+`render.py` as a single FFmpeg concat image sequence.
 """
 from __future__ import annotations
 
 import colorsys
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 SUB_DIR = HERE.parent / "subtitles"
-MAX_WORDS_PER_CUE = 4          # max words per cue for Latin scripts
-MAX_INDIC_WORDS_PER_CUE = 3    # max words per cue for Indic scripts (wider conjuncts/matras)
-MAX_VISUAL_UNITS = 19.0        # widest caption (in letter widths) that fits ONE row at the fixed size in every style, so no caption is ever shrunk
-MAX_GAP_IN_CUE = 0.22          # speech pause > 0.22s starts a fresh caption card
-BRIDGE_GAP_MAX = 0.18          # bridge tiny intra-sentence gaps <= 0.18s without overlap
+
+MAX_WORDS_PER_CUE = 4          # Maximum words per cue for Latin scripts
+MAX_INDIC_WORDS_PER_CUE = 3    # Maximum words per cue for Indic scripts (wider conjuncts and matras)
+MAX_VISUAL_UNITS = 19.0        # Maximum visual width (in character units) that fits a single row at fixed font size
+MAX_GAP_IN_CUE = 0.22          # Speech pause > 0.22s starts a fresh caption card
+BRIDGE_GAP_MAX = 0.18          # Bridge micro-gaps <= 0.18s within a sentence without overlapping cues
 SENTENCE_END = re.compile(r"[.?!।][\"'”’)\]]*$")
 CLAUSE_END = re.compile(r"[,;:—–][\"'”’)\]]*$")
 INDIC_RE = re.compile(r"[\u0900-\u0D7F]")
 
-DEFAULT_FONT_SIZE = 54          # one caption size for every style on a 1080-wide picture (the styles' own 66 to 74 read too large)
-SINGLE_Y = 68.0                 # full-frame cuts: captions at 65 to 70% of the height (owner's default)
-SEAM_Y = 50.0                   # top/bottom split: captions sit on the divider line, clear of both faces
+DEFAULT_FONT_SIZE = 54         # Fixed single-row caption size in pixels on a 1080px-wide canvas
+SINGLE_Y = 68.0                # Default vertical placement (% of height) on full-frame 9:16 cuts
+SEAM_Y = 50.0                  # Default vertical placement (% of height) on the split_v center seam
+FACE_DROP_Y = 79.0             # Safe lower-zone drop (% of height) when a foreground face occupies y=55..72%
+FACE_LOWER_MID_Y0 = 0.55       # Lower-mid face zone top threshold (normalized canvas height)
+FACE_LOWER_MID_Y1 = 0.72       # Lower-mid face zone bottom threshold (normalized canvas height)
 
 
-def caption_font_size(width: int, spec: Optional[Dict[str, Any]] = None) -> int:
-    """Caption size in pixels: `size=` in `#subs`, else `ZENO_SUBS_FONT_SIZE`, else the default, scaled to the picture width."""
+def caption_font_size(width: int = 1080, spec: Optional[Dict[str, Any]] = None) -> int:
+    """Return caption font size in 1080w design-space pixels from `#subs size=`, `ZENO_SUBS_FONT_SIZE`, or `DEFAULT_FONT_SIZE`.
+
+    `subtitles/caption-renderer.js` multiplies `style.fontSize` by `resScale = (width / 1080) * aspectScale`,
+    so returning design-space pixels here prevents `(width / 1080)^2` double-shrinking on 720p/540p renders.
+    """
+    _ = width
     raw = (spec or {}).get("size") or os.environ.get("ZENO_SUBS_FONT_SIZE") or DEFAULT_FONT_SIZE
     try:
         base = min(90.0, max(36.0, float(raw)))
     except (TypeError, ValueError):
         base = float(DEFAULT_FONT_SIZE)
-    return int(round(base * max(0.5, float(width or 1080) / 1080.0)))
+    return int(round(base))
+
 
 STYLE_ALIASES: Dict[str, int] = {
     "hormozi punch": 4,
@@ -59,6 +75,12 @@ STYLE_ALIASES: Dict[str, int] = {
     "sticker": 12,
     "cutout": 12,
     "white box": 5,
+    "white pill": 32,
+    "white karaoke": 32,
+    "white karaoke pill": 32,
+    "karaoke pill": 32,
+    "w47 pill": 32,
+    "w47": 32,
     "black box": 30,
     "yellow box": 31,
     "marker": 10,
@@ -142,10 +164,9 @@ CONTRACTIONS: Dict[str, List[str]] = {
     "they'd": ["they", "would"],
 }
 
-
 IS_WIN = os.name == "nt"
-NODE_DIR = HERE.parent / "tools" / "node"          # Zeno's own portable Node (tools/ is never touched by updates)
-NODE_DIST = "https://nodejs.org/dist/latest-v22.x/"   # the current Node 22 LTS, checked against nodejs.org's own SHA-256 list
+NODE_DIR = HERE.parent / "tools" / "node"
+NODE_DIST = "https://nodejs.org/dist/latest-v22.x/"
 
 
 def _local_node() -> Optional[Path]:
@@ -154,7 +175,7 @@ def _local_node() -> Optional[Path]:
 
 
 def node_path() -> str:
-    """Node for the caption renderer: the computer's own, else Zeno's portable copy in tools/node."""
+    """Resolve the Node.js binary: system `node` on PATH first, else the portable copy in `tools/node`."""
     found = shutil.which("node")
     if found:
         return found
@@ -163,7 +184,7 @@ def node_path() -> str:
 
 
 def _npm_cmd() -> Tuple[List[str], Dict[str, str]]:
-    """How to run npm, and an environment where npm can find node (npm is itself a Node script)."""
+    """Resolve the `npm` command and an environment with `node` on PATH."""
     env = dict(os.environ)
     sys_npm = shutil.which("npm")
     if sys_npm and shutil.which("node"):
@@ -177,8 +198,7 @@ def _npm_cmd() -> Tuple[List[str], Dict[str, str]]:
 
 
 def install_portable_node(timeout: float = 600.0) -> bool:
-    """Download the current Node 22 LTS for this computer into tools/node (about 30-50 MB, no admin rights), after checking it
-    against the SHA-256 list nodejs.org publishes. Used when the computer has no Node, so captions always render."""
+    """Download portable Node 22 LTS into `tools/node` after verifying its SHA-256 checksum from `nodejs.org`."""
     import hashlib
     import platform
     import tarfile
@@ -197,7 +217,7 @@ def install_portable_node(timeout: float = 600.0) -> bool:
     else:
         suffix = f"-linux-{arch}.tar.gz"
     try:
-        with urllib.request.urlopen(NODE_DIST + "SHASUMS256.txt", timeout=30) as resp:   # noqa: S310 (nodejs.org)
+        with urllib.request.urlopen(NODE_DIST + "SHASUMS256.txt", timeout=30) as resp:  # noqa: S310
             sums = resp.read().decode("utf-8", "replace")
         name, want = "", ""
         for line in sums.splitlines():
@@ -206,15 +226,15 @@ def install_portable_node(timeout: float = 600.0) -> bool:
                 want, name = parts[0].lower(), parts[1]
                 break
         if not name:
-            print(f"  [SUBS] nodejs.org lists no Node build for this computer ({suffix.strip('-')})")
+            print(f"  [SUBS] nodejs.org lists no Node build for this platform ({suffix.strip('-')})")
             return False
-        print(f"  [SUBS] Node.js is not installed: downloading {name} into tools/node (one time, no admin needed)...")
+        print(f"  [SUBS] Node.js not found on PATH: downloading {name} into tools/node...")
         tmp = Path(tempfile.mkdtemp(prefix="zeno_node_"))
         arc = tmp / name
-        with urllib.request.urlopen(NODE_DIST + name, timeout=timeout) as resp, open(arc, "wb") as fh:   # noqa: S310
+        with urllib.request.urlopen(NODE_DIST + name, timeout=timeout) as resp, open(arc, "wb") as fh:  # noqa: S310
             shutil.copyfileobj(resp, fh)
         if hashlib.sha256(arc.read_bytes()).hexdigest().lower() != want:
-            print("  [SUBS] the Node download did not match nodejs.org's checksum; not installed")
+            print("  [SUBS] Downloaded Node archive failed SHA-256 verification; aborting install.")
             shutil.rmtree(tmp, ignore_errors=True)
             return False
         out = tmp / "x"
@@ -223,7 +243,10 @@ def install_portable_node(timeout: float = 600.0) -> bool:
                 zf.extractall(out)
         else:
             with tarfile.open(arc) as tf:
-                tf.extractall(out, filter="tar") if hasattr(tarfile, "data_filter") else tf.extractall(out)   # noqa: S202
+                if hasattr(tarfile, "data_filter"):
+                    tf.extractall(out, filter="tar")
+                else:
+                    tf.extractall(out)  # noqa: S202
         inner = next(p for p in out.iterdir() if p.is_dir() and p.name.startswith("node-v"))
         NODE_DIR.parent.mkdir(parents=True, exist_ok=True)
         if NODE_DIR.exists():
@@ -231,51 +254,194 @@ def install_portable_node(timeout: float = 600.0) -> bool:
         shutil.move(str(inner), str(NODE_DIR))
         shutil.rmtree(tmp, ignore_errors=True)
         ok = _local_node() is not None
-        print("  [SUBS] Node.js ready in tools/node" if ok else "  [SUBS] Node.js could not be unpacked")
+        print("  [SUBS] Portable Node.js ready in tools/node" if ok else "  [SUBS] Node.js archive could not be unpacked")
         return ok
-    except Exception as exc:   # noqa: BLE001
-        print(f"  [SUBS] could not install Node.js ({type(exc).__name__}: {exc}); captions need it (nodejs.org, LTS)")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [SUBS] Could not install portable Node.js ({type(exc).__name__}: {exc}); install Node LTS from nodejs.org.")
         return False
 
 
 def available() -> bool:
-    """Node is installed and the renderer's dependencies (node-canvas) are in place."""
+    """Return True when Node.js, `node-canvas`, and `subtitles/styles.json` are all installed."""
     return bool(node_path()) and (SUB_DIR / "node_modules" / "canvas").is_dir() and (SUB_DIR / "styles.json").is_file()
 
 
 def ensure_ready() -> bool:
-    """Make captions drawable on this computer: Node (the computer's own, else a portable copy fetched once into tools/node) and
-    the renderer's one dependency (node-canvas, a prebuilt binary of about 20 MB). Needs internet only the first time."""
+    """Ensure Node.js and the `node-canvas` dependency in `subtitles/` are ready for rendering."""
     if available():
         return True
     if not node_path():
         install_portable_node()
     npm, env = _npm_cmd()
     if node_path() and npm and (SUB_DIR / "package.json").is_file() and not (SUB_DIR / "node_modules" / "canvas").is_dir():
-        print("  [SUBS] first use on this computer: installing the caption renderer (about 20 MB)...")
+        print("  [SUBS] Installing subtitle renderer dependencies (node-canvas)...")
         try:
-            r = subprocess.run(npm + ["install", "--no-audit", "--no-fund", "--silent"], cwd=str(SUB_DIR), capture_output=True, text=True,
-                               timeout=600, env=env, shell=False)
+            r = subprocess.run(
+                npm + ["install", "--no-audit", "--no-fund", "--silent"],
+                cwd=str(SUB_DIR),
+                capture_output=True,
+                text=True,
+                timeout=600,
+                env=env,
+                shell=False,
+            )
             if r.returncode != 0:
-                print("  [SUBS] caption renderer install failed: " + (r.stderr or r.stdout or "").strip()[-300:])
-        except Exception as exc:   # noqa: BLE001
-            print(f"  [SUBS] install failed: {exc}")
+                print("  [SUBS] Subtitle renderer install failed: " + (r.stderr or r.stdout or "").strip()[-300:])
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [SUBS] Subtitle renderer install error: {exc}")
     return available()
 
 
-
 def styles() -> List[Dict[str, Any]]:
+    """Load the curated subtitle style catalog from `subtitles/styles.json`."""
     return json.loads((SUB_DIR / "styles.json").read_text(encoding="utf-8"))
 
 
+# Script/language grouping for bundled static Google Fonts (`subtitles/fonts.json`)
+_INDIC_FAMILY_SCRIPTS: Dict[str, Tuple[str, ...]] = {
+    # Hindi / Marathi (Devanagari)
+    "anek devanagari": ("devanagari", "hindi", "marathi"),
+    "baloo 2": ("devanagari", "hindi", "marathi"),
+    "hind": ("devanagari", "hindi", "marathi"),
+    "kalam": ("devanagari", "hindi", "marathi"),
+    "modak": ("devanagari", "hindi", "marathi"),
+    "mukta": ("devanagari", "hindi", "marathi"),
+    "noto sans devanagari": ("devanagari", "hindi", "marathi"),
+    "noto serif devanagari": ("devanagari", "hindi", "marathi"),
+    "rozha one": ("devanagari", "hindi", "marathi"),
+    "teko": ("devanagari", "hindi", "marathi"),
+    # Kannada
+    "anek kannada": ("kannada",),
+    "baloo tamma 2": ("kannada",),
+    "noto sans kannada": ("kannada",),
+    "noto serif kannada": ("kannada",),
+    "tiro kannada": ("kannada",),
+    # Telugu
+    "anek telugu": ("telugu",),
+    "gidugu": ("telugu",),
+    "hind guntur": ("telugu",),
+    "noto sans telugu": ("telugu",),
+    "noto serif telugu": ("telugu",),
+    "ramabhadra": ("telugu",),
+    # Tamil
+    "anek tamil": ("tamil",),
+    "baloo thambi 2": ("tamil",),
+    "catamaran": ("tamil",),
+    "coiny": ("tamil",),
+    "hind madurai": ("tamil",),
+    "kavivanar": ("tamil",),
+    "mukta malar": ("tamil",),
+    "noto sans tamil": ("tamil",),
+    # Malayalam
+    "anek malayalam": ("malayalam",),
+    "baloo chettan 2": ("malayalam",),
+    "chilanka": ("malayalam",),
+    "manjari": ("malayalam",),
+    "noto sans malayalam": ("malayalam",),
+    "noto serif malayalam": ("malayalam",),
+    # Bengali
+    "anek bangla": ("bengali",),
+    "atma": ("bengali",),
+    "baloo da 2": ("bengali",),
+    "galada": ("bengali",),
+    "hind siliguri": ("bengali",),
+    "noto sans bengali": ("bengali",),
+    "noto serif bengali": ("bengali",),
+    # Gujarati
+    "anek gujarati": ("gujarati",),
+    "baloo bhai 2": ("gujarati",),
+    "hind vadodara": ("gujarati",),
+    "mogra": ("gujarati",),
+    "mukta vaani": ("gujarati",),
+    "noto sans gujarati": ("gujarati",),
+    # Punjabi (Gurmukhi)
+    "anek gurmukhi": ("gurmukhi", "punjabi"),
+    "baloo paaji 2": ("gurmukhi", "punjabi"),
+    "mukta mahee": ("gurmukhi", "punjabi"),
+    "noto sans gurmukhi": ("gurmukhi", "punjabi"),
+    # Odia (Oriya)
+    "anek odia": ("odia", "oriya"),
+    "baloo bhaina 2": ("odia", "oriya"),
+    "noto sans oriya": ("odia", "oriya"),
+    "noto serif oriya": ("odia", "oriya"),
+}
+
+
+def fonts() -> List[Dict[str, Any]]:
+    """Load the bundled static font registry from `subtitles/fonts.json`."""
+    p = SUB_DIR / "fonts.json"
+    if not p.is_file():
+        return []
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def list_fonts(script: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return bundled static font families with available weights and script tags.
+
+    Pass `script` (e.g. `"english"`, `"latin"`, `"hindi"`, `"kannada"`, `"tamil"`,
+    `"telugu"`, `"malayalam"`, `"bengali"`, `"gujarati"`, `"punjabi"`, `"odia"`,
+    or `"indic"`) to filter the catalog.
+    """
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for entry in fonts():
+        fam = str(entry.get("family") or "").strip()
+        fname = str(entry.get("file") or "").strip()
+        if not fam or not fname:
+            continue
+        if not (SUB_DIR / "fonts" / fname).is_file():
+            continue
+        key = fam.lower()
+        if key not in grouped:
+            scripts = _INDIC_FAMILY_SCRIPTS.get(key, ("english", "latin"))
+            grouped[key] = {
+                "family": fam,
+                "weights": [],
+                "scripts": list(scripts),
+                "is_indic": key in _INDIC_FAMILY_SCRIPTS,
+            }
+        w = int(entry.get("weight") or 400)
+        if w not in grouped[key]["weights"]:
+            grouped[key]["weights"].append(w)
+
+    items = []
+    want = str(script or "").strip().lower()
+    for rec in sorted(grouped.values(), key=lambda x: x["family"].lower()):
+        rec["weights"].sort()
+        if want:
+            if want == "indic":
+                if not rec["is_indic"]:
+                    continue
+            elif want in ("english", "latin"):
+                if rec["is_indic"]:
+                    continue
+            elif want not in rec["scripts"]:
+                continue
+        items.append(rec)
+    return items
+
+
+def resolve_font(token: Any) -> Optional[str]:
+    """Resolve a bundled font family name case-insensitively (accepting hyphens/underscores)."""
+    if token is None:
+        return None
+    raw = str(token).strip().strip("\"'")
+    if not raw:
+        return None
+    norm = re.sub(r"[-_\s]+", " ", raw).strip().lower()
+    for rec in list_fonts():
+        fam = str(rec["family"])
+        if fam.lower() == norm or re.sub(r"[-_\s]+", " ", fam).strip().lower() == norm:
+            return fam
+    return None
+
+
 def resolve_style(token: Any) -> Optional[Dict[str, Any]]:
-    """Resolve a subtitle style by id (`4`), exact name (`Blue Highlight`, any case), or known alias (`Hormozi Punch`); None otherwise."""
+    """Resolve a subtitle style by numeric ID (`4`), exact name (`Blue Highlight`), or alias (`Hormozi Punch`)."""
     if token is None:
         return None
     tok = str(token).strip().strip("\"'").lower()
     if not tok:
         return None
-    # A style's `autoWeight` says how often auto may pick it (default 6; Sticker Cutout is 1, so it turns up only rarely).
     pool = [x for x in styles() for _ in range(max(1, int(x.get("autoWeight", 6))))]
     for s in pool:
         if str(s.get("id")) == tok or str(s.get("name", "")).lower() == tok:
@@ -290,7 +456,9 @@ def resolve_style(token: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
-# ---------------------------------------------------------------- clip cache & word loading
+# ---------------------------------------------------------------------------
+# Clip Cache & Aligned Word Loading
+# ---------------------------------------------------------------------------
 def _safe_stem(stem: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("_") or "clip"
 
@@ -485,6 +653,7 @@ def _words_of_clip(src: Any, work_dir: Optional[Path] = None) -> List[Dict[str, 
 
 
 def _speech_spans(src: Any, work_dir: Optional[Path] = None) -> List[Tuple[float, float]]:
+    """Load VAD active speech spans `[(start, end), ...]` for `src` from clip cache."""
     for d in _resolve_clip_cache_dirs(src, work_dir=work_dir, include_vo_siblings=True):
         f = d / "speech_spans.json"
         if f.is_file():
@@ -499,7 +668,7 @@ def _speech_spans(src: Any, work_dir: Optional[Path] = None) -> List[Tuple[float
 
 
 def _call_clip_loader(fn: Callable[..., Any], src: Any, work_dir: Optional[Path]) -> Any:
-    """Invoke `_words_of_clip` / `_speech_spans` while remaining 100% compatible with 1-arg test mocks."""
+    """Invoke `_words_of_clip` or `_speech_spans` while remaining compatible with 1-argument test mocks."""
     if work_dir is None:
         return fn(src)
     try:
@@ -508,15 +677,17 @@ def _call_clip_loader(fn: Callable[..., Any], src: Any, work_dir: Optional[Path]
         return fn(src)
 
 
-# ---------------------------------------------------------------- script line IDs, contractions & foreign-word guard
+# ---------------------------------------------------------------------------
+# Script Line IDs, Contractions & Foreign-Word Boundary Guard
+# ---------------------------------------------------------------------------
 def _base_line(seg_id: str) -> str:
     m = re.match(r"^(L\d+)", str(seg_id))
     return m.group(1) if m else str(seg_id)
 
 
 def _seg_lines(seg_id: str) -> Set[str]:
-    """Resolve `L1`, `L1b`, `L1_L2` (`{"L1", "L2"}`), ranges `L2_L5` (`{"L2", "L3", "L4", "L5"}`),
-    or return `set()` for custom non-line IDs (`S1`, `HOOK1`) so custom IDs never filter out spoken words."""
+    """Resolve `L1`, `L1b`, `L1_L2` (`{"L1", "L2"}`), or ranges `L2_L5` (`{"L2", ..., "L5"}`);
+    returns an empty set for custom non-line IDs (`S1`, `HOOK1`) so custom IDs never filter out spoken words."""
     s = str(seg_id or "").strip()
     if not re.match(r"^L\d+", s, re.IGNORECASE):
         return set()
@@ -534,7 +705,7 @@ def _normalize_apostrophes(text: str) -> str:
 
 
 def _expand_word_forms(word: str) -> List[List[str]]:
-    """Return candidate tokenizations for `word`: `[cleaned_single]` and (if contraction) `[expanded_parts]`."""
+    """Return candidate tokenizations for `word`: `[cleaned_single]` and (when contracted) `[expanded_parts]`."""
     from script_order import clean
 
     w_norm = _normalize_apostrophes(str(word or "").strip().lower())
@@ -558,8 +729,8 @@ def _build_line_token_map(script_lines: Optional[List[Dict[str, Any]]]) -> Dict[
     from script_order import clean
 
     out: Dict[str, List[str]] = {}
-    for l in script_lines or []:
-        lid = str(l.get("id") or "").strip()
+    for line_entry in script_lines or []:
+        lid = str(line_entry.get("id") or "").strip()
         if not lid:
             continue
         acc: List[str] = []
@@ -570,7 +741,7 @@ def _build_line_token_map(script_lines: Optional[List[Dict[str, Any]]]) -> Dict[
                 seen.add(t)
                 acc.append(t)
 
-        for tok in l.get("tokens") or []:
+        for tok in line_entry.get("tokens") or []:
             s_tok = _normalize_apostrophes(str(tok).strip().lower())
             _push(s_tok)
             for c_tok in clean([s_tok]):
@@ -579,7 +750,7 @@ def _build_line_token_map(script_lines: Optional[List[Dict[str, Any]]]) -> Dict[
                 for exp_tok in CONTRACTIONS.get(key, ()):
                     _push(exp_tok)
 
-        raw_text = str(l.get("text") or "").strip()
+        raw_text = str(line_entry.get("text") or "").strip()
         if raw_text:
             for raw_w in raw_text.split():
                 for form in _expand_word_forms(raw_w):
@@ -610,7 +781,7 @@ def _foreign_to_line(
     similarity: Callable[[str, str], float],
     adjacent_lines: Optional[Set[str]] = None,
 ) -> bool:
-    """True when `word` does not match the segment's target line(s) and strongly (`>= 0.80`) matches an adjacent script line."""
+    """Return True when `word` does not match the segment's target line(s) and strongly (`>= 0.80`) matches an adjacent script line."""
     if isinstance(seg_line, (set, frozenset, list, tuple)):
         target_ids = {str(x) for x in seg_line if str(x)}
     else:
@@ -649,12 +820,14 @@ def _adjacent_line_ids(target_ids: Set[str], line_tokens: Dict[str, List[str]]) 
     return prev_ids, next_ids
 
 
-# ---------------------------------------------------------------- script-line + speech-span fallback
+# ---------------------------------------------------------------------------
+# Script-Line + Speech-Span Synthesis Fallback
+# ---------------------------------------------------------------------------
 def _script_words_for_lines(target_ids: Set[str], script_lines: Optional[List[Dict[str, Any]]]) -> List[str]:
     if not target_ids or not script_lines:
         return []
     ordered_ids = sorted(target_ids, key=lambda x: int(x[1:]) if x.startswith("L") and x[1:].isdigit() else 999999)
-    by_id = {str(l.get("id")): l for l in script_lines if l.get("id")}
+    by_id = {str(line_entry.get("id")): line_entry for line_entry in script_lines if line_entry.get("id")}
     words: List[str] = []
     for lid in ordered_ids:
         entry = by_id.get(lid)
@@ -682,8 +855,13 @@ def _active_speech_windows(st: float, en: float, spoken: List[Tuple[float, float
                 merged[-1] = (merged[-1][0], max(merged[-1][1], b))
             else:
                 merged.append((a, b))
-        return merged, sum(b - a for a, b in merged)
-    if dur >= 0.45:
+        if merged:
+            return merged, sum(b - a for a, b in merged)
+        # VAD-missed quiet speech fallback on non-muted spoken cuts
+        if dur >= 0.35:
+            return [(st, en)], dur
+        return [], 0.0
+    if dur >= 0.25:
         pad = min(0.05, dur * 0.08)
         win = (st + pad, en - pad)
         return [win], max(0.0, win[1] - win[0])
@@ -694,7 +872,7 @@ def _synthesize_words_over_spans(
     words_text: List[str],
     tl_spans: List[Tuple[int, float, float]],
 ) -> Dict[int, List[Dict[str, Any]]]:
-    """Distribute `words_text` proportionally across `(seg_idx, tl_start, tl_end)` speech spans."""
+    """Distribute `words_text` proportionally across `(seg_idx, tl_start, tl_end)` speech windows."""
     result: Dict[int, List[Dict[str, Any]]] = {}
     if not words_text or not tl_spans:
         return result
@@ -710,9 +888,7 @@ def _synthesize_words_over_spans(
         elif CLAUSE_END.search(w):
             base_w += 0.9
         weights.append(base_w)
-    total_weight = sum(weights) or float(len(words_text))
 
-    # Partition words across spans proportional to span duration
     n_words = len(words_text)
     n_spans = len(tl_spans)
     cum_dur = 0.0
@@ -741,10 +917,13 @@ def _synthesize_words_over_spans(
     return result
 
 
-# ---------------------------------------------------------------- phrase chunking & monotonic cues
+# ---------------------------------------------------------------------------
+# Multilingual Phrase Chunking & Strictly Monotonic Cues
+# ---------------------------------------------------------------------------
 def _visual_units(text: str) -> float:
-    """Width of `text` on screen, in units of one Kannada/Hindi/Telugu letter (about 40 px at the fixed caption size).
-    Tamil and Malayalam letters are about 30% wider, Bengali 15%, lower-case Latin 20% narrower (measured on rendered captions)."""
+    """Estimate horizontal rendered width of `text` in normalized character units (~40px at 54px font size).
+    Accounts for wider Tamil/Malayalam glyphs (+30%), Bengali/Kannada/Telugu glyphs (+15%),
+    narrow lowercase Latin (-20%), and non-spacing/spacing Indic vowel signs."""
     units = 0.0
     for ch in text:
         cat = unicodedata.category(ch)
@@ -753,7 +932,7 @@ def _visual_units(text: str) -> float:
         cp = ord(ch)
         if 0x0B80 <= cp <= 0x0BFF or 0x0D00 <= cp <= 0x0D7F:      # Tamil, Malayalam
             w = 1.30
-        elif 0x0980 <= cp <= 0x09FF:                                # Bengali
+        elif 0x0980 <= cp <= 0x09FF or 0x0C00 <= cp <= 0x0C7F or 0x0C80 <= cp <= 0x0CFF:  # Bengali, Telugu, Kannada
             w = 1.15
         elif cp < 0x0250:                                           # Latin
             w = 1.0 if (ch.isupper() or ch.isdigit()) else (0.45 if ch in "il.,'!|:;" else 0.80)
@@ -763,8 +942,9 @@ def _visual_units(text: str) -> float:
     return units
 
 
-# Words a caption card must not END on (the next word completes the phrase) and must not START with (they finish the previous word's phrase).
-# Covers Kannada, Telugu, Tamil, Malayalam, Hindi/Marathi, Bengali and English, so a card never reads "15 | ನಿಮಿಷ" or "Order | ಮಾಡ್ತೀನಿ".
+# Multilingual function words, determiners, postpositions, and light-verb stems across
+# Kannada, Telugu, Tamil, Malayalam, Hindi, Marathi, Bengali, and English so caption cards
+# break cleanly at natural phrase boundaries rather than stranding numbers, possessives, or auxiliaries.
 _NO_END = {w.lower() for line in (
     "ನನ್ನ ನಿನ್ನ ನಿಮ್ಮ ನಮ್ಮ ಅವನ ಅವಳ ಅವರ ಈ ಆ ಒಂದು ಮತ್ತೆ ಹಾಗೂ ಆದ್ರೆ ಆದರೆ ಯಾವ ಎಷ್ಟು",
     "నా నీ మీ మా ఈ ఆ ఒక మరియు కానీ",
@@ -775,16 +955,24 @@ _NO_END = {w.lower() for line in (
     "আমার তোমার আপনার আমাদের এই ওই এক এবং কিন্তু",
     "a an the to of in on at for with my your our his her their and or but that this these those is are was were be",
 ) for w in line.split()}
+
 _NO_START = {w.lower() for line in (
     "का की के को में से पर ने तक भी ही है हैं था थी थे हूँ हो हूं",
     "ला चा ची चे ना त ही आहे आहेत होता होती",
     "এর কে তে থেকে ও ই আছে হয় করে",
 ) for w in line.split()}
-_NO_START_PREFIX = ("ಮಾಡ", "ಆಗ", "ಇದ್ದ", "ಇದೆ", "ಇರು", "ಕೊಡ", "చేయ", "చేస", "అవ", "ചെയ്", "ആയി", "ஆகு", "செய்", "করি", "করে", "করব", "করছ", "হবে", "হচ্ছ")
+
+_NO_START_PREFIX = (
+    "ಮಾಡ", "ಆಗ", "ಇದ್ದ", "ಇದೆ", "ಇರು", "ಕೊಡ",
+    "చేయ", "చేస", "అవ",
+    "ചെയ്", "ആയി",
+    "ஆகு", "செய்",
+    "করি", "করে", "করব", "করছ", "হবে", "হচ্ছ",
+)
 
 
 def _core(w: str) -> str:
-    # strip punctuation only: Python's \W would also eat Indic vowel signs, which are combining marks
+    """Strip leading/trailing punctuation/symbol/separator characters while preserving Indic combining vowel signs."""
     t = w or ""
     i, j = 0, len(t)
     while i < j and unicodedata.category(t[i])[0] in "PSZ":
@@ -805,17 +993,17 @@ def _is_no_start(text: str) -> bool:
 
 
 def _chunk_continuous_phrase(run_words: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
-    """Split one unbroken run of speech into caption cards (2 to 4 words, up to 3 for Indic), choosing the cheapest set of break points:
-    breaks go after commas, never after a number or possessive ("ನಿಮ್ಮ | AI English"), never before a postposition or light verb ("Order | ಮಾಡ್ತೀನಿ"),
-    and a lone one-word card is avoided."""
+    """Partition an unbroken speech run into single-row caption cards via dynamic programming:
+    rewards breaks after clause/sentence punctuation, penalizes orphan 1-word cards, numbers split
+    from units, possessives/prepositions at card ends, and postpositions/light verbs at card starts."""
     n = len(run_words)
     if n == 0:
         return []
     has_indic = any(INDIC_RE.search(w["text"]) for w in run_words)
-    max_w = MAX_WORDS_PER_CUE   # Indic cards of 4 words are allowed only while they stay narrow (checked below)
+    max_w = MAX_WORDS_PER_CUE
     units = [_visual_units(w["text"]) for w in run_words]
-    INF = float("inf")
-    best = [INF] * (n + 1)
+    inf = float("inf")
+    best = [inf] * (n + 1)
     prev = [0] * (n + 1)
     best[0] = 0.0
     for j in range(1, n + 1):
@@ -826,7 +1014,7 @@ def _chunk_continuous_phrase(run_words: List[Dict[str, Any]]) -> List[List[Dict[
                 break
             if has_indic and j - i > MAX_INDIC_WORDS_PER_CUE and width > 16.0:
                 continue
-            if best[i] == INF:
+            if best[i] == inf:
                 continue
             size = j - i
             cost = 1.0 + (1.6 if size == 1 and n > 1 else 0.0) + (0.25 if size == 2 and n > 3 else 0.0)
@@ -838,14 +1026,19 @@ def _chunk_continuous_phrase(run_words: List[Dict[str, Any]]) -> List[List[Dict[
                     cost += 7.0
                 if _is_no_start(nxt):
                     cost += 7.0
-                # keep a Latin word and the Indic word that carries its suffix/verb together
-                if INDIC_RE.search(nxt) and not INDIC_RE.search(last) and re.search(r"[A-Za-z]", last) and not (CLAUSE_END.search(last) or SENTENCE_END.search(last)):
+                # Keep code-switched English nouns paired with trailing Indic inflections/auxiliaries
+                if (
+                    INDIC_RE.search(nxt)
+                    and not INDIC_RE.search(last)
+                    and re.search(r"[A-Za-z]", last)
+                    and not (CLAUSE_END.search(last) or SENTENCE_END.search(last))
+                ):
                     cost += 0.6
-            cost += (1.0 - min(1.0, width / MAX_VISUAL_UNITS)) * 0.4   # prefer fuller cards over thin ones
+            cost += (1.0 - min(1.0, width / MAX_VISUAL_UNITS)) * 0.4
             if best[i] + cost < best[j]:
                 best[j] = best[i] + cost
                 prev[j] = i
-    if best[n] == INF:   # cannot happen (a single word always fits), but never lose words
+    if best[n] == inf:
         return [[w] for w in run_words]
     chunks: List[List[Dict[str, Any]]] = []
     j = n
@@ -857,16 +1050,23 @@ def _chunk_continuous_phrase(run_words: List[Dict[str, Any]]) -> List[List[Dict[
     return [c for c in chunks if c]
 
 
-def _group_segment_words(words: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+def _group_segment_words(words: List[Dict[str, Any]], gap_scale: float = 1.0) -> List[List[Dict[str, Any]]]:
     if not words:
         return []
+    eff_scale = max(1.0, float(gap_scale or 1.0))
+    eff_max_gap = MAX_GAP_IN_CUE * eff_scale
+    eff_glue_gap = 0.75 * eff_scale
     runs: List[List[Dict[str, Any]]] = []
     cur_run: List[Dict[str, Any]] = []
     for w in words:
         if cur_run:
             gap = w["start"] - cur_run[-1]["end"]
-            glued = gap <= 0.75 and (_is_no_end(cur_run[-1]["text"]) or _is_no_start(w["text"])) and not SENTENCE_END.search(cur_run[-1]["text"])
-            if (gap > MAX_GAP_IN_CUE and not glued) or SENTENCE_END.search(cur_run[-1]["text"]):
+            glued = (
+                gap <= eff_glue_gap
+                and (_is_no_end(cur_run[-1]["text"]) or _is_no_start(w["text"]))
+                and not SENTENCE_END.search(cur_run[-1]["text"])
+            )
+            if (gap > eff_max_gap and not glued) or SENTENCE_END.search(cur_run[-1]["text"]):
                 runs.append(cur_run)
                 cur_run = []
         cur_run.append(w)
@@ -898,18 +1098,243 @@ def _cue(words: List[Dict[str, Any]], max_end: Optional[float] = None) -> Dict[s
     }
 
 
+def _segment_speed(seg: Dict[str, Any]) -> float:
+    """Return clamped playback speed factor via `common.segment_speed` with safe fallback."""
+    try:
+        import common
+
+        fn = getattr(common, "segment_speed", None)
+        if callable(fn):
+            val = float(fn(seg))
+            if math.isfinite(val) and val > 0.0:
+                return val
+    except Exception:
+        pass
+    if not isinstance(seg, dict):
+        return 1.0
+    raw = seg.get("speed")
+    if raw is None or isinstance(raw, bool):
+        return 1.0
+    try:
+        val = float(str(raw).strip().rstrip("xX"))
+        return max(0.25, min(4.0, val)) if math.isfinite(val) and val > 0.0 else 1.0
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _segment_is_muted(seg: Dict[str, Any]) -> bool:
+    """Return True when `seg` disables source audio (`common.segment_is_muted` with safe fallback)."""
+    try:
+        import common
+
+        fn = getattr(common, "segment_is_muted", None)
+        if callable(fn):
+            return bool(fn(seg))
+    except Exception:
+        pass
+    if not isinstance(seg, dict):
+        return False
+    for key in ("mute", "muted"):
+        raw = seg.get(key)
+        if isinstance(raw, str):
+            low = raw.strip().lower()
+            if low in ("1", "true", "yes", "on"):
+                return True
+            if low in ("", "0", "false", "no", "off", "none", "null"):
+                continue
+            return True
+        if raw:
+            return True
+    am = str(seg.get("audio_mode") or seg.get("audio") or "").strip().lower()
+    return am in ("mute", "muted", "off", "none")
+
+
+def _segment_is_beat(seg: Dict[str, Any]) -> bool:
+    """Return True when `seg` is a non-spoken visual beat (`common.segment_is_beat` with safe fallback)."""
+    try:
+        import common
+
+        fn = getattr(common, "segment_is_beat", None)
+        if callable(fn):
+            return bool(fn(seg))
+    except Exception:
+        pass
+    if not isinstance(seg, dict):
+        return False
+    for key in ("beat", "silent"):
+        raw = seg.get(key)
+        if isinstance(raw, str):
+            low = raw.strip().lower()
+            if low in ("1", "true", "yes", "on"):
+                return True
+            if low in ("", "0", "false", "no", "off", "none", "null"):
+                continue
+            return True
+        if raw:
+            return True
+    return False
+
+
+def _segment_hold_tail(seg: Dict[str, Any]) -> float:
+    """Return non-negative post-speech freeze-hold tail duration in seconds."""
+    try:
+        import common
+
+        fn = getattr(common, "segment_hold_tail", None)
+        if callable(fn):
+            return max(0.0, float(fn(seg)))
+    except Exception:
+        pass
+    try:
+        return max(0.0, min(1.5, float(seg.get("hold_tail") or seg.get("hold") or 0.0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _segment_play_duration(seg: Dict[str, Any]) -> float:
+    """Return moving playback duration (`(end - start) / speed`, excluding `hold_tail`)."""
+    try:
+        import common
+
+        fn = getattr(common, "segment_play_duration", None)
+        if callable(fn):
+            return max(0.0, float(fn(seg)))
+    except Exception:
+        pass
+    src_dur = max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
+    return src_dur / _segment_speed(seg)
+
+
+def _src_to_seg_time(seg: Dict[str, Any], src_t: float) -> float:
+    """Map absolute source timestamp `src_t` to clamped segment-relative playback seconds `[0, play_dur]`."""
+    play_dur = _segment_play_duration(seg)
+    try:
+        import common
+
+        fn = getattr(common, "src_to_seg_time", None)
+        if callable(fn):
+            return max(0.0, min(play_dur, float(fn(seg, src_t))))
+    except Exception:
+        pass
+    st = float(seg.get("start", 0.0))
+    spd = _segment_speed(seg)
+    return max(0.0, min(play_dur, (float(src_t) - st) / spd))
+
+
+def segment_duration(seg: Dict[str, Any]) -> float:
+    """Return total segment duration including speed scaling and any post-speech `hold_tail`."""
+    try:
+        import common
+
+        fn = getattr(common, "segment_duration", None)
+        if callable(fn) and (callable(getattr(common, "segment_play_duration", None)) or abs(_segment_speed(seg) - 1.0) < 1e-4):
+            return float(fn(seg))
+    except Exception:
+        pass
+    return _segment_play_duration(seg) + _segment_hold_tail(seg)
+
+
+def _flag_truthy(raw: Any) -> bool:
+    """Return True for truthy booleans/numbers and non-false string flags (`on`/`true`/`yes`/`1`)."""
+    if isinstance(raw, str):
+        return raw.strip().lower() not in ("", "0", "false", "no", "off", "none", "null")
+    return bool(raw)
+
+
+def _plan_cards_off(plan: Optional[Dict[str, Any]]) -> bool:
+    """Return True when the job-level plan disables flashcards (`#cards off`)."""
+    if not isinstance(plan, dict):
+        return False
+    return _flag_truthy(plan.get("cards_off")) or plan.get("cards") is False or plan.get("flashcards") is False
+
+
+def _segment_has_active_flashcard(seg: Dict[str, Any], plan_cards_off: bool = False) -> bool:
+    """Return True when `seg` renders an active flashcard overlay."""
+    if not isinstance(seg, dict) or plan_cards_off:
+        return False
+    if _flag_truthy(seg.get("cards_off")) or seg.get("cards") is False or seg.get("flashcards") is False:
+        return False
+    return bool(seg.get("flashcards"))
+
+
+def _segment_subs_off(seg: Dict[str, Any], plan_cards_off: bool = False, with_cards: bool = False) -> bool:
+    """Return True when bottom subtitles should be suppressed on `seg`.
+
+    Suppresses whenever `subs_off` (or `subs=off`) is set, or when the segment carries an active
+    flashcard unless explicitly opted back in via `subs_on` (`subs=on`) or job-level `with_cards`.
+    """
+    if not isinstance(seg, dict):
+        return False
+    if _flag_truthy(seg.get("subs_off")):
+        return True
+    raw_subs = seg.get("subs")
+    if raw_subs is False or (isinstance(raw_subs, str) and raw_subs.strip().lower() in ("off", "none", "false", "no", "0")):
+        return True
+    if _segment_has_active_flashcard(seg, plan_cards_off=plan_cards_off):
+        subs_on = _flag_truthy(seg.get("subs_on")) or (
+            raw_subs is True or (isinstance(raw_subs, str) and raw_subs.strip().lower() in ("on", "true", "yes", "1"))
+        )
+        if not (subs_on or with_cards):
+            return True
+    return False
+
+
+def _seg_inline_words(seg: Dict[str, Any]) -> List[str]:
+    """Extract spoken caption words directly from a segment's inline `text` or `dialogue` field."""
+    if not isinstance(seg, dict):
+        return []
+    raw = str(seg.get("text") or seg.get("dialogue") or "").strip()
+    if not raw:
+        return []
+    cleaned = re.sub(r"\[[^\]]*\]", " ", raw)
+    return [w for w in cleaned.split() if w.strip()]
+
+
+def _segment_tl_speech_spans(
+    seg_idx: int,
+    seg: Dict[str, Any],
+    tl_bounds: Tuple[float, float],
+    spoken: List[Tuple[float, float]],
+) -> Tuple[List[Tuple[int, float, float]], float]:
+    """Map a segment's active speech windows onto timeline coordinates `(seg_idx, tl_start, tl_end)`."""
+    st_k, en_k = float(seg["start"]), float(seg["end"])
+    t0_k, tl_end_k = tl_bounds
+    play_k = _segment_play_duration(seg)
+    seg_len_k = max(0.04, tl_end_k - t0_k)
+    max_play_k = min(seg_len_k, play_k) if play_k > 0.0 else seg_len_k
+    wins, sp_dur = _active_speech_windows(st_k, en_k, spoken)
+    tl_spans: List[Tuple[int, float, float]] = []
+    if sp_dur >= 0.18:
+        for wa, wb in wins:
+            ta = t0_k + _src_to_seg_time(seg, wa)
+            tb = min(t0_k + max_play_k, max(ta + 0.04, t0_k + _src_to_seg_time(seg, wb)))
+            if tb - ta >= 0.04:
+                tl_spans.append((seg_idx, ta, tb))
+    return tl_spans, sp_dur
+
+
 def build_cues(
     segs: List[Dict[str, Any]],
     starts: List[float],
     script_lines: Optional[List[Dict[str, Any]]] = None,
     work_dir: Optional[Path] = None,
+    plan: Optional[Dict[str, Any]] = None,
+    with_cards: Optional[bool] = None,
 ) -> List[Dict[str, Any]]:
-    """Caption cues on the finished timeline (seconds): 2 to 4 words each (up to 3 for Indic scripts),
-    strictly monotonic (`cue[k].endTime <= cue[k+1].startTime`), with zero blank dialogue segments."""
+    """Build strictly monotonic timeline caption cues (`cue[k].endTime <= cue[k+1].startTime`)
+    with 2-4 words per card (up to 3 for Indic scripts) and zero blank dialogue segments."""
     try:
         from prepare import _word_similarity as similarity
-    except Exception:   # noqa: BLE001
-        similarity = lambda a, b: 1.0 if a == b else 0.0   # noqa: E731
+    except Exception:  # noqa: BLE001
+        similarity = lambda a, b: 1.0 if a == b else 0.0  # noqa: E731
+
+    plan_cards_off = _plan_cards_off(plan)
+    if with_cards is not None:
+        eff_with_cards = _flag_truthy(with_cards)
+    elif isinstance(plan, dict) and isinstance(plan.get("subs"), dict):
+        eff_with_cards = _flag_truthy(plan["subs"].get("with_cards"))
+    else:
+        eff_with_cards = False
 
     line_tokens = _build_line_token_map(script_lines)
     n_segs = len(segs)
@@ -917,7 +1342,7 @@ def build_cues(
     seg_spoken_list: List[List[Tuple[float, float]]] = [[] for _ in range(n_segs)]
     seg_tl_bounds: List[Tuple[float, float]] = []
 
-    # Track straddling boundary words emitted at the end of a segment so an adjacent cut of the same clip doesn't duplicate them
+    # Track straddling boundary words emitted at the tail of a cut so adjacent cuts of the same clip never duplicate them
     prev_clip_src: Optional[str] = None
     prev_clip_en: float = -999.0
     prev_emitted_keys: Dict[Tuple[str, float, float], float] = {}
@@ -925,10 +1350,10 @@ def build_cues(
     for i, s in enumerate(segs):
         st, en = float(s["start"]), float(s["end"])
         t0 = float(starts[i])
-        tl_end = float(starts[i + 1]) if i + 1 < len(starts) else t0 + max(0.0, en - st)
+        tl_end = float(starts[i + 1]) if i + 1 < len(starts) else t0 + max(0.0, segment_duration(s))
         seg_tl_bounds.append((t0, tl_end))
 
-        if s.get("beat"):
+        if _segment_is_beat(s) or _segment_is_muted(s) or _segment_subs_off(s, plan_cards_off=plan_cards_off, with_cards=eff_with_cards):
             prev_clip_src = None
             prev_emitted_keys = {}
             continue
@@ -949,10 +1374,13 @@ def build_cues(
         if not same_contiguous_clip:
             prev_emitted_keys = {}
 
-        # Next segment lookahead if next segment shares the exact same contiguous clip
         next_same_clip = False
         next_st, next_en = 0.0, 0.0
-        if i + 1 < n_segs and not segs[i + 1].get("beat") and str(segs[i + 1].get("src") or "") == src_key:
+        if (
+            i + 1 < n_segs
+            and not (_segment_is_beat(segs[i + 1]) or _segment_is_muted(segs[i + 1]))
+            and str(segs[i + 1].get("src") or "") == src_key
+        ):
             next_st, next_en = float(segs[i + 1]["start"]), float(segs[i + 1]["end"])
             if next_st < en + 0.15 and next_st >= st:
                 next_same_clip = True
@@ -987,11 +1415,10 @@ def build_cues(
                 vad_ov = sum(max(0.0, min(we, b) - max(ws, a)) for a, b in spoken)
                 near_vad = any(a - 0.05 <= mid <= b + 0.05 for a, b in spoken)
                 if vad_ov < 0.04 and not near_vad:
-                    # Rescue quiet syllables only when they match the segment's target script line AND sit near active speech
                     near_any_speech = any(a - 0.35 <= mid <= b + 0.35 for a, b in spoken)
                     if not (matches_target and near_any_speech):
                         continue
-                # Clamp Viterbi silence-stretched word tails (> 0.65s) to speech_span_end + 0.08s
+                # Clamp silence-stretched alignment tails (> 0.65s) to active speech end + 0.08s
                 if we - ws > 0.65:
                     ov_spans = sorted(((a, b) for a, b in spoken if min(we, b) > max(ws, a)), key=lambda x: x[0])
                     if ov_spans:
@@ -1017,7 +1444,7 @@ def build_cues(
 
         candidates.sort(key=lambda x: (x["ws"], x["we"]))
 
-        # Edge-only foreign-word guard: ONLY inspect leading/trailing cut-edge words outside [first_target..last_target]
+        # Edge-only foreign-word guard: inspect only leading/trailing cut-edge words outside [first_target..last_target]
         if candidates and target_ids and line_tokens:
             prev_ids, next_ids = _adjacent_line_ids(target_ids, line_tokens)
             active_wins, _ = _active_speech_windows(st, en, spoken)
@@ -1031,7 +1458,6 @@ def build_cues(
             filtered: List[Dict[str, Any]] = []
             for idx, c in enumerate(candidates):
                 if first_t <= idx <= last_t:
-                    # Interior word (or target-matching word): NEVER delete interior spoken words
                     filtered.append(c)
                     continue
                 is_lead_edge = idx < first_t and ((c["ws_raw"] - st) < 0.65 or (c["ws_raw"] - speech_start) < 0.65)
@@ -1046,11 +1472,13 @@ def build_cues(
         emitted_keys: Dict[Tuple[str, float, float], float] = {}
         seg_out: List[Dict[str, Any]] = []
         seg_len = max(0.04, tl_end - t0)
+        play_len = _segment_play_duration(s)
+        max_play = min(seg_len, play_len) if play_len > 0.0 else seg_len
         for c in candidates:
-            rel_s = max(0.0, c["ws"] - st)
-            rel_e = min(en - st, max(rel_s + 0.02, c["we"] - st))
-            tl_s = min(t0 + seg_len - 0.02, t0 + rel_s)
-            tl_e = min(t0 + seg_len, max(tl_s + 0.02, t0 + rel_e))
+            rel_s = _src_to_seg_time(s, c["ws"])
+            rel_e = min(max_play, max(rel_s + 0.02, _src_to_seg_time(s, c["we"])))
+            tl_s = max(t0, min(t0 + max_play - 0.02, t0 + rel_s))
+            tl_e = min(t0 + max_play, max(tl_s + 0.02, t0 + rel_e))
             seg_out.append({"text": c["text"], "start": tl_s, "end": tl_e, "seg_idx": i})
             emitted_keys[c["raw_key"]] = c["ov"]
 
@@ -1059,51 +1487,128 @@ def build_cues(
         prev_clip_en = en
         prev_emitted_keys = emitted_keys
 
-    # Script-Line + Speech-Span Fallback: backfill dialogue segments whose aligned word coverage is missing (< 35% or 0 words)
-    if script_lines:
-        idx = 0
-        while idx < n_segs:
-            s = segs[idx]
-            target_ids = _seg_lines(str(s.get("id") or ""))
-            if s.get("beat") or not target_ids:
-                idx += 1
+    # Backfill dialogue segments where aligned word coverage is missing (0 words or < 65% of expected).
+    # Evaluate per individual non-muted spoken segment so blank sub-cuts (`L7b`) never hide behind `L7a`,
+    # and also synthesize captions for custom non-`L<n>` segments (`HOOK`, `CTA1`, `S1`) carrying inline text/dialogue.
+    processed_backfill: Set[int] = set()
+    for idx in range(n_segs):
+        if idx in processed_backfill:
+            continue
+        s = segs[idx]
+        if _segment_is_beat(s) or _segment_is_muted(s):
+            continue
+
+        target_ids = _seg_lines(str(s.get("id") or ""))
+        if not target_ids:
+            processed_backfill.add(idx)
+            if _segment_subs_off(s, plan_cards_off=plan_cards_off, with_cards=eff_with_cards):
                 continue
-            run_end = idx + 1
-            while run_end < n_segs and not segs[run_end].get("beat") and _seg_lines(str(segs[run_end].get("id") or "")) == target_ids:
-                run_end += 1
+            if len(seg_words_list[idx]) == 0:
+                inline_words = _seg_inline_words(s)
+                if inline_words:
+                    seg_spans, seg_sp_dur = _segment_tl_speech_spans(idx, s, seg_tl_bounds[idx], seg_spoken_list[idx])
+                    if not seg_spans:
+                        t0_k, tl_end_k = seg_tl_bounds[idx]
+                        play_k = _segment_play_duration(s)
+                        seg_len_k = max(0.0, tl_end_k - t0_k)
+                        max_play_k = min(seg_len_k, play_k) if play_k > 0.0 else seg_len_k
+                        if max_play_k >= 0.18:
+                            seg_spans = [(idx, t0_k, t0_k + max_play_k)]
+                            seg_sp_dur = max_play_k
+                    if seg_sp_dur >= 0.18 and seg_spans:
+                        synthesized = _synthesize_words_over_spans(inline_words, seg_spans)
+                        seg_words_list[idx] = synthesized.get(idx, [])
+            continue
 
-            expected = _script_words_for_lines(target_ids, script_lines)
-            if expected:
-                got_total = sum(len(seg_words_list[k]) for k in range(idx, run_end))
-                tl_spans: List[Tuple[int, float, float]] = []
-                total_speech = 0.0
-                for k in range(idx, run_end):
-                    st_k, en_k = float(segs[k]["start"]), float(segs[k]["end"])
-                    t0_k, tl_end_k = seg_tl_bounds[k]
-                    wins, sp_dur = _active_speech_windows(st_k, en_k, seg_spoken_list[k])
-                    if sp_dur >= 0.25:
-                        total_speech += sp_dur
-                        for wa, wb in wins:
-                            ta = t0_k + max(0.0, wa - st_k)
-                            tb = min(tl_end_k, t0_k + max(0.04, wb - st_k))
-                            if tb - ta >= 0.04:
-                                tl_spans.append((k, ta, tb))
+        # Collect spoken segments in the same line-ID run (allowing intervening muted/beat cutaways)
+        run_indices: List[int] = [idx]
+        scan = idx + 1
+        while scan < n_segs:
+            sn = segs[scan]
+            if _segment_is_beat(sn) or _segment_is_muted(sn):
+                scan += 1
+                continue
+            if _seg_lines(str(sn.get("id") or "")) == target_ids:
+                run_indices.append(scan)
+                scan += 1
+            else:
+                break
+        processed_backfill.update(run_indices)
 
-                needs_full_synth = (got_total == 0) or (len(expected) >= 3 and got_total < 0.35 * len(expected))
-                if needs_full_synth and total_speech >= 0.25 and tl_spans:
-                    synthesized = _synthesize_words_over_spans(expected, tl_spans)
-                    for k in range(idx, run_end):
-                        seg_words_list[k] = synthesized.get(k, [])
-            idx = run_end
+        expected = _script_words_for_lines(target_ids, script_lines) if script_lines else []
+        if not expected:
+            for k in run_indices:
+                sk = segs[k]
+                if _segment_subs_off(sk, plan_cards_off=plan_cards_off, with_cards=eff_with_cards):
+                    continue
+                if len(seg_words_list[k]) == 0:
+                    inline_words = _seg_inline_words(sk)
+                    if inline_words:
+                        seg_spans, seg_sp_dur = _segment_tl_speech_spans(k, sk, seg_tl_bounds[k], seg_spoken_list[k])
+                        if seg_sp_dur >= 0.18 and seg_spans:
+                            synthesized = _synthesize_words_over_spans(inline_words, seg_spans)
+                            seg_words_list[k] = synthesized.get(k, [])
+            continue
 
-    # Group words into rhythmic cues and bridge tiny intra-sentence micro-gaps without ever overlapping
+        seg_spans_map: Dict[int, List[Tuple[int, float, float]]] = {}
+        seg_sp_dur_map: Dict[int, float] = {}
+        seg_weight_map: Dict[int, float] = {}
+        for k in run_indices:
+            sk = segs[k]
+            tl_sp, sp_dur = _segment_tl_speech_spans(k, sk, seg_tl_bounds[k], seg_spoken_list[k])
+            seg_spans_map[k] = tl_sp
+            seg_sp_dur_map[k] = sp_dur
+            fallback_w = max(0.04, _segment_play_duration(sk))
+            seg_weight_map[k] = sp_dur if sp_dur >= 0.18 else fallback_w
+
+        # Proportionally slice `expected` across multi-cut segments sharing this line ID
+        n_run = len(run_indices)
+        n_exp = len(expected)
+        total_w = sum(seg_weight_map[k] for k in run_indices) or float(n_run)
+        expected_by_seg: Dict[int, List[str]] = {}
+        cum_w = 0.0
+        w_start = 0
+        for pos, k in enumerate(run_indices):
+            cum_w += seg_weight_map[k]
+            if pos == n_run - 1:
+                w_end = n_exp
+            else:
+                rem = n_run - 1 - pos
+                min_end = w_start + 1 if (n_exp - w_start) > rem else w_start
+                max_end = (n_exp - rem) if n_exp >= n_run else n_exp
+                target_cum = int(round(n_exp * (cum_w / total_w)))
+                w_end = max(min_end, min(max_end, target_cum))
+            expected_by_seg[k] = expected[w_start:w_end]
+            w_start = w_end
+
+        for k in run_indices:
+            sk = segs[k]
+            if _segment_subs_off(sk, plan_cards_off=plan_cards_off, with_cards=eff_with_cards):
+                continue
+            seg_spans = seg_spans_map[k]
+            seg_sp_dur = seg_sp_dur_map[k]
+            if seg_sp_dur < 0.18 or not seg_spans:
+                continue
+            got_seg = len(seg_words_list[k])
+            expected_seg = expected_by_seg[k] or _seg_inline_words(sk) or (expected[-1:] if got_seg == 0 else [])
+            if not expected_seg:
+                continue
+            needs_synth = (got_seg == 0) or (len(expected_seg) >= 3 and got_seg < 0.65 * len(expected_seg))
+            if needs_synth:
+                synthesized = _synthesize_words_over_spans(expected_seg, seg_spans)
+                seg_words_list[k] = synthesized.get(k, [])
+
+    # Group words into rhythmic cues and bridge tiny intra-sentence gaps without overlapping
     cues: List[Dict[str, Any]] = []
     for i, words in enumerate(seg_words_list):
         if not words:
             continue
         t0, tl_end = seg_tl_bounds[i]
+        spd_i = _segment_speed(segs[i])
+        gap_scale = 1.0 / min(1.0, spd_i) if spd_i < 1.0 else 1.0
+        eff_bridge_gap = BRIDGE_GAP_MAX * gap_scale
         words.sort(key=lambda x: (x["start"], x["end"]))
-        groups = _group_segment_words(words)
+        groups = _group_segment_words(words, gap_scale=gap_scale)
         seg_cues = [_cue(g, max_end=tl_end) for g in groups if g]
         for k, c in enumerate(seg_cues):
             c["segIndex"] = i
@@ -1111,7 +1616,7 @@ def build_cues(
                 next_st = seg_cues[k + 1]["startTime"]
                 last_word_end = c["words"][-1]["endTime"]
                 gap = next_st - last_word_end
-                if 0.0 <= gap <= BRIDGE_GAP_MAX and not SENTENCE_END.search(c["words"][-1]["text"]):
+                if 0.0 <= gap <= eff_bridge_gap and not SENTENCE_END.search(c["words"][-1]["text"]):
                     c["endTime"] = round(next_st, 3)
                     c["words"][-1]["endTime"] = round(next_st, 3)
                 elif c["endTime"] > next_st:
@@ -1127,7 +1632,7 @@ def build_cues(
                             cw["endTime"] = c["endTime"]
         cues.extend(seg_cues)
 
-    # Global strict non-overlap invariant across segment boundaries
+    # Global non-overlap invariant across segment boundaries
     for k in range(len(cues) - 1):
         if cues[k]["endTime"] > cues[k + 1]["startTime"]:
             cues[k]["endTime"] = cues[k + 1]["startTime"]
@@ -1138,7 +1643,9 @@ def build_cues(
     return cues
 
 
-# ---------------------------------------------------------------- layout-aware safe Y placement
+# ---------------------------------------------------------------------------
+# Layout-Aware Vertical Placement (`y=68` full-frame, `y=50` split_v seam)
+# ---------------------------------------------------------------------------
 def _is_split_v_segment(seg: Dict[str, Any]) -> bool:
     lay = str(seg.get("layout") or "single").split(":")[0].strip().lower()
     if lay in ("split_v", "gmeet_grid", "top_bottom"):
@@ -1149,6 +1656,368 @@ def _is_split_v_segment(seg: Dict[str, Any]) -> bool:
     return False
 
 
+def _is_single_fullframe_segment(seg: Dict[str, Any]) -> bool:
+    """Return True when `seg` uses a full-frame `single` layout (not a split, PiP, or baked split slot)."""
+    if _is_split_v_segment(seg):
+        return False
+    lay = str(seg.get("layout") or "single").split(":")[0].strip().lower()
+    if lay not in ("", "single", "full", "fullscreen"):
+        return False
+    active = str(seg.get("active") or seg.get("slot") or "").strip().lower()
+    if active in ("top", "bottom", "left", "right"):
+        return False
+    return True
+
+
+def _segment_face_boxes(
+    seg: Dict[str, Any],
+    width: int,
+    height: int,
+    cache: Dict[str, Optional[Dict[str, Any]]],
+) -> List[Tuple[float, float, float, float]]:
+    """Return normalized `(x0, y0, x1, y1)` detected face boxes in canvas coordinates for `seg`."""
+    vis: Optional[Dict[str, Any]] = None
+    if isinstance(seg.get("vision"), dict):
+        vis = seg["vision"]
+    elif isinstance(seg.get("faces"), list):
+        vis = {"faces": seg["faces"]}
+    elif isinstance(seg.get("bbox_norm"), (list, tuple)) and len(seg["bbox_norm"]) >= 4:
+        vis = {"bbox_norm": seg["bbox_norm"]}
+    else:
+        src = seg.get("src") or seg.get("clip")
+        if src:
+            src_key = str(src)
+            if src_key not in cache:
+                try:
+                    from common import resolve
+                    from vision_tracker import analyze_clip_vision
+
+                    cache[src_key] = analyze_clip_vision(resolve(src))
+                except Exception:
+                    cache[src_key] = None
+            vis = cache.get(src_key)
+    if not isinstance(vis, dict) or vis.get("baked_split"):
+        return []
+
+    raw_faces_field = vis.get("faces")
+    faces: List[Any] = []
+    if isinstance(raw_faces_field, list):
+        for f in raw_faces_field:
+            if isinstance(f, dict) and isinstance(f.get("bbox_norm"), (list, tuple)) and len(f["bbox_norm"]) >= 4:
+                if not ("confidence" in f and float(f.get("confidence") or 0.0) <= 0.0):
+                    faces.append(f["bbox_norm"])
+            elif isinstance(f, (list, tuple)) and len(f) >= 4:
+                faces.append(f)
+    bb = vis.get("bbox_norm")
+    if not faces and not raw_faces_field and isinstance(bb, (list, tuple)) and len(bb) >= 4:
+        faces.append(bb)
+    if not faces:
+        return []
+
+    foc = (
+        seg["focus"]
+        if isinstance(seg.get("focus"), (list, tuple)) and len(seg["focus"]) >= 2
+        else (vis.get("focus") or [0.5, 0.38])
+    )
+    try:
+        fx, fy = float(foc[0]), float(foc[1])
+    except (TypeError, ValueError):
+        fx, fy = 0.5, 0.38
+    zmax = max(1.0, float(seg.get("zoom") or 1.0), float(seg.get("zoom_to") or 1.0))
+    canvas_ar = float(width) / float(max(1, height))
+    ar_raw = vis.get("aspect_ratio")
+    ar = float(ar_raw) if ar_raw else canvas_ar
+
+    out: List[Tuple[float, float, float, float]] = []
+    for fb in faces:
+        try:
+            x0, y0, x1, y1 = float(fb[0]), float(fb[1]), float(fb[2]), float(fb[3])
+        except (TypeError, ValueError):
+            continue
+        if ar > canvas_ar + 0.02:
+            rx = ar / max(0.1, canvas_ar)
+            x0 = x0 * rx - fx * (rx - 1.0)
+            x1 = x1 * rx - fx * (rx - 1.0)
+        elif ar < canvas_ar - 0.02:
+            ry = canvas_ar / max(0.1, ar)
+            y0 = y0 * ry - fy * (ry - 1.0)
+            y1 = y1 * ry - fy * (ry - 1.0)
+        zx0 = max(0.0, min(1.0, fx + (x0 - fx) * zmax))
+        zx1 = max(0.0, min(1.0, fx + (x1 - fx) * zmax))
+        zy0 = max(0.0, min(1.0, fy + (y0 - fy) * zmax))
+        zy1 = max(0.0, min(1.0, fy + (y1 - fy) * zmax))
+        if zx1 > zx0 + 0.01 and zy1 > zy0 + 0.01:
+            out.append((zx0, zy0, zx1, zy1))
+    return out
+
+
+def _has_lower_mid_face(face_boxes: List[Tuple[float, float, float, float]]) -> bool:
+    """Return True if any foreground face overlaps the lower-mid caption band (`y in [0.55, 0.72]`)."""
+    for fx0, fy0, fx1, fy1 in face_boxes:
+        if fx1 > 0.10 and fx0 < 0.90 and fy1 > FACE_LOWER_MID_Y0 and fy0 < FACE_LOWER_MID_Y1:
+            return True
+    return False
+
+
+def _caption_half_height_pct(width: int, height: int, spec: Optional[Dict[str, Any]] = None) -> float:
+    """Height-aware caption half-height in % of canvas height (ensures clean 1:1 and 9:16 clearance)."""
+    font_size = caption_font_size(width, spec)
+    eff_w = float(width or 1080)
+    eff_px = float(font_size) * (eff_w / 1080.0)
+    return max(5.8, eff_px * 1.45 / float(max(1, height)) * 100.0)
+
+
+def _load_flashcard_boxes(
+    plan: Optional[Dict[str, Any]],
+    width: int,
+    height: int,
+    report_dir: Optional[Path] = None,
+    work_dir: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Load active timeline flashcard boxes from `plan` or `overlays/flashcards[_sq]_meta.json`."""
+    is_sq = (int(width) == int(height)) or (abs(int(width) - int(height)) <= max(1, int(width)) * 0.15)
+    raw_cards: Any = None
+    meta_w: Optional[float] = None
+    meta_h: Optional[float] = None
+
+    if isinstance(plan, dict):
+        mem_key = "_flashcard_boxes_sq" if is_sq else "_flashcard_boxes"
+        if plan.get(mem_key):
+            raw_cards = plan.get(mem_key)
+
+    if not raw_cards:
+        fname = "flashcards_sq_meta.json" if is_sq else "flashcards_meta.json"
+        cand_files: List[Path] = []
+        if report_dir is not None:
+            cand_files.append(Path(report_dir) / "overlays" / fname)
+        if isinstance(plan, dict) and plan.get("_overlays_dir"):
+            cand_files.append(Path(str(plan["_overlays_dir"])) / fname)
+        if work_dir is not None:
+            cand_files.append(Path(work_dir) / "overlays" / fname)
+        for meta_f in cand_files:
+            if meta_f.is_file():
+                try:
+                    data = json.loads(meta_f.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        raw_cards = data.get("cards") or []
+                        if data.get("canvas_w"):
+                            meta_w = float(data["canvas_w"])
+                        if data.get("canvas_h"):
+                            meta_h = float(data["canvas_h"])
+                    elif isinstance(data, list):
+                        raw_cards = data
+                    if raw_cards:
+                        break
+                except Exception:
+                    continue
+
+    if not isinstance(raw_cards, list):
+        return []
+
+    eff_w = float(meta_w or width or 1)
+    eff_h = float(meta_h or height or 1)
+    sx = float(width) / max(1.0, eff_w)
+    sy = float(height) / max(1.0, eff_h)
+
+    out: List[Dict[str, Any]] = []
+    for item in raw_cards:
+        if not isinstance(item, dict):
+            continue
+        try:
+            t0 = float(item["start"] if item.get("start") is not None else item.get("t0", 0.0))
+            t1 = float(item["end"] if item.get("end") is not None else item.get("t1", 0.0))
+            y0_raw = float(item.get("y0", 0.0))
+            if item.get("y1") is not None:
+                y1_raw = float(item["y1"])
+            elif item.get("h") is not None:
+                y1_raw = y0_raw + float(item["h"])
+            else:
+                continue
+            x0_raw = float(item.get("x0", 0.0))
+            if item.get("x1") is not None:
+                x1_raw = float(item["x1"])
+            elif item.get("w") is not None:
+                x1_raw = x0_raw + float(item["w"])
+            else:
+                x1_raw = eff_w
+        except (TypeError, ValueError):
+            continue
+        if t1 <= t0 + 0.005 or y1_raw <= y0_raw:
+            continue
+        out.append({
+            "start": t0,
+            "end": t1,
+            "t0": t0,
+            "t1": t1,
+            "x0": x0_raw * sx,
+            "y0": y0_raw * sy,
+            "x1": x1_raw * sx,
+            "y1": y1_raw * sy,
+        })
+    return out
+
+
+def _extract_raw_face_boxes(seg_or_vis: Dict[str, Any]) -> List[Tuple[float, float, float, float]]:
+    """Extract normalized `(x0, y0, x1, y1)` face tuples directly from a segment or vision dict."""
+    raw = seg_or_vis.get("faces")
+    out: List[Tuple[float, float, float, float]] = []
+    if isinstance(raw, list):
+        for f in raw:
+            bb = f.get("bbox_norm") if isinstance(f, dict) else f
+            if isinstance(f, dict) and "confidence" in f and float(f.get("confidence") or 0.0) <= 0.0:
+                continue
+            if isinstance(bb, (list, tuple)) and len(bb) >= 4:
+                try:
+                    x0, y0, x1, y1 = float(bb[0]), float(bb[1]), float(bb[2]), float(bb[3])
+                    if x1 > x0 + 0.01 and y1 > y0 + 0.01:
+                        out.append((max(0.0, min(1.0, x0)), max(0.0, min(1.0, y0)), max(0.0, min(1.0, x1)), max(0.0, min(1.0, y1))))
+                except (TypeError, ValueError):
+                    continue
+    return out
+
+
+def _segment_dodge_face_boxes(
+    seg: Dict[str, Any],
+    width: int,
+    height: int,
+    cache: Dict[str, Optional[Dict[str, Any]]],
+) -> List[Tuple[float, float, float, float]]:
+    """Return normalized full-canvas face boxes `(x0, y0, x1, y1)` for subtitle collision dodging,
+    supporting single-frame, baked-split, 1:1 square pillarbox, and `split_v` top/bottom panels."""
+    is_sq = abs(int(width) - int(height)) <= max(1, int(width)) * 0.15
+    eff_w = max(2, int(round(height * 9.0 / 16.0))) if is_sq else int(width)
+    eff_h = int(height)
+
+    def _map_sq_x(boxes: List[Tuple[float, float, float, float]]) -> List[Tuple[float, float, float, float]]:
+        if not is_sq:
+            return boxes
+        scale_x = 9.0 / 16.0
+        return [
+            (
+                max(0.0, min(1.0, 0.5 + (fx0 - 0.5) * scale_x)),
+                fy0,
+                max(0.0, min(1.0, 0.5 + (fx1 - 0.5) * scale_x)),
+                fy1,
+            )
+            for fx0, fy0, fx1, fy1 in boxes
+        ]
+
+    if _is_split_v_segment(seg):
+        # If caller explicitly provided full-canvas faces spanning both panels, honor them directly.
+        explicit_faces = _extract_raw_face_boxes(seg)
+        if explicit_faces and any(b[1] < 0.48 for b in explicit_faces) and any(b[3] > 0.52 for b in explicit_faces):
+            return _map_sq_x(explicit_faces)
+
+        slot = str(seg.get("slot") or seg.get("active") or "").strip().lower()
+        speaker = str(seg.get("speaker") or "").strip().lower()
+        active_top = (
+            slot in ("top", "slot_a", "a", "0")
+            if slot
+            else (("robot" in speaker) or ("nova" in speaker))
+        )
+        half_h = max(1, eff_h // 2)
+        out: List[Tuple[float, float, float, float]] = []
+
+        live_faces = _segment_face_boxes(seg, eff_w, half_h, cache)
+        y_off_live = 0.0 if active_top else 0.5
+        for fx0, fy0, fx1, fy1 in live_faces:
+            out.append((fx0, y_off_live + fy0 * 0.5, fx1, y_off_live + fy1 * 0.5))
+
+        peer = seg.get("peer")
+        peer_seg: Optional[Dict[str, Any]] = None
+        if isinstance(peer, dict) and (peer.get("src") or peer.get("clip") or peer.get("faces") or peer.get("vision")):
+            peer_seg = peer
+        elif isinstance(peer, str) and peer.strip():
+            p_ref = peer.split("@")[0].strip()
+            if ":" in p_ref and len(p_ref.split(":", 1)[0]) > 1:
+                p_ref = p_ref.split(":", 1)[1].strip()
+            if p_ref:
+                peer_seg = {"src": p_ref}
+        if peer_seg is not None:
+            peer_faces = _segment_face_boxes(peer_seg, eff_w, half_h, cache)
+            y_off_peer = 0.5 if active_top else 0.0
+            for fx0, fy0, fx1, fy1 in peer_faces:
+                out.append((fx0, y_off_peer + fy0 * 0.5, fx1, y_off_peer + fy1 * 0.5))
+
+        return _map_sq_x(out)
+
+    faces = _segment_face_boxes(seg, eff_w, eff_h, cache)
+    if not faces:
+        vis = seg.get("vision") if isinstance(seg.get("vision"), dict) else None
+        if vis is None and (seg.get("src") or seg.get("clip")):
+            vis = cache.get(str(seg.get("src") or seg.get("clip")))
+        if isinstance(vis, dict) and vis.get("baked_split"):
+            faces = _extract_raw_face_boxes(vis)
+    return _map_sq_x(faces)
+
+
+def _interval_overlap_pct(
+    cand_y: float,
+    intervals: List[Tuple[float, float]],
+    half_h: float,
+    margin: float,
+) -> float:
+    """Return total vertical overlap (in % of canvas height) between `[cand_y - half_h, cand_y + half_h]`
+    and a list of per-box `(y0_pct, y1_pct)` intervals expanded by `margin`."""
+    c0 = cand_y - half_h
+    c1 = cand_y + half_h
+    ov_sum = 0.0
+    for y0, y1 in intervals:
+        ov = min(c1, y1 + margin) - max(c0, y0 - margin)
+        if ov > 0.0:
+            ov_sum += ov
+    return ov_sum
+
+
+def _pick_non_overlapping_y(
+    default_cue_y: float,
+    card_intervals: List[Tuple[float, float]],
+    banner_intervals: List[Tuple[float, float]],
+    face_intervals: List[Tuple[float, float]],
+    cap_half_pct: float,
+    pad_pct: float,
+    is_square: bool,
+) -> float:
+    """Pick the cleanest Y candidate (%) avoiding active flashcards, banners, and detected face boxes."""
+    min_y = max(16.0, cap_half_pct + 2.0)
+    max_y = min(90.0, 100.0 - cap_half_pct - 2.0)
+    if max_y < min_y:
+        min_y, max_y = 18.0, 88.0
+
+    raw_cands: List[float] = [default_cue_y]
+    for by0, by1 in card_intervals + banner_intervals:
+        raw_cands.append(by1 + cap_half_pct + pad_pct + 0.05)
+        raw_cands.append(by0 - cap_half_pct - pad_pct - 0.05)
+    for fy0, fy1 in face_intervals:
+        raw_cands.append(fy1 + cap_half_pct + 1.55)
+        raw_cands.append(fy0 - cap_half_pct - 1.55)
+    raw_cands.extend([68.0, 79.0, 50.0, 83.0, 38.0, 86.0, 56.0, 24.0])
+    if is_square:
+        raw_cands.append(82.0)
+
+    cands: List[float] = []
+    seen: Set[float] = set()
+    for cy in raw_cands:
+        clamped = round(max(min_y, min(max_y, float(cy))), 2)
+        if clamped not in seen:
+            seen.add(clamped)
+            cands.append(clamped)
+
+    def _score(cy: float) -> Tuple[int, int, int, float, float]:
+        ov_card = _interval_overlap_pct(cy, card_intervals, cap_half_pct, pad_pct)
+        ov_banner = _interval_overlap_pct(cy, banner_intervals, cap_half_pct, pad_pct)
+        ov_face = _interval_overlap_pct(cy, face_intervals, cap_half_pct, 1.0)
+        return (
+            1 if ov_card > 0.01 else 0,
+            1 if ov_face > 0.01 else 0,
+            1 if ov_banner > 0.01 else 0,
+            round(ov_card * 2.0 + ov_face * 2.0 + ov_banner, 3),
+            round(abs(cy - default_cue_y), 3),
+        )
+
+    return min(cands, key=_score)
+
+
 def resolve_safe_y_percent(
     spec: Dict[str, Any],
     segs: List[Dict[str, Any]],
@@ -1157,15 +2026,17 @@ def resolve_safe_y_percent(
     width: int,
     height: int,
     cues: Optional[List[Dict[str, Any]]] = None,
+    flashcard_boxes: Optional[List[Dict[str, Any]]] = None,
+    plan: Optional[Dict[str, Any]] = None,
+    report_dir: Optional[Path] = None,
 ) -> float:
-    """Compute default `y_percent` (`72.0` on `9:16`, `82.0` on `1:1` square, `50.0` on `split_v` seam)
-    and attach per-cue `style.positionY` overrides when segments switch between `split_v` and `single` or show banners."""
+    """Compute default `y_percent` (`68.0` on `9:16`, `82.0` on `1:1` square, `50.0` on `split_v` seam)
+    and attach per-cue `style.positionY` overrides when cuts alternate between `split_v` and `single`,
+    show banners or active flashcards, or contain a lower-mid foreground face overlapping the default `~68%` band."""
     raw_y = spec.get("y")
     explicit_y = raw_y is not None and str(raw_y).strip().lower() not in ("", "auto", "none")
     is_square = abs(width - height) <= width * 0.15
-    # `y=` in the plan is where captions sit on full-frame cuts. A top/bottom split always puts them on
-    # the divider line (a caption at 65 to 70% would cover the lower character's face), unless `split_y=` says otherwise.
-    base_single_y = (float(raw_y) if explicit_y else (82.0 if is_square else SINGLE_Y))
+    base_single_y = float(raw_y) if explicit_y else (82.0 if is_square else SINGLE_Y)
     try:
         seam_y = float(spec.get("split_y")) if spec.get("split_y") is not None else SEAM_Y
     except (TypeError, ValueError):
@@ -1187,11 +2058,19 @@ def resolve_safe_y_percent(
     if not cues:
         return default_y
 
+    if flashcard_boxes is None:
+        flashcard_boxes = _load_flashcard_boxes(plan, width, height, report_dir=report_dir)
+
+    cap_half_pct = _caption_half_height_pct(width, height, spec)
+    pad_pct = max(1.5, 22.0 / float(max(1, height)) * 100.0)
+
     banner_fn = None
     try:
         from layouts import banner_boxes as banner_fn
     except Exception:
         banner_fn = None
+
+    face_cache: Dict[str, Optional[Dict[str, Any]]] = {}
 
     for c in cues:
         seg_idx = c.get("segIndex")
@@ -1211,22 +2090,92 @@ def resolve_safe_y_percent(
         t0 = float(starts[seg_idx]) if seg_idx < len(starts) else 0.0
         cue_y = seam_y if _is_split_v_segment(seg) else base_single_y
 
+        # Build per-box forbidden Y intervals for banners (do NOT merge distant boxes!)
+        banner_intervals: List[Tuple[float, float]] = []
         if banner_fn is not None and (seg.get("banners") or seg.get("stop_saying")):
             try:
-                seg_dur = max(0.08, float(seg["end"]) - float(seg["start"]))
+                seg_dur = max(0.08, segment_duration(seg))
                 boxes = banner_fn(seg, width, height, seg_dur)
                 rel_a = max(0.0, float(c["startTime"]) - t0)
                 rel_b = max(rel_a + 0.04, float(c["endTime"]) - t0)
-                active_boxes = [b for b in boxes if float(b["t1"]) >= rel_a and float(b["t0"]) <= rel_b]
-                if active_boxes and height > 0:
-                    b_top = min(float(b["y0"]) for b in active_boxes) / height * 100.0
-                    b_bot = max(float(b["y1"]) for b in active_boxes) / height * 100.0
-                    if (cue_y + 5.8) >= (b_top - 1.5) and (cue_y - 5.8) <= (b_bot + 1.5):
-                        below_y = b_bot + 7.5
-                        above_y = b_top - 7.5
-                        cue_y = below_y if below_y <= 86.0 else max(18.0, above_y)
+                active_banners = [b for b in boxes if float(b["t1"]) >= rel_a and float(b["t0"]) <= rel_b]
+                if active_banners and height > 0:
+                    for b in active_banners:
+                        by0 = float(b["y0"]) / float(height) * 100.0
+                        by1 = float(b["y1"]) / float(height) * 100.0
+                        if by1 > by0:
+                            banner_intervals.append((by0, by1))
             except Exception:
                 pass
+
+        # Build per-box forbidden Y intervals for active timeline flashcards overlapping this cue
+        card_intervals: List[Tuple[float, float]] = []
+        if flashcard_boxes and height > 0:
+            c_st = float(c["startTime"])
+            c_en = float(c["endTime"])
+            for fc in flashcard_boxes:
+                if not isinstance(fc, dict):
+                    continue
+                try:
+                    f_st = float(fc["start"] if fc.get("start") is not None else fc.get("t0", 0.0))
+                    f_en = float(fc["end"] if fc.get("end") is not None else fc.get("t1", 0.0))
+                    fy0_px = float(fc.get("y0", 0.0))
+                    fy1_px = float(fc["y1"]) if fc.get("y1") is not None else (fy0_px + float(fc.get("h", 0.0)))
+                except (TypeError, ValueError):
+                    continue
+                if min(c_en, f_en) - max(c_st, f_st) > 0.005 and fy1_px > fy0_px:
+                    card_intervals.append((fy0_px / float(height) * 100.0, fy1_px / float(height) * 100.0))
+
+        blocked_intervals = banner_intervals + card_intervals
+        overlay_dodged = False
+
+        if blocked_intervals and _interval_overlap_pct(cue_y, blocked_intervals, cap_half_pct, pad_pct) > 0.0:
+            dodge_faces = _segment_dodge_face_boxes(seg, width, height, face_cache)
+            face_intervals = [
+                (fy0 * 100.0, fy1 * 100.0)
+                for fx0, fy0, fx1, fy1 in dodge_faces
+                if fx1 > 0.10 and fx0 < 0.90 and fy1 > fy0
+            ]
+            cue_y = _pick_non_overlapping_y(
+                cue_y,
+                card_intervals,
+                banner_intervals,
+                face_intervals,
+                cap_half_pct,
+                pad_pct,
+                is_square,
+            )
+            overlay_dodged = True
+
+        # V1-approved smart face-avoidance drop: shift single-frame ~68% captions down to 79.0%
+        # when a foreground face occupies the lower-mid zone [0.55, 0.72] and no banner/flashcard sits at 79.0%.
+        if (
+            not overlay_dodged
+            and not is_square
+            and _is_single_fullframe_segment(seg)
+            and (not explicit_y or abs(cue_y - SINGLE_Y) <= 5.0)
+            and 55.0 <= cue_y <= 73.0
+        ):
+            face_boxes = _segment_face_boxes(seg, width, height, face_cache)
+            if _has_lower_mid_face(face_boxes):
+                drop_blocked = _interval_overlap_pct(FACE_DROP_Y, blocked_intervals, cap_half_pct, pad_pct) > 0.0
+                if not drop_blocked:
+                    cue_y = FACE_DROP_Y
+                elif card_intervals:
+                    face_intervals = [
+                        (fy0 * 100.0, fy1 * 100.0)
+                        for fx0, fy0, fx1, fy1 in face_boxes
+                        if fx1 > 0.10 and fx0 < 0.90 and fy1 > fy0
+                    ]
+                    cue_y = _pick_non_overlapping_y(
+                        cue_y,
+                        card_intervals,
+                        banner_intervals,
+                        face_intervals,
+                        cap_half_pct,
+                        pad_pct,
+                        is_square,
+                    )
 
         if abs(cue_y - default_y) >= 0.5:
             c.setdefault("style", {})["positionY"] = round(cue_y, 2)
@@ -1234,20 +2183,23 @@ def resolve_safe_y_percent(
     return default_y
 
 
-# ---------------------------------------------------------------- rendering & ffconcat
+# ---------------------------------------------------------------------------
+# Node Caption Rendering, FFmpeg Concat Demuxer & SRT Export
+# ---------------------------------------------------------------------------
 def render_frames(
     cues: List[Dict[str, Any]],
     style: Dict[str, Any],
     width: int,
     height: int,
     out_dir: Path,
-    y_percent: float = 72.0,
+    y_percent: float = 68.0,
     fps: int = 25,
     return_meta: bool = False,
     font_size: Optional[int] = None,
+    font_family: Optional[str] = None,
 ) -> Any:
-    """Draw every caption state to a transparent PNG with the Node renderer;
-    returns `frames` list by default, or the full manifest dict `{frames, bandY0, bandHeight, ...}` when `return_meta=True`."""
+    """Render every caption state to cropped transparent PNGs via `subtitles/render_cues.js`.
+    Returns the `frames` list by default, or the full manifest dict when `return_meta=True`."""
     out_dir.mkdir(parents=True, exist_ok=True)
     clean_cues = [{k: v for k, v in c.items() if k != "segIndex"} for c in cues]
     job = {
@@ -1260,18 +2212,33 @@ def render_frames(
         "fontSize": int(font_size or caption_font_size(width)),
         "cues": clean_cues,
     }
+    if font_family and str(font_family).strip():
+        job["fontFamily"] = resolve_font(font_family) or str(font_family).strip()
     jf = out_dir / "job.json"
     jf.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
-    r = subprocess.run([node_path(), str(SUB_DIR / "render_cues.js"), str(jf)], capture_output=True, text=True, encoding="utf-8", timeout=900)
+    r = subprocess.run(
+        [node_path(), str(SUB_DIR / "render_cues.js"), str(jf)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=900,
+    )
     if r.returncode != 0:
         raise RuntimeError(f"subtitle renderer failed: {(r.stderr or r.stdout).strip()[-400:]}")
-    line = [l for l in r.stdout.splitlines() if l.startswith("{")][-1]
+    line = [ln for ln in r.stdout.splitlines() if ln.startswith("{")][-1]
     manifest = json.loads(line)
     return manifest if return_meta else manifest["frames"]
 
 
-def write_concat_list(frames: List[Dict[str, Any]], total: float, width: int, height: int, out_dir: Path, fps: int = 25) -> Path:
-    """An FFmpeg concat list covering `0..total`: each caption PNG for its duration, a transparent `blank.png` matching exact cue PNG dimensions in the gaps."""
+def write_concat_list(
+    frames: List[Dict[str, Any]],
+    total: float,
+    width: int,
+    height: int,
+    out_dir: Path,
+    fps: int = 25,
+) -> Path:
+    """Write an FFmpeg `ffconcat` file spanning `0..total` seconds, filling non-spoken intervals with transparent `blank.png`."""
     from PIL import Image
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1309,7 +2276,7 @@ def write_concat_list(frames: List[Dict[str, Any]], total: float, width: int, he
         a = max(t, raw_a)
         if a >= total - 0.001:
             break
-        # Bridge <15ms subframe float rounding micro-gaps so captions never blink transparent mid-cue
+        # Bridge <15ms subframe rounding micro-gaps so captions never blink transparent mid-cue
         if t > 0.0 and 0.0 < (a - t) < 0.015:
             a = t
         elif a - t > 0.001:
@@ -1323,13 +2290,14 @@ def write_concat_list(frames: List[Dict[str, Any]], total: float, width: int, he
     if total - t > 0.001:
         lines += [f"file '{blank.as_posix()}'", f"duration {total - t:.4f}"]
         last = str(blank)
-    lines.append(f"file '{Path(last).as_posix()}'")     # the concat demuxer needs the last file repeated
+    lines.append(f"file '{Path(last).as_posix()}'")
     lst = out_dir / "subs.ffconcat"
     lst.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return lst
 
 
 def write_srt(cues: List[Dict[str, Any]], path: Path) -> None:
+    """Write standard SubRip (`.srt`) sidecar subtitles from timeline `cues`."""
     def ts(x: float) -> str:
         ms = int(round(max(0.0, x) * 1000))
         return f"{ms // 3600000:02d}:{ms // 60000 % 60:02d}:{ms // 1000 % 60:02d},{ms % 1000:03d}"
@@ -1341,8 +2309,10 @@ def write_srt(cues: List[Dict[str, Any]], path: Path) -> None:
     path.write_text("\n".join(out), encoding="utf-8")
 
 
-# ---------------------------------------------------------------- which style: rotate from job to job
-HISTORY = "_subs_history.json"      # in work/, one list of the styles this computer used, newest last
+# ---------------------------------------------------------------------------
+# Cross-Job Style Rotation (`#subs auto`)
+# ---------------------------------------------------------------------------
+HISTORY = "_subs_history.json"
 
 
 def _history_file(work_dir: Path) -> Path:
@@ -1350,36 +2320,35 @@ def _history_file(work_dir: Path) -> Path:
 
 
 def recent_styles(work_dir: Optional[Path] = None, n: int = 3) -> List[str]:
-    """The last `n` subtitle styles used on this computer, newest first."""
+    """Return the last `n` subtitle style names used on this machine, newest first."""
     from common import WORK
 
     try:
         d = json.loads(_history_file(work_dir or WORK).read_text(encoding="utf-8"))
         return [str(x.get("style")) for x in reversed(d.get("used", []))][:n]
-    except Exception:   # noqa: BLE001
+    except Exception:  # noqa: BLE001
         return []
 
 
 def remember_style(name: str, project: str, work_dir: Optional[Path] = None) -> None:
+    """Record `name` as the subtitle style used for `project` without double-counting re-renders."""
     from common import WORK
 
     f = _history_file(work_dir or WORK)
     try:
         d = json.loads(f.read_text(encoding="utf-8"))
-    except Exception:   # noqa: BLE001
+    except Exception:  # noqa: BLE001
         d = {}
-    used = [x for x in d.get("used", []) if x.get("project") != project]       # a re-render of the same edit does not count twice
+    used = [x for x in d.get("used", []) if x.get("project") != project]
     used.append({"style": name, "project": project, "at": time.strftime("%Y-%m-%d %H:%M")})
     try:
         f.write_text(json.dumps({"used": used[-20:]}, ensure_ascii=False), encoding="utf-8")
-    except Exception:   # noqa: BLE001
+    except Exception:  # noqa: BLE001
         pass
 
 
 def choose_style(project: str, work_dir: Optional[Path] = None, avoid: int = 2) -> Dict[str, Any]:
-    """`#subs auto`: a style that is not one of the last `avoid` used on this computer, picked by a stable hash of the project name so a
-    re-render of the same edit keeps its look while the next edit gets another one."""
-    # A style's `autoWeight` says how often auto may pick it (default 6; Sticker Cutout is 1, so it turns up only rarely).
+    """Select a deterministic style for `#subs auto` weighted by `autoWeight` and avoiding the last `avoid` styles."""
     pool = [x for x in styles() for _ in range(max(1, int(x.get("autoWeight", 6))))]
     recent = set(recent_styles(work_dir, avoid))
     fresh = [s for s in pool if s["name"] not in recent] or pool
@@ -1387,8 +2356,10 @@ def choose_style(project: str, work_dir: Optional[Path] = None, avoid: int = 2) 
     return fresh[h % len(fresh)]
 
 
-# ---------------------------------------------------------------- colours: look at the picture behind each caption
-SAFE_FILLS = {          # accents and box colours that stay readable (white text on them is 4.5:1 or better; bright ones sit on dark bars)
+# ---------------------------------------------------------------------------
+# Scene-Aware Contrast & Hue Adaptation (`adapt=on`)
+# ---------------------------------------------------------------------------
+SAFE_FILLS = {
     "bright": ["#FACC15", "#22D3EE", "#A3E635", "#F472B6", "#FB923C", "#60A5FA", "#C084FC", "#FFFFFF"],
     "box": ["#2563EB", "#7C3AED", "#15803D", "#DC2626", "#DB2777", "#0F766E", "#C2410C"],
 }
@@ -1396,7 +2367,7 @@ SAFE_FILLS = {          # accents and box colours that stay readable (white text
 
 def _rgb(hexcol: str) -> Tuple[float, float, float]:
     h = hexcol.lstrip("#")
-    return tuple(int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4))     # type: ignore[return-value]
+    return tuple(int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4))  # type: ignore[return-value]
 
 
 def _lum(rgb: Tuple[float, float, float]) -> float:
@@ -1422,7 +2393,7 @@ def _hue_gap(a: float, b: float) -> float:
 
 
 def band_stats(img: Any, y_percent: float) -> Dict[str, float]:
-    """What the caption will sit on: mean luminance, the dominant hue and how colourful the band is. `img` is a small PIL RGB frame."""
+    """Measure mean luminance, dominant hue, saturation ratio, and dark-pixel ratio on the horizontal band around `y_percent`."""
     import numpy as np
 
     w, h = img.size
@@ -1439,14 +2410,17 @@ def band_stats(img: Any, y_percent: float) -> Dict[str, float]:
         hsv = np.array([colorsys.rgb_to_hsv(*c) for c in px[colourful][:: max(1, int(colourful.sum() // 400))]])
         ang = hsv[:, 0] * 2 * np.pi
         weights = hsv[:, 1] * hsv[:, 2]
-        hue = (np.degrees(np.arctan2((np.sin(ang) * weights).sum(), (np.cos(ang) * weights).sum())) % 360.0)
-    return {"lum": float(_lum(tuple(px.mean(axis=0)))), "hue": float(hue), "colour": float(colourful.mean()), "dark": float((lum < 0.25).mean())}
+        hue = float(np.degrees(np.arctan2((np.sin(ang) * weights).sum(), (np.cos(ang) * weights).sum())) % 360.0)
+    return {
+        "lum": float(_lum(tuple(px.mean(axis=0)))),
+        "hue": float(hue),
+        "colour": float(colourful.mean()),
+        "dark": float((lum < 0.25).mean()),
+    }
 
 
 def adapt_style(style: Dict[str, Any], st: Dict[str, float]) -> Dict[str, Any]:
-    """Colour overrides for one caption so it reads on the picture behind it. Bars and boxes stay dark and take a tint of the scene's own hue
-    (they match it); the accent on the spoken word is the colour furthest from the scene's hue (it contrasts); outlined text switches colour when
-    it would blend into the picture. Returns {} for styles whose colours need no change."""
+    """Return per-cue color overrides that tint dark bars toward the scene hue while picking high-contrast active word accents."""
     kind_mode = style.get("highlightMode") or ""
     sat = st["colour"]
     bg_hue = st["hue"]
@@ -1491,7 +2465,7 @@ def adapt_style(style: Dict[str, Any], st: Dict[str, float]) -> Dict[str, Any]:
 
 
 def _frames_for_cues(video: Path, cues: List[Dict[str, Any]], out_dir: Path) -> List[Tuple[float, Any]]:
-    """Small frames of the rendered picture, four a second, for measuring colours."""
+    """Sample small RGB frames from `video` at 4 fps for background color analysis."""
     from PIL import Image
     from common import ffmpeg
 
@@ -1516,22 +2490,23 @@ def build_overlay(
     fps: int = 25,
     subdir: str = "_subs",
 ) -> Optional[Path]:
-    """Everything `render.py` needs: the concat list of caption images for the whole video (`subs.ffconcat`), plus `subs_meta.json`
-    recording the cropped horizontal band (`band_y0`, `band_h`) and exact frame timings inside `(report_dir or work_dir) / subdir`."""
+    """Build the subtitle overlay concat file (`subs.ffconcat`) and metadata (`subs_meta.json`) inside `(report_dir or work_dir) / subdir`."""
     spec = plan.get("subs")
     if not isinstance(spec, dict) or not spec.get("style"):
         return None
     if not ensure_ready():
-        print("  [SUBS] Node.js is not installed (get the LTS version from nodejs.org) or its caption package could not be installed. Rendering without subtitles.")
+        print("  [SUBS] Node.js or node-canvas is unavailable. Rendering without subtitles.")
         return None
+
     project = Path(str(plan.get("output") or "zeno")).stem
     if str(spec["style"]).strip().lower() == "auto":
         style = choose_style(project, work_dir)
     else:
         style = resolve_style(spec["style"])
-    if style is None:   # a deleted or misspelt style must not cost the video its subtitles
+    if style is None:
         style = choose_style(project, work_dir)
-        print(f"  [SUBS] unknown style '{spec['style']}' (styles: auto, " + ", ".join(f"{s['id']} {s['name']}" for s in styles()) + f"). Using '{style['name']}' instead.")
+        style_list = ", ".join(f"{s['id']} {s['name']}" for s in styles())
+        print(f"  [SUBS] Unknown style '{spec['style']}' (available: auto, {style_list}). Falling back to '{style['name']}'.")
 
     script_lines: List[Dict[str, Any]] = []
     try:
@@ -1540,20 +2515,36 @@ def build_overlay(
 
         if plan.get("script"):
             _, script_lines = parse_script_file(resolve(plan["script"]))
-    except Exception:   # noqa: BLE001
+    except Exception:  # noqa: BLE001
         script_lines = []
 
     cache_hint = Path(report_dir) if (report_dir is not None and (Path(report_dir) / "clip_caches.json").is_file()) else Path(work_dir)
-    # Sticker Cutout puts every word on its own sticker with gaps, so its cards must be narrower to stay on one row at the fixed size.
     global MAX_VISUAL_UNITS
     _units_before = MAX_VISUAL_UNITS
     MAX_VISUAL_UNITS = _units_before * (0.80 if str(style.get("highlightMode")) == "sticker" else 1.0)
+    eff_with_cards = _flag_truthy(spec.get("with_cards"))
     try:
-        cues = build_cues(segs, starts, script_lines, work_dir=cache_hint)
+        cues = build_cues(
+            segs,
+            starts,
+            script_lines,
+            work_dir=cache_hint,
+            plan=plan,
+            with_cards=eff_with_cards,
+        )
     finally:
         MAX_VISUAL_UNITS = _units_before
     if not cues:
-        print("  [SUBS] no spoken words to show.")
+        plan_cards_off = _plan_cards_off(plan)
+        suppressed_all = any(
+            not (_segment_is_beat(s) or _segment_is_muted(s))
+            and _segment_subs_off(s, plan_cards_off=plan_cards_off, with_cards=eff_with_cards)
+            for s in segs
+        )
+        if suppressed_all:
+            print("  [SUBS] All spoken segments suppressed by flashcards or subs=off; skipping bottom subtitles.")
+        else:
+            print("  [SUBS] No spoken words found for subtitles.")
         return None
 
     base_out = Path(report_dir) if report_dir is not None else Path(work_dir)
@@ -1563,10 +2554,21 @@ def build_overlay(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     eff_fps = max(24, int(fps or (plan.get("canvas") or {}).get("fps") or 25))
-    y_pct = resolve_safe_y_percent(spec, segs, starts, total, width, height, cues=cues)
+    fc_boxes = _load_flashcard_boxes(plan, width, height, report_dir=report_dir, work_dir=work_dir)
+    y_pct = resolve_safe_y_percent(
+        spec,
+        segs,
+        starts,
+        total,
+        width,
+        height,
+        cues=cues,
+        flashcard_boxes=fc_boxes,
+        plan=plan,
+        report_dir=report_dir,
+    )
 
     adapted = 0
-    # One style, one look for the whole video: colours change per caption only when the plan says `adapt=on`.
     if video is not None and spec.get("adapt", False):
         try:
             probes = _frames_for_cues(Path(video), cues, out_dir)
@@ -1584,11 +2586,27 @@ def build_overlay(
                         c["style"] = {**(c.get("style") or {}), **ov}
                         adapted += 1
             shutil.rmtree(out_dir / "probe", ignore_errors=True)
-        except Exception as exc:   # noqa: BLE001  (the stored colours are always readable; adapting is a refinement)
-            print(f"  [SUBS] could not read the picture's colours, using the style's own: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [SUBS] Could not sample background colors, keeping default style palette: {exc}")
 
-    manifest = render_frames(cues, style, width, height, out_dir, y_pct, fps=eff_fps, return_meta=True,
-                             font_size=caption_font_size(width, spec))
+    custom_font: Optional[str] = None
+    if spec.get("font"):
+        custom_font = resolve_font(spec["font"])
+        if custom_font is None:
+            print(f"  [SUBS] Unknown font '{spec['font']}'; keeping style default '{style.get('fontFamily', 'Montserrat')}'.")
+
+    manifest = render_frames(
+        cues,
+        style,
+        width,
+        height,
+        out_dir,
+        y_pct,
+        fps=eff_fps,
+        return_meta=True,
+        font_size=caption_font_size(width, spec),
+        font_family=custom_font,
+    )
     frames = manifest["frames"]
     band_y0 = int(manifest.get("bandY0", 0))
     band_h = int(manifest.get("bandHeight", height))
@@ -1601,23 +2619,49 @@ def build_overlay(
             import job_report
 
             job_report.record_subs(report_dir, style["name"], len(cues), adapted)
-        except Exception:   # noqa: BLE001
+        except Exception:  # noqa: BLE001
             pass
 
     ffconcat_path = write_concat_list(frames, total, width, band_h, out_dir, fps=eff_fps)
+
+    cue_half_px = (_caption_half_height_pct(width, height, spec) / 100.0) * float(height)
+    meta_cues = []
+    for ci, c in enumerate(cues):
+        eff_y = float((c.get("style") or {}).get("positionY", y_pct))
+        cy_px = (eff_y / 100.0) * float(height)
+        y0_px = max(0, int(round(cy_px - cue_half_px)))
+        y1_px = min(int(height), int(round(cy_px + cue_half_px)))
+        meta_cues.append({
+            "index": ci,
+            "start": round(float(c["startTime"]), 4),
+            "end": round(float(c["endTime"]), 4),
+            "text": str(c.get("text") or ""),
+            "y_percent": round(eff_y, 2),
+            "y0_px": y0_px,
+            "y1_px": y1_px,
+        })
+
+    default_cy_px = (float(y_pct) / 100.0) * float(height)
+    default_y0_px = max(0, int(round(default_cy_px - cue_half_px)))
+    default_y1_px = min(int(height), int(round(default_cy_px + cue_half_px)))
 
     meta_frames = []
     for f in frames:
         st_s = float(f["startSec"]) if "startSec" in f else float(f["startMs"]) / 1000.0
         en_s = float(f["endSec"]) if "endSec" in f else (float(f["startMs"]) + float(f["durationMs"])) / 1000.0
+        cue_idx = int(f.get("captionIndex", 0))
+        cue_geo = meta_cues[cue_idx] if 0 <= cue_idx < len(meta_cues) else None
         meta_frames.append({
             "file": str(Path(f["path"]).resolve()),
             "start": round(st_s, 4),
             "end": round(en_s, 4),
             "text": str(f.get("text") or ""),
-            "cue": int(f.get("captionIndex", 0)),
+            "cue": cue_idx,
             "word": int(f.get("stepIndex", 0)),
             "sub": int(f.get("subIndex", 0)),
+            "y_percent": cue_geo["y_percent"] if cue_geo else round(y_pct, 2),
+            "y0_px": cue_geo["y0_px"] if cue_geo else default_y0_px,
+            "y1_px": cue_geo["y1_px"] if cue_geo else default_y1_px,
         })
 
     subs_meta = {
@@ -1629,25 +2673,47 @@ def build_overlay(
         "y_percent": round(y_pct, 2),
         "style": style["name"],
         "style_id": style["id"],
+        "font_family": manifest.get("fontFamily") or custom_font or style.get("fontFamily"),
         "cues_count": len(cues),
+        "cues": meta_cues,
         "frames": meta_frames,
         "srt_path": str(srt_path) if srt_path else None,
     }
     (out_dir / "subs_meta.json").write_text(json.dumps(subs_meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    print(f"  [SUBS] {len(cues)} captions, {len(frames)} frames (band y={band_y0}..{band_y0 + band_h}), style '{style['name']}', colours adapted on {adapted} captions")
+    font_note = f", font '{subs_meta['font_family']}'" if custom_font else ""
+    print(
+        f"  [SUBS] {len(cues)} captions, {len(frames)} frames "
+        f"(band y={band_y0}..{band_y0 + band_h}), style '{style['name']}'{font_note}, "
+        f"colors adapted on {adapted} captions"
+    )
     try:
         import events
 
-        events.emit("subs", f"Subtitles: {len(cues)} captions in '{style['name']}', colours adapted to the picture on {adapted}", style=style['name'], captions=len(cues))
+        events.emit(
+            "subs",
+            f"Subtitles: {len(cues)} captions in '{style['name']}'{font_note}, colors adapted on {adapted}",
+            style=style["name"],
+            captions=len(cues),
+        )
     except Exception:
         pass
     return ffconcat_path
 
 
-if __name__ == "__main__" and len(__import__("sys").argv) > 1 and __import__("sys").argv[1] == "--ensure":
-    # used by the installers: make captions ready now, so the first render does not wait for it
+if __name__ == "__main__":
     import sys as _sys
-    ok = ensure_ready()
-    print("  [SUBS] captions ready" if ok else "  [SUBS] captions NOT ready (see above)")
-    _sys.exit(0 if ok else 1)
+
+    if len(_sys.argv) > 1 and _sys.argv[1] == "--ensure":
+        ok = ensure_ready()
+        print("  [SUBS] captions ready" if ok else "  [SUBS] captions NOT ready (see above)")
+        _sys.exit(0 if ok else 1)
+    if len(_sys.argv) > 1 and _sys.argv[1] == "--list-fonts":
+        script_arg = _sys.argv[2] if len(_sys.argv) > 2 else None
+        items = list_fonts(script=script_arg)
+        for rec in items:
+            ws = ",".join(str(w) for w in rec["weights"])
+            sc = "/".join(rec["scripts"])
+            print(f"{rec['family']} [{ws}] ({sc})")
+        print(f"Total: {len(items)} bundled static Google Font families")
+        _sys.exit(0)

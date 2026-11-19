@@ -167,6 +167,164 @@ class OtaManifestCleanerTests(unittest.TestCase):
             self.assertTrue((root / "work" / "_job_outbox" / "pending.json").is_file())
             self.assertEqual((root / ".env").read_text(encoding="utf-8"), "KEY=1\n")
 
+    def test_1_0_28_to_2_0_0_end_to_end_upgrade(self):
+        import auto_updater
+        import release
+
+        with tempfile.TemporaryDirectory(prefix="zeno_1x_to_2x_") as tmp:
+            root = Path(tmp) / "Zeno"
+            root.mkdir(parents=True)
+
+            # Seed mock client 1.0.28 files/dirs that must be wiped/stripped on upgrade to 2.0.0
+            legacy_files = {
+                "VERSION": "1.0.28\n",
+                "agent/EDIT_RULES.md": "# old 1.x rules\n",
+                "agent/FORMATS.md": "# old 1.x formats\n",
+                "styles/micronarrative/SKILL.md": "# old 1.x skill\n",
+                "config/legacy.json": '{"legacy": true}\n',
+                "CONCEPT.md": "# legacy concept\n",
+                "LOW_COST_WORKFLOW.md": "# legacy low cost workflow\n",
+                "TOKEN_LEDGER.md": "# legacy token ledger\n",
+                "scripts/zeno_mcp.py": "# deleted 1.x mcp server\n",
+                "scripts/ai_director.py": "# deleted 1.x ai_director\n",
+                "scripts/direct_mode.py": "# deleted 1.x direct_mode\n",
+                "scripts/brain_memory.py": "# deleted 1.x brain_memory\n",
+                "work/old_1x_proj/plan.edl": "L1 a.mp4 0-1\n",
+                "work/old_1x_proj/director_packet.md": "# old 1.x packet\n",
+            }
+            for rel, body in legacy_files.items():
+                p = root / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(body, encoding="utf-8")
+
+            settings_local_path = root / ".claude" / "settings.local.json"
+            settings_local_path.parent.mkdir(parents=True, exist_ok=True)
+            settings_local_payload = {
+                "permissions": {"allow": ["Bash(echo custom:*)"]},
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [
+                                {"type": "command", "command": ".venv/bin/python scripts/call_cap.py"},
+                                {"type": "command", "command": "echo user-custom-pretool-hook"},
+                            ],
+                        }
+                    ],
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": "echo user-custom-stop-hook"},
+                            ]
+                        }
+                    ],
+                },
+            }
+            settings_local_path.write_text(json.dumps(settings_local_payload, indent=2), encoding="utf-8")
+
+            # Seed protected client files/dirs that MUST survive untouched
+            protected_files = {
+                ".env": "GEMINI_API_KEY=keep-secret\n",
+                ".zeno_session.json": '{"token":"keep-session-token","email":"editor@gosupernova.live"}\n',
+                ".venv/bin/python": "#!/usr/bin/env python3\n# keep venv\n",
+                "models/x": "model-weights-bytes",
+                "tools/ffmpeg/ffmpeg": "ffmpeg-binary-bytes",
+                "subtitles/node_modules/pkg/index.js": "module.exports = { ok: true };\n",
+                "app/node_modules/pkg/index.js": "module.exports = { app: true };\n",
+                "work/_clips/c1/words.json": '[{"w":"hello","start":0.1,"end":0.4}]\n',
+                "input/footage/a.mp4": "raw-footage-bytes",
+                "output/x.mp4": "rendered-output-bytes",
+            }
+            for rel, body in protected_files.items():
+                p = root / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(body, encoding="utf-8")
+
+            blob, _count, sha = release.build_bundle_bytes(version="2.0.0", clear_work_projects=True)
+            orig_sys_path = sys.path[:]
+            try:
+                with patch.object(auto_updater, "ROOT", root), \
+                     patch.object(auto_updater, "WORK", root / "work"), \
+                     patch.object(auto_updater, "RELEASE_STATE_FILE", root / "work" / ".cloud_release_state.json"), \
+                     patch.object(auto_updater.subprocess, "run") as m_subproc:
+                    res = auto_updater.apply_bundle_bytes(
+                        blob,
+                        expected_sha256=sha,
+                        version="2.0.0",
+                        sha="v200test",
+                    )
+                m_subproc.assert_not_called()
+            finally:
+                sys.path[:] = orig_sys_path
+
+            self.assertTrue(res["ok"], res)
+            self.assertTrue(res["updated"], res)
+            self.assertTrue(res.get("cleanup", {}).get("ran"), res)
+            self.assertTrue(res.get("cleanup", {}).get("clear_work_projects"), res)
+            self.assertGreaterEqual(res.get("cleanup", {}).get("legacy_hooks_removed", 0), 1, res)
+            self.assertFalse((root / "_zeno_manifest.json").exists())
+
+            # 1) ALL deleted 1.x files/dirs + work/old_1x_proj wiped
+            for removed_rel in (
+                "agent",
+                "styles",
+                "config",
+                "CONCEPT.md",
+                "LOW_COST_WORKFLOW.md",
+                "TOKEN_LEDGER.md",
+                "scripts/zeno_mcp.py",
+                "scripts/ai_director.py",
+                "scripts/direct_mode.py",
+                "scripts/brain_memory.py",
+                "work/old_1x_proj",
+            ):
+                self.assertFalse((root / removed_rel).exists(), f"1.x path survived upgrade: {removed_rel}")
+
+            # 2) Legacy call_cap.py hook stripped, unrelated user custom hooks + permissions preserved
+            updated_local_raw = settings_local_path.read_text(encoding="utf-8")
+            self.assertNotIn("call_cap.py", updated_local_raw)
+            updated_local = json.loads(updated_local_raw)
+            self.assertEqual(updated_local["permissions"], {"allow": ["Bash(echo custom:*)"]})
+            pre_cmds = [
+                h.get("command")
+                for entry in updated_local["hooks"]["PreToolUse"]
+                for h in entry.get("hooks", [])
+            ]
+            stop_cmds = [
+                h.get("command")
+                for entry in updated_local["hooks"]["Stop"]
+                for h in entry.get("hooks", [])
+            ]
+            self.assertEqual(pre_cmds, ["echo user-custom-pretool-hook"])
+            self.assertEqual(stop_cmds, ["echo user-custom-stop-hook"])
+
+            # 3) New 2.0.0 artifacts & Zeno Outs files arrived
+            self.assertTrue((root / "edit-7k.bat").is_file())
+            self.assertTrue((root / "AGENTS.md").is_file())
+            self.assertTrue((root / "CLAUDE.md").is_file())
+            self.assertEqual((root / "AGENTS.md").read_bytes(), (root / "CLAUDE.md").read_bytes())
+            for zo_rel in (
+                "AGENTS.md",
+                "CLAUDE.md",
+                "README.md",
+                "edit-7k.bat",
+                "scripts/common.py",
+                "scripts/deliver.py",
+                "scripts/notify.py",
+                "scripts/zeno.py",
+            ):
+                self.assertIn(
+                    "Zeno Outs",
+                    (root / zo_rel).read_text(encoding="utf-8"),
+                    f"Expected Zeno Outs reference in delivered {zo_rel}",
+                )
+
+            # 4) All protected files & runtime deps survived completely untouched
+            for rel, expected_body in protected_files.items():
+                p = root / rel
+                self.assertTrue(p.is_file(), f"Protected path missing after upgrade: {rel}")
+                self.assertEqual(p.read_text(encoding="utf-8"), expected_body, f"Protected path modified: {rel}")
+
 
 if __name__ == "__main__":
     unittest.main()

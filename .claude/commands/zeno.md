@@ -1,20 +1,21 @@
 ---
-description: Edit one or a queued batch of script-led videos with Zeno's 1-call planner and verified plan.
-argument-hint: "<footage> <script-tab> --name <Notion name>"
+description: Edit one video or a multi-video sequential queue in Zeno v2.0.0 and deliver finished folders to ~/Downloads/Zeno Outs/<VideoName>/.
+argument-hint: "\"<footage_dir>\" --script <gdoc_tab_url_or_path> --name \"<VideoName>\""
 ---
 # /zeno
 
-User inputs: `$ARGUMENTS`
+Inputs: `$ARGUMENTS` (use `.venv/bin/python` on macOS/Linux or `.venv\Scripts\python.exe` on Windows as `<PY>`).
 
-Follow `AGENTS.md` and `agent/DIRECTOR.md`. One video per chat: start each video in a new chat, so every step re-reads a small chat (claude.ai connectors are off, so the editor gives the exact Notion name); use supplied inputs without asking again. The planner makes at most 2 model calls per video. If the output says `[PLANNER STOPPED]` (the planner used its 2 model calls and the plan still fails), do not plan by hand: report the `[BLOCKED]` lines to the editor and ask. Each `--inspect` opens an isolated per-video `INR 40` / `24`-request cost window.
+Process 1, 2, or 3+ queued videos **one by one sequentially** in this chat with **zero Yes/No prompts**, delivering every finished package to `~/Downloads/Zeno Outs/<VideoName>/` with automatic desktop sound & popup notification:
+- Deliverables: `reel_<VideoName>.mp4`, `SQ_<VideoName>.mp4`, Premiere `.prproj`/`.xml`, `review_sheet.jpg`, `<VideoName>.plan.edl`, `<VideoName>.script.txt`.
 
-## Procedure
-1. **Turn 1 (Primary 1-call)**: Run `<PY> scripts/zeno.py --inspect <footage> --script <script> --name "<name>" --auto-plan --compact` (if inputs are missing, run `--preflight --compact`, show results, and ask for them; never `--skip-preflight`). `--auto-plan` runs live preflight, inspects/reuses clips, runs Zeno's isolated 1-call subscription planner (`claude -p` or `codex exec`, zero connector/history overhead, typically `20k–55k` tokens), runs `--check-plan`, prints the Pitch Card, and automatically renders 9:16 + 1:1 Square without asking Yes/No. When `--auto-plan` passes `[PLAN PASS]`, do NOT open packets/sheets/rules; deliver outputs + token report.
-2. **Strict Manual / Fallback Cap (4–5 turns max, NEVER 40+)**:
-   - **Turn 2**: Read `editing_packet_p*.md` (or `editing_packet.md`) + ALL `clip_sheet_*.jpg` in ONE parallel batch.
-   - **Turn 3**: Write `script_analysis.md` and `plan.edl` (plus `decisions.txt` if needed) in ONE parallel batch.
-   - **Turn 4**: Never pause to ask Yes/No before rendering (unless the user explicitly requested `--no-auto-render` / plan-only review). Run ONE combined check+render command: `<PY> scripts/zeno.py --execute <plan> --square --compact` (no separate `cost_control.py` + `--check-plan` + `--execute` roundtrips unless `--check-plan` is explicitly needed or the plan fails!; never pipe to `tail` in a way that hides exit status). If a command backgrounds, **END TURN immediately** and wait for system completion notification — NEVER poll `manage_task`, `write_stdin`, `send_input`, or progress/log files!
-   - **Turn 5**: `verify.py` checks both 9:16 and 1:1 Square framing and builds a single compact `review_sheet.jpg` automatically (never write custom FFmpeg/Python frame-extraction scripts). Read `review_sheet.jpg` ONCE (unless verify fails) and present deliverables (MP4s + Premiere files) with the saved per-video token report. README and ledger entries are automatic.
-3. **`[DO NOT]` during edits**: NEVER open `agent/REFERENCE.md`, `CONCEPT.md`, `agent/EDIT_RULES.md`, `agent/FORMATS.md`, `scripts/*.py`, `clip_caches.json`, `facts.md`, `line_map.md`, `ffprobe`, or `dir`/`Get-ChildItem`/`ls` (`editing_packet.md` already holds syntax card, raw footage inventory, unmatched line diagnostics, and all words/candidates/rules).
-
-For revisions, record feedback verbatim first (`--feedback "<words>" --plan <plan>`), then read the saved plan and only affected line evidence (`edit_packet.py` + `--check-plan`, checking `cost_control.py` if retries repeat). Reuse measured footage and preserve every visual rule in `AGENTS.md`.
+## Workflow (Host-AI Direct, Zero MCP)
+1. **Single Video Inspect**: Run `<PY> scripts/zeno.py "<footage_dir>" --script "<gdoc_tab_url_or_path>" --name "<VideoName>" --inspect --compact`. Wait for completion without polling (`sleep`, `write_stdin`, or `manage_task`).
+2. **Multi-Video Queue (`2+` videos)**: Run `<PY> scripts/zeno.py --queue <queue.json> --inspect-only --compact` (e.g. `work/queue.json`), then spawn **1 isolated subagent per queued video** returning only `~/Downloads/Zeno Outs/<VideoName>/` + status so `editing_packet.md` and `clip_sheet_*.jpg` stay out of the main chat.
+3. **Plan, Repair & Deliver** (inside the single-video context/subagent):
+   - Read **ONLY** `work/<project>/editing_packet.md` (or `editing_packet_p*.md` if chunked) and `work/<project>/clip_sheet_*.jpg` in one batch (never open `formats/*`, `scripts/*`, `facts.md`, `line_map.md`, or `clip_caches.json`).
+   - Write `work/<project>/script_analysis.md` (first line `Format: <id> (<title>)`) and `work/<project>/plan.edl` (plus `work/<project>/decisions.txt` only if needed).
+   - For `[BLOCKED]` fixes, run `<PY> scripts/edit_packet.py work/<project> --line <ID>` instead of re-reading the whole packet.
+   - Run `<PY> scripts/zeno.py --execute work/<project>/plan.edl --square --compact`, inspect `~/Downloads/Zeno Outs/<VideoName>/review_sheet.jpg` once, and immediately start the next queued video.
+4. **Missing inputs**: Run `<PY> scripts/zeno.py --preflight --compact` and ask only for what is missing.
+5. **Editorial & Visual Invariants**: Follow all rules in `CLAUDE.md` (every spoken line once in script order, `sp="ExactSpeaker"`, pause-snapped word-bound cuts, `z=1` splits with 14% headroom + advancing silent listener `peer=`, `1.08` punch-ins / `1.0->1.06` pushes, `#subs auto y=68` / `y=50` on `split_v`, `#page scroll`, purposeful story-driven transitions, script-accurate marks/flashcards/banners, 2-layer 5–10% Gaussian blur 1:1 Square wrap, bottom 20–25% CTA-safe).

@@ -1,0 +1,29 @@
+{
+  "id": "scroll_page",
+  "layout": "split_h",
+  "names": [
+    "scrolling text",
+    "scrolling subtitles",
+    "split screen + scrolling text",
+    "scroll text",
+    "scrolling transcript"
+  ],
+  "description": "Top half shows two speakers side by side (split_h, still, no vertical divider) above a solid blue rule; bottom half displays a white scrolling transcript page with an active box highlighting each spoken word.",
+  "when": "the script specifies scrolling text with two speakers",
+  "geometry": {
+    "canvas": "1080x1920",
+    "picture_h": 932,
+    "line_h": 20,
+    "line_colour": "#1F4DA1",
+    "page_h": 968,
+    "text_size": 44,
+    "text_left": 216,
+    "zoom": "none: every segment stays at z=1"
+  },
+  "plan": [
+    "#page scroll",
+    "segments: layout=split_h z=1"
+  ],
+  "confidence": "measured",
+  "source": "measured on 2026-11-12 from in-house scrolling-text reference video"
+}

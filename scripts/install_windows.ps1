@@ -4,7 +4,7 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
-# 0. Team rule: Zeno lives in Documents\Zeno and finished videos go to Downloads\Zeno Outputs.
+# 0. Team rule: Zeno lives in Documents\Zeno and finished videos go to Downloads\Zeno Outs.
 #    If this folder is somewhere else, copy it there and continue from the new copy.
 #    (Windows can't move a folder a script is running from. The owner's dev copy has a .zeno-dev file and stays put.)
 $downloads = Join-Path $env:USERPROFILE "Downloads"
@@ -23,12 +23,12 @@ if (-not (Test-Path ".zeno-dev") -and ($here.TrimEnd('\') -ne $target.TrimEnd('\
     Write-Host "Zeno is now in $target. Continuing the install there; you can delete this old folder afterwards."
     Set-Location $target
 }
-New-Item -ItemType Directory -Force -Path (Join-Path $downloads "Zeno Outputs") | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $downloads "Zeno Outs") | Out-Null
 
 Write-Host "=============================================="
 Write-Host " Zeno installer (Windows)"
 Write-Host " Folder : $(Get-Location)"
-Write-Host " Videos : $(Join-Path $downloads 'Zeno Outputs')"
+Write-Host " Videos : $(Join-Path $downloads 'Zeno Outs')"
 Write-Host "=============================================="
 
 # 1. uv: installs Python 3.12 and the packages (user folder only)
@@ -102,8 +102,6 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "[Auth] Opening your browser to sign in with Google (@gosupernova.live)..."
     & .venv\Scripts\python.exe scripts\setup.py --login
 }
-& .venv\Scripts\python.exe scripts\setup.py --lean-session | Out-Null
-& .venv\Scripts\python.exe scripts\setup.py --connect-claude
 & .venv\Scripts\python.exe scripts\setup.py --smoke
 
 Write-Host ""

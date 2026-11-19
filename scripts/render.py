@@ -1,16 +1,19 @@
 """Render an edit plan (JSON or EDL) into the final broadcast-ready MP4 video.
 
 Usage:
-    python3 scripts/render.py work/<project>/plan.edl [--draft] [--verify]
+    python3 scripts/render.py work/<project>/plan.edl [--draft] [--verify] [--square]
         [--preset auto|single|split_v|split_h|chat_bar|video_call|hybrid]
         [--mark-pack default|glossy|flash|vignette]
+        [--deliver] [--name <FolderName>]
 """
 from __future__ import annotations
 
 import argparse
 from array import array
+import contextlib
 import hashlib
 import inspect
+import io
 import json
 import math
 import os
@@ -21,56 +24,115 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (  # noqa: E402
-    DEFAULT_LOUDNESS_LUFS,
-    DEFAULT_PEAK_CAP_DB,
-    DEFAULT_SFX,
-    FFMPEG,
-    MARKS_DIR,
-    SFX_DIR,
-    OUTPUT,
-    WORK,
-    clip_work_dir,
-    _normalize_mark_type,
-    ffmpeg,
-    ffmpeg_encode,
-    final_bitrate_kbps,
-    probe,
-    read_json,
-    resolve,
-    resolve_mark_asset,
-    resolve_mark_sfx,
-    resolve_sfx_asset,
-    square_job_output,
-    strip_ratio_prefix,
-    tc,
-    write_json,
+import common  # noqa: E402
+
+
+def _fallback_normalize_mark_type(mark_type: str) -> str:
+    t = str(mark_type or "right").strip().lower()
+    if t in ("right", "correct", "check", "tick", "green", "ok", "true", "yes"):
+        return "right"
+    if t in ("wrong", "error", "cross", "x", "red", "false", "no", "incorrect"):
+        return "wrong"
+    return t
+
+
+ROOT: Path = getattr(common, "ROOT", Path(__file__).resolve().parent.parent)
+WORK: Path = getattr(common, "WORK", ROOT / "work")
+OUTPUT: Path = getattr(
+    common,
+    "OUTPUT",
+    Path(os.environ.get("ZENO_OUTPUT_DIR", "").strip() or (Path.home() / "Downloads" / "Zeno Outs")).expanduser(),
 )
+FFMPEG: Path = common.FFMPEG
+MARKS_DIR: Path = getattr(common, "MARKS_DIR", ROOT / "assets" / "marks")
+SFX_DIR: Path = getattr(common, "SFX_DIR", ROOT / "assets" / "sfx")
+DEFAULT_LOUDNESS_LUFS: float = float(getattr(common, "DEFAULT_LOUDNESS_LUFS", -10.5))
+DEFAULT_PEAK_CAP_DB: float = float(getattr(common, "DEFAULT_PEAK_CAP_DB", -1.0))
+DEFAULT_SFX: Dict[str, str] = getattr(common, "DEFAULT_SFX", {"right": "correct_ding.wav", "wrong": "sn_wrong.wav"})
+
+clip_work_dir = common.clip_work_dir
+_normalize_mark_type = getattr(
+    common,
+    "_normalize_mark_type",
+    getattr(common, "normalize_mark_type", _fallback_normalize_mark_type),
+)
+ffmpeg = common.ffmpeg
+ffmpeg_encode = common.ffmpeg_encode
+final_bitrate_kbps = common.final_bitrate_kbps
+probe = common.probe
+read_json = common.read_json
+resolve = common.resolve
+resolve_mark_asset = common.resolve_mark_asset
+resolve_mark_sfx = common.resolve_mark_sfx
+resolve_sfx_asset = common.resolve_sfx_asset
+square_job_output = common.square_job_output
+strip_ratio_prefix = common.strip_ratio_prefix
+tc = common.tc
+write_json = common.write_json
+thermal_pause = getattr(common, "thermal_pause", lambda *a, **kw: None)
+job_done = getattr(common, "job_done", lambda: None)
+
+
+def segment_hold_tail(seg: Dict[str, Any]) -> float:
+    """Return clamped post-word freeze-hold tail seconds (`common.segment_hold_tail` with safe fallback)."""
+    fn = getattr(common, "segment_hold_tail", None)
+    if callable(fn):
+        return float(fn(seg))
+    try:
+        return max(0.0, min(1.5, float(seg.get("hold_tail") or 0.0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _segment_speed(seg: Dict[str, Any]) -> float:
+    """Return clamped playback speed multiplier (`common.segment_speed` with safe fallback)."""
+    fn = getattr(common, "segment_speed", None)
+    if callable(fn):
+        return float(fn(seg))
+    try:
+        val = float(seg.get("speed") or 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(val) or val <= 0.0:
+        return 1.0
+    return max(0.5, min(2.0, val))
+
+
+def segment_duration(seg: Dict[str, Any]) -> float:
+    """Return total segment duration including `speed` and `hold_tail` (`common.segment_duration` with safe fallback)."""
+    fn = getattr(common, "segment_duration", None)
+    if callable(fn):
+        return float(fn(seg))
+    raw = max(0.0, float(seg.get("end", 0.0)) - float(seg.get("start", 0.0)))
+    return max(0.08, raw / _segment_speed(seg) + segment_hold_tail(seg))
+
+
+_seg_duration = segment_duration
 
 try:
     import edl_parser
 except Exception:
-    edl_parser = None
+    edl_parser = None  # type: ignore[assignment]
 
 try:
     import layouts
 except Exception:
-    layouts = None
+    layouts = None  # type: ignore[assignment]
 
 try:
     import verify
 except Exception:
-    verify = None
+    verify = None  # type: ignore[assignment]
 
 try:
     import style_config
     _TUNING = style_config.get_tuning()
 except Exception:
-    style_config = None
+    style_config = None  # type: ignore[assignment]
     _TUNING = {}
 
 EDGE_FADE = 0.012  # tiny audio fade at every cut to avoid clicks
-TRANSITIONS_DIR = Path(__file__).resolve().parent.parent / "assets" / "transitions"
+TRANSITIONS_DIR = ROOT / "assets" / "transitions"
 _SPLIT_LAYOUTS = {"split_h", "split_v", "left_right", "top_bottom"}
 _SFX_STATS_CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -184,6 +246,73 @@ def _sfx_audio_stats(fpath: Path) -> Dict[str, Any]:
     return stats
 
 
+def _mark_sfx_preroll(sfx_path: Path) -> float:
+    """Clamped attack pre-roll for mark SFX so leading silence is trimmed and the audible punch lands on the beat."""
+    pk = float(_sfx_audio_stats(sfx_path).get("peak_sec", 0.0) or 0.0)
+    if pk <= 0.04:
+        return 0.0
+    return min(0.12, max(0.0, pk * 0.50))
+
+
+_STANDARD_FPS = (24, 25, 30, 50, 60)
+
+
+def _snap_standard_fps(raw_fps: float) -> int:
+    """Snap a probed clip frame rate to the nearest standard CFR rate (24/25/30/50/60) when within 1.5 fps."""
+    val = float(raw_fps or 0.0)
+    if val <= 0.0:
+        return 0
+    nearest = min(_STANDARD_FPS, key=lambda std: abs(val - std))
+    if abs(val - nearest) <= 1.5:
+        return int(nearest)
+    return max(1, int(round(val)))
+
+
+def _detect_modal_fps(
+    segs: List[Dict[str, Any]],
+    first_info: Optional[Dict[str, Any]] = None,
+) -> int:
+    """Pick the modal (most frequent) rounded standard FPS across all segments, tie-breaking toward higher standard FPS."""
+    counts: Dict[int, int] = {}
+    probe_cache: Dict[str, int] = {}
+    if segs and first_info:
+        first_src_key = str(segs[0].get("src") or "")
+        if first_src_key:
+            first_snapped = _snap_standard_fps(float(first_info.get("fps") or 0.0))
+            if first_snapped > 0:
+                probe_cache[first_src_key] = first_snapped
+    for s in segs:
+        raw_src = str(s.get("src") or "")
+        if not raw_src:
+            continue
+        if raw_src not in probe_cache:
+            src_p = resolve(raw_src)
+            info: Optional[Dict[str, Any]] = None
+            if src_p.is_file():
+                try:
+                    info = probe(src_p)
+                except Exception:
+                    info = None
+            else:
+                info_cache = clip_work_dir(raw_src) / "info.json"
+                if info_cache.is_file():
+                    try:
+                        info = read_json(info_cache)
+                    except Exception:
+                        info = None
+            probe_cache[raw_src] = _snap_standard_fps(float((info or {}).get("fps") or 0.0))
+        seg_fps = probe_cache[raw_src]
+        if seg_fps > 0:
+            counts[seg_fps] = counts.get(seg_fps, 0) + 1
+    if not counts:
+        fb = float((first_info or {}).get("fps") or 24)
+        return _snap_standard_fps(fb) or 24
+    return max(
+        counts.keys(),
+        key=lambda f: (counts[f], 1 if f in _STANDARD_FPS else 0, f),
+    )
+
+
 def _calibrate_sfx_gain_db(
     sfx_path: Path,
     raw_gain_db: Optional[float],
@@ -248,7 +377,7 @@ def _calibrate_sfx_gain_db(
 
 
 def load_overlay_transition(name: str) -> Optional[Dict[str, Any]]:
-    """Measured overlay transitions live in assets/transitions/<name>.json (screen-blend flash envelope)."""
+    """Load measured screen-blend flash envelope from assets/transitions/<name>.json."""
     path = TRANSITIONS_DIR / f"{name}.json"
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
 
@@ -276,7 +405,7 @@ def flash_filters(
             continue
         src_k = min(n_spec - 1, int(m * n_spec / max(1, total_frames)))
         r, g, b = frames_spec[src_k]["screen_rgb"]
-        expr = lambda c: f"val+(255-val)*{c}/255"
+        expr = lambda c: f"val+(255-val)*{c}/255"  # noqa: E731
         out.append(f"lutrgb=r='{expr(r)}':g='{expr(g)}':b='{expr(b)}':enable='between(n,{f_idx},{f_idx})'")
     return out
 
@@ -293,6 +422,9 @@ _META_TRANSITIONS: Dict[str, Dict[str, Any]] = {
     "whip_down": {"kind": "slide_down", "default_dur": 0.36},
     "smoothdown": {"kind": "slide_down", "default_dur": 0.36},
     "zoom_burst": {"kind": "zoom_burst", "default_dur": 0.36},
+    "zoom_in": {"kind": "zoom_in", "default_dur": 0.30},
+    "zoom_out": {"kind": "zoom_out", "default_dur": 0.32},
+    "zoom_blur": {"kind": "zoom_blur", "default_dur": 0.36},
     "flash_zoom": {
         "kind": "flash_zoom",
         "default_dur": 0.36,
@@ -319,6 +451,18 @@ _META_TRANSITIONS: Dict[str, Dict[str, Any]] = {
     "fade": {"kind": "fade", "default_dur": 0.30},
     "dissolve": {"kind": "fade", "default_dur": 0.30},
 }
+
+_WHOOSH_TRANSITIONS = {
+    "whip_left", "whip_right", "whip_up", "whip_down",
+    "slide_up", "slide_down", "smoothleft", "smoothright", "smoothup", "smoothdown",
+    "flash_zoom", "zoom_burst", "zoom_in", "zoom_out", "zoom_blur",
+    "split_reveal", "warm_flash", "warm_flash_punch",
+}
+_whoosh_trs = _WHOOSH_TRANSITIONS
+
+
+def even(x: float) -> int:
+    return int(round(x / 2)) * 2
 
 
 def _build_physical_transition_fc(
@@ -401,21 +545,82 @@ def _build_physical_transition_fc(
             f"setpts=N/({fps}*TB),format=yuv420p{out}"
         )
 
+    W_ss = W * 2
+    H_ss = H * 2
+
+    def _ss2x_zoom(z_expr: str) -> str:
+        """2x supersampled dynamic zoom in yuv444p + Lanczos downscale (0.5px sub-pixel steps, zero black borders)."""
+        return (
+            f"format=yuv444p,"
+            f"scale=w='max({W_ss},round({W_ss}*({z_expr})/2)*2)':h='max({H_ss},round({H_ss}*({z_expr})/2)*2)':eval=frame:flags=bicubic,"
+            f"crop=w={W_ss}:h={H_ss}:x='(iw-{W_ss})/2':y='(ih-{H_ss})/2',"
+            f"scale=w={W}:h={H}:flags=lanczos,setsar=1,format=yuv420p"
+        )
+
     if kind in ("zoom_burst", "flash_zoom"):
         z_a = f"1+0.35*({S})"
         z_b = f"1.18-0.18*({S})"
         r_diag = max(12, int(round(min(W, H) * 0.018)))
         br_pop = "0.10" if kind == "flash_zoom" else "0.06"
         return (
-            f"{oa}scale=w='trunc({W}*({z_a})/2)*2':h='trunc({H}*({z_a})/2)*2':eval=frame:flags=bicubic,"
-            f"crop=w={W}:h={H}:x='(iw-{W})/2':y='(ih-{H})/2',setsar=1,setpts=N/({fps}*TB),format=yuv420p[za{idx}];"
-            f"{ib}scale=w='trunc({W}*({z_b})/2)*2':h='trunc({H}*({z_b})/2)*2':eval=frame:flags=bicubic,"
-            f"crop=w={W}:h={H}:x='(iw-{W})/2':y='(ih-{H})/2',setsar=1,setpts=N/({fps}*TB),format=yuv420p[zb{idx}];"
+            f"{oa}{_ss2x_zoom(z_a)},setpts=N/({fps}*TB)[za{idx}];"
+            f"{ib}{_ss2x_zoom(z_b)},setpts=N/({fps}*TB)[zb{idx}];"
             f"[za{idx}][zb{idx}]blend=all_expr='A*(1-({SB}))+B*({SB})',"
             f"dblur=angle=45:radius={r_diag}:enable='between(n,{c0},{c1})',"
             f"dblur=angle=135:radius={r_diag}:enable='between(n,{c0},{c1})',"
             f"rgbashift=rh=-5:bh=5:rv=-3:bv=3:edge=smear:enable='between(n,{c0},{c1})',"
             f"eq=brightness='{br_pop}*pow(sin(PI*(n+1)/{n_tr + 1}),2)':saturation='1+0.10*sin(PI*(n+1)/{n_tr + 1})':eval=frame,"
+            f"setpts=N/({fps}*TB),format=yuv420p{out}"
+        )
+
+    if kind == "zoom_in":
+        z_a = f"1+0.24*({S})"
+        z_b = f"1.12-0.12*({S})"
+        r_soft = max(4, int(round(min(W, H) * 0.008)))
+        r_avg = max(2, int(round(min(W, H) * 0.004)))
+        return (
+            f"{oa}{_ss2x_zoom(z_a)},"
+            f"dblur=angle=45:radius={r_soft}:enable='between(n,{s0},{s1})',"
+            f"avgblur=sizeX={r_avg}:sizeY={r_avg}:enable='between(n,{c0},{c1})',"
+            f"setpts=N/({fps}*TB),format=yuv420p[za{idx}];"
+            f"{ib}{_ss2x_zoom(z_b)},setpts=N/({fps}*TB)[zb{idx}];"
+            f"[za{idx}][zb{idx}]blend=all_expr='A*(1-({SB}))+B*({SB})',"
+            f"eq=brightness='0.03*sin(PI*(n+1)/{n_tr + 1})':eval=frame,"
+            f"setpts=N/({fps}*TB),format=yuv420p{out}"
+        )
+
+    if kind == "zoom_out":
+        z_a = f"1.0-0.16*({S})"
+        z_b = f"1.24-0.24*({S})"
+        return (
+            f"{ib}format=yuv444p,"
+            f"scale=w='max({W_ss},round({W_ss}*({z_b})/2)*2)':h='max({H_ss},round({H_ss}*({z_b})/2)*2)':eval=frame:flags=bicubic,"
+            f"crop=w={W_ss}:h={H_ss}:x='(iw-{W_ss})/2':y='(ih-{H_ss})/2',setsar=1,setpts=N/({fps}*TB)[zb{idx}];"
+            f"{oa}format=yuv444p,"
+            f"scale=w='min({W_ss},max(2,round({W_ss}*({z_a})/2)*2))':h='min({H_ss},max(2,round({H_ss}*({z_a})/2)*2))':eval=frame:flags=bicubic,"
+            f"format=yuva444p,fade=t=out:s=0:n={n_tr}:alpha=1,setsar=1,setpts=N/({fps}*TB)[za{idx}];"
+            f"[zb{idx}][za{idx}]overlay=x='(W-w)/2':y='(H-h)/2':eval=frame:shortest=1:format=yuv444,"
+            f"scale=w={W}:h={H}:flags=lanczos,setsar=1,"
+            f"eq=brightness='0.025*sin(PI*(n+1)/{n_tr + 1})':eval=frame,"
+            f"setpts=N/({fps}*TB),format=yuv420p{out}"
+        )
+
+    if kind == "zoom_blur":
+        z_a = f"1+0.32*({S})"
+        z_b = f"1.26-0.26*({S})"
+        r_sh = max(8, int(round(min(W, H) * 0.012)))
+        r_pk = max(16, int(round(min(W, H) * 0.024)))
+        return (
+            f"{oa}{_ss2x_zoom(z_a)},"
+            f"dblur=angle=45:radius={r_sh}:enable='between(n,{s0},{n_tr - 1})',"
+            f"dblur=angle=135:radius={r_pk}:enable='between(n,{c0},{n_tr - 1})',"
+            f"setpts=N/({fps}*TB),format=yuv420p[za{idx}];"
+            f"{ib}{_ss2x_zoom(z_b)},"
+            f"dblur=angle=45:radius={r_pk}:enable='between(n,0,{c1})',"
+            f"dblur=angle=135:radius={r_sh}:enable='between(n,0,{s1})',"
+            f"setpts=N/({fps}*TB),format=yuv420p[zb{idx}];"
+            f"[za{idx}][zb{idx}]blend=all_expr='A*(1-({SB}))+B*({SB})',"
+            f"eq=brightness='0.05*pow(sin(PI*(n+1)/{n_tr + 1}),2)':saturation='1+0.08*sin(PI*(n+1)/{n_tr + 1})':eval=frame,"
             f"setpts=N/({fps}*TB),format=yuv420p{out}"
         )
 
@@ -459,8 +664,7 @@ def _build_physical_transition_fc(
                 f"{oa}split=2[aT_in{idx}][aB_in{idx}];"
                 f"[aT_in{idx}]crop=w={W}:h={H2}:x=0:y=0[aT{idx}];"
                 f"[aB_in{idx}]crop=w={W}:h={HB}:x=0:y={H2}[aB{idx}];"
-                f"{ib}scale=w='trunc({W}*({z_in})/2)*2':h='trunc({H}*({z_in})/2)*2':eval=frame:flags=bicubic,"
-                f"crop=w={W}:h={H}:x='(iw-{W})/2':y='(ih-{H})/2',setsar=1,"
+                f"{ib}{_ss2x_zoom(z_in)},"
                 f"eq=brightness='-0.12*(1-({E}))':eval=frame,setpts=N/({fps}*TB),format=yuv420p[bg{idx}];"
                 f"[bg{idx}][aT{idx}]overlay=x=0:y='round(-{H2}*({S}))'[sr1_{idx}];"
                 f"[sr1_{idx}][aB{idx}]overlay=x=0:y='round({H2}+{HB}*({S}))',"
@@ -474,8 +678,7 @@ def _build_physical_transition_fc(
             f"{oa}split=2[aL_in{idx}][aR_in{idx}];"
             f"[aL_in{idx}]crop=w={W2}:h={H}:x=0:y=0[aL{idx}];"
             f"[aR_in{idx}]crop=w={WR}:h={H}:x={W2}:y=0[aR{idx}];"
-            f"{ib}scale=w='trunc({W}*({z_in})/2)*2':h='trunc({H}*({z_in})/2)*2':eval=frame:flags=bicubic,"
-            f"crop=w={W}:h={H}:x='(iw-{W})/2':y='(ih-{H})/2',setsar=1,"
+            f"{ib}{_ss2x_zoom(z_in)},"
             f"eq=brightness='-0.12*(1-({E}))':eval=frame,setpts=N/({fps}*TB),format=yuv420p[bg{idx}];"
             f"[bg{idx}][aL{idx}]overlay=x='round(-{W2}*({S}))':y=0[sr1_{idx}];"
             f"[sr1_{idx}][aR{idx}]overlay=x='round({W2}+{WR}*({S}))':y=0,"
@@ -487,10 +690,8 @@ def _build_physical_transition_fc(
         z_a = f"1+0.06*({S})"
         z_b = f"1.06-0.06*({S})"
         return (
-            f"{oa}scale=w='trunc({W}*({z_a})/2)*2':h='trunc({H}*({z_a})/2)*2':eval=frame:flags=bicubic,"
-            f"crop=w={W}:h={H}:x='(iw-{W})/2':y='(ih-{H})/2',setsar=1,setpts=N/({fps}*TB),format=yuv420p[za{idx}];"
-            f"{ib}scale=w='trunc({W}*({z_b})/2)*2':h='trunc({H}*({z_b})/2)*2':eval=frame:flags=bicubic,"
-            f"crop=w={W}:h={H}:x='(iw-{W})/2':y='(ih-{H})/2',setsar=1,setpts=N/({fps}*TB),format=yuv420p[zb{idx}];"
+            f"{oa}{_ss2x_zoom(z_a)},setpts=N/({fps}*TB)[za{idx}];"
+            f"{ib}{_ss2x_zoom(z_b)},setpts=N/({fps}*TB)[zb{idx}];"
             f"[za{idx}][zb{idx}]blend=all_expr='A*(1-({SB}))+B*({SB})',setpts=N/({fps}*TB),format=yuv420p{out}"
         )
 
@@ -593,6 +794,99 @@ def _call_build_overlay(
     return sub_list, int(band_y0 or 0)
 
 
+def _flag_true(val: Any) -> bool:
+    """Parse boolean/flag values cleanly, handling string forms like `'true'`/`'false'`."""
+    if isinstance(val, str):
+        return val.strip().lower() in ("1", "true", "yes", "on")
+    return bool(val)
+
+
+def _plan_has_flashcards(plan: Dict[str, Any], segs: List[Dict[str, Any]]) -> bool:
+    """Return True when bilingual flashcards are enabled and present on the plan or segments."""
+    if _flag_true(plan.get("cards_off")):
+        return False
+    pf = plan.get("flashcards")
+    if isinstance(pf, str) and pf.strip().lower() in ("off", "none", "false", "0"):
+        return False
+    if isinstance(pf, list) and len(pf) > 0:
+        return True
+    return any(bool(s.get("flashcards")) and not _flag_true(s.get("cards_off")) for s in segs)
+
+
+def _valid_flashcards(cards: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Filter placed flashcard metadata dicts to entries with an existing PNG and positive span."""
+    valid: List[Dict[str, Any]] = []
+    for card in cards or []:
+        if not isinstance(card, dict):
+            continue
+        png_raw = card.get("png") or card.get("path") or card.get("file")
+        if not png_raw or not Path(str(png_raw)).is_file():
+            continue
+        try:
+            t_st = max(0.0, float(card.get("start", 0.0)))
+            t_en = float(card.get("end", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if t_en <= t_st + 0.01:
+            continue
+        valid.append(card)
+    return valid
+
+
+def _build_overlay_composite_graph(
+    base_video: Path,
+    cards: Optional[List[Dict[str, Any]]],
+    sub_list: Optional[Path],
+    sub_band_y0: int,
+    fps: int,
+    extra_fc: str = "",
+) -> Tuple[List[Any], str, int]:
+    """Build FFmpeg inputs and filter_complex compositing `base_video -> flashcards -> subtitles -> [vsub]`.
+
+    Uses sharp crisp hard-cut card swaps (`-loop 1 -framerate <fps> -i <png>` +
+    `overlay=x=...:y=...:enable='between(t,start,end)':shortest=1:eof_action=pass`)
+    with subtitles layered cleanly on top of flashcards.
+    """
+    in_args: List[Any] = ["-i", base_video]
+    next_idx = 1
+    fc_nodes: List[str] = []
+    cur_v = "[0:v:0]"
+    applied_cards = 0
+
+    for k, card in enumerate(_valid_flashcards(cards)):
+        png_path = Path(str(card.get("png") or card.get("path") or card.get("file")))
+        t_st = max(0.0, float(card.get("start", 0.0)))
+        t_en = float(card.get("end", 0.0))
+        x0 = int(round(float(card.get("x0", 0))))
+        y0 = int(round(float(card.get("y0", 0))))
+
+        in_args += ["-loop", "1", "-framerate", str(fps), "-i", str(png_path)]
+        fc_lbl = f"[fc{k}]"
+        out_lbl = f"[vfc{k}]"
+        fc_nodes.append(f"[{next_idx}:v]format=rgba{fc_lbl}")
+        fc_nodes.append(
+            f"{cur_v}{fc_lbl}overlay=x={x0}:y={y0}:"
+            f"enable='between(t,{t_st:.4f},{t_en:.4f})':shortest=1:eof_action=pass{out_lbl}"
+        )
+        cur_v = out_lbl
+        next_idx += 1
+        applied_cards += 1
+
+    if sub_list is not None and Path(sub_list).is_file():
+        in_args += ["-f", "concat", "-safe", "0", "-i", str(sub_list)]
+        fc_nodes.append(f"[{next_idx}:v]fps={fps}[vcap]")
+        fc_nodes.append(
+            f"{cur_v}[vcap]overlay=0:{int(sub_band_y0)}:format=auto:eof_action=pass,format=yuv420p[vsub]"
+        )
+    else:
+        fc_nodes.append(f"{cur_v}format=yuv420p[vsub]")
+
+    if extra_fc:
+        fc_nodes.append(extra_fc)
+
+    return in_args, ";".join(fc_nodes), applied_cards
+
+
 def _say(kind: str, text: str, **data: Any) -> None:
     try:
         import events
@@ -600,10 +894,6 @@ def _say(kind: str, text: str, **data: Any) -> None:
         events.emit(kind, text, **data)
     except Exception:
         pass
-
-
-def even(x: float) -> int:
-    return int(round(x / 2)) * 2
 
 
 def render_square_1x1(
@@ -618,10 +908,10 @@ def render_square_1x1(
     fps: Optional[int] = None,
     bitrate_kbps: Optional[int] = None,
 ) -> Path:
-    """Convert a 9:16 vertical video into a 1:1 square MP4 with 1 video stream and 1 stereo AAC 192k audio stream:
-      - Layer 1 (Background): 1:1 center crop from the 9:16 clip with 5-10% Gaussian blur (gblur=sigma=18).
-      - Layer 2 (Foreground): Full 9:16 vertical clip scaled to fit height and centered on top.
-      - Optional Layer 3: Native crisp 1:1 subtitle overlay (`sub_list` + `sub_band_y0`) so sidebars never blur ghost text.
+    """Convert a completed 9:16 vertical reel into a 1:1 square MP4 with 1 video stream and 1 stereo AAC audio stream:
+      - Split the finished 9:16 reel into 2 layers (no separate 1:1 images, flashcards, timestamps, or subtitles).
+      - Layer 1 (Background): 1:1 center crop from the 9:16 reel with 4x downscaled Gaussian blur (`blur_sigma=18.0`, ~7%, in 5–10% range).
+      - Layer 2 (Foreground): Full 9:16 reel scaled cleanly to fit height (`608x1080` at `1080x1080`) and centered on top.
     """
     src_mp4 = resolve(src_mp4)
     if out_mp4 is None:
@@ -634,7 +924,7 @@ def render_square_1x1(
     sq = even(sq_size)
     fg_w = even(sq * 9.0 / 16.0)
     bg_h = even(sq * 16.0 / 9.0)
-    # 4x downscaled Gaussian blur (16x fewer pixels) -> upscale back to sq x sq: visually identical, 94% less CPU heat
+    # 4x downscaled Gaussian blur (16x fewer pixels) -> upscale back to sq x sq: visually identical, 94% less CPU load
     blur_scale = 4
     sq_small = even(sq // blur_scale)
     bg_h_small = even(bg_h // blur_scale)
@@ -660,7 +950,7 @@ def render_square_1x1(
         next_idx += 1
 
     fc_parts = [
-        f"[0:v:0]split=2[bg_in][fg_in]",
+        "[0:v:0]split=2[bg_in][fg_in]",
         f"[bg_in]scale={sq_small}:{bg_h_small}:force_original_aspect_ratio=increase:flags=bilinear,"
         f"crop={sq_small}:{sq_small}:(iw-{sq_small})/2:(ih-{sq_small})/2,"
         f"gblur=sigma={sigma_small:.2f},"
@@ -668,11 +958,11 @@ def render_square_1x1(
         f"[fg_in]scale={fg_w}:{sq}:flags=lanczos[fg]",
     ]
     if sub_input_idx is not None:
-        fc_parts.append(f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[vsq]")
+        fc_parts.append("[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[vsq]")
         fc_parts.append(f"[{sub_input_idx}:v]fps={eff_fps}[vcap]")
         fc_parts.append(f"[vsq][vcap]overlay=0:{int(sub_band_y0)}:format=auto:eof_action=pass,format=yuv420p[vout]")
     else:
-        fc_parts.append(f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p[vout]")
+        fc_parts.append("[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p[vout]")
 
     map_aud: List[Any] = []
     codec_aud: List[Any] = []
@@ -705,11 +995,21 @@ def render_square_1x1(
 
 def render_segment(seg: Dict[str, Any], W: int, H: int, fps: int, out: Path, draft: bool) -> float:
     """Fallback single-layout segment renderer with sub-pixel supersampled zoompan and PTS-safe audio."""
-    dur = max(0.08, float(seg["end"]) - float(seg["start"]))
+    src_dur = max(0.08, float(seg["end"]) - float(seg["start"]))
+    speed = _segment_speed(seg)
+    has_speed = abs(speed - 1.0) >= 0.005
+    is_muted = bool(seg.get("mute") or seg.get("muted"))
+    raw_dur = max(0.08, src_dur / speed)
+    hold_tail = segment_hold_tail(seg)
+    dur = max(0.08, segment_duration(seg))
+    raw_frames = max(1, round(raw_dur * fps))
+    raw_exact = raw_frames / fps
     frames = max(1, round(dur * fps))
     exact = frames / fps
+    zoom_span = raw_exact if hold_tail > 0.01 else exact
     if layouts is not None and hasattr(layouts, "resolve_segment_zoom_spec"):
-        z0, z1, zoom_style, zoom_at, zoom_dur = layouts.resolve_segment_zoom_spec(seg, exact)
+        z_spec = layouts.resolve_segment_zoom_spec(seg, zoom_span)
+        z0, z1, zoom_style, zoom_at, zoom_dur = z_spec[:5]
     else:
         z0 = float(seg.get("zoom", 1.0) or 1.0)
         z1 = float(seg.get("zoom_to", z0) or z0)
@@ -718,50 +1018,100 @@ def render_segment(seg: Dict[str, Any], W: int, H: int, fps: int, out: Path, dra
         zoom_dur = float(seg.get("zoom_dur") or 0.18)
     fx, fy = seg.get("focus", [0.5, 0.38])
     vf = [
-        "setpts=PTS-STARTPTS",
+        f"setpts=(PTS-STARTPTS)/{speed:.6f}" if has_speed else "setpts=PTS-STARTPTS",
         f"fps={fps}",
         f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos",
         f"crop={W}:{H}:x='(iw-{W})*{fx:.4f}':y='(ih-{H})*{fy:.4f}'",
     ]
+    if hold_tail > 0.01:
+        vf.append(f"trim=end_frame={raw_frames}")
     if layouts is not None and hasattr(layouts, "_build_subpixel_zoom_filter"):
-        vf.extend(
-            layouts._build_subpixel_zoom_filter(
-                slot_w=W,
-                slot_h=H,
-                fps=fps,
-                exact_dur=exact,
-                fx=float(fx),
-                fy=float(fy),
-                z0=z0,
-                z1=z1,
-                zoom_style=zoom_style,
-                zoom_at=zoom_at,
-                zoom_dur=zoom_dur,
-            )
-        )
-    vf += ["setsar=1", "format=yuv420p", "tpad=stop_mode=clone:stop=3"]
+        z_kw: Dict[str, Any] = {
+            "slot_w": W,
+            "slot_h": H,
+            "fps": fps,
+            "exact_dur": zoom_span,
+            "fx": float(fx),
+            "fy": float(fy),
+            "z0": z0,
+            "z1": z1,
+            "zoom_style": zoom_style,
+            "zoom_at": zoom_at,
+            "zoom_dur": zoom_dur,
+        }
+        try:
+            z_params = inspect.signature(layouts._build_subpixel_zoom_filter).parameters
+            if "zoom_peak" in z_params and seg.get("zoom_peak") is not None:
+                z_kw["zoom_peak"] = float(seg["zoom_peak"])
+            if "zoom_end" in z_params and seg.get("zoom_end") is not None:
+                z_kw["zoom_end"] = float(seg["zoom_end"])
+        except (TypeError, ValueError):
+            pass
+        vf.extend(layouts._build_subpixel_zoom_filter(**z_kw))
+    clone_frames = max(3, frames - raw_frames + 3) if hold_tail > 0.01 else 3
+    vf += ["setsar=1", "format=yuv420p", f"tpad=stop_mode=clone:stop={clone_frames}"]
     seg_loud = float(seg.get("loudness") if seg.get("loudness") is not None else DEFAULT_LOUDNESS_LUFS)
     seg_gain_db = float(seg.get("gain_db") or 0.0)
-    af = [
-        "aresample=48000",
-        "aformat=channel_layouts=stereo",
-        "asetpts=PTS-STARTPTS",
-        "apad",
-        f"atrim=0:{exact:.6f}",
-        "asetpts=PTS-STARTPTS",
-        "highpass=f=70",
-        f"loudnorm=I={seg_loud}:TP={DEFAULT_PEAK_CAP_DB}:LRA=9",
-    ]
-    if abs(seg_gain_db) >= 0.05:
-        af.append(f"volume={seg_gain_db:+.2f}dB")
-    af += [
-        f"alimiter=limit={DEFAULT_PEAK_CAP_DB}dB:level=false",
-        f"afade=t=in:d={EDGE_FADE}",
-        f"afade=t=out:st={max(0.0, exact - EDGE_FADE):.6f}:d={EDGE_FADE}",
-    ]
+    if is_muted:
+        af = [
+            "aresample=48000",
+            "aformat=channel_layouts=stereo",
+            "asetpts=PTS-STARTPTS",
+            "volume=0",
+            "apad",
+            f"atrim=0:{exact:.6f}",
+            "asetpts=PTS-STARTPTS",
+        ]
+    elif hold_tail > 0.01:
+        af = [
+            "aresample=48000",
+            "aformat=channel_layouts=stereo",
+            "asetpts=PTS-STARTPTS",
+        ]
+        if has_speed:
+            af.append(f"atempo={speed:.6f}")
+        af += [
+            f"atrim=0:{raw_exact:.6f}",
+            "asetpts=PTS-STARTPTS",
+            "highpass=f=70",
+            f"loudnorm=I={seg_loud}:TP={DEFAULT_PEAK_CAP_DB}:LRA=9",
+        ]
+        if abs(seg_gain_db) >= 0.05:
+            af.append(f"volume={seg_gain_db:+.2f}dB")
+        af += [
+            f"alimiter=limit={DEFAULT_PEAK_CAP_DB}dB:level=false",
+            f"afade=t=in:d={EDGE_FADE}",
+            f"afade=t=out:st={max(0.0, raw_exact - EDGE_FADE):.6f}:d={EDGE_FADE}",
+            "apad",
+            f"atrim=0:{exact:.6f}",
+            "asetpts=PTS-STARTPTS",
+        ]
+    else:
+        af = [
+            "aresample=48000",
+            "aformat=channel_layouts=stereo",
+            "asetpts=PTS-STARTPTS",
+        ]
+        if has_speed:
+            af.append(f"atempo={speed:.6f}")
+        af += [
+            "apad",
+            f"atrim=0:{exact:.6f}",
+            "asetpts=PTS-STARTPTS",
+            "highpass=f=70",
+            f"loudnorm=I={seg_loud}:TP={DEFAULT_PEAK_CAP_DB}:LRA=9",
+        ]
+        if abs(seg_gain_db) >= 0.05:
+            af.append(f"volume={seg_gain_db:+.2f}dB")
+        af += [
+            f"alimiter=limit={DEFAULT_PEAK_CAP_DB}dB:level=false",
+            f"afade=t=in:d={EDGE_FADE}",
+            f"afade=t=out:st={max(0.0, exact - EDGE_FADE):.6f}:d={EDGE_FADE}",
+        ]
     src = resolve(seg["src"])
     has_audio = probe(src)["has_audio"]
-    args = ["-ss", f"{float(seg['start']):.3f}", "-t", f"{dur + 0.5:.3f}", "-i", src]
+    read_dur = src_dur
+    args = ["-ss", f"{float(seg['start']):.3f}", "-t", f"{read_dur + 0.5:.3f}", "-i", src]
     if not has_audio:
         args += ["-f", "lavfi", "-t", f"{exact:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
     args += [
@@ -797,11 +1147,12 @@ def place(pos: Any, W: int, H: int, size: int) -> Tuple[str, str]:
 def _load_plan(plan_arg: str) -> Tuple[Path, Dict[str, Any]]:
     plan_path = resolve(plan_arg)
     if plan_path.suffix.lower() == ".edl":
-        if edl_parser is not None and hasattr(edl_parser, "parse_edl"):
-            plan = edl_parser.parse_edl(plan_path)
-            # Keep sibling plan.json synced
-            write_json(plan_path.with_suffix(".json"), plan)
-            return plan_path, plan
+        if edl_parser is not None:
+            parse_fn = getattr(edl_parser, "parse_edl", getattr(edl_parser, "load_edl", None))
+            if callable(parse_fn):
+                plan = parse_fn(plan_path)
+                write_json(plan_path.with_suffix(".json"), plan)
+                return plan_path, plan
         json_sibling = plan_path.with_suffix(".json")
         if json_sibling.is_file():
             return plan_path, read_json(json_sibling)
@@ -809,13 +1160,22 @@ def _load_plan(plan_arg: str) -> Tuple[Path, Dict[str, Any]]:
     return plan_path, read_json(plan_path)
 
 
+def _default_output_path(plan: Dict[str, Any], plan_path: Path) -> Path:
+    if plan.get("output"):
+        return resolve(plan["output"])
+    if hasattr(common, "unique_job_output"):
+        return Path(common.unique_job_output(plan_path.parent.name))
+    folder_nm = strip_ratio_prefix(plan_path.parent.name) or plan_path.parent.name
+    return OUTPUT / folder_nm / f"reel_{folder_nm}.mp4"
+
+
 def _match_cached_segments_when_offline(
     segs: List[Dict[str, Any]],
     cache_dir: Path,
     fps: int,
 ) -> Optional[List[Path]]:
-    """If raw footage files are offline (e.g. migrated from D:\\ drive), match existing
-    rendered segment `.mkv` intermediates in `work/_segments/` by creation order & duration.
+    """If raw footage files are offline, match existing rendered segment `.mkv` intermediates
+    in `work/_segments/` by creation order and frame-accurate duration.
     """
     cand_mkvs = [
         p for p in cache_dir.glob("*.mkv")
@@ -830,10 +1190,10 @@ def _match_cached_segments_when_offline(
     matched: List[Path] = []
 
     for idx, s in enumerate(segs):
-        exp_dur = round((float(s["end"]) - float(s["start"])) * fps) / fps
+        exp_dur = max(1, round(max(0.08, segment_duration(s)) * fps)) / float(fps)
         best_i = None
         best_score = 999999.0
-        for m_idx, (p, dur, mtime_s) in enumerate(meta):
+        for m_idx, (p, dur, _mtime_s) in enumerate(meta):
             if m_idx in used:
                 continue
             dur_err = abs(dur - exp_dur)
@@ -851,6 +1211,38 @@ def _match_cached_segments_when_offline(
     return matched
 
 
+def _export_premiere(
+    plan: Dict[str, Any],
+    plan_path: Path,
+    out_dir: Path,
+    work_dir: Path,
+    fps: int,
+    width: int,
+    height: int,
+) -> Optional[Dict[str, Any]]:
+    pr_mod = None
+    for mod_name in ("premiere_export", "premiere"):
+        try:
+            pr_mod = __import__(mod_name)
+            break
+        except ImportError:
+            continue
+    if pr_mod is None:
+        return None
+    export_fn = getattr(pr_mod, "export_premiere_project", getattr(pr_mod, "export_project", None))
+    if not callable(export_fn):
+        return None
+    return export_fn(
+        plan=plan,
+        plan_path=plan_path,
+        out_dir=out_dir,
+        work_dir=work_dir,
+        fps=fps,
+        width=width,
+        height=height,
+    )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Render an edit plan (.json or .edl) into the final MP4.")
     ap.add_argument("plan", help="Path to plan.json or plan.edl")
@@ -864,13 +1256,13 @@ def main() -> None:
     ap.add_argument(
         "--mark-pack",
         default=None,
-        help="Override ✓/✗ mark badge pack (default, glossy, flash, vignette)",
+        help="Override check/cross mark badge pack (default, glossy, flash, vignette)",
     )
     ap.add_argument(
         "--loudness",
         type=float,
         default=None,
-        help=f"Override target integrated loudness in LUFS (default: {DEFAULT_LOUDNESS_LUFS} LUFS for Meta Ads/Reels)",
+        help=f"Override target integrated loudness in LUFS (default: {DEFAULT_LOUDNESS_LUFS:.1f} LUFS for Meta Ads/Reels)",
     )
     ap.add_argument(
         "--gain-db",
@@ -892,14 +1284,27 @@ def main() -> None:
     ap.add_argument(
         "--no-premiere",
         action="store_true",
-        help="Skip automatic Adobe Premiere Pro (.prproj + .premiere.xml) project export",
+        help="Skip automatic Adobe Premiere Pro (.prproj + .xml) project export",
+    )
+    ap.add_argument(
+        "--deliver",
+        action="store_true",
+        help="Automatically deliver finished files into ~/Downloads/Zeno Outs/<FolderName>/ after rendering",
+    )
+    ap.add_argument(
+        "--name",
+        default="",
+        help="Optional target folder/deliverable name override when using --deliver",
     )
     a = ap.parse_args()
 
-    # Direct MP4 -> 1:1 Square conversion if a .mp4 path is passed with --square
+    # Direct MP4 -> 1:1 Square conversion if a .mp4 path is passed
     if str(a.plan).lower().endswith(".mp4"):
         src_vid = resolve(a.plan)
-        sq_out = OUTPUT / f"SQ_{strip_ratio_prefix(src_vid.stem)}.mp4"
+        if src_vid.stem.lower().startswith("reel_"):
+            sq_out = square_job_output(src_vid)
+        else:
+            sq_out = OUTPUT / f"SQ_{strip_ratio_prefix(src_vid.stem)}.mp4"
         print(f"Rendering 1:1 Square version from {src_vid} -> {sq_out} ...")
         render_square_1x1(src_vid, sq_out, sq_size=1080, blur_sigma=a.blur_sigma, draft=a.draft)
         print(f"Done (1:1 Square): {sq_out}")
@@ -908,7 +1313,7 @@ def main() -> None:
     plan_path, plan = _load_plan(a.plan)
     if a.preset:
         plan["preset"] = a.preset
-        if a.preset != "auto" and a.preset != "hybrid":
+        if a.preset not in ("auto", "hybrid"):
             for s in plan.get("segments", []):
                 s["layout"] = a.preset
     if a.mark_pack:
@@ -929,22 +1334,29 @@ def main() -> None:
     canvas = plan.get("canvas", {})
     W = even(canvas.get("width", first.get("width") or 720))
     H = even(canvas.get("height", first.get("height") or 1280))
-    fps = int(canvas.get("fps", round(first.get("fps") or 24)))
-    # Scrolling-text page format (`#page scroll`): the edit is rendered into the picture area in the top half; the progress strip
-    # and the scrolling page are added around it in the last step. From here on H is the height of that picture area.
+    fps = (
+        int(round(float(canvas["fps"])))
+        if canvas.get("fps")
+        else _detect_modal_fps(segs, first_info=first)
+    )
+
+    # Scrolling-text page format (`#page scroll`): render segments into the top picture area,
+    # then stack the progress bar and scrolling page below in the final step.
     FULL_H = H
     page_cfg, page_geo, scroll_page = None, None, None
     try:
-        import scroll_page
+        import scroll_page  # type: ignore[no-redef]
         page_cfg = scroll_page.page_config(plan)
-    except Exception as exc:   # noqa: BLE001
-        print(f"  [PAGE] the scrolling page module could not be loaded: {exc}")
+    except Exception as exc:  # noqa: BLE001
+        if plan.get("page"):
+            print(f"  [PAGE] Scrolling page module could not be loaded: {exc}")
         page_cfg = None
-    if page_cfg:
+    if page_cfg and scroll_page is not None:
         page_geo = scroll_page.geometry(W, H, page_cfg)
         H = page_geo["video_h"]
         print(f"Scrolling-text page format: picture {W}x{H} on top, page {W}x{page_geo['page_h']} below.")
-    out_path = resolve(plan.get("output") or (OUTPUT / f"{plan_path.parent.name}.mp4"))
+
+    out_path = _default_output_path(plan, plan_path)
     cache = WORK / "_segments"
     cache.mkdir(parents=True, exist_ok=True)
 
@@ -953,9 +1365,7 @@ def main() -> None:
     if not first_src.is_file():
         offline_matched = _match_cached_segments_when_offline(segs, cache, fps)
 
-    # 1) each segment -> normalized intermediate (cached by its settings)
-    from common import thermal_pause  # a Mac slowed by heat gets time to cool between segments
-
+    # 1) Each segment -> normalized intermediate (cached by exact parameters)
     if layouts is not None and hasattr(layouts, "split_lock_report") and first_src.is_file():
         try:
             lock_lines = layouts.split_lock_report(plan, W, H)
@@ -963,7 +1373,10 @@ def main() -> None:
             lock_lines = []
         if lock_lines:
             try:
-                (plan_path.parent / "render_notes.json").write_text(json.dumps({"split_panels": lock_lines}, ensure_ascii=False), encoding="utf-8")
+                (plan_path.parent / "render_notes.json").write_text(
+                    json.dumps({"split_panels": lock_lines}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
             except Exception:
                 pass
             print("Split panels (one fixed frame per panel, no zoom):")
@@ -981,11 +1394,18 @@ def main() -> None:
         else:
             src_resolved = resolve(s["src"])
             mtime = src_resolved.stat().st_mtime if src_resolved.is_file() else 0.0
+            hold_tail_val = round(segment_hold_tail(s), 4)
             key_items = [
                 s["src"], s["start"], s["end"], s.get("zoom"), s.get("zoom_to"),
-                s.get("zoom_style"), s.get("zoom_at"), s.get("zoom_dur"), s.get("focus"),
+                s.get("zoom_style"), s.get("zoom_at"), s.get("zoom_dur"),
+                s.get("zoom_peak"), s.get("zoom_end"),
+                s.get("focus"), s.get("focus_end"),
+                round(_segment_speed(s), 4), bool(s.get("mute") or s.get("muted")),
+                s.get("gain_db"), s.get("loudness"),
                 W, H, fps, a.draft, mtime,
             ]
+            if hold_tail_val > 0.0:
+                key_items.append(hold_tail_val)
             if lay and lay != "single":
                 key_items.extend([lay, s.get("peer"), s.get("chat"), s.get("slot")])
             cache_hex = hashlib.md5(json.dumps(key_items, sort_keys=True).encode()).hexdigest()[:16]
@@ -995,18 +1415,30 @@ def main() -> None:
             f = offline_matched[i]
 
         if f.exists():
-            durs.append(round((float(s["end"]) - float(s["start"])) * fps) / fps)
-            _say("render", f"Cut {s['id']} ready (from cache): {Path(str(s['src'])).name} {float(s['start']):.2f}-{float(s['end']):.2f}, {lay}", cut=s['id'], i=i + 1, n=len(segs))
+            durs.append(max(1, round(max(0.08, segment_duration(s)) * fps)) / float(fps))
+            _say(
+                "render",
+                f"Cut {s['id']} ready (from cache): {Path(str(s['src'])).name} {float(s['start']):.2f}-{float(s['end']):.2f}, {lay}",
+                cut=s["id"],
+                i=i + 1,
+                n=len(segs),
+            )
         else:
             print(f"  segment {s['id']}: {s['src']} {float(s['start']):.2f}-{float(s['end']):.2f} ({lay})")
-            _say("render", f"Cutting {s['id']}: {Path(str(s['src'])).name} {float(s['start']):.2f}-{float(s['end']):.2f}, {lay}", cut=s['id'], i=i + 1, n=len(segs))
+            _say(
+                "render",
+                f"Cutting {s['id']}: {Path(str(s['src'])).name} {float(s['start']):.2f}-{float(s['end']):.2f}, {lay}",
+                cut=s["id"],
+                i=i + 1,
+                n=len(segs),
+            )
             if layouts is not None and hasattr(layouts, "render_segment_layout"):
                 durs.append(layouts.render_segment_layout(s, plan, W, H, fps, f, a.draft))
             else:
                 durs.append(render_segment(s, W, H, fps, f, a.draft))
         files.append(f)
 
-    # 2) output timeline (Zero-Audio-Loss physical transitions: video uses tpad+S-curve motion/polish; audio uses 0.00s-drift joins!)
+    # 2) Output timeline (Zero-Audio-Loss physical transitions: video uses tpad+S-curve motion; audio uses 0.00s-drift joins)
     starts: List[float] = []
     total = 0.0
     for i, s in enumerate(segs):
@@ -1046,8 +1478,12 @@ def main() -> None:
                 req_d = def_tr_dur
             else:
                 raw_d = float(raw_d_val)
-                # Upgrade cramped legacy @0.22-@0.28 defaults to smooth calibrated physical durations
-                req_d = def_tr_dur if 0.20 <= raw_d <= 0.285 else raw_d
+                if raw_d <= 0.0:
+                    req_d = def_tr_dur
+                elif raw_d < 0.16:
+                    req_d = 0.16
+                else:
+                    req_d = raw_d
             d = min(req_d, durs[i] / 2.0, durs[i - 1] / 2.0)
         else:
             d = 0.0
@@ -1056,7 +1492,6 @@ def main() -> None:
             s["_join_at"] = total
         if s.get("_flash"):
             s["_flash_at"] = total
-        # Zero-audio-loss: tpad clones k frames on video for physical transition windows while audio joins with 0.00s drift!
         starts.append(total)
         total += durs[i]
     seg_start = {s["id"]: starts[i] for i, s in enumerate(segs)}
@@ -1067,23 +1502,21 @@ def main() -> None:
     for i, f in enumerate(files):
         inputs += ["-i", f]
         fc.append(f"[{i}:v]fps={fps},setpts=PTS-STARTPTS[sv{i}]")
-        fc.append(f"[{i}:a]asetpts=PTS-STARTPTS[sa{i}]")
+        fc.append(f"[{i}:a]atrim=0:{durs[i]:.6f},asetpts=PTS-STARTPTS[sa{i}]")
     au = "[sa0]"
-    acc = durs[0]
-    xf_audio_dur = 0.045  # 45ms constant-power/triangular audio crossfade (zero drift via apad)
+    xf_audio_dur = 0.016  # 16ms triangular audio crossfade (zero drift via apad, preserves cut B opening consonant)
     for i in range(1, len(segs)):
         na = f"[a{i}]"
         fc.append(f"{au}apad=pad_dur={xf_audio_dur:.4f}[ap{i}]")
         fc.append(f"[ap{i}][sa{i}]acrossfade=d={xf_audio_dur:.4f}:c1=tri:c2=tri{na}")
-        acc += durs[i]
         au = na
 
-    # Video: one exact-frame concat of every cut. Each transition processes ONLY the 2*half[i] join window
-    # (`[oa{i}]` from tail of cut i-1 + `[ib{i}]` from head of cut i -> `[x{i}]`) with smooth S-curve physical motion,
+    # Video: exact-frame concat of every cut. Each transition processes ONLY the 2*half[i] join window
+    # (`[oa{i}]` from tail of cut i-1 + `[ib{i}]` from head of cut i -> `[x{i}]`) with smooth S-curve motion,
     # keeping segment midpoints untouched and preserving total frame count down to the exact frame.
     nsegs = len(segs)
     frames = [max(1, round(durs[i] * fps)) for i in range(nsegs)]
-    half = [0] * nsegs  # frames each side of the join INTO segment i (0 = plain cut)
+    half = [0] * nsegs
     for i in range(1, nsegs):
         if segs[i]["_tr"] != "cut" and min(frames[i - 1], frames[i]) >= 5:
             max_prev = frames[i - 1] // 3 if frames[i - 1] >= 9 else (frames[i - 1] - 1) // 2
@@ -1102,13 +1535,13 @@ def main() -> None:
             fc.append(f"[sv{i}]split={len(uses)}" + "".join(f"[{u}{i}]" for u in uses))
         if tail:
             fc.append(
-                f"[tl{i}]tpad=stop_mode=clone:stop={tail},"
+                f"[tl{i}]tpad=stop_mode=clone:stop={tail + 2},"
                 f"trim=start_frame={frames[i] - tail}:end_frame={frames[i] + tail},"
                 f"setpts=N/({fps}*TB),format=yuv420p[oa{i + 1}]"
             )
         if i and head:
             fc.append(
-                f"[hd{i}]tpad=start_mode=clone:start={head},"
+                f"[hd{i}]tpad=start_mode=clone:start={head}:stop_mode=clone:stop=2,"
                 f"trim=start_frame=0:end_frame={2 * head},"
                 f"setpts=N/({fps}*TB),format=yuv420p[ib{i}]"
             )
@@ -1127,7 +1560,8 @@ def main() -> None:
                 )
             )
         fc.append(
-            f"[bd{i}]trim=start_frame={head}:end_frame={frames[i] - tail},"
+            f"[bd{i}]tpad=stop_mode=clone:stop=2,"
+            f"trim=start_frame={head}:end_frame={frames[i] - tail},"
             f"setpts=N/({fps}*TB),format=yuv420p[body{i}]"
         )
 
@@ -1139,7 +1573,7 @@ def main() -> None:
     fc.append("".join(ordered) + f"concat=n={len(ordered)}:v=1:a=0,settb=AVTB,setpts=N/({fps}*TB)[vcat]")
     v = "[vcat]"
 
-    # 2b) frame-exact overlay transitions (warm flash) and optical flash polish around join_t
+    # 2b) Frame-exact overlay transitions (warm flash) and optical flash polish around join_t
     flash_chain: List[str] = []
     for s in segs:
         if s.get("_flash"):
@@ -1156,7 +1590,7 @@ def main() -> None:
         fc.append(f"{v}{','.join(flash_chain)},format=yuv420p[vflash]")
         v = "[vflash]"
 
-    # 3) marks (✓ / ✗ or minimal 2-pulse end-of-sentence red/green overlays) and peak-calibrated sound effects
+    # 3) Marks (check / cross or minimal 2-pulse end-of-sentence red/green overlays) and peak-calibrated SFX
     n = len(files)
     sfx_list: List[Tuple[Path, float, float]] = []
     explicit_tr_times: List[float] = []
@@ -1173,10 +1607,38 @@ def main() -> None:
     }
     strobe_styles = {"flash", "vignette", "kn20228", "w42", "strobe"}
 
-    for k, m in enumerate(plan.get("marks", [])):
-        mtype = _normalize_mark_type(m.get("type", "right"))
-        t = seg_start[m["segment"]] + float(m.get("at", 0.0))
-        dur = float(m.get("duration", 0.56))
+    all_marks: List[Dict[str, Any]] = []
+    seen_marks = set()
+    for m in plan.get("marks", []) or []:
+        if not isinstance(m, dict):
+            continue
+        sid = str(m.get("segment") or "")
+        if sid not in seg_start:
+            continue
+        mt = _normalize_mark_type(m.get("type") or m.get("kind") or "right")
+        m_at = round(float(m.get("at", 0.0) or 0.0), 3)
+        seen_marks.add((sid, mt, m_at))
+        all_marks.append(m)
+    for s in segs:
+        sid = str(s.get("id") or "")
+        if sid not in seg_start:
+            continue
+        for im in s.get("marks", []) or []:
+            if not isinstance(im, dict):
+                continue
+            m_copy = dict(im)
+            m_copy.setdefault("segment", sid)
+            mt = _normalize_mark_type(m_copy.get("type") or m_copy.get("kind") or "right")
+            m_at = round(float(m_copy.get("at", 0.0) or 0.0), 3)
+            key = (str(m_copy["segment"]), mt, m_at)
+            if key not in seen_marks:
+                seen_marks.add(key)
+                all_marks.append(m_copy)
+
+    for k, m in enumerate(all_marks):
+        mtype = _normalize_mark_type(m.get("type") or m.get("kind") or "right")
+        t = max(0.0, seg_start[m["segment"]] + float(m.get("at", 0.0) or 0.0))
+        dur = max(0.08, float(m.get("duration") if m.get("duration") is not None else 0.56))
         style_key = str(m.get("style") or m.get("pack") or default_pack).strip()
         png = resolve_mark_asset(mtype, style=style_key)
         if not png.is_file():
@@ -1191,24 +1653,43 @@ def main() -> None:
         )
 
         if is_fullframe_strobe:
-            # Minimal, smooth "coming and going" 2-pulse flash (~0.56s total, 0.50 max opacity)
-            dur = min(dur, 0.60)
-            pulse_dur = max(0.24, min(0.30, dur / 2.0))
-            pulse_frames = max(5, round(pulse_dur * fps))
-            total_2pulse_dur = (2 * pulse_frames) / float(fps)
-            ccm = "aa=0.50" if mtype == "wrong" else "rr=0.30:aa=0.50"
-            inputs += ["-loop", "1", "-framerate", str(fps), "-t", f"{pulse_frames / float(fps):.4f}", "-i", png]
-            fc.append(
-                f"[{n}:v]scale={W}:{H},format=rgba,colorchannelmixer={ccm},"
-                f"fade=t=in:st=0:d=0.04:alpha=1,fade=t=out:st=0.11:d=0.10:alpha=1,"
-                f"loop=loop=1:size={pulse_frames}:start=0,"
-                f"setpts=N/({fps}*TB)+{t:.4f}/TB[mk{k}]"
+            alpha = max(
+                0.15,
+                min(
+                    1.0,
+                    float(
+                        m.get("alpha")
+                        if m.get("alpha") is not None
+                        else plan_tuning.get("mark_alpha", 0.70)
+                    ),
+                ),
             )
-            fc.append(
-                f"{v}[mk{k}]overlay=x=0:y=0:eof_action=pass:"
-                f"enable='between(t,{t:.4f},{t + total_2pulse_dur:.4f})'[vm{k}]"
-            )
-            pos_desc = f"minimal-2pulse:{png.name}"
+            dur = min(dur, 0.56)
+            inputs += ["-loop", "1", "-framerate", str(fps), "-t", f"{dur + 0.08:.4f}", "-i", png]
+            if mtype == "wrong" and dur >= 0.30:
+                p1_dur = round(min(0.16, dur * 0.35), 4)
+                p2_start = round(min(0.22, dur * 0.48), 4)
+                fc.append(
+                    f"[{n}:v]scale={W}:{H},format=rgba,colorchannelmixer=aa={alpha:.3f},"
+                    f"setpts=PTS-STARTPTS+{t:.4f}/TB[mk{k}]"
+                )
+                fc.append(
+                    f"{v}[mk{k}]overlay=x=0:y=0:eof_action=pass:"
+                    f"enable='between(t,{t:.4f},{t + p1_dur:.4f})+between(t,{t + p2_start:.4f},{t + dur:.4f})'[vm{k}]"
+                )
+                pos_desc = f"2pulse:{png.name}"
+            else:
+                fade_st = max(t + 0.04, t + dur - 0.05)
+                fc.append(
+                    f"[{n}:v]scale={W}:{H},format=rgba,colorchannelmixer=aa={alpha:.3f},"
+                    f"setpts=PTS-STARTPTS+{t:.4f}/TB,"
+                    f"fade=t=out:st={fade_st:.4f}:d=0.05:alpha=1[mk{k}]"
+                )
+                fc.append(
+                    f"{v}[mk{k}]overlay=x=0:y=0:eof_action=pass:"
+                    f"enable='between(t,{t:.4f},{t + dur:.4f})'[vm{k}]"
+                )
+                pos_desc = f"glow:{png.name}"
         else:
             inputs += ["-loop", "1", "-framerate", str(fps), "-t", f"{dur:.3f}", "-i", png]
             size = even(min(W, H) * float(m.get("size", 0.22)))
@@ -1250,8 +1731,8 @@ def main() -> None:
                     category="mark",
                     default_gain_db=default_gain,
                 )
-                sfx_list.append((sfx_path, t, gain_db))
-            # Optional second SFX layer (disabled by default for wrong marks via wrong_sfx_layer="none")
+                t_sfx = max(0.0, t - _mark_sfx_preroll(sfx_path))
+                sfx_list.append((sfx_path, t_sfx, gain_db))
             if is_fullframe_strobe:
                 layer_name = str(
                     plan_tuning.get("wrong_sfx_layer", "none")
@@ -1263,7 +1744,8 @@ def main() -> None:
                     extra_sfx = _redirect_broken_sfx(extra_sfx)
                 if extra_sfx and extra_sfx.is_file() and (not sfx_path or extra_sfx.resolve() != sfx_path.resolve()):
                     layer_gain = default_gain if mtype == "wrong" else max(-2.0, default_gain - 2.0)
-                    sfx_list.append((extra_sfx, t, layer_gain))
+                    t_layer = max(0.0, t - _mark_sfx_preroll(extra_sfx))
+                    sfx_list.append((extra_sfx, t_layer, layer_gain))
         log_fx.append((t, f"{mtype.upper()} mark ({pos_desc}, {dur:.2f}s)"))
 
     whoosh_gain = float(plan_tuning.get("whoosh_sfx_gain_db", -0.5))
@@ -1291,12 +1773,7 @@ def main() -> None:
             sfx_list.append((sfx_path, t_play, cal_g))
             log_fx.append((t_play, f"SFX {sfx_path.name} ({cal_g:+.1f}dB)"))
 
-    # Auto-attach peak-aligned, varied transition SFX to physical/kinetic transitions (never fade/dip_to_black/dip_to_white/cut)
-    _WHOOSH_TRANSITIONS = {
-        "whip_left", "whip_right", "whip_up", "whip_down",
-        "slide_up", "slide_down", "smoothleft", "smoothright", "smoothup", "smoothdown",
-        "flash_zoom", "zoom_burst", "split_reveal", "warm_flash", "warm_flash_punch",
-    }
+    # Auto-attach peak-aligned, varied transition SFX to physical/kinetic transitions
     whoosh_name = str(plan_tuning.get("whoosh_sfx", "whoosh.wav"))
     custom_whoosh = (
         isinstance(plan.get("tuning"), dict)
@@ -1325,7 +1802,7 @@ def main() -> None:
             pool_names = [primary_whoosh.name]
         elif eff_tr == "split_reveal":
             pool_names = ["w42_swoosh.wav", "sn_swish_1.wav", "w42_transition.wav"]
-        elif eff_tr in ("zoom_burst", "flash_zoom", "warm_flash", "warm_flash_punch"):
+        elif eff_tr in ("zoom_burst", "zoom_in", "zoom_out", "zoom_blur", "flash_zoom", "warm_flash", "warm_flash_punch"):
             pool_names = ["w42_transition.wav", "whoosh.wav", "sn_swish_1.wav"]
         else:
             pool_names = ["whoosh.wav", "sn_swish_1.wav", "kn20228_swoosh.wav"]
@@ -1417,9 +1894,16 @@ def main() -> None:
             f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS[asfx]"
         )
 
-    # 4) dual-stem float mix pass, dialogue-only loudnorm measurement, then post-loudnorm SFX float summing
-    loud = float(plan.get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
-    master_gain_db = float(plan.get("audio", {}).get("gain_db", 0.0) or 0.0)
+    # 4) Dual-stem float mix pass, dialogue-only EBU R128 loudnorm measurement, then post-loudnorm SFX float summing
+    audio_cfg = plan.get("audio") or {}
+    raw_loud = audio_cfg.get("loudness")
+    if isinstance(raw_loud, str):
+        raw_loud = re.sub(r"(?i)lufs$", "", raw_loud.strip())
+    loud = float(raw_loud) if raw_loud not in (None, "") else DEFAULT_LOUDNESS_LUFS
+    raw_mg = audio_cfg.get("gain_db", 0.0)
+    if isinstance(raw_mg, str):
+        raw_mg = re.sub(r"(?i)db$", "", raw_mg.strip())
+    master_gain_db = float(raw_mg or 0.0)
     mix = WORK / "_segments" / "mix.mkv"
     fc.append(f"{v}null[vout]")
     subs_cfg = plan.get("subs")
@@ -1428,8 +1912,10 @@ def main() -> None:
         and not (isinstance(subs_cfg, str) and subs_cfg.strip().lower() in ("off", "none", "false", "0"))
         and not (isinstance(subs_cfg, dict) and str(subs_cfg.get("mode", "")).strip().lower() in ("off", "none"))
     )
+    has_flashcards = _plan_has_flashcards(plan, segs)
     if page_cfg:
-        subs_enabled = False   # the scrolling page is the subtitles
+        subs_enabled = False
+        has_flashcards = False
     ffmpeg_encode(
         *inputs,
         "-filter_complex", ";".join(fc),
@@ -1445,8 +1931,7 @@ def main() -> None:
         "-c:a", "pcm_f32le",
         mix,
         draft=bool(a.draft),
-        # with subtitles this file is an intermediate (the captions are added, and the video encoded once more, in the last step)
-        bitrate_kbps=max(final_bitrate_kbps(total) * 3, 30000) if (subs_enabled or page_cfg) else final_bitrate_kbps(total),
+        bitrate_kbps=max(final_bitrate_kbps(total) * 3, 30000) if (subs_enabled or page_cfg or has_flashcards) else final_bitrate_kbps(total),
     )
     _say("render", "Picture and sound mixed; measuring dialogue loudness")
     r = ffmpeg(
@@ -1470,12 +1955,44 @@ def main() -> None:
     master_audio_fc = (
         f"[0:a:0]{dlg_ln_chain}[dlg_ln];"
         f"[dlg_ln][0:a:1]amix=inputs=2:weights=1 1:normalize=0:dropout_transition=0:duration=first,"
-        # Oversample before limiting and leave AAC reconstruction headroom for the -1 dBTP ceiling.
-        f"aresample=192000,alimiter=limit=0.75:attack=3:release=40:level=false:latency=true,"
+        f"aresample=192000,alimiter=limit=0.80:attack=3:release=40:level=false:latency=true,"
         f"aresample=48000,aformat=channel_layouts=stereo[aout]"
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    # Subtitles (only when the plan has `#subs ...`): measure picture contrast on un-subtitled `mix`, then composite at canvas fps.
+
+    # Stage 3b: Bilingual Flashcards (9:16 placement on clean `mix` BEFORE subtitles so captions dodge cards)
+    fc_cards: List[Dict[str, Any]] = []
+    if has_flashcards:
+        try:
+            import flashcard_placer
+
+            fc_meta = flashcard_placer.place_timeline_flashcards(
+                plan,
+                segs,
+                starts,
+                durs,
+                total,
+                mix,
+                W,
+                H,
+                plan_path.parent / "overlays",
+                is_square=False,
+            )
+            if isinstance(fc_meta, dict):
+                fc_cards = list(fc_meta.get("cards") or [])
+            if fc_cards:
+                plan["_flashcard_boxes"] = fc_cards
+                for c_item in fc_cards:
+                    c_lbl = str(c_item.get("en") or c_item.get("text") or "card")[:40]
+                    c_st = float(c_item.get("start", 0.0))
+                    c_en = float(c_item.get("end", c_st))
+                    log_fx.append((c_st, f"CARD {c_lbl} ({max(0.0, c_en - c_st):.2f}s)"))
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [CARDS] Could not place 9:16 flashcards: {exc}")
+            fc_cards = []
+    valid_fc_cards = _valid_flashcards(fc_cards)
+
+    # Subtitles (`#subs ...`): measure picture contrast on un-subtitled `mix`, dodging active flashcards, then composite at canvas fps.
     sub_list = None
     sub_band_y0 = 0
     if subs_enabled:
@@ -1497,31 +2014,37 @@ def main() -> None:
                 subdir="_subs",
                 plan_path=plan_path,
             )
-        except Exception as exc:   # noqa: BLE001  (a subtitle problem never stops the video)
-            print(f"  [SUBS] could not build subtitles: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [SUBS] Could not build subtitles: {exc}")
             sub_list = None
-    if page_cfg:
+
+    if page_cfg and page_geo is not None and scroll_page is not None:
         page_video = None
         try:
-            built = scroll_page.build(plan, segs, starts, total, W, FULL_H, fps, WORK, report_dir=plan_path.parent,
-                                      srt_path=out_path.with_suffix(".srt"), draft=bool(a.draft))
+            built = scroll_page.build(
+                plan, segs, starts, total, W, FULL_H, fps, WORK,
+                report_dir=plan_path.parent,
+                srt_path=out_path.with_suffix(".srt"),
+                draft=bool(a.draft),
+            )
             page_video = built[0] if built else None
-        except Exception as exc:   # noqa: BLE001  (a page problem never stops the video)
-            print(f"  [PAGE] could not build the scrolling page: {exc}")
-        bar_h, page_h = page_geo["bar_h"], page_geo["below_h"]   # below the picture: its border line and the page
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [PAGE] Could not build scrolling page: {exc}")
+        bar_h, page_h = page_geo["bar_h"], page_geo["below_h"]
         if page_video:
-            # MKV timestamps are rounded to milliseconds. Give both streams the
-            # same frame clock before framesync stacks them, avoiding repeated
-            # picture frames when the page's fps filter uses an exact time base.
-            page_clock = (f"[0:v:0]fps={fps},settb=1/{fps},setpts=N[picture];"
-                          f"[1:v]fps={fps},settb=1/{fps},setpts=N[page];")
+            page_clock = (
+                f"[0:v:0]fps={fps},settb=1/{fps},setpts=N[picture];"
+                f"[1:v]fps={fps},settb=1/{fps},setpts=N[page];"
+            )
             if bar_h:
-                page_fc = page_clock + (f"[page]split[pa][pb];[pa]crop={W}:{bar_h}:0:0[pbar];[pb]crop={W}:{page_h}:0:{bar_h}[ppage];"
-                                       f"[pbar][picture][ppage]vstack=inputs=3,format=yuv420p[vsub];")
+                page_fc = page_clock + (
+                    f"[page]split[pa][pb];[pa]crop={W}:{bar_h}:0:0[pbar];[pb]crop={W}:{page_h}:0:{bar_h}[ppage];"
+                    f"[pbar][picture][ppage]vstack=inputs=3,format=yuv420p[vsub];"
+                )
             else:
                 page_fc = page_clock + "[picture][page]vstack=inputs=2,format=yuv420p[vsub];"
-            page_inputs = ["-i", mix, "-i", str(page_video)]
-        else:   # keep the full-size picture even without the page
+            page_inputs: List[Any] = ["-i", mix, "-i", str(page_video)]
+        else:
             page_fc = f"[0:v:0]pad={W}:{FULL_H}:0:{bar_h}:color=white,format=yuv420p[vsub];"
             page_inputs = ["-i", mix]
         ffmpeg_encode(
@@ -1534,17 +2057,20 @@ def main() -> None:
             "-c:a", "aac", "-ac", "2", "-b:a", "192k", "-movflags", "+faststart", out_path,
             draft=bool(a.draft),
             bitrate_kbps=final_bitrate_kbps(total),
-            hw_decode=False,   # GPU-decoded picture + page through vstack came out green (VideoToolbox, W46)
+            hw_decode=False,  # CPU decode prevents green vstack frames on Apple VideoToolbox
         )
-    elif sub_list:
-        sub_fc = (
-            f"[1:v]fps={fps}[vcap];"
-            f"[0:v:0][vcap]overlay=0:{sub_band_y0}:format=auto:eof_action=pass,format=yuv420p[vsub];"
-            f"{master_audio_fc}"
+    elif sub_list or valid_fc_cards:
+        comp_inputs, comp_fc, _ = _build_overlay_composite_graph(
+            mix,
+            valid_fc_cards,
+            sub_list,
+            sub_band_y0,
+            fps,
+            extra_fc=master_audio_fc,
         )
         ffmpeg_encode(
-            "-i", mix, "-f", "concat", "-safe", "0", "-i", str(sub_list),
-            "-filter_complex", sub_fc,
+            *comp_inputs,
+            "-filter_complex", comp_fc,
             "-map", "[vsub]", "-map", "[aout]",
             "-r", str(fps),
             "-c:v", "libx264", "-preset", "ultrafast" if a.draft else "veryfast",
@@ -1563,7 +2089,7 @@ def main() -> None:
             "-movflags", "+faststart", out_path,
         )
 
-    # 5) human-readable timeline (with mapped Concept Brief, Scene & Character Speakers)
+    # 5) Human-readable timeline log
     lines = [f"{out_path.name}  {W}x{FULL_H} @ {fps} fps  length {tc(total)}"]
     if plan.get("concept_brief"):
         lines.append(f"Concept Brief    : {plan['concept_brief']}")
@@ -1576,7 +2102,11 @@ def main() -> None:
         z = s.get("zoom", 1.0)
         z_st = f":{s['zoom_style']}" if s.get("zoom_style") else ""
         z_at = f"@{s['zoom_at']}s" if s.get("zoom_at") is not None else ""
-        zt = f" zoom {z}" + (f"->{s['zoom_to']}" if "zoom_to" in s else "") + z_st + z_at if z != 1.0 or "zoom_to" in s or z_st else ""
+        zt = (
+            f" zoom {z}" + (f"->{s['zoom_to']}" if "zoom_to" in s else "") + z_st + z_at
+            if z != 1.0 or "zoom_to" in s or z_st
+            else ""
+        )
         tr_disp = s.get("_tr_label") or s["_tr"]
         trn = f" [{tr_disp} {s['_d']:.2f}s]" if s["_tr"] != "cut" else (f" [{s['_flash']}]" if s.get("_flash") else "")
         sc_tag = s.get("scene") or ""
@@ -1595,10 +2125,10 @@ def main() -> None:
     print("\n".join(lines))
     print(f"\nDone: {out_path}")
 
+    # 5b) Adobe Premiere Pro (.prproj + .xml) export
     if not getattr(a, "no_premiere", False):
         try:
-            import premiere_export
-            pr_res = premiere_export.export_premiere_project(
+            pr_res = _export_premiere(
                 plan=plan,
                 plan_path=plan_path,
                 out_dir=out_path.parent,
@@ -1607,155 +2137,84 @@ def main() -> None:
                 width=W,
                 height=H,
             )
-            print(f"Done (Premiere .prproj): {pr_res['prproj']}")
-            print(f"Done (Premiere .xml):    {pr_res['xml']}")
+            if pr_res:
+                print(f"Done (Premiere .prproj): {pr_res['prproj']}")
+                print(f"Done (Premiere .xml):    {pr_res['xml']}")
         except Exception as exc:
             print(f"[WARN] Premiere Pro export skipped: {exc}")
 
+    # 5c) 1:1 Square Meta Ads version (`SQ_<Name>.mp4`)
+    # Always stitch directly from the completed 9:16 reel (`out_path`): split into 2 layers,
+    # center-crop bottom layer to 1:1 with ~7% (5–10%) Gaussian blur, and place the full 9:16
+    # reel centered on top. Never generate separate 1:1 images, flashcards, timestamps, or subtitles.
     if a.square or plan.get("square") or (plan.get("canvas") or {}).get("square"):
         sq_out = square_job_output(out_path)
         sq_sz = even(max(W, 1080))
         print(f"Rendering 1:1 Square version -> {sq_out} ...")
-        if subs_enabled:
-            sq_base = cache / f"sq_base_{os.getpid()}.mp4"
-            sq_br = final_bitrate_kbps(total, scale=0.65)
-            try:
-                render_square_1x1(
-                    mix,
-                    sq_base,
-                    sq_size=sq_sz,
-                    blur_sigma=a.blur_sigma,
-                    draft=bool(a.draft),
-                    audio_src=out_path,
-                    fps=fps,
-                    bitrate_kbps=max(sq_br * 3, 24000),
-                )
-                sq_sub_list = None
-                sq_band_y0 = 0
-                try:
-                    import subtitles
-                    sq_plan = plan
-                    if isinstance(plan.get("subs"), dict) and str(plan["subs"].get("style", "")).strip().lower() == "auto":
-                        picked = subtitles.recent_styles(WORK, n=1) if hasattr(subtitles, "recent_styles") else []
-                        if picked:
-                            sq_plan = {**plan, "subs": {**plan["subs"], "style": picked[0]}}
-                    sq_sub_list, sq_band_y0 = _call_build_overlay(
-                        subtitles,
-                        sq_plan,
-                        segs,
-                        starts,
-                        total,
-                        sq_sz,
-                        sq_sz,
-                        WORK,
-                        srt_path=None,
-                        video=sq_base,
-                        report_dir=None,
-                        fps=fps,
-                        subdir="_subs_sq",
-                        plan_path=plan_path,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    print(f"  [SUBS 1:1] could not build 1:1 subtitles: {exc}")
-                    sq_sub_list = None
-
-                if sq_sub_list is not None:
-                    sq_sub_fc = (
-                        f"[1:v]fps={fps}[vcap];"
-                        f"[0:v:0][vcap]overlay=0:{sq_band_y0}:format=auto:eof_action=pass,format=yuv420p[vsub]"
-                    )
-                    ffmpeg_encode(
-                        "-i", sq_base, "-f", "concat", "-safe", "0", "-i", str(sq_sub_list),
-                        "-filter_complex", sq_sub_fc,
-                        "-map", "[vsub]", "-map", "0:a:0?",
-                        "-r", str(fps),
-                        "-c:v", "libx264", "-preset", "ultrafast" if a.draft else "veryfast",
-                        "-crf", "23" if a.draft else "18", "-profile:v", "high", "-pix_fmt", "yuv420p",
-                        "-c:a", "copy", "-movflags", "+faststart", sq_out,
-                        draft=bool(a.draft),
-                        bitrate_kbps=sq_br,
-                    )
-                else:
-                    render_square_1x1(
-                        out_path,
-                        sq_out,
-                        sq_size=sq_sz,
-                        blur_sigma=a.blur_sigma,
-                        draft=bool(a.draft),
-                        fps=fps,
-                    )
-            finally:
-                try:
-                    if sq_base.is_file():
-                        sq_base.unlink()
-                except OSError:
-                    pass
-        else:
-            render_square_1x1(out_path, sq_out, sq_size=sq_sz, blur_sigma=a.blur_sigma, draft=bool(a.draft), fps=fps)
+        render_square_1x1(
+            out_path,
+            sq_out,
+            sq_size=sq_sz,
+            blur_sigma=a.blur_sigma,
+            draft=bool(a.draft),
+            fps=fps,
+        )
         print(f"Done (1:1 Square): {sq_out}")
 
-    # 6) optional post-render verification
+    # 6) Optional post-render Deep QC verification
     if a.verify and verify is not None and hasattr(verify, "run_verification"):
         print()
-        import contextlib
-        import io
 
         class _Tee(io.StringIO):
-            def write(self, text: str) -> int:   # show the checks as before and keep a copy for the job archive
+            def write(self, text: str) -> int:
                 sys.__stdout__.write(text)
                 return super().write(text)
 
         _buf = _Tee()
+        eff_target_lufs = round(loud + master_gain_db, 2)
+        _ver_kw: Dict[str, Any] = {}
+        try:
+            _ver_params = inspect.signature(verify.run_verification).parameters
+            if "target_lufs" in _ver_params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in _ver_params.values()
+            ):
+                _ver_kw["target_lufs"] = eff_target_lufs
+        except (TypeError, ValueError):
+            pass
         with contextlib.redirect_stdout(_buf):
-            ok = verify.run_verification(plan_path)
+            ok = verify.run_verification(plan_path, **_ver_kw)
         try:
             (plan_path.parent / "verify_report.json").write_text(
-                json.dumps({"ok": bool(ok), "text": _buf.getvalue()[-60000:]}, ensure_ascii=False), encoding="utf-8")
+                json.dumps({"ok": bool(ok), "text": _buf.getvalue()[-60000:]}, ensure_ascii=False),
+                encoding="utf-8",
+            )
         except Exception:
             pass
         if not ok:
             sys.exit(1)
 
-    # 6b) automatic cleanup of render cache and transient project scratch, no question asked (recorded in the job report)
+    # 6b) Automatic cleanup of render segment cache and transient project scratch
     try:
         import clean
-        import job_report
-        job_report.record_cleanup(plan_path.parent, clean.cleanup_after_job(project_dir=plan_path.parent))
+        clean_res = clean.cleanup_after_job(project_dir=plan_path.parent)
+        try:
+            import job_report
+            job_report.record_cleanup(plan_path.parent, clean_res)
+        except Exception:
+            pass
     except Exception:
         pass
 
-    # 7) automated per-clip & per-agent token telemetry logging
-    import os as _os
-    if _os.environ.get("ZENO_SKIP_TELEMETRY") != "1":
+    # 6c) Optional automatic delivery to ~/Downloads/Zeno Outs/<FolderName>/
+    if getattr(a, "deliver", False):
         try:
-            import token_tracker
-            import time as _telemetry_time
-            rec = token_tracker.finalize_job_telemetry(plan_path, plan, total, out_path,
-                                                     completed_at=_telemetry_time.time())
-            token_tracker.print_console_summary(rec)
+            import deliver
+            deliv = deliver.deliver_to_downloads(plan_path, name=a.name)
+            print(f"Delivered to Downloads: {deliv['folder']} ({len(deliv['files'])} files)")
         except Exception as exc:
-            print(f"[WARNING] Token report could not be saved ({type(exc).__name__}). Video rendering finished; retry the report separately.")
+            print(f"[WARN] Delivery to Downloads failed: {exc}")
 
-        # 7b) the whole job, end to end, into the team's archive on the Zeno server (text only; waits in an outbox when offline)
-        try:
-            import job_archive
-            stored = job_archive.archive_job(plan_path, plan, total, out_path)
-            if stored is not None:
-                print("[ARCHIVE] this edit is stored in the team archive." if stored
-                      else "[ARCHIVE] the server could not be reached; this edit's record waits on this computer and goes with the next job.")
-        except Exception:
-            pass
-
-        # 8) per-format numbers for the team format library (numbers only; never the script, footage or video)
-        try:
-            import format_learning
-            format_learning.observe_job(plan_path, plan, verified=bool(a.verify))
-        except Exception:
-            pass
-
-    # Close this video's active edit window so the next video starts with a clean timestamp even when render.py was invoked directly
     try:
-        from common import job_done
         job_done()
     except Exception:
         pass

@@ -6,6 +6,8 @@
 """
 import argparse
 import base64
+import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -300,10 +302,14 @@ def observe(script_hash, verified=True, seconds=2.5, fmt="split_h"):
                        "formats": [{"format": fmt, "segments": 4, "seconds": seconds * 4, "mean_shot_sec": seconds}]})
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-import format_learning  # noqa: E402
-
-_real = format_learning.build_observation({"segments": [{"id": "L1", "start": 0, "end": 3, "layout": "split_h"}], "marks": []}, "# style: micronarrative\n", "script", True)
+_real = {
+    "style": "micronarrative",
+    "script_hash": hashlib.sha256(b"script").hexdigest()[:16],
+    "verified": True,
+    "video_seconds": 3.0,
+    "formats": [{"format": "split_h", "segments": 1, "seconds": 3.0, "mean_shot_sec": 3.0,
+                 "zoom_in_share": 0.0, "transitions_per_min": 0.0, "marks": 0, "strike_banners": 0}],
+}
 check("what the client builds is accepted by the server", client.post("/v1/observations", headers=_auth, json=_real).status_code == 200, str(_real))
 check("observation needs a key -> 401", client.post("/v1/observations", json={}).status_code in (401, 422))
 check("a bad script hash is refused -> 400", observe("not hex!").status_code == 400)
@@ -331,9 +337,21 @@ def _fake_embed(text):   # a tiny stand-in for Gemini: a word-count vector over 
     return [float(t.count(w)) for w in vocab] + [0.01]
 
 
-import knowledge_sync  # noqa: E402
+def _collect_local_knowledge(root: Path):
+    items = []
+    for f in sorted((root / "formats" / "layouts").glob("*.json")):
+        r = json.loads(f.read_text(encoding="utf-8"))
+        items.append({"kind": "format", "name": r["id"], "payload": r,
+                      "text": " ".join([r.get("description", ""), r.get("when", ""), " ".join(r.get("names", []))])})
+    for spec_path in sorted((root / "formats" / "specs").glob("*_spec.json")):
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        for v in spec.get("variants") or []:
+            items.append({"kind": "reference", "name": f"{spec.get('style', 'micronarrative')}/{v['id']}", "payload": v,
+                          "text": " ".join(str(x) for x in (v.get("reference", ""), v.get("language", ""), v.get("structure", "")))})
+    return items
 
-_recipes = knowledge_sync.collect_local()
+
+_recipes = _collect_local_knowledge(Path(__file__).resolve().parent.parent)
 check("local knowledge is collected (formats and references)", sum(1 for i in _recipes if i["kind"] == "format") >= 6 and any(i["kind"] == "reference" for i in _recipes))
 _adm = {**basic("admin-pw"), "X-Zeno-Admin": "1"}
 with patch.object(service, "_embed", side_effect=_fake_embed):
@@ -432,6 +450,14 @@ check("check problems are counted", dict(_pa["top_check_problems"]).get("WRONG V
 check("groups by version", "1.0.14" in _pa["by"]["version"] and _pa["by"]["version"]["1.0.13"]["bad"] == 1)
 check("negative feedback is listed", any("too big" in f["text"] for f in _pa["feedback_negative"]))
 check("filter by editor", client.get("/admin/api/patterns?editor=nobody-at-all", headers=_adm).json()["patterns"]["overall"]["jobs"] == 0)
+_v2_fail = {"job_uid": "job_v2_failed", "kind": "failed", "project": "p3", "zeno_version": "2.0.0",
+            "script_analysis": "Format: skit (1.1 Skit-Based Micro-Narrative)", "summary": {"renders": 0}}
+_v2_open = {"job_uid": "job_v2_inspect", "kind": "inspect", "project": "p4", "zeno_version": "2.0.0", "summary": {"renders": 0}}
+client.post("/v1/jobs", headers=_auth, json=_v2_fail)
+client.post("/v1/jobs", headers=_auth, json=_v2_open)
+_pj2 = {d["job_uid"]: d for d in client.get("/admin/api/patterns", headers=_adm).json()["jobs"]}
+check("v2.0.0 kind='failed' is bad and kind='inspect' is open",
+      _pj2["job_v2_failed"]["outcome"] == "bad" and _pj2["job_v2_failed"]["format"] == "skit" and _pj2["job_v2_inspect"]["outcome"] == "open")
 
 # Versions: every request that says its version, and every update download, tells the server what each editor runs
 check("version check with header -> 200", client.get("/v1/version", headers={**_auth, "X-Zeno-Version": "1.0.13", "X-Zeno-Platform": "Windows AMD64"}).status_code == 200)

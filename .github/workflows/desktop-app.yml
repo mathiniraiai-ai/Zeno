@@ -1,5 +1,5 @@
 name: Zeno desktop app
-# Builds the installers for the desktop app (app/): Mac (Apple Silicon) .dmg and Windows .exe.
+# Builds the installers for the desktop app (app/): Mac (.dmg, arm64 + x64) and Windows (.exe).
 on:
   workflow_dispatch:
   push:
@@ -9,6 +9,7 @@ on:
       - '.github/workflows/desktop-app.yml'
 jobs:
   build:
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -28,9 +29,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Check JS syntax
+        run: |
+          node --check main.js
+          node --check preload.js
+          node --check renderer/app.js
+          node --check scripts/afterSign.js
       - run: npm install --no-audit --no-fund
       - run: npm run ${{ matrix.script }}
       - uses: actions/upload-artifact@v4
         with:
           name: zeno-${{ matrix.os }}
           path: ${{ matrix.artifact }}
+          if-no-files-found: error

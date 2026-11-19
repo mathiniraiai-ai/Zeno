@@ -1,0 +1,24 @@
+{
+  "id": "video_call",
+  "layout": "video_call",
+  "names": [
+    "video call",
+    "facetime",
+    "floating window",
+    "picture in picture",
+    "picture-in-picture",
+    "pip",
+    "rectangle overlay",
+    "calling on video"
+  ],
+  "description": "Active speaker fills the full vertical frame while the conversation partner appears in a rounded picture-in-picture card near the top.",
+  "when": "a remote video call or an AI teacher shown on a phone or tablet call overlay",
+  "geometry": {
+    "canvas": "1080x1920",
+    "card": "rounded rectangle in upper frame",
+    "main": "full frame (1080x1920)",
+    "subs_y": 68
+  },
+  "confidence": "defined",
+  "source": "Zeno Pro layout specification (video_call)"
+}

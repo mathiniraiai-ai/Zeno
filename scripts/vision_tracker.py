@@ -1,34 +1,35 @@
-"""Computer Vision Face/Headroom Tracker, MAR Idle-Window Detector & Layout Recommender.
+"""Computer Vision Face/Headroom Tracker, Seam & Motion Analyzer, and Split-Panel Aligner.
 
-Uses OpenCV (`cv2` + YuNet 5-landmark ONNX) and `numpy` when available, with a graceful
-fallback when `cv2` is unavailable so every pipeline stage works in any Python environment.
+Provides OpenCV YuNet 5-landmark face detection (`face_detection_yunet_2023mar.onnx`),
+eye-anchored headroom focus (`14%` headroom, `38%` eyeline), multi-face safe-zoom focus
+ranges (`1.05`, `1.08`, `1.10`), baked split-screen seam detection, peripheral camera
+motion measurement, ORB/RANSAC split-panel background registration, and Mouth Aspect
+Ratio (`MAR`) listening idle-window selection. Gracefully falls back when `cv2` or `numpy`
+is unavailable.
 """
 from __future__ import annotations
-
-import os
 
 import argparse
 import hashlib
 import json
 import math
+import os
 import re
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from common import (
-    MODELS_DIR,
-    ROOT,
-    SCRIPTCUT_ROOT,
-    WORK,
-    clip_work_dir,
-    YUNET_MODEL,
-    probe,
-    read_json,
-    resolve,
-    write_json,
-)
+_SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+try:
+    import common as _common
+except ImportError:  # pragma: no cover
+    _common = None  # type: ignore[assignment]
 
 try:
     import numpy as np
@@ -40,37 +41,119 @@ try:
 except ImportError:  # pragma: no cover
     cv2 = None  # type: ignore[assignment]
 
+ROOT: Path = getattr(_common, "ROOT", _SCRIPTS_DIR.parent)
+WORK: Path = getattr(_common, "WORK", ROOT / "work")
+MODELS_DIR: Path = getattr(_common, "MODELS_DIR", ROOT / "models")
+YUNET_MODEL: Path = getattr(
+    _common,
+    "YUNET_MODEL",
+    MODELS_DIR / "face_detection_yunet_2023mar.onnx",
+)
+
 TARGET_HEADROOM_PCT: float = 14.0
 TARGET_EYELINE_PCT: float = 38.0
 MIN_SLOT_FILL: float = 0.55
 MAX_EXTRA_ZOOM: float = 1.35
+SAFE_ZOOM_LEVELS: Tuple[float, ...] = (1.05, 1.08, 1.10)
+STATIC_CAMERA_MOTION_MAX: float = 2.8
 
 _YUNET_LOCK = threading.Lock()
 _YUNET_DETECTOR: Any = None
 _VISION_CACHE: Dict[str, Dict[str, Any]] = {}
 _IDLE_CACHE: Dict[str, Dict[str, Any]] = {}
+_SIGNATURES: Dict[str, Any] = {}
+_REGISTER_CACHE: Dict[str, Optional[Dict[str, float]]] = {}
+_STATIC_MOTION_CACHE: Dict[str, float] = {}
 
 
-def _even(v: float) -> int:
-    n = int(round(v))
+# ---------------------------------------------------------------------------
+# Workspace & I/O Bridges (delegating to `common` when present)
+# ---------------------------------------------------------------------------
+def resolve(path_like: Union[str, Path]) -> Path:
+    if _common is not None and hasattr(_common, "resolve"):
+        return _common.resolve(path_like)
+    p = Path(path_like)
+    if p.is_absolute() or p.exists():
+        return p.resolve() if p.exists() else p
+    cand = ROOT / str(path_like).replace("\\", "/")
+    return cand
+
+
+def clip_work_dir(src: Union[str, Path]) -> Path:
+    if _common is not None and hasattr(_common, "clip_work_dir"):
+        return _common.clip_work_dir(src)
+    return WORK / "_clips" / Path(str(src)).stem
+
+
+def read_json(path: Union[str, Path]) -> Any:
+    if _common is not None and hasattr(_common, "read_json"):
+        return _common.read_json(path)
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def write_json(path: Union[str, Path], data: Any) -> None:
+    if _common is not None and hasattr(_common, "write_json"):
+        _common.write_json(path, data)
+        return
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(f"{p.name}.tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def probe(path: Union[str, Path]) -> Dict[str, Any]:
+    if _common is not None and hasattr(_common, "probe"):
+        return _common.probe(path)
+    resolved = resolve(path)
+    info: Dict[str, Any] = {
+        "path": str(resolved),
+        "duration": None,
+        "width": None,
+        "height": None,
+        "fps": None,
+        "rotation": 0,
+        "has_audio": True,
+    }
+    if cv2 is not None and resolved.is_file():
+        cap = cv2.VideoCapture(str(resolved))
+        if cap.isOpened():
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 24.0)
+            frames = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
+            info["width"] = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 720)
+            info["height"] = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1280)
+            info["fps"] = fps
+            info["duration"] = frames / fps if fps > 0 and frames > 0 else 6.0
+            cap.release()
+    return info
+
+
+def _even(value: float) -> int:
+    n = int(round(value))
     return n if n % 2 == 0 else n + 1
 
 
+# ---------------------------------------------------------------------------
+# YuNet 5-Landmark Face Detector & Focus Geometry
+# ---------------------------------------------------------------------------
 def resolve_yunet_model() -> Optional[Path]:
-    """Locate `face_detection_yunet_2023mar.onnx` in workspace or sibling ScriptCut-AI."""
+    """Locate `face_detection_yunet_2023mar.onnx` in `models/` or `assets/vision/`."""
     candidates = [
+        getattr(_common, "YUNET_MODEL", None),
         YUNET_MODEL,
         MODELS_DIR / "face_detection_yunet_2023mar.onnx",
-        SCRIPTCUT_ROOT / "models" / "face_detection_yunet_2023mar.onnx",
+        ROOT / "assets" / "vision" / "face_detection_yunet_2023mar.onnx",
     ]
     for cand in candidates:
-        if cand and cand.is_file():
-            return cand
+        if cand is not None:
+            p = Path(cand)
+            if p.is_file():
+                return p
     return None
 
 
 def get_yunet_detector() -> Any:
-    """Return a cached OpenCV FaceDetectorYN instance, or None if unavailable."""
+    """Return a thread-safe cached OpenCV `FaceDetectorYN` instance, or `None` if unavailable."""
     global _YUNET_DETECTOR
     if _YUNET_DETECTOR is not None:
         return _YUNET_DETECTOR
@@ -79,12 +162,14 @@ def get_yunet_detector() -> Any:
     model_path = resolve_yunet_model()
     if model_path is None:
         return None
-    try:
-        _YUNET_DETECTOR = cv2.FaceDetectorYN.create(
-            str(model_path), "", (320, 320), 0.55, 0.3, 5000
-        )
-    except Exception:
-        _YUNET_DETECTOR = None
+    with _YUNET_LOCK:
+        if _YUNET_DETECTOR is None:
+            try:
+                _YUNET_DETECTOR = cv2.FaceDetectorYN.create(
+                    str(model_path), "", (320, 320), 0.55, 0.3, 5000
+                )
+            except Exception:
+                _YUNET_DETECTOR = None
     return _YUNET_DETECTOR
 
 
@@ -95,7 +180,7 @@ def compute_eye_anchored_focus(
     target_eyeline: float = TARGET_EYELINE_PCT / 100.0,
 ) -> List[float]:
     """Compute normalized `[fx, fy]` focus point anchored to the eyes (`38%` eyeline)
-    and hair crown (`14%` headroom) so zoom/split crops never decapitate the speaker.
+    and hair crown (`14%` headroom) so zoom and split crops never clip the speaker's head.
     """
     if not bbox_norm or len(bbox_norm) < 4:
         return [0.5, 0.38]
@@ -110,17 +195,39 @@ def compute_eye_anchored_focus(
         ex = cx
         ey = y0 + 0.42 * head_h
 
-    # Blend horizontal center toward eye midpoint, clamped to safe crop range
     fx = max(0.08, min(0.92, 0.7 * ex + 0.3 * cx))
-
-    # Anchor vertical focus so eyes sit at target_eyeline (0.38) while keeping
-    # top of head (y0) at or below target_headroom (0.14) from top of frame.
     desired_top = min(y0 - target_headroom * 0.65, ey - target_eyeline * 0.72)
     fy = max(0.12, min(0.78, ey - (target_eyeline - 0.32) + 0.15 * (desired_top - y0)))
-    # Ensure head crown is protected when zooming in
     max_safe_fy = max(0.14, min(0.75, y0 + head_h * 0.36))
     fy = min(fy, max_safe_fy)
     return [round(fx, 4), round(fy, 4)]
+
+
+def safe_zoom_focus(
+    spans: Sequence[Tuple[float, float]],
+    z: float,
+) -> Optional[Tuple[float, float]]:
+    """Compute the horizontal focus range `(min_fx, max_fx)` in `[0.05, 0.95]` that keeps
+    every face span `(x0, x1)` fully inside the visible `[ (1 - 1/z)*fx, (1 - 1/z)*fx + 1/z ]`
+    window at zoom `z` (`1.05`, `1.08`, `1.10`). Returns `None` when no focus keeps all faces in frame.
+    """
+    z_val = float(z)
+    if z_val <= 0.0:
+        return None
+    k = 1.0 - 1.0 / z_val
+    if k <= 0.0 or not spans:
+        return None
+    lo = max(0.05, (max(float(x1) for _, x1 in spans) - 1.0 / z_val) / k)
+    hi = min(0.95, min(float(x0) for x0, _ in spans) / k)
+    return (round(lo, 2), round(hi, 2)) if lo <= hi else None
+
+
+def compute_safe_zoom_map(
+    spans: Sequence[Tuple[float, float]],
+    zoom_levels: Sequence[float] = SAFE_ZOOM_LEVELS,
+) -> Dict[str, Optional[Tuple[float, float]]]:
+    """Evaluate `safe_zoom_focus` across standard zoom tiers (`1.05`, `1.08`, `1.10`)."""
+    return {f"{float(z):g}": safe_zoom_focus(spans, float(z)) for z in zoom_levels}
 
 
 def _measure_mouth_mar(
@@ -128,7 +235,7 @@ def _measure_mouth_mar(
     mouth_roi_norm: Sequence[float],
     prev_mouth_gray: Optional["np.ndarray"] = None,
 ) -> Tuple[float, float, Optional["np.ndarray"]]:
-    """Compute Mouth Aspect Ratio (`MAR`) and frame-to-frame mouth pixel delta."""
+    """Compute Mouth Aspect Ratio (`MAR`) proxy and frame-to-frame mouth pixel delta."""
     if np is None or arr_rgb is None or arr_rgb.size == 0:
         return 0.04, 0.004, None
 
@@ -151,7 +258,11 @@ def _measure_mouth_mar(
     else:
         luma_f = 0.299 * patch[:, :, 0] + 0.587 * patch[:, :, 1] + 0.114 * patch[:, :, 2]
         gray = luma_f.astype(np.uint8)
-        grad_ratio = float(np.mean(np.abs(np.diff(luma_f, axis=0))) / 42.0) if luma_f.shape[0] > 1 else 0.0
+        grad_ratio = (
+            float(np.mean(np.abs(np.diff(luma_f, axis=0))) / 42.0)
+            if luma_f.shape[0] > 1
+            else 0.0
+        )
 
     p80 = float(np.percentile(gray, 80)) if gray.size > 0 else 120.0
     p25 = float(np.percentile(gray, 25)) if gray.size > 0 else 60.0
@@ -176,18 +287,15 @@ def detect_faces_in_frame(
     is_bgr: bool = True,
     min_fw_ratio: float = 0.065,
 ) -> List[Dict[str, Any]]:
-    """Detect all foreground faces in `frame` using YuNet 5-landmark ONNX.
+    """Detect foreground faces in `frame` using YuNet 5-landmark ONNX.
 
-    Returns faces sorted Left-to-Right (or Top-to-Bottom if stacked vertically) with:
+    Returns faces sorted Left-to-Right with normalized geometry:
       - `bbox_norm`: `[x0, y0, x1, y1]` (hair crown to chin)
       - `eye_center_norm`: `[ex, ey]`
+      - `nose_tip_norm`: `[nx, ny]`
       - `mouth_center_norm`: `[mx, my]`
       - `mouth_roi_norm`: `[mx0, my0, mx1, my1]`
-      - `headroom_pct`: `y0 * 100.0`
-      - `eyeline_pct`: `ey * 100.0`
-      - `focus`: `[fx, fy]` (eye-anchored for 14% headroom / 38% eyeline)
-      - `mar_score`: float
-      - `confidence`: float
+      - `headroom_pct`, `eyeline_pct`, `focus`, `mar_score`, `is_speaking`, `confidence`
     """
     if np is None or cv2 is None or frame is None or frame.size == 0:
         return []
@@ -213,36 +321,35 @@ def detect_faces_in_frame(
         return []
 
     fg_raw = []
-    for f in raw_faces:
-        fw_norm = float(f[2]) / float(w)
-        fh_norm = float(f[3]) / float(h)
-        conf = float(f[14])
+    for det in raw_faces:
+        fw_norm = float(det[2]) / float(w)
+        fh_norm = float(det[3]) / float(h)
+        conf = float(det[14])
         if fw_norm >= min_fw_ratio and fh_norm >= 0.055 and conf >= 0.62:
-            fg_raw.append(f)
+            fg_raw.append(det)
 
     if not fg_raw:
-        best_f = max(raw_faces, key=lambda item: float(item[14]))
-        if float(best_f[14]) >= 0.55 and (float(best_f[2]) / float(w)) >= 0.045:
-            fg_raw = [best_f]
+        best_det = max(raw_faces, key=lambda item: float(item[14]))
+        if float(best_det[14]) >= 0.55 and (float(best_det[2]) / float(w)) >= 0.045:
+            fg_raw = [best_det]
 
     if not fg_raw:
         return []
 
-    # Sort left-to-right by center X (or top-to-bottom if horizontally aligned)
     fg_raw.sort(key=lambda item: (float(item[0]) + 0.5 * float(item[2])) / float(w))
 
     faces: List[Dict[str, Any]] = []
-    for idx, f in enumerate(fg_raw):
-        fx = float(f[0]) / float(w)
-        fy = float(f[1]) / float(h)
-        fw = float(f[2]) / float(w)
-        fh = float(f[3]) / float(h)
-        re_x, re_y = float(f[4]) / float(w), float(f[5]) / float(h)
-        le_x, le_y = float(f[6]) / float(w), float(f[7]) / float(h)
-        nt_x, nt_y = float(f[8]) / float(w), float(f[9]) / float(h)
-        rm_x, rm_y = float(f[10]) / float(w), float(f[11]) / float(h)
-        lm_x, lm_y = float(f[12]) / float(w), float(f[13]) / float(h)
-        conf = round(float(f[14]), 3)
+    for idx, det in enumerate(fg_raw):
+        fx = float(det[0]) / float(w)
+        fy = float(det[1]) / float(h)
+        fw = float(det[2]) / float(w)
+        fh = float(det[3]) / float(h)
+        re_x, re_y = float(det[4]) / float(w), float(det[5]) / float(h)
+        le_x, le_y = float(det[6]) / float(w), float(det[7]) / float(h)
+        nt_x, nt_y = float(det[8]) / float(w), float(det[9]) / float(h)
+        rm_x, rm_y = float(det[10]) / float(w), float(det[11]) / float(h)
+        lm_x, lm_y = float(det[12]) / float(w), float(det[13]) / float(h)
+        conf = round(float(det[14]), 3)
 
         eye_cx = float(np.clip(0.5 * (re_x + le_x), 0.02, 0.98))
         eye_cy = float(np.clip(0.5 * (re_y + le_y), 0.02, 0.98))
@@ -257,7 +364,7 @@ def detect_faces_in_frame(
         mx1 = float(np.clip(mx0 + mw, mx0 + 0.02, 0.99))
         my1 = float(np.clip(my0 + mh, my0 + 0.02, 0.99))
 
-        # Expand top by 18% of face height to cover hair crown
+        # Expand top by 18% of face height so hair crown is protected
         hx0 = float(np.clip(fx - 0.08 * fw, 0.01, 0.95))
         hy0 = float(np.clip(fy - 0.18 * fh, 0.01, 0.92))
         hx1 = float(np.clip(fx + fw * 1.08, hx0 + 0.06, 0.99))
@@ -295,18 +402,37 @@ def detect_faces_in_frame(
     return faces
 
 
-_SIGNATURES: Dict[str, Any] = {}
+def prominent_faces(
+    faces: List[Dict[str, Any]],
+    min_area_ratio: float = 0.4,
+) -> List[Dict[str, Any]]:
+    """Filter out minor false positives or distant background faces smaller than `min_area_ratio`
+    of the primary face's bounding-box area.
+    """
+    if len(faces) < 2:
+        return faces
+
+    def _area(face: Dict[str, Any]) -> float:
+        x0, y0, x1, y1 = face["bbox_norm"]
+        return max(0.0, float(x1) - float(x0)) * max(0.0, float(y1) - float(y0))
+
+    biggest = max(_area(f) for f in faces)
+    return [f for f in faces if biggest > 0.0 and _area(f) >= min_area_ratio * biggest]
 
 
+# ---------------------------------------------------------------------------
+# Visual Color Signatures & Peripheral Camera Motion Detection
+# ---------------------------------------------------------------------------
 def clip_visual_signature(src: Union[str, Path], n: int = 5) -> Optional["np.ndarray"]:
-    """A colour fingerprint of a clip: the average LAB colour of a 3 x 3 grid over the central part of `n` frames, averaged. It has no
-    hard bin edges, so a slightly different shade of the same wardrobe or set stays close, while the robot in a beige room and a woman
-    in a green field land far apart. Used to tell which character a silent listening clip shows when its file name does not say."""
+    """Compute a 27-element mean LAB 3x3 grid color fingerprint over the central region of `n`
+    sampled frames so silent reaction/listening clips can be matched to the right speaker clip.
+    """
     key = str(src)
     if key in _SIGNATURES:
         return _SIGNATURES[key]
     if np is None or cv2 is None:
         return None
+
     cap = cv2.VideoCapture(key)
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     grids = []
@@ -317,9 +443,16 @@ def clip_visual_signature(src: Union[str, Path], n: int = 5) -> Optional["np.nda
         if not ok or frame is None:
             continue
         h, w = frame.shape[:2]
-        core = frame[int(h * 0.05): int(h * 0.75), int(w * 0.15): int(w * 0.85)]
-        lab = cv2.cvtColor(cv2.resize(core, (90, 120), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2LAB).astype("float32")
-        cells = [lab[r * 40:(r + 1) * 40, c * 30:(c + 1) * 30].reshape(-1, 3).mean(axis=0) for r in range(3) for c in range(3)]
+        core = frame[int(h * 0.05) : int(h * 0.75), int(w * 0.15) : int(w * 0.85)]
+        if core.size == 0:
+            continue
+        resized = cv2.resize(core, (90, 120), interpolation=cv2.INTER_AREA)
+        lab = cv2.cvtColor(resized, cv2.COLOR_BGR2LAB).astype("float32")
+        cells = [
+            lab[r * 40 : (r + 1) * 40, c * 30 : (c + 1) * 30].reshape(-1, 3).mean(axis=0)
+            for r in range(3)
+            for c in range(3)
+        ]
         grids.append(np.concatenate(cells))
     cap.release()
     sig = np.mean(grids, axis=0).astype("float32") if grids else None
@@ -328,31 +461,85 @@ def clip_visual_signature(src: Union[str, Path], n: int = 5) -> Optional["np.nda
 
 
 def signature_distance(a: Optional["np.ndarray"], b: Optional["np.ndarray"]) -> float:
-    """0 = the same look; about 0.1-0.25 for the same character in another pose; 1 = clearly different (mean LAB difference per
-    value divided by 50, capped at 1). 1.0 when either is missing."""
+    """Normalized LAB color distance in `[0.0, 1.0]` (`0` = identical, `1.0` = distinct or missing)."""
     if a is None or b is None:
         return 1.0
     return float(min(1.0, np.mean(np.abs(a - b)) / 50.0))
 
 
-def prominent_faces(faces: List[Dict[str, Any]], min_area_ratio: float = 0.4) -> List[Dict[str, Any]]:
-    """Faces that count as people in the shot: a detection with under 40% of the largest face's area is a false positive
-    (a wall picture, a sign, a corner) or a distant bystander. A real two-shot has two faces of comparable size. Measured on
-    the W43 robot clips: the robot's face was 0.47 x 0.35 of the frame and a phantom 'face' in the corner 0.34 x 0.15."""
-    def area(f: Dict[str, Any]) -> float:
-        x0, y0, x1, y1 = f["bbox_norm"]
-        return max(0.0, x1 - x0) * max(0.0, y1 - y0)
-
-    if len(faces) < 2:
-        return faces
-    biggest = max(area(f) for f in faces)
-    return [f for f in faces if biggest > 0 and area(f) >= min_area_ratio * biggest]
+def _peripheral_motion_delta(prev_gray_96: "np.ndarray", cur_gray_96: "np.ndarray") -> float:
+    """Compute mean peripheral grayscale delta (`0..255`), masking out the central speaker area."""
+    diff = np.abs(cur_gray_96 - prev_gray_96)
+    mask = np.ones_like(diff, dtype=bool)
+    mask[12:84, 21:75] = False
+    return float(np.mean(diff[mask]))
 
 
-def _detect_axis_baked_seam(arr: "np.ndarray", kind_label: str) -> Tuple[float, Optional[Dict[str, Any]]]:
-    """Detect a full-span seam along axis 0 of `arr` within `[0.35, 0.65]`, weighting raw step
-    sharpness by cross-seam neighborhood contrast so internal panel stripes/grids never outrank
-    the true inter-panel boundary.
+def detect_static_camera_motion(
+    video_path: Union[str, Path],
+    start_sec: float = 0.0,
+    end_sec: Optional[float] = None,
+) -> float:
+    """Measure peripheral background camera motion (`0-255` grayscale delta) across `[start_sec, end_sec]`.
+
+    Masks out the center speaker region (`x in [0.22..0.78], y in [0.12..0.88]`) so a talking
+    speaker on a locked tripod registers as a static camera (`score < 2.8`).
+    """
+    resolved = resolve(video_path)
+    end_tag = "end" if end_sec is None else f"{float(end_sec):.2f}"
+    key = f"{resolved}:{float(start_sec):.2f}-{end_tag}"
+    if key in _STATIC_MOTION_CACHE:
+        return _STATIC_MOTION_CACHE[key]
+
+    if cv2 is None or np is None or not resolved.is_file():
+        _STATIC_MOTION_CACHE[key] = 0.0
+        return 0.0
+
+    cap = cv2.VideoCapture(str(resolved))
+    if not cap.isOpened():
+        _STATIC_MOTION_CACHE[key] = 0.0
+        return 0.0
+
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 24.0) or 24.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    clip_dur = total_frames / fps if total_frames > 0 else 6.0
+    t_start = max(0.0, float(start_sec))
+    t_end = float(end_sec) if end_sec is not None else clip_dur
+    dur = max(0.2, t_end - t_start)
+
+    n_samples = min(6, max(3, int(dur * 2.0)))
+    deltas: List[float] = []
+    prev_bg: Optional["np.ndarray"] = None
+
+    for k in range(n_samples):
+        t = t_start + (k + 0.5) / n_samples * dur
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            continue
+        small = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (96, 96)).astype("float32")
+        if prev_bg is not None:
+            deltas.append(_peripheral_motion_delta(prev_bg, small))
+        prev_bg = small
+
+    cap.release()
+    score = round(float(sum(deltas) / len(deltas)), 3) if deltas else 0.0
+    _STATIC_MOTION_CACHE[key] = score
+    return score
+
+
+measure_camera_motion = detect_static_camera_motion
+
+
+# ---------------------------------------------------------------------------
+# Baked Split-Screen Seam Detection
+# ---------------------------------------------------------------------------
+def _detect_axis_baked_seam(
+    arr: "np.ndarray",
+    kind_label: str,
+) -> Tuple[float, Optional[Dict[str, Any]]]:
+    """Detect a full-span seam along axis 0 of `arr` within `[0.35, 0.65]`, weighting step
+    sharpness by cross-seam neighborhood contrast so internal stripes never outrank a true split seam.
     """
     length, span = arr.shape[:2]
     d_map = np.mean(np.abs(np.diff(arr, axis=0)), axis=2) if arr.ndim == 3 else np.abs(np.diff(arr, axis=0))
@@ -425,8 +612,7 @@ def _detect_axis_baked_seam(arr: "np.ndarray", kind_label: str) -> Tuple[float, 
 
 def _measure_baked_split_seam_detail(frame: "np.ndarray") -> Dict[str, Any]:
     """Measure baked-in horizontal (`split_v_baked`) or vertical (`split_h_baked`) split-screen
-    seam across `[0.35..0.65]` of frame height/width, returning kind, normalized `seam_frac`
-    (`0.35..0.65`, default `0.50`), and `[band_lo_frac, band_hi_frac]` around any divider bar.
+    seam across `[0.35..0.65]` of frame height/width.
     """
     default_res: Dict[str, Any] = {
         "kind": None,
@@ -455,9 +641,8 @@ def detect_baked_split_seam(
     frame: "np.ndarray",
     return_frac: bool = False,
 ) -> Union[Optional[str], Tuple[Optional[str], float]]:
-    """Check if `frame` already has a baked-in horizontal (`split_v_baked`) or
-    vertical (`split_h_baked`) split-screen seam. When `return_frac=True`, returns
-    `(seam_kind, seam_frac)` with `seam_frac` in `[0.35..0.65]` (default `0.50`).
+    """Detect baked-in split seam (`"split_v_baked"`, `"split_h_baked"`, or `None`).
+    When `return_frac=True`, returns `(seam_kind, seam_frac)`.
     """
     det = _measure_baked_split_seam_detail(frame)
     if return_frac:
@@ -465,6 +650,9 @@ def detect_baked_split_seam(
     return det["kind"]
 
 
+# ---------------------------------------------------------------------------
+# Slot Crop Filters, Paired Split Framing & Background Registration
+# ---------------------------------------------------------------------------
 def compute_slot_crop_filter(
     src_w: int,
     src_h: int,
@@ -475,9 +663,8 @@ def compute_slot_crop_filter(
     headroom_pct: float = TARGET_HEADROOM_PCT,
     extra_zoom: float = 1.0,
 ) -> Dict[str, Any]:
-    """Compute an exact FFmpeg `scale=sw:sh:flags=lanczos,crop=slot_w:slot_h:cx:cy` filter
-    that centers the speaker horizontally and anchors their head crown at `headroom_pct`
-    (`14%`) and eye line at `38%` inside any target `(slot_w, slot_h)`.
+    """Compute an FFmpeg `scale=sw:sh:flags=lanczos,crop=slot_w:slot_h:cx:cy` filter that
+    centers the speaker horizontally and anchors their crown at `headroom_pct` (`14%`).
     """
     src_w = max(16, int(src_w or slot_w))
     src_h = max(16, int(src_h or slot_h))
@@ -539,6 +726,46 @@ def compute_slot_crop_filter(
     }
 
 
+def _canonical_split_clip(clip_path: Union[str, Path]) -> Path:
+    """Resolve a character's canonical split reference clip so speaking/listening swaps never shift."""
+    p = Path(clip_path)
+    if not p.is_file():
+        return p
+    stem = p.stem
+    role_re = r"[\s_-]*(dfv|sfv|speaking|listening|idle|silent)\b.*$"
+    if re.search(r"\b(dfv|speaking|talk|dialogue)\b", stem, re.I):
+        char_prefix = re.sub(role_re, "", stem, flags=re.I).strip().lower()
+        if char_prefix:
+            for cand in sorted(p.parent.glob(f"*{p.suffix}")):
+                if cand == p or not cand.is_file():
+                    continue
+                c_prefix = re.sub(role_re, "", cand.stem, flags=re.I).strip().lower()
+                if c_prefix == char_prefix and re.search(r"\b(sfv|listening|idle|silent)\b", cand.stem, re.I):
+                    return cand
+    if re.search(r"\bsplit\b", stem, re.I) and not re.search(r"\b(sfv|listening|idle|silent)\b", stem, re.I):
+        p_vis = analyze_clip_vision(p) or {}
+        p_bb = p_vis.get("bbox_norm") or [0.35, 0.14, 0.65, 0.42]
+        best_cand: Optional[Path] = None
+        best_dist = 0.08
+        for cand in sorted(p.parent.glob(f"*{p.suffix}")):
+            if cand == p or not cand.is_file():
+                continue
+            if re.search(r"\b(sfv|listening|idle|silent)\b", cand.stem, re.I):
+                c_vis = analyze_clip_vision(cand) or {}
+                c_bb = c_vis.get("bbox_norm") or [0.35, 0.14, 0.65, 0.42]
+                dist = (
+                    abs(float(p_bb[1]) - float(c_bb[1]))
+                    + abs(float(p_bb[3]) - float(c_bb[3]))
+                    + abs(float(p_bb[0]) - float(c_bb[0]))
+                )
+                if dist < best_dist:
+                    best_dist = dist
+                    best_cand = cand
+        if best_cand is not None:
+            return best_cand
+    return p
+
+
 def compute_paired_split_crop_filters(
     live_src: Union[str, Path],
     peer_src: Union[str, Path],
@@ -553,56 +780,21 @@ def compute_paired_split_crop_filters(
     live_focus: Optional[Sequence[float]] = None,
     peer_focus: Optional[Sequence[float]] = None,
     return_focus: bool = False,
+    live_offset_y: float = 0.0,
+    peer_offset_y: float = 0.0,
 ) -> Union[
     Tuple[Dict[str, Any], Dict[str, Any]],
     Tuple[Dict[str, Any], Dict[str, Any], List[float], List[float]],
 ]:
-    """Compute matched FFmpeg `scale=sw:sh:flags=lanczos,crop=slot_w:slot_h:cx:cy` filters
-    for a two-character split screen (`split_h` or `split_v`) so that BOTH characters share:
-      1. The exact same common headroom (`common_hr` fraction from top of slot to head crown),
-      2. Matched face zoom size (`common_fh` fraction of slot height), and
-      3. Horizontal face centering (`fx`) inside their respective slot.
-    Because the pair calculation is symmetric over `{live_src, peer_src}`, swapping active
-    speaker and listener across dialogue turns produces zero framing shift.
+    """Compute matched FFmpeg scale+crop filters for a two-character split screen (`split_h` or
+    `split_v`) so both characters share identical headroom, matched face scale, and symmetric
+    framing across speaker/listener turns, with optional per-panel vertical offsets
+    (`live_offset_y`, `peer_offset_y`; positive shifts the character downward in that panel).
     """
     live_slot_w, live_slot_h = _even(max(16, live_slot_w)), _even(max(16, live_slot_h))
     peer_slot_w, peer_slot_h = _even(max(16, peer_slot_w)), _even(max(16, peer_slot_h))
     src_w, src_h = max(16, int(src_w or live_slot_w)), max(16, int(src_h or live_slot_h))
     peer_w, peer_h = max(16, int(peer_w or peer_slot_w)), max(16, int(peer_h or peer_slot_h))
-
-    def _canonical_split_clip(clip_path: Union[str, Path]) -> Path:
-        p = Path(clip_path)
-        if not p.is_file():
-            return p
-        stem = p.stem
-        if re.search(r"\b(dfv|speaking|talk|dialogue)\b", stem, re.I):
-            char_prefix = re.sub(r"[\s_-]*(dfv|sfv|speaking|listening|idle|silent)\b.*$", "", stem, flags=re.I).strip().lower()
-            if char_prefix:
-                for cand in sorted(p.parent.glob(f"*{p.suffix}")):
-                    if cand == p or not cand.is_file():
-                        continue
-                    c_stem = cand.stem
-                    c_prefix = re.sub(r"[\s_-]*(dfv|sfv|speaking|listening|idle|silent)\b.*$", "", c_stem, flags=re.I).strip().lower()
-                    if c_prefix == char_prefix and re.search(r"\b(sfv|listening|idle|silent)\b", c_stem, re.I):
-                        return cand
-        if re.search(r"\bsplit\b", stem, re.I) and not re.search(r"\b(sfv|listening|idle|silent)\b", stem, re.I):
-            p_vis = analyze_clip_vision(p) or {}
-            p_bb = p_vis.get("bbox_norm") or [0.35, 0.14, 0.65, 0.42]
-            best_cand = None
-            best_dist = 0.08
-            for cand in sorted(p.parent.glob(f"*{p.suffix}")):
-                if cand == p or not cand.is_file():
-                    continue
-                if re.search(r"\b(sfv|listening|idle|silent)\b", cand.stem, re.I):
-                    c_vis = analyze_clip_vision(cand) or {}
-                    c_bb = c_vis.get("bbox_norm") or [0.35, 0.14, 0.65, 0.42]
-                    dist = abs(float(p_bb[1]) - float(c_bb[1])) + abs(float(p_bb[3]) - float(c_bb[3])) + abs(float(p_bb[0]) - float(c_bb[0]))
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_cand = cand
-            if best_cand is not None:
-                return best_cand
-        return p
 
     def _extract_geom(
         clip_path: Union[str, Path],
@@ -610,9 +802,9 @@ def compute_paired_split_crop_filters(
     ) -> Tuple[float, float, float, float, float]:
         vis: Dict[str, Any] = {}
         try:
-            p = _canonical_split_clip(clip_path)
-            if p.is_file():
-                vis = analyze_clip_vision(p) or {}
+            canon = _canonical_split_clip(clip_path)
+            if canon.is_file():
+                vis = analyze_clip_vision(canon) or {}
         except Exception:
             vis = {}
         bbox = vis.get("bbox_norm")
@@ -637,13 +829,21 @@ def compute_paired_split_crop_filters(
     fx_a, y0_a, fh_a, ey_a, fw_a = _extract_geom(live_src, live_focus)
     fx_b, y0_b, fh_b, ey_b, fw_b = _extract_geom(peer_src, peer_focus)
 
-    # Dynamic common headroom (~12%-18%) shared identically by both characters
-    # One fixed, generous headroom for EVERY cut (editor feedback: heads cut, head height jumping between cuts).
-    # It no longer depends on how tall each clip's hair measured, so the crown sits at the same height in every cut.
     try:
         common_hr = round(max(0.12, min(0.24, float(os.environ.get("ZENO_SPLIT_HEADROOM", "0.14")))), 4)
     except ValueError:
         common_hr = 0.14
+
+    try:
+        live_off = float(live_offset_y or 0.0)
+    except (TypeError, ValueError):
+        live_off = 0.0
+    try:
+        peer_off = float(peer_offset_y or 0.0)
+    except (TypeError, ValueError):
+        peer_off = 0.0
+    eff_hr_live = max(0.06, min(0.42, common_hr + live_off))
+    eff_hr_peer = max(0.06, min(0.42, common_hr + peer_off))
 
     s0_a = max(live_slot_w / float(src_w), live_slot_h / float(src_h))
     s0_b = max(peer_slot_w / float(peer_w), peer_slot_h / float(peer_h))
@@ -656,7 +856,6 @@ def compute_paired_split_crop_filters(
         max_z = 1.213 if fw >= 0.35 else MAX_EXTRA_ZOOM
         return min(max_z, max(1.0, k_bot))
 
-    # Determine if one character is significantly lower in the frame than the other
     if abs(y0_a - y0_b) >= 0.08:
         if y0_a > y0_b:
             k_a = _scale_for_lower_head(y0_a, hr_ratio_a, fw_a)
@@ -692,22 +891,30 @@ def compute_paired_split_crop_filters(
         y0: float,
         ey: float,
         k: float,
+        eff_hr: float,
+        off: float,
     ) -> Dict[str, Any]:
         s = s0 * k
         sw = max(sw_slot, _even(w_in * s))
         sh = max(sh_slot, _even(h_in * s))
         crop_x = int(round(min(max(fx * sw - sw_slot / 2.0, 0), sw - sw_slot)))
-        want_y = y0 * sh - common_hr * sh_slot
+        want_y = y0 * sh - eff_hr * sh_slot
         crop_y = int(round(min(max(want_y, 0), sh - sh_slot)))
-        # The source cannot give this much room above the head: extend the top edge instead of cutting the hair.
         pad_top = int(round(-want_y)) if want_y < -2 else 0
         pad_top = min(pad_top, int(sh_slot * 0.30))
         slot_fx = round(min(0.65, max(0.35, (fx * sw - crop_x) / float(sw_slot))), 4)
-        slot_fy = round(min(0.48, max(0.25, (ey * sh - crop_y + pad_top) / float(sh_slot))), 4)
+        fy_raw = (ey * sh - crop_y + pad_top) / float(sh_slot)
+        slot_fy = (
+            round(min(0.65, max(0.18, fy_raw)), 4)
+            if abs(off) > 1e-4
+            else round(min(0.48, max(0.25, fy_raw)), 4)
+        )
         flt = f"scale={sw}:{sh}:flags=lanczos,crop={sw_slot}:{sh_slot}:{crop_x}:{crop_y}"
         if pad_top:
-            flt = (f"scale={sw}:{sh}:flags=lanczos,crop={sw_slot}:{sh_slot - pad_top}:{crop_x}:0,"
-                   f"pad={sw_slot}:{sh_slot}:0:{pad_top}:color=black,fillborders=top={pad_top}:mode=smear")
+            flt = (
+                f"scale={sw}:{sh}:flags=lanczos,crop={sw_slot}:{sh_slot - pad_top}:{crop_x}:0,"
+                f"pad={sw_slot}:{sh_slot}:0:{pad_top}:color=black,fillborders=top={pad_top}:mode=smear"
+            )
         return {
             "filter": flt,
             "pad_top": pad_top,
@@ -715,27 +922,28 @@ def compute_paired_split_crop_filters(
             "crop": (crop_x, crop_y),
             "slot_size": (sw_slot, sh_slot),
             "common_headroom_pct": round(common_hr * 100.0, 2),
+            "offset_y": round(off, 4),
             "extra_zoom": round(k, 3),
             "slot_focus": [slot_fx, slot_fy],
-            # Where the slot's top-left corner sits in the scaled source (y can be negative: padded top).
-            "geom": {"s": sw / float(w_in), "ox": float(crop_x), "oy": float(crop_y - pad_top),
-                     "src": [int(w_in), int(h_in)]},
+            "geom": {
+                "s": sw / float(w_in),
+                "ox": float(crop_x),
+                "oy": float(crop_y - pad_top),
+                "src": [int(w_in), int(h_in)],
+            },
         }
 
-    live_crop = _build_one(src_w, src_h, live_slot_w, live_slot_h, s0_a, fx_a, y0_a, ey_a, k_a)
-    peer_crop = _build_one(peer_w, peer_h, peer_slot_w, peer_slot_h, s0_b, fx_b, y0_b, ey_b, k_b)
+    live_crop = _build_one(src_w, src_h, live_slot_w, live_slot_h, s0_a, fx_a, y0_a, ey_a, k_a, eff_hr_live, live_off)
+    peer_crop = _build_one(peer_w, peer_h, peer_slot_w, peer_slot_h, s0_b, fx_b, y0_b, ey_b, k_b, eff_hr_peer, peer_off)
     if return_focus:
         return live_crop, peer_crop, list(live_crop["slot_focus"]), list(peer_crop["slot_focus"])
     return live_crop, peer_crop
 
 
-# ---------------------------------------------------------------------------
-# Split panel lock: one frame per panel, every clip of that panel lined up to it
-# ---------------------------------------------------------------------------
-_REGISTER_CACHE: Dict[str, Optional[Dict[str, float]]] = {}
-
-
 def _read_gray_frame(src: Union[str, Path], t: float) -> Optional["np.ndarray"]:
+    """Decode a single grayscale frame from `src` at timestamp `t` seconds."""
+    if cv2 is None:
+        return None
     try:
         cap = cv2.VideoCapture(str(src))
         if not cap.isOpened():
@@ -753,9 +961,15 @@ def _read_gray_frame(src: Union[str, Path], t: float) -> Optional["np.ndarray"]:
         return None
 
 
-def _person_mask(shape: Tuple[int, int], bbox_norm: Optional[Sequence[float]]) -> Optional["np.ndarray"]:
-    """Mask that hides the character (head and body), so only the background is matched."""
-    if not bbox_norm or len(bbox_norm) < 4:
+read_gray_frame = _read_gray_frame
+
+
+def _person_mask(
+    shape: Tuple[int, int],
+    bbox_norm: Optional[Sequence[float]],
+) -> Optional["np.ndarray"]:
+    """Build a binary mask excluding the foreground speaker (head & torso) for background matching."""
+    if np is None or not bbox_norm or len(bbox_norm) < 4:
         return None
     h, w = shape[:2]
     x0, y0, x1, y1 = [float(v) for v in bbox_norm[:4]]
@@ -763,9 +977,9 @@ def _person_mask(shape: Tuple[int, int], bbox_norm: Optional[Sequence[float]]) -
     mask = np.full((h, w), 255, dtype=np.uint8)
     hx0, hx1 = int(max(0, (x0 - 0.30 * fw) * w)), int(min(w, (x1 + 0.30 * fw) * w))
     hy0 = int(max(0, (y0 - 0.45 * fh) * h))
-    mask[hy0:int(min(h, (y1 + 0.15 * fh) * h)), hx0:hx1] = 0
+    mask[hy0 : int(min(h, (y1 + 0.15 * fh) * h)), hx0:hx1] = 0
     bx0, bx1 = int(max(0, (x0 - 0.85 * fw) * w)), int(min(w, (x1 + 0.85 * fw) * w))
-    mask[int(min(h, (y1 + 0.10 * fh) * h)):h, bx0:bx1] = 0
+    mask[int(min(h, (y1 + 0.10 * fh) * h)) : h, bx0:bx1] = 0
     return mask
 
 
@@ -777,24 +991,28 @@ def register_background(
     ref_bbox: Optional[Sequence[float]] = None,
     clip_bbox: Optional[Sequence[float]] = None,
 ) -> Optional[Dict[str, float]]:
-    """How the background of `clip_src` at `clip_t` sits against the background of `ref_src`
-    at `ref_t`: a point p in the reference frame is at `a * p + (tx, ty)` in the clip frame
-    (source pixels). None when the two backgrounds are not the same scene.
+    """Estimate partial 2D affine alignment `(a, tx, ty)` mapping background points in `ref_src`
+    at `ref_t` to `clip_src` at `clip_t` (`p_clip = a * p_ref + (tx, ty)`). Returns `None` when
+    the two clips do not share a static background.
     """
     key = f"{ref_src}|{ref_t:.2f}|{clip_src}|{clip_t:.2f}"
     if key in _REGISTER_CACHE:
         return _REGISTER_CACHE[key]
+    if cv2 is None or np is None:
+        return None
+
     out: Optional[Dict[str, float]] = None
     try:
         a_img = _read_gray_frame(ref_src, ref_t)
         b_img = _read_gray_frame(clip_src, clip_t)
         if a_img is not None and b_img is not None:
-            def _feats(img: "np.ndarray", bbox: Optional[Sequence[float]]):
+            def _feats(img: "np.ndarray", bbox: Optional[Sequence[float]]) -> Tuple[Any, Any, float]:
                 k = 960.0 / max(img.shape[:2]) if max(img.shape[:2]) > 960 else 1.0
                 small = cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA) if k != 1.0 else img
                 orb = cv2.ORB_create(nfeatures=3000, fastThreshold=10)
                 kp, des = orb.detectAndCompute(small, _person_mask(small.shape, bbox))
                 return kp, des, k
+
             ka, da, sa = _feats(a_img, ref_bbox)
             kb, db, sb = _feats(b_img, clip_bbox)
             if da is not None and db is not None and len(ka) >= 30 and len(kb) >= 30:
@@ -802,15 +1020,26 @@ def register_background(
                 if len(matches) >= 30:
                     pa = np.float32([ka[m.queryIdx].pt for m in matches]) / sa
                     pb = np.float32([kb[m.trainIdx].pt for m in matches]) / sb
-                    mat, inl = cv2.estimateAffinePartial2D(pa, pb, method=cv2.RANSAC, ransacReprojThreshold=1.5,
-                                                           maxIters=4000, confidence=0.995)
+                    mat, inl = cv2.estimateAffinePartial2D(
+                        pa,
+                        pb,
+                        method=cv2.RANSAC,
+                        ransacReprojThreshold=1.5,
+                        maxIters=4000,
+                        confidence=0.995,
+                    )
                     n_in = int(inl.sum()) if inl is not None else 0
                     if mat is not None and n_in >= 25 and n_in >= 0.12 * len(matches):
                         a = float(math.hypot(mat[0, 0], mat[1, 0]))
                         rot = abs(math.degrees(math.atan2(mat[1, 0], mat[0, 0])))
                         if 0.6 <= a <= 1.6 and rot <= 1.5:
-                            out = {"a": a, "tx": float(mat[0, 2]), "ty": float(mat[1, 2]),
-                                   "inliers": float(n_in), "matches": float(len(matches))}
+                            out = {
+                                "a": a,
+                                "tx": float(mat[0, 2]),
+                                "ty": float(mat[1, 2]),
+                                "inliers": float(n_in),
+                                "matches": float(len(matches)),
+                            }
     except Exception:
         out = None
     _REGISTER_CACHE[key] = out
@@ -818,15 +1047,20 @@ def register_background(
 
 
 def slot_filter_from_origin(
-    w_in: int, h_in: int, slot_w: int, slot_h: int, s: float, ox: float, oy: float,
+    w_in: int,
+    h_in: int,
+    slot_w: int,
+    slot_h: int,
+    s: float,
+    ox: float,
+    oy: float,
 ) -> Dict[str, Any]:
-    """FFmpeg filter that scales the source by `s` and shows the `slot_w x slot_h` window whose
-    top-left corner is at `(ox, oy)` of the scaled picture. A negative `oy` extends the top edge.
-    `clamp_px` says how far the window had to move to stay inside the picture (0 = exact).
+    """Build an FFmpeg scale+crop filter displaying the `slot_w x slot_h` window at `(ox, oy)`
+    of the `s`-scaled source, extending the top border cleanly when `oy < 0`.
     """
     slot_w, slot_h = _even(slot_w), _even(slot_h)
     s_want = float(s)
-    s = max(s, slot_w / float(w_in), slot_h / float(h_in))   # the clip must still fill the panel
+    s = max(s_want, slot_w / float(w_in), slot_h / float(h_in))
     sw, sh = max(slot_w, _even(w_in * s)), max(slot_h, _even(h_in * s))
     want_x, want_y = float(ox), float(oy)
     crop_x = int(round(min(max(want_x, 0), sw - slot_w)))
@@ -835,8 +1069,10 @@ def slot_filter_from_origin(
     if pad_top:
         vis_h = min(slot_h - pad_top, sh)
         crop_y = 0
-        flt = (f"scale={sw}:{sh}:flags=lanczos,crop={slot_w}:{vis_h}:{crop_x}:0,"
-               f"pad={slot_w}:{slot_h}:0:{pad_top}:color=black,fillborders=top={pad_top}:mode=smear")
+        flt = (
+            f"scale={sw}:{sh}:flags=lanczos,crop={slot_w}:{vis_h}:{crop_x}:0,"
+            f"pad={slot_w}:{slot_h}:0:{pad_top}:color=black,fillborders=top={pad_top}:mode=smear"
+        )
         got_y = -float(pad_top)
     else:
         crop_y = int(round(min(max(want_y, 0), max(0, sh - slot_h))))
@@ -848,9 +1084,20 @@ def slot_filter_from_origin(
         "scale": (sw, sh),
         "crop": (crop_x, crop_y),
         "slot_size": (slot_w, slot_h),
-        "clamp_px": round(max(abs(crop_x - want_x), abs(got_y - want_y),
-                              (s / s_want - 1.0) * max(slot_w, slot_h) if s > s_want * 1.002 else 0.0), 2),
-        "geom": {"s": sw / float(w_in), "ox": float(crop_x), "oy": got_y, "src": [int(w_in), int(h_in)]},
+        "clamp_px": round(
+            max(
+                abs(crop_x - want_x),
+                abs(got_y - want_y),
+                (s / s_want - 1.0) * max(slot_w, slot_h) if s > s_want * 1.002 else 0.0,
+            ),
+            2,
+        ),
+        "geom": {
+            "s": sw / float(w_in),
+            "ox": float(crop_x),
+            "oy": got_y,
+            "src": [int(w_in), int(h_in)],
+        },
     }
 
 
@@ -860,33 +1107,68 @@ def derive_registered_crop(
     w_in: int,
     h_in: int,
 ) -> Dict[str, Any]:
-    """Crop for another clip of the same panel so that its background lands on exactly the same
-    pixels as the reference clip's. `reg` comes from `register_background` (None = same framing).
+    """Derive a registered crop for another clip in the same split panel so its background
+    lands pixel-for-pixel on `ref_crop`.
     """
-    g = ref_crop["geom"]
+    geom = ref_crop["geom"]
     slot_w, slot_h = ref_crop["slot_size"]
-    a, tx, ty = (reg["a"], reg["tx"], reg["ty"]) if reg else (1.0, 0.0, 0.0)
-    if reg is None:
-        rw, rh = g["src"]
-        a = 0.5 * (w_in / float(rw) + h_in / float(rh))   # same picture at another resolution
-    s_c = g["s"] / a
-    out = slot_filter_from_origin(w_in, h_in, slot_w, slot_h, s_c, g["ox"] + s_c * tx, g["oy"] + s_c * ty)
+    if reg is not None:
+        a, tx, ty = reg["a"], reg["tx"], reg["ty"]
+    else:
+        rw, rh = geom["src"]
+        a = 0.5 * (w_in / float(rw) + h_in / float(rh))
+        tx, ty = 0.0, 0.0
+    s_c = geom["s"] / a
+    out = slot_filter_from_origin(
+        w_in,
+        h_in,
+        slot_w,
+        slot_h,
+        s_c,
+        geom["ox"] + s_c * tx,
+        geom["oy"] + s_c * ty,
+    )
     out["common_headroom_pct"] = ref_crop.get("common_headroom_pct")
+    if "offset_y" in ref_crop:
+        out["offset_y"] = ref_crop["offset_y"]
     out["extra_zoom"] = ref_crop.get("extra_zoom")
     out["slot_focus"] = list(ref_crop.get("slot_focus") or [0.5, 0.36])
     return out
 
 
+# ---------------------------------------------------------------------------
+# Mouth-Closed Listening Idle Window & Full Clip Vision Analysis
+# ---------------------------------------------------------------------------
+def _merge_spans(
+    spans: List[Tuple[float, float]],
+    gap_tol: float = 0.20,
+) -> List[Tuple[float, float]]:
+    if not spans:
+        return []
+    sorted_spans = sorted(spans, key=lambda x: x[0])
+    merged = [sorted_spans[0]]
+    for s, e in sorted_spans[1:]:
+        ps, pe = merged[-1]
+        if s <= pe + gap_tol:
+            merged[-1] = (ps, max(pe, e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
 def _load_clip_speech_spans(video_path: Path) -> List[Tuple[float, float]]:
-    """Auto-load speech spans from `work/<stem>/hq_words.json` or `words.json` if present."""
+    """Auto-load speech spans from `hq_words.json` or `words.json` in the clip's work directory."""
     work_dir = clip_work_dir(video_path)
     for fname in ("hq_words.json", "words.json"):
         f = work_dir / fname
         if f.is_file():
             try:
-                words = read_json(f)
+                raw_data = read_json(f)
+                words = raw_data.get("words", []) if isinstance(raw_data, dict) else raw_data
                 spans = []
                 for w in words:
+                    if not isinstance(w, dict):
+                        continue
                     s = w.get("start")
                     e = w.get("end")
                     if s is not None and e is not None and float(e) > float(s):
@@ -920,20 +1202,6 @@ def _normalize_speech_spans(
     return _merge_spans(raw, gap_tol=0.20)
 
 
-def _merge_spans(spans: List[Tuple[float, float]], gap_tol: float = 0.20) -> List[Tuple[float, float]]:
-    if not spans:
-        return []
-    sorted_spans = sorted(spans, key=lambda x: x[0])
-    merged = [sorted_spans[0]]
-    for s, e in sorted_spans[1:]:
-        ps, pe = merged[-1]
-        if s <= pe + gap_tol:
-            merged[-1] = (ps, max(pe, e))
-        else:
-            merged.append((s, e))
-    return merged
-
-
 def _non_speaking_intervals(
     duration: float,
     speech_spans: List[Tuple[float, float]],
@@ -954,7 +1222,6 @@ def _non_speaking_intervals(
         cursor = min(duration, e + margin)
     if duration - cursor >= 0.18:
         intervals.append((round(cursor, 3), round(duration, 3)))
-
     return intervals
 
 
@@ -964,12 +1231,8 @@ def find_listening_idle_window(
     duration: Optional[float] = None,
     sample_fps: float = 8.0,
 ) -> Dict[str, Any]:
-    """Find the cleanest mouth-closed listening window (`still_at` and `idle_span`) in a clip.
-
-    Tracks Mouth Aspect Ratio (`MAR`) and mouth pixel delta (`cv2.absdiff`) across
-    non-speaking intervals so that in `split_v`, `split_h`, and `video_call` modes,
-    the non-speaking listener holds on a clean mouth-closed frame/loop with zero
-    double-mouth movement.
+    """Find the cleanest mouth-closed listening window (`still_at` and `idle_span`) in a clip
+    by scoring Mouth Aspect Ratio (`MAR`) and lip pixel delta across non-speaking intervals.
     """
     resolved = resolve(video_path)
     spans = _normalize_speech_spans(speech_spans, resolved if resolved.is_file() else None)
@@ -986,41 +1249,30 @@ def find_listening_idle_window(
 
     quiet_wins = _non_speaking_intervals(dur, spans)
 
-    # Default fallback if cv2 is unavailable or clip does not exist on disk
-    if cv2 is None or np is None or not resolved.is_file():
-        if quiet_wins:
-            best_q = max(quiet_wins, key=lambda w: w[1] - w[0])
-            s0, s1 = best_q[0], best_q[1]
-        else:
-            s0 = round(max(0.0, dur - min(1.2, dur * 0.25)), 3)
-            s1 = round(dur, 3)
-        mid = round(0.5 * (s0 + s1), 3)
-        res = {
-            "still_at": mid,
-            "idle_span": [round(s0, 3), round(s1, 3)],
-            "start": round(s0, 3),
-            "end": round(s1, 3),
-            "duration": round(max(0.1, s1 - s0), 3),
-            "mar_score": 0.035,
-            "motion_delta": 0.004,
-        }
-        _IDLE_CACHE[cache_key] = res
-        return dict(res)
-
-    cap = cv2.VideoCapture(str(resolved))
-    if not cap.isOpened():
-        s0, s1 = quiet_wins[0] if quiet_wins else (0.0, min(1.5, dur))
+    def _fallback_idle(s0: float, s1: float, mar: float = 0.035, delta: float = 0.004) -> Dict[str, Any]:
         res = {
             "still_at": round(0.5 * (s0 + s1), 3),
             "idle_span": [round(s0, 3), round(s1, 3)],
             "start": round(s0, 3),
             "end": round(s1, 3),
             "duration": round(max(0.1, s1 - s0), 3),
-            "mar_score": 0.035,
-            "motion_delta": 0.004,
+            "mar_score": mar,
+            "motion_delta": delta,
         }
         _IDLE_CACHE[cache_key] = res
         return dict(res)
+
+    if cv2 is None or np is None or not resolved.is_file():
+        if quiet_wins:
+            best_q = max(quiet_wins, key=lambda w: w[1] - w[0])
+            return _fallback_idle(best_q[0], best_q[1])
+        s0 = round(max(0.0, dur - min(1.2, dur * 0.25)), 3)
+        return _fallback_idle(s0, round(dur, 3))
+
+    cap = cv2.VideoCapture(str(resolved))
+    if not cap.isOpened():
+        s0, s1 = quiet_wins[0] if quiet_wins else (0.0, min(1.5, dur))
+        return _fallback_idle(s0, s1)
 
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 24.0)
     if fps <= 1.0:
@@ -1028,7 +1280,6 @@ def find_listening_idle_window(
     total_frames = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or round(dur * fps)))
     dur = max(dur, total_frames / fps)
 
-    # Detect initial mouth ROI on midpoint frame
     cap.set(cv2.CAP_PROP_POS_FRAMES, total_frames // 2)
     ok, mid_frame = cap.read()
     mouth_roi = [0.38, 0.48, 0.62, 0.62]
@@ -1037,7 +1288,6 @@ def find_listening_idle_window(
         if faces:
             mouth_roi = faces[0]["mouth_roi_norm"]
 
-    # Sample frames in non-speaking windows first; if none, sample across entire clip
     search_windows = quiet_wins if quiet_wins else [(0.0, dur)]
     step_sec = 1.0 / max(2.0, min(sample_fps, fps))
 
@@ -1053,7 +1303,6 @@ def find_listening_idle_window(
                 arr_rgb = frame[:, :, ::-1]
                 mar, delta, prev_gray = _measure_mouth_mar(arr_rgb, mouth_roi, prev_gray)
                 in_quiet = any(qs <= t <= qe for qs, qe in quiet_wins)
-                # Combined cost penalizes open mouth (MAR) and lip motion (delta)
                 cost = mar * 1.4 + delta * 3.5 + (0.0 if in_quiet else 0.25)
                 samples.append({
                     "t": round(f_idx / fps, 3),
@@ -1068,22 +1317,11 @@ def find_listening_idle_window(
 
     if not samples:
         s0, s1 = search_windows[0]
-        res = {
-            "still_at": round(0.5 * (s0 + s1), 3),
-            "idle_span": [round(s0, 3), round(s1, 3)],
-            "start": round(s0, 3),
-            "end": round(s1, 3),
-            "duration": round(max(0.1, s1 - s0), 3),
-            "mar_score": 0.04,
-            "motion_delta": 0.005,
-        }
-        _IDLE_CACHE[cache_key] = res
-        return dict(res)
+        return _fallback_idle(s0, s1, mar=0.04, delta=0.005)
 
     best_sample = min(samples, key=lambda s: s["cost"])
     still_at = float(best_sample["t"])
 
-    # Find longest contiguous run of clean idle frames (or lowest cost window >= 0.4s)
     best_run: List[Dict[str, float]] = []
     cur_run: List[Dict[str, float]] = []
     for s in samples:
@@ -1124,7 +1362,7 @@ def find_listening_idle_window(
 
 
 def _clip_file_hash8(resolved: Path) -> str:
-    """Return an 8-char content/mtime signature so disk vision caches never collide across projects."""
+    """Compute an 8-char file size/mtime hash so disk vision caches stay unique per clip build."""
     try:
         st = resolved.stat()
         raw = f"{resolved.resolve()}|{st.st_size}|{int(st.st_mtime)}"
@@ -1138,9 +1376,9 @@ def analyze_clip_vision(
     speech_spans: Optional[Sequence[Any]] = None,
     sample_count: int = 5,
 ) -> Dict[str, Any]:
-    """Sample frames from `video_path` to determine face count, shot type, eye-anchored
-    `focus = [fx, fy]` (14% headroom / 38% eyeline), and clean mouth-closed idle window.
-    Persists results to `work/<stem>/vision_<hash8>.json` so vision data survives process exits.
+    """Sample frames from `video_path` to measure face count, shot type, baked split seams,
+    peripheral camera motion, safe-zoom focus windows (`1.05`, `1.08`, `1.10`), eye-anchored
+    focus (`14%` headroom, `38%` eyeline), and mouth-closed idle windows.
     """
     resolved = resolve(video_path)
     cache_key = str(resolved)
@@ -1164,9 +1402,18 @@ def analyze_clip_vision(
             except Exception:
                 pass
 
-    info = probe(resolved) if resolved.is_file() else {
-        "path": str(resolved), "duration": 6.0, "width": 720, "height": 1280, "fps": 24.0, "has_audio": True
-    }
+    info = (
+        probe(resolved)
+        if resolved.is_file()
+        else {
+            "path": str(resolved),
+            "duration": 6.0,
+            "width": 720,
+            "height": 1280,
+            "fps": 24.0,
+            "has_audio": True,
+        }
+    )
     w = int(info.get("width") or 720)
     h = int(info.get("height") or 1280)
     dur = float(info.get("duration") or 6.0)
@@ -1176,51 +1423,65 @@ def analyze_clip_vision(
     sampled_faces: List[List[Dict[str, Any]]] = []
     baked_seams: List[str] = []
     baked_seam_details: List[Dict[str, Any]] = []
+    bg_motion_deltas: List[float] = []
+    prev_bg_96: Optional["np.ndarray"] = None
     frames_sampled = 0
 
     if cv2 is not None and np is not None and resolved.is_file():
         cap = cv2.VideoCapture(str(resolved))
         if cap.isOpened():
-            fps = float(cap.get(cv2.CAP_PROP_FPS) or info.get("fps") or 24.0)
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or info.get("fps") or 24.0) or 24.0
             total_frames = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or round(dur * fps)))
             n_samples = max(1, min(sample_count, total_frames))
             indices = [
                 min(total_frames - 1, max(0, int(round((i + 0.5) / n_samples * total_frames))))
                 for i in range(n_samples)
             ]
-            for f_idx in indices:
+            for sample_ord, f_idx in enumerate(indices, 1):
                 cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     continue
                 frames_sampled += 1
+
+                gray_96 = cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (96, 96)).astype("float32")
+                if prev_bg_96 is not None:
+                    bg_motion_deltas.append(_peripheral_motion_delta(prev_bg_96, gray_96))
+                prev_bg_96 = gray_96
+
                 seam_det = _measure_baked_split_seam_detail(frame)
                 if seam_det["kind"]:
                     baked_seams.append(str(seam_det["kind"]))
                     baked_seam_details.append(seam_det)
-                _t_scan = time.perf_counter()
+
+                t_scan0 = time.perf_counter()
                 faces = prominent_faces(detect_faces_in_frame(frame, is_bgr=True))
+                scan_ms = (time.perf_counter() - t_scan0) * 1000.0
                 try:
                     import vision_scan
 
-                    vision_scan.record(resolved.name, f_idx / max(1.0, fps), frame, faces, indices.index(f_idx) + 1, len(indices), (time.perf_counter() - _t_scan) * 1000.0)
+                    vision_scan.record(
+                        resolved.name,
+                        f_idx / max(1.0, fps),
+                        frame,
+                        faces,
+                        sample_ord,
+                        len(indices),
+                        scan_ms,
+                    )
                 except Exception:
                     pass
                 if faces:
                     sampled_faces.append(faces)
             cap.release()
 
-    # Aggregate face count and geometry across sampled frames
     if sampled_faces:
-        # Choose representative frame with modal (or maximum reliable) face count
-        counts = [len(fl) for fl in sampled_faces]
         two_face_frames = [fl for fl in sampled_faces if len(fl) >= 2]
         if len(two_face_frames) >= max(1, len(sampled_faces) // 2):
             rep_faces = two_face_frames[len(two_face_frames) // 2][:2]
             face_count = 2
         else:
             one_face_frames = [fl for fl in sampled_faces if len(fl) >= 1]
-            # Average primary face bbox and eye center across frames for stability
             avg_bbox = [
                 round(sum(fl[0]["bbox_norm"][k] for fl in one_face_frames) / len(one_face_frames), 4)
                 for k in range(4)
@@ -1230,7 +1491,7 @@ def analyze_clip_vision(
                 for k in range(2)
             ]
             avg_focus = compute_eye_anchored_focus(avg_bbox, avg_eye)
-            # Deadband-smoothed focus path (first half vs second half)
+
             half_idx = max(1, len(one_face_frames) // 2)
             first_h = one_face_frames[:half_idx]
             last_h = one_face_frames[half_idx:] or first_h
@@ -1244,6 +1505,7 @@ def analyze_clip_vision(
                 focus_start, focus_end = f0, f1
             else:
                 focus_start, focus_end = avg_focus, avg_focus
+
             primary = dict(one_face_frames[len(one_face_frames) // 2][0])
             primary["bbox_norm"] = avg_bbox
             primary["eye_center_norm"] = avg_eye
@@ -1254,7 +1516,6 @@ def analyze_clip_vision(
             rep_faces = [primary]
             face_count = 1
     else:
-        # Graceful geometric default with 14% headroom / 38% eyeline
         default_bbox = [0.24, 0.14, 0.76, 0.86]
         default_eye = [0.5, 0.38]
         rep_faces = [{
@@ -1274,15 +1535,14 @@ def analyze_clip_vision(
         }]
         face_count = 1
 
-    # Determine shot_type: baked split vs in-frame two_shot vs single
     seam_majority = max(1, (frames_sampled or len(sampled_faces)) // 2)
     if baked_seams and len(baked_seams) >= seam_majority:
         seam_counts = {k: baked_seams.count(k) for k in set(baked_seams)}
         shot_type = max(seam_counts, key=seam_counts.get)
     elif face_count >= 2:
-        f0, f1 = rep_faces[0], rep_faces[1]
-        dx = abs(f0["eye_center_norm"][0] - f1["eye_center_norm"][0])
-        dy = abs(f0["eye_center_norm"][1] - f1["eye_center_norm"][1])
+        f0_rep, f1_rep = rep_faces[0], rep_faces[1]
+        dx = abs(f0_rep["eye_center_norm"][0] - f1_rep["eye_center_norm"][0])
+        dy = abs(f0_rep["eye_center_norm"][1] - f1_rep["eye_center_norm"][1])
         if dy > 0.35 and dx < 0.25:
             shot_type = "split_v_baked"
         elif dx >= 0.18:
@@ -1314,10 +1574,21 @@ def analyze_clip_vision(
                 seam_frac = round(min(0.65, max(0.35, 0.5 * (ys[0] + ys[1]))), 4)
                 seam_band_frac = [seam_frac, seam_frac]
 
+    face_x_spans = [
+        (float(f["bbox_norm"][0]), float(f["bbox_norm"][2]))
+        for f in rep_faces
+        if f.get("bbox_norm") and len(f["bbox_norm"]) >= 4
+    ]
+    safe_zooms = {
+        k: (list(v) if v is not None else None)
+        for k, v in compute_safe_zoom_map(face_x_spans).items()
+    }
+    cam_motion = round(float(sum(bg_motion_deltas) / len(bg_motion_deltas)), 3) if bg_motion_deltas else 0.0
+
     primary_face = rep_faces[0]
     idle_info = find_listening_idle_window(resolved, speech_spans=speech_spans, duration=dur)
 
-    result = {
+    result: Dict[str, Any] = {
         "path": str(resolved),
         "width": w,
         "height": h,
@@ -1330,6 +1601,8 @@ def analyze_clip_vision(
         "baked_split": baked_split,
         "seam_frac": seam_frac,
         "seam_band_frac": seam_band_frac,
+        "camera_motion": cam_motion,
+        "safe_zoom_ranges": safe_zooms,
         "focus": primary_face["focus"],
         "focus_end": primary_face.get("focus_end", primary_face["focus"]),
         "bbox_norm": primary_face["bbox_norm"],
@@ -1352,37 +1625,34 @@ def analyze_clip_vision(
     return dict(result)
 
 
-
-
-# Convenient aliases
 analyze_clip = analyze_clip_vision
 track_clip = analyze_clip_vision
 
 
-
-
-
-
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Analyze clip face/headroom geometry, idle windows, and recommend layouts.")
-    ap.add_argument("clips", nargs="*", help="Video clip paths to analyze")
-    ap.add_argument("--script", help="Optional script file for layout recommendation")
-    ap.add_argument("--preset", default="auto", help="Layout preset: auto | hybrid | single | split_v | split_h | chat_bar | video_call")
-    ap.add_argument("--out", help="Optional JSON output path")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser(
+        description="Analyze clip face/headroom geometry, baked split seams, camera motion, and idle windows."
+    )
+    parser.add_argument("clips", nargs="*", help="Video clip paths to analyze")
+    parser.add_argument("--script", help="Optional script file path")
+    parser.add_argument(
+        "--preset",
+        default="auto",
+        help="Layout preset: auto | hybrid | single | split_v | split_h | chat_bar | video_call",
+    )
+    parser.add_argument("--out", help="Optional JSON output path")
+    args = parser.parse_args()
 
     clips_data: Dict[str, Any] = {}
-    for c in args.clips:
-        p = resolve(c)
+    for clip_arg in args.clips:
+        p = resolve(clip_arg)
         info = analyze_clip_vision(p)
         clips_data[p.stem] = info
-        # Also persist vision.json in work/<stem>/ if work/<stem> exists
         work_dir = clip_work_dir(p)
         if work_dir.is_dir():
             write_json(work_dir / "vision.json", info)
 
     output_payload = {"clips": clips_data}
-
     if args.out:
         write_json(resolve(args.out), output_payload)
     print(json.dumps(output_payload, indent=2, ensure_ascii=False))

@@ -1,59 +1,91 @@
-"""One-command post-render verifier (`verify.py`).
+"""One-command post-render Deep QC verifier (`verify.py`).
 
 Usage:
     python3 scripts/verify.py work/<project>/plan.json [--script input/script/<script>.txt]
-    python3 scripts/verify.py work/<project>/plan.edl
+    python3 scripts/verify.py work/<project>/plan.edl [--script input/script/<script>.txt]
 
-Performs 5 deterministic checks and outputs a 5-line PASS/FAIL summary:
-1. Output MP4 existence, resolution, FPS, and duration vs expected timeline total (±0.08s).
-2. Integrated loudness (via EBU R128 / loudnorm or cached render measurement).
-3. Cut boundary verification against cached word spans + 10ms RMS energy (clipped words, internal pauses >1.3s).
-4. Script Coverage Score (`21/21 script lines present in order, 100% coverage, 0 boundary duplicates`)
-   by mapping kept `[start, end]` segment slices over `hq_words.json`/`words.json` against the script.
-5. Builds One Single Contact Sheet (`work/<project>/marks_contact_sheet.jpg`, `<80 KB`) via FFmpeg `tile`
-   filter showing every `✓`/`✗` mark frame and jump-cut frame in a single compact strip, AND performs
-   a deterministic RGB pixel check (`G - R` for right, `R - G` for wrong) on each mark region.
+Performs deterministic post-render Deep QC checks:
+1. Output MP4 existence, resolution, FPS, and duration vs expected timeline total (±0.15s).
+2. Integrated loudness (EBU R128 / loudnorm) and True Peak ceiling.
+3. Cut boundary verification against cached word spans + 10ms RMS energy, internal dead air (>0.60s), and splice clicks.
+4. Script coverage, phrase/word repetition detection, and strict script line ordering.
+5. Deterministic RGB pixel check on every mark frame + compact `marks_contact_sheet.jpg` (<95 KB).
+6. Split-screen zoom/headroom/intra-split rules and hook transition limits.
+7. Subtitle `.srt` sidecar cue ordering/non-overlap and canvas bounds safety.
+8. 9:16 & 1:1 Square frame-level Deep QC: black frames, frozen frames, face crop safety, and banner-on-face overlap.
+9. Picture-vs-plan frame correspondence across every cut + `review_sheet.jpg` contact sheet generation.
 """
 from __future__ import annotations
 
 import argparse
 import array
+import inspect
 import json
 import math
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Sequence, Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (  # noqa: E402
-    FFMPEG,
-    ROOT,
-    OUTPUT,
-    WORK,
-    clip_work_dir,
-    _normalize_mark_type,
-    probe,
-    read_json,
-    resolve,
-    square_job_output,
-    tc,
-    write_json,
+import common  # noqa: E402
+
+
+def _fallback_normalize_mark_type(mark_type: str) -> str:
+    t = str(mark_type or "right").strip().lower()
+    if t in ("right", "correct", "check", "tick", "green", "ok", "true", "yes"):
+        return "right"
+    if t in ("wrong", "error", "cross", "x", "red", "false", "no", "incorrect"):
+        return "wrong"
+    return t
+
+
+FFMPEG: Path = common.FFMPEG
+ROOT: Path = getattr(common, "ROOT", Path(__file__).resolve().parent.parent)
+WORK: Path = getattr(common, "WORK", ROOT / "work")
+OUTPUT: Path = getattr(
+    common,
+    "OUTPUT",
+    Path(os.environ.get("ZENO_OUTPUT_DIR", "").strip() or (Path.home() / "Downloads" / "Zeno Outs")).expanduser(),
 )
+DEFAULT_LOUDNESS_LUFS: float = float(getattr(common, "DEFAULT_LOUDNESS_LUFS", -10.5))
+
+clip_work_dir = common.clip_work_dir
+_normalize_mark_type = getattr(
+    common,
+    "_normalize_mark_type",
+    getattr(common, "normalize_mark_type", _fallback_normalize_mark_type),
+)
+probe = common.probe
+read_json = common.read_json
+resolve = common.resolve
+square_job_output = common.square_job_output
+strip_ratio_prefix = getattr(common, "strip_ratio_prefix", lambda s: re.sub(r"^(?:reel|sq)[\s_-]+", "", str(s or "").strip(), flags=re.IGNORECASE).strip() or str(s or "").strip())
+tc = common.tc
+write_json = common.write_json
 
 try:
     import edl_parser
 except Exception:
-    edl_parser = None
+    edl_parser = None  # type: ignore[assignment]
 
 try:
-    from prepare import (
-        _clean_token,
-        _word_similarity,
-        compute_10ms_rms_envelope,
-        parse_script_file,
+    import prepare as _prepare_mod
+
+    _clean_token = getattr(
+        _prepare_mod,
+        "_clean_token",
+        getattr(_prepare_mod, "clean_token", lambda w: re.sub(r"[^\w\u0900-\u0D7F']", "", str(w or "").lower()).strip()),
     )
+    _word_similarity = getattr(
+        _prepare_mod,
+        "_word_similarity",
+        getattr(_prepare_mod, "word_similarity", lambda a, b: 1.0 if _clean_token(a) == _clean_token(b) else 0.0),
+    )
+    compute_10ms_rms_envelope = getattr(_prepare_mod, "compute_10ms_rms_envelope", None)
+    parse_script_file = getattr(_prepare_mod, "parse_script_file", None)
 except Exception:
     _clean_token = lambda w: re.sub(r"[^\w\u0900-\u0D7F']", "", str(w or "").lower()).strip()  # noqa: E731
     _word_similarity = lambda a, b: 1.0 if _clean_token(a) == _clean_token(b) else 0.0  # noqa: E731
@@ -65,12 +97,147 @@ def load_plan(plan_arg: str | Path) -> Tuple[Path, Dict[str, Any]]:
     """Load either plan.json or plan.edl into a plan dict."""
     p = resolve(plan_arg)
     if p.suffix.lower() == ".edl":
-        if edl_parser is not None and hasattr(edl_parser, "parse_edl"):
-            return p, edl_parser.parse_edl(p)
+        if edl_parser is not None:
+            parse_fn = getattr(edl_parser, "parse_edl", getattr(edl_parser, "load_edl", None))
+            if callable(parse_fn):
+                return p, parse_fn(p)
         json_sibling = p.with_suffix(".json")
         if json_sibling.is_file():
             return p, read_json(json_sibling)
     return p, read_json(p)
+
+
+def _locate_output_mp4(plan: Dict[str, Any], p_file: Path) -> Path:
+    """Resolve the rendered 9:16 master MP4 whether in `plan['output']`, `output/`, or `~/Downloads/Zeno Outs/<FolderName>/`."""
+    raw_out = plan.get("output")
+    primary = resolve(raw_out) if raw_out else (OUTPUT / f"{p_file.parent.name}.mp4")
+    if primary.is_file():
+        return primary
+
+    stem = strip_ratio_prefix(Path(str(raw_out)).stem) if raw_out else strip_ratio_prefix(p_file.parent.name)
+    if not stem:
+        stem = p_file.parent.name
+    dl_root = Path(os.environ.get("ZENO_OUTPUT_DIR", "").strip() or (Path.home() / "Downloads" / "Zeno Outs")).expanduser()
+    candidates = [
+        dl_root / stem / f"reel_{stem}.mp4",
+        OUTPUT / stem / f"reel_{stem}.mp4",
+        ROOT / "output" / stem / f"reel_{stem}.mp4",
+        ROOT / "output" / f"reel_{stem}.mp4",
+        ROOT / "output" / f"{stem}.mp4",
+        OUTPUT / f"reel_{stem}.mp4",
+    ]
+    for cand in candidates:
+        if cand.is_file():
+            return cand
+    return primary
+
+
+def _segment_hold_tail(seg: Dict[str, Any]) -> float:
+    """Return freeze-tail hold duration (seconds) after source clip end."""
+    fn = getattr(common, "segment_hold_tail", None)
+    if callable(fn):
+        try:
+            return max(0.0, float(fn(seg) or 0.0))
+        except Exception:
+            pass
+    try:
+        return max(0.0, float(seg.get("hold_tail") or seg.get("hold") or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _segment_speed(seg: Dict[str, Any]) -> float:
+    """Return clamped playback speed factor (`common.segment_speed` with safe fallback)."""
+    fn = getattr(common, "segment_speed", None)
+    if callable(fn):
+        try:
+            return float(fn(seg))
+        except Exception:
+            pass
+    if not isinstance(seg, dict):
+        return 1.0
+    try:
+        val = float(seg.get("speed") if seg.get("speed") is not None else 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(val) or val <= 0.0:
+        return 1.0
+    return max(0.15, min(4.0, val))
+
+
+def _segment_is_muted(seg: Dict[str, Any]) -> bool:
+    """Return True when segment mutes source audio (`common.segment_is_muted` with safe fallback)."""
+    fn = getattr(common, "segment_is_muted", None)
+    if callable(fn):
+        try:
+            return bool(fn(seg))
+        except Exception:
+            pass
+    if not isinstance(seg, dict):
+        return False
+    if bool(seg.get("mute")):
+        return True
+    am = str(seg.get("audio_mode") or seg.get("audio") or "").strip().lower()
+    return am in ("mute", "off", "none")
+
+
+def _segment_is_beat(seg: Dict[str, Any]) -> bool:
+    """Return True for non-spoken visual beats (`common.segment_is_beat` with safe fallback)."""
+    fn = getattr(common, "segment_is_beat", None)
+    if callable(fn):
+        try:
+            return bool(fn(seg))
+        except Exception:
+            pass
+    if not isinstance(seg, dict):
+        return False
+    return bool(seg.get("beat"))
+
+
+def _segment_play_duration(seg: Dict[str, Any]) -> float:
+    """Return rendered moving playback duration excluding `hold_tail` (`common.segment_play_duration` fallback)."""
+    fn = getattr(common, "segment_play_duration", None)
+    if callable(fn):
+        try:
+            return max(0.0, float(fn(seg) or 0.0))
+        except Exception:
+            pass
+    src_dur = max(0.0, float(seg.get("end", 0.0) or 0.0) - float(seg.get("start", 0.0) or 0.0))
+    return max(0.0, src_dur / _segment_speed(seg))
+
+
+def _src_to_seg_time(seg: Dict[str, Any], src_t: float) -> float:
+    """Map absolute source timestamp to segment-relative rendered seconds (`common.src_to_seg_time` fallback)."""
+    fn = getattr(common, "src_to_seg_time", None)
+    if callable(fn):
+        try:
+            return float(fn(seg, src_t))
+        except Exception:
+            pass
+    return max(0.0, (float(src_t) - float(seg.get("start", 0.0) or 0.0)) / _segment_speed(seg))
+
+
+def _seg_to_src_time(seg: Dict[str, Any], seg_t: float) -> float:
+    """Map segment-relative rendered seconds back to absolute source timestamp (`common.seg_to_src_time` fallback)."""
+    fn = getattr(common, "seg_to_src_time", None)
+    if callable(fn):
+        try:
+            return float(fn(seg, seg_t))
+        except Exception:
+            pass
+    return float(seg.get("start", 0.0) or 0.0) + max(0.0, float(seg_t)) * _segment_speed(seg)
+
+
+def _segment_duration(seg: Dict[str, Any]) -> float:
+    """Return effective timeline duration handling `speed` + `hold_tail` via `common.segment_duration`."""
+    fn = getattr(common, "segment_duration", None)
+    if callable(fn):
+        if callable(getattr(common, "segment_speed", None)) or abs(_segment_speed(seg) - 1.0) <= 1e-6:
+            try:
+                return max(0.0, float(fn(seg) or 0.0))
+            except Exception:
+                pass
+    return _segment_play_duration(seg) + _segment_hold_tail(seg)
 
 
 def compute_timeline_starts(plan: Dict[str, Any], fps: int) -> Tuple[List[float], List[float], float, Dict[str, float]]:
@@ -78,22 +245,27 @@ def compute_timeline_starts(plan: Dict[str, Any], fps: int) -> Tuple[List[float]
     segs = plan.get("segments", [])
     durs: List[float] = []
     for s in segs:
-        dur = float(s["end"]) - float(s["start"])
+        dur = _segment_duration(s)
         frames = max(1, round(dur * fps))
         durs.append(frames / fps)
 
     starts: List[float] = []
     total = 0.0
-    for i, s in enumerate(segs):
+    for i, _s in enumerate(segs):
         starts.append(total)
         total += durs[i]
 
-    seg_start = {str(s.get("id", f"S{i+1}")): starts[i] for i, s in enumerate(segs)}
+    seg_start = {str(s.get("id", f"S{i + 1}")): starts[i] for i, s in enumerate(segs)}
     return starts, durs, total, seg_start
 
 
-def check_loudness(mp4_path: Path, target_lufs: float = -11.5) -> Tuple[bool, float, float]:
+def check_loudness(mp4_path: Path, target_lufs: Optional[float] = None) -> Tuple[bool, float, float]:
     """Measure integrated loudness (LUFS) and True Peak (dBTP), caching by file mtime + size."""
+    eff_target = (
+        float(getattr(common, "DEFAULT_LOUDNESS_LUFS", DEFAULT_LOUDNESS_LUFS))
+        if target_lufs is None
+        else float(target_lufs)
+    )
     cache_path = WORK / "_segments" / "loudness_cache.json"
     cache_data: Dict[str, Any] = {}
     if cache_path.is_file():
@@ -115,7 +287,7 @@ def check_loudness(mp4_path: Path, target_lufs: float = -11.5) -> Tuple[bool, fl
             "-i",
             str(mp4_path),
             "-af",
-            f"loudnorm=I={target_lufs}:TP=-1.0:LRA=11:print_format=json",
+            f"loudnorm=I={eff_target}:TP=-1.0:LRA=11:print_format=json",
             "-f",
             "null",
             "-",
@@ -134,36 +306,69 @@ def check_loudness(mp4_path: Path, target_lufs: float = -11.5) -> Tuple[bool, fl
         else:
             i_lufs, tp_db = float("nan"), float("nan")
 
-    ok = abs(i_lufs - target_lufs) <= 1.8 and tp_db <= -0.5
+    ok = abs(i_lufs - eff_target) <= 1.8 and tp_db <= -0.5
     return ok, i_lufs, tp_db
 
 
 def _extract_zoom_pair(seg: Dict[str, Any]) -> Tuple[float, float]:
-    """Parse raw un-clamped (z0, z1) numeric zoom factors from numeric or string zoom specs."""
+    """Parse raw un-clamped (z0, z1) numeric zoom factors (accounting for `zoom_peak` on `bell` curves)."""
     raw_z = seg.get("zoom", 1.0)
     z0, z1 = 1.0, 1.0
+    z_peak: Optional[float] = None
     if isinstance(raw_z, (int, float)):
         z0 = z1 = float(raw_z)
     elif raw_z is not None:
-        s = str(raw_z).strip()
+        s_full = str(raw_z).strip()
+        s = s_full.split("@", 1)[0].strip()
         prefix = ""
         if ":" in s:
             prefix, rhs = s.split(":", 1)
             prefix = prefix.strip().lower()
-            s = rhs.split("@", 1)[0].strip()
+            s = rhs.strip()
+        elif s.lower() in (
+            "sudden_in", "punch_in", "push", "in", "zoom_in", "mild_in", "flash_zoom",
+            "sudden_out", "punch_out", "pull", "out", "zoom_out", "mild_out", "bell", "smooth",
+        ):
+            prefix = s.lower()
+            s = ""
         if "->" in s:
-            a, b = s.split("->", 1)
+            parts = [p.strip() for p in s.split("->") if p.strip()]
             try:
-                z0, z1 = float(a.strip()), float(b.strip())
+                vals = [float(p) for p in parts]
+                if len(vals) >= 3:
+                    z0, z_peak, z1 = vals[0], vals[1], vals[-1]
+                elif len(vals) == 2:
+                    z0, z1 = vals[0], vals[1]
+                elif len(vals) == 1:
+                    z0 = z1 = vals[0]
             except ValueError:
                 z0 = z1 = 1.0
+        elif not s:
+            if prefix in ("zoom_in", "mild_in"):
+                z0, z1 = 1.0, 1.08
+            elif prefix in ("zoom_out", "mild_out"):
+                z0, z1 = 1.08, 1.0
+            elif prefix in ("sudden_in", "punch_in", "push", "in"):
+                z0, z1 = 1.0, 1.10
+            elif prefix in ("sudden_out", "punch_out", "pull", "out"):
+                z0, z1 = 1.10, 1.0
+            elif prefix == "flash_zoom":
+                z0, z1 = 1.0, 1.12
+            elif prefix == "bell":
+                z0, z_peak, z1 = 1.20, 1.55, 1.0
         else:
             try:
                 v = float(s)
-                if prefix in ("sudden_in", "push", "in") or "sudden_in" in str(raw_z) or "push" in str(raw_z):
+                if prefix in ("sudden_in", "punch_in", "push", "in", "zoom_in", "mild_in", "flash_zoom") or any(
+                    k in s_full.lower() for k in ("sudden_in", "zoom_in", "mild_in", "push", "flash_zoom")
+                ):
                     z0, z1 = 1.0, v
-                elif prefix in ("sudden_out", "pull", "out") or "sudden_out" in str(raw_z) or "pull" in str(raw_z):
+                elif prefix in ("sudden_out", "punch_out", "pull", "out", "zoom_out", "mild_out") or any(
+                    k in s_full.lower() for k in ("sudden_out", "zoom_out", "mild_out", "pull")
+                ):
                     z0, z1 = v, 1.0
+                elif prefix == "bell":
+                    z0, z_peak, z1 = 1.20, v, 1.0
                 else:
                     z0 = z1 = v
             except ValueError:
@@ -173,6 +378,13 @@ def _extract_zoom_pair(seg: Dict[str, Any]) -> Tuple[float, float]:
             z1 = float(seg["zoom_to"])
         except (TypeError, ValueError):
             pass
+    if seg.get("zoom_peak") is not None:
+        try:
+            z_peak = float(seg["zoom_peak"])
+        except (TypeError, ValueError):
+            pass
+    if z_peak is not None:
+        return min(z0, z1, z_peak), max(z0, z1, z_peak)
     return z0, z1
 
 
@@ -204,6 +416,51 @@ def _subtract_intervals(
 
 
 DEAD_AIR_THRESHOLD = 0.60
+CLIPPED_WORD_MARGIN_SEC = 0.07
+CLIPPED_WORD_RMS_FLOOR_DB = -28.0
+
+
+def _resolve_clip_cache_dir(src: Any, plan: Optional[Dict[str, Any]] = None) -> Path:
+    """Resolve a clip's cache folder via `clip_work_dir(src)` or fallback `clip_caches.json`."""
+    wdir = clip_work_dir(src)
+    if (wdir / "hq_words.json").is_file() or (wdir / "words.json").is_file() or (wdir / "audio16k.wav").is_file():
+        return wdir
+    if common.clip_work_dir is not clip_work_dir:
+        wdir_common = common.clip_work_dir(src)
+        if (
+            (wdir_common / "hq_words.json").is_file()
+            or (wdir_common / "words.json").is_file()
+            or (wdir_common / "audio16k.wav").is_file()
+        ):
+            return wdir_common
+    clip_cache_root = getattr(common, "CLIP_CACHE", WORK / "_clips")
+    cand_dirs: List[Path] = []
+    if isinstance(plan, dict) and plan.get("_plan_dir"):
+        cand_dirs.append(Path(str(plan["_plan_dir"])))
+    cand_dirs.append(WORK)
+    for proj in cand_dirs:
+        cmap_file = proj / "clip_caches.json"
+        if not cmap_file.is_file():
+            continue
+        try:
+            cmap = read_json(cmap_file)
+            if isinstance(cmap, dict):
+                p = Path(str(src or ""))
+                for key in (str(src or ""), p.name, p.stem):
+                    mapped = cmap.get(key)
+                    if mapped:
+                        mapped_p = Path(str(mapped))
+                        cands = (
+                            [mapped_p]
+                            if mapped_p.is_absolute()
+                            else [clip_cache_root / mapped_p, WORK / mapped_p, proj / mapped_p]
+                        )
+                        for cand in cands:
+                            if cand.is_dir():
+                                return cand
+        except Exception:
+            pass
+    return wdir
 
 
 def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None) -> Tuple[bool, int, int, int, int]:
@@ -226,13 +483,19 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
             marks_by_sid.setdefault(msid, []).append(mk)
 
     timeline_mark_holds: List[Tuple[float, float]] = []
+    seg_speeds: List[float] = []
 
     for i, s in enumerate(segs):
-        sid = str(s.get("id", f"S{i+1}"))
+        sid = str(s.get("id", f"S{i + 1}"))
         stem = Path(str(s.get("src", ""))).stem
-        wdir = clip_work_dir(s.get("src", ""))
+        wdir = _resolve_clip_cache_dir(s.get("src", ""), plan)
         st, en = float(s["start"]), float(s["end"])
-        dur = max(0.0, en - st)
+        spd = _segment_speed(s)
+        seg_speeds.append(spd)
+        play_dur = _segment_play_duration(s)
+        hold_tail = _segment_hold_tail(s)
+        eff_dur = seg_durs[i] if i < len(seg_durs) else _segment_duration(s)
+        is_muted_or_beat = _segment_is_muted(s) or _segment_is_beat(s)
 
         if i > 0 and Path(str(segs[i - 1].get("src", ""))).stem == stem:
             z0, z1 = _extract_zoom_pair(s)
@@ -244,15 +507,27 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
         clip_mark_holds: List[Tuple[float, float]] = []
         t0_tl = starts[i] if i < len(starts) else float(seg_start_map.get(sid, 0.0))
         for mk in seg_marks:
-            m_at = float(mk.get("at", max(0.0, dur - 0.60)))
+            m_at = float(mk.get("at", max(0.0, eff_dur - 0.60)))
             m_dur = float(mk.get("duration", 0.56) or 0.56)
             hold_rel_s = max(0.0, m_at - 0.15)
-            # End-of-sentence flash holds extend through the mark pulse + tail to cut end
-            hold_rel_e = dur if (m_at + m_dur >= dur - 0.45) else min(dur, m_at + m_dur + 0.35)
-            clip_mark_holds.append((st + hold_rel_s, st + hold_rel_e))
-            timeline_mark_holds.append((t0_tl + hold_rel_s, t0_tl + hold_rel_e))
+            tl_hold_e = eff_dur if (m_at + m_dur >= eff_dur - 0.45) else min(eff_dur, m_at + m_dur + 0.35)
+            clip_hold_s = min(en, _seg_to_src_time(s, hold_rel_s))
+            clip_hold_e = en if (m_at + m_dur >= play_dur - 0.45) else min(en, _seg_to_src_time(s, m_at + m_dur + 0.35))
+            clip_mark_holds.append((clip_hold_s, clip_hold_e))
+            timeline_mark_holds.append((t0_tl + hold_rel_s, t0_tl + tl_hold_e))
+        if hold_tail > 0.0:
+            # Exempt freeze-tail hold beat from rendered MP4 dead-air silence detection using play_dur (not raw end-start)
+            timeline_mark_holds.append((t0_tl + max(0.0, play_dur - 0.10), t0_tl + eff_dur))
 
-        # Check internal pauses inside [st, en] (>0.60s dead air threshold, excluding mark flash holds)
+        if is_muted_or_beat:
+            # Exempt muted / visual-beat hook windows from rendered MP4 silencedetect & skip spoken silence/word checks
+            timeline_mark_holds.append((t0_tl, t0_tl + eff_dur))
+            continue
+
+        # Scale silence thresholds by 1.0 / speed on unmuted slowed segments
+        seg_dead_air = (DEAD_AIR_THRESHOLD / max(0.25, spd)) if spd < 1.0 else DEAD_AIR_THRESHOLD
+
+        # Check internal pauses inside [st, en] (>seg_dead_air threshold, excluding mark flash holds)
         sil_path = wdir / "silences.json"
         if sil_path.is_file():
             try:
@@ -268,29 +543,36 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
                     ov_s = max(st + 0.15, sl["start"])
                     ov_e = min(en - 0.15, sl["end"])
                     for rem_s, rem_e in _subtract_intervals(ov_s, ov_e, clip_mark_holds):
-                        if (rem_e - rem_s) > DEAD_AIR_THRESHOLD:
+                        if (rem_e - rem_s) > seg_dead_air:
                             long_pauses += 1
             except Exception:
                 pass
 
         # Check if cut boundary slices through the middle of a kept word
-        hq_path = wdir / "hq_words.json"
-        if hq_path.is_file() and compute_10ms_rms_envelope is not None:
+        words_path = wdir / "hq_words.json"
+        if not words_path.is_file():
+            words_path = wdir / "words.json"
+        if words_path.is_file() and compute_10ms_rms_envelope is not None:
             try:
-                words = read_json(hq_path)
+                words = read_json(words_path)
                 rms = compute_10ms_rms_envelope(wdir / "audio16k.wav")
                 for boundary_t in (st, en):
                     if boundary_t <= 0.05:
                         continue
-                    crossing = any(w["start"] + 0.18 < boundary_t < w["end"] - 0.18 for w in words)
+                    crossing = any(
+                        float(w.get("start", 0.0)) + CLIPPED_WORD_MARGIN_SEC
+                        < boundary_t
+                        < float(w.get("end", 0.0)) - CLIPPED_WORD_MARGIN_SEC
+                        for w in words
+                    )
                     if crossing and rms:
                         near_db = [db for t, db in rms if abs(t - boundary_t) <= 0.02]
-                        if near_db and max(near_db) > -18.0:
+                        if near_db and max(near_db) > CLIPPED_WORD_RMS_FLOOR_DB:
                             clipped_words += 1
             except Exception:
                 pass
 
-    # Also scan the rendered MP4 audio stream directly for any internal dead air >0.60s inside cuts
+    # Scan the rendered MP4 audio stream directly for any internal dead air >0.60s inside cuts
     if mp4_path is not None and mp4_path.is_file() and long_pauses == 0:
         try:
             r = subprocess.run(
@@ -322,8 +604,10 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
                     t1_s = t0_s + seg_durs[idx_s]
                     ov_s = max(t0_s + 0.15, s_start)
                     ov_e = min(t1_s - 0.15, s_end)
+                    spd_s = seg_speeds[idx_s] if idx_s < len(seg_speeds) else 1.0
+                    seg_thresh = (DEAD_AIR_THRESHOLD / max(0.25, spd_s)) if spd_s < 1.0 else DEAD_AIR_THRESHOLD
                     for rem_s, rem_e in _subtract_intervals(ov_s, ov_e, timeline_mark_holds):
-                        if (rem_e - rem_s) > DEAD_AIR_THRESHOLD:
+                        if (rem_e - rem_s) > seg_thresh:
                             long_pauses += 1
         except Exception:
             pass
@@ -331,8 +615,6 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
     # Inspect ±8ms windows around each inter-segment splice for full-scale step clicks
     if mp4_path is not None and mp4_path.is_file() and len(segs) > 1:
         try:
-            fps = int((plan.get("canvas") or {}).get("fps", 24))
-            starts, _, _ = compute_timeline_starts(plan, fps)
             r_pcm = subprocess.run(
                 [
                     str(FFMPEG),
@@ -407,7 +689,7 @@ def check_script_coverage(
     script_path: Optional[Path] = None,
 ) -> Tuple[bool, int, int, int]:
     """Compute Script Coverage Score by mapping kept [start, end] segment slices over
-    hq_words.json / words.json against the script (avoiding long-form re-transcription).
+    hq_words.json / words.json against the script (avoiding re-transcription).
     Returns (passed, covered_lines, total_lines, boundary_duplicates).
     """
     if script_path is None:
@@ -424,7 +706,7 @@ def check_script_coverage(
 
         accepted_raw = _so.read_accepted(Path(plan["_plan_dir"])) if plan.get("_plan_dir") else {}
         accepted = set(accepted_raw)
-    except Exception:   # noqa: BLE001
+    except Exception:  # noqa: BLE001
         _so = None  # type: ignore[assignment]
         accepted = set()
 
@@ -469,14 +751,17 @@ def check_script_coverage(
 
     segs = plan.get("segments", [])
     seg_word_slices: List[List[str]] = []
-    seg_word_keys: List[List[Tuple[str, float]]] = []   # (clip, start time) of each kept word: the same transcript word on both sides of a cut is not said twice
+    seg_word_keys: List[List[Tuple[str, float]]] = []
 
     for s in segs:
+        if _segment_is_muted(s) or _segment_is_beat(s):
+            seg_word_slices.append([])
+            seg_word_keys.append([])
+            continue
         stem = Path(str(s.get("src", ""))).stem
-        wdir = clip_work_dir(s.get("src", ""))
+        wdir = _resolve_clip_cache_dir(s.get("src", ""), plan)
         st, en = float(s["start"]), float(s["end"])
         words: List[Dict[str, Any]] = []
-        # Read only the primary word file (hq_words.json preferred over words.json)
         for fname in ("hq_words.json", "words.json"):
             fpath = wdir / fname
             if fpath.is_file():
@@ -509,7 +794,8 @@ def check_script_coverage(
     explicit_by_seg: List[List[str]] = []
     seg_line_ids: List[List[str]] = []
     for idx, s in enumerate(segs):
-        sid_note = f"{s.get('id', '')} {s.get('note', '')}"
+        is_mb = _segment_is_muted(s) or _segment_is_beat(s)
+        sid_note = str(s.get("id", "")) if is_mb else f"{s.get('id', '')} {s.get('note', '')}"
         explicit_lids = _extract_explicit_line_ids(sid_note, valid_ids=valid_lids)
         explicit_by_seg.append(list(explicit_lids))
         if not explicit_lids and script_lines and seg_word_slices[idx]:
@@ -532,9 +818,9 @@ def check_script_coverage(
 
     repeated_words: List[str] = []
 
-    # 1. Intra-segment 2..6-word phrase stumbles and 1-word stutters (compared against THAT line's script tokens, never full-script word counts)
+    # 1. Intra-segment 2..6-word phrase stumbles and 1-word stutters
     for idx, toks in enumerate(seg_word_slices):
-        sid = str(segs[idx].get("id", f"S{idx+1}"))
+        sid = str(segs[idx].get("id", f"S{idx + 1}"))
         if _is_accepted_ref(sid):
             continue
         line_toks = [
@@ -592,8 +878,8 @@ def check_script_coverage(
 
     # 2. Inter-segment 2..6-word phrase stumbles and 1-word boundary duplicates across consecutive cuts
     for i in range(len(segs) - 1):
-        sid_a = str(segs[i].get("id", f"S{i+1}"))
-        sid_b = str(segs[i + 1].get("id", f"S{i+2}"))
+        sid_a = str(segs[i].get("id", f"S{i + 1}"))
+        sid_b = str(segs[i + 1].get("id", f"S{i + 2}"))
         if _is_accepted_ref(sid_a) or _is_accepted_ref(sid_b):
             continue
         if not seg_word_slices[i] or not seg_word_slices[i + 1]:
@@ -662,11 +948,9 @@ def check_script_coverage(
                 if not scripted_pair:
                     repeated_words.append(f"{sid_a}->{sid_b}: boundary repeat '{w_last} {w_first}'")
 
-    # 3. Also integrate script_order.repeat_problems if available
+    # 3. Integrate script_order.repeat_problems if available
     if _so is not None and hasattr(_so, "repeat_problems"):
         try:
-            import inspect
-
             rp_fn = getattr(_so, "repeat_problems")
             sig_params = list(inspect.signature(rp_fn).parameters.keys())
             seg_pairs = [(str(s.get("id", "")), seg_word_slices[i]) for i, s in enumerate(segs)]
@@ -677,8 +961,13 @@ def check_script_coverage(
             else:
                 extra_probs = rp_fn(seg_pairs)
             for pr in extra_probs or []:
-                pr_str = str(pr)
-                if not _is_accepted_ref(pr_str) and pr_str not in repeated_words:
+                pr_str = str(pr.get("message", str(pr))) if isinstance(pr, dict) else str(pr)
+                pr_id = str(pr.get("id", "")) if isinstance(pr, dict) else ""
+                if (
+                    not _is_accepted_ref(pr_str)
+                    and not (pr_id and _is_accepted_ref(pr_id))
+                    and pr_str not in repeated_words
+                ):
                     repeated_words.append(pr_str)
         except Exception:
             pass
@@ -692,7 +981,11 @@ def check_script_coverage(
         return (boundary_dups == 0), len(segs), len(segs), boundary_dups
 
     all_kept_tokens = [tok for sl in seg_word_slices for tok in sl]
-    all_notes = " ".join(str(s.get("id", "")) + " " + str(s.get("note", "")) for s in segs)
+    all_notes = " ".join(
+        str(s.get("id", ""))
+        + ("" if (_segment_is_muted(s) or _segment_is_beat(s)) else (" " + str(s.get("note", ""))))
+        for s in segs
+    )
     all_notes_norm = all_notes.replace("_", " ")
     all_explicit_lids = {lid_item for grp in explicit_by_seg for lid_item in grp}
 
@@ -701,14 +994,14 @@ def check_script_coverage(
     for sline in script_lines:
         lid = sline["id"]
         stokens = sline["tokens"]
-        if lid in accepted:     # a deliberate exception in decisions.txt (a visual brief, a scene cue): the plan check already accepted it
+        if lid in accepted:
             covered += 1
             continue
-        # Check if line ID is explicitly covered in segment IDs/notes in order OR token overlap >= 0.35
         matched_seg = None
         for idx in range(last_seg_idx, len(segs)):
+            is_mb_idx = _segment_is_muted(segs[idx]) or _segment_is_beat(segs[idx])
             sid_str = str(segs[idx].get("id", ""))
-            note_str = str(segs[idx].get("note", ""))
+            note_str = "" if is_mb_idx else str(segs[idx].get("note", ""))
             sid_note_norm = (sid_str + " " + note_str).replace("_", " ")
             if lid in explicit_by_seg[idx] or re.search(rf"\b{re.escape(lid)}(?:[a-z]\d*)?\b", sid_note_norm):
                 matched_seg = idx
@@ -749,7 +1042,7 @@ def check_script_coverage(
         if wrong:
             passed = False
             print("[ORDER FAIL] " + "; ".join(wrong))
-    except Exception as exc:   # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         print(f"[ORDER FAIL] could not measure order: {exc}")
         passed = False
     return passed, covered, total_lines, boundary_dups
@@ -778,6 +1071,169 @@ def _mark_bbox(pos: Any, W: int, H: int, size_frac: float = 0.22) -> Tuple[int, 
     return x0, y0, size, size
 
 
+def _read_rgb_frame(mp4_path: Path, t_sec: float, W: int, H: int) -> bytes:
+    """Decode a single `W x H` RGB24 frame from `mp4_path` at `t_sec` seconds."""
+    cmd = [
+        str(FFMPEG),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{max(0.0, float(t_sec)):.3f}",
+        "-i",
+        str(mp4_path),
+        "-vf",
+        f"scale={int(W)}:{int(H)}",
+        "-frames:v",
+        "1",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-",
+    ]
+    return subprocess.run(cmd, capture_output=True).stdout or b""
+
+
+def _collect_deduped_marks(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Collect both top-level `plan['marks']` and inline `seg['marks']`, deduped by `(segment, round(at,2), type)`."""
+    raw_marks = list(plan.get("marks", []) or [])
+    for seg in plan.get("segments", []) or []:
+        if not isinstance(seg, dict):
+            continue
+        sid_seg = str(seg.get("id", ""))
+        for m_in in seg.get("marks", []) or []:
+            if isinstance(m_in, dict):
+                mc = dict(m_in)
+                if not mc.get("segment") and sid_seg:
+                    mc["segment"] = sid_seg
+                raw_marks.append(mc)
+
+    deduped: List[Dict[str, Any]] = []
+    seen: set[Tuple[str, float, str]] = set()
+    for m in raw_marks:
+        if not isinstance(m, dict):
+            continue
+        mtype_k = _normalize_mark_type(m.get("type") or m.get("kind") or "right")
+        sid_k = str(m.get("segment", ""))
+        at_k = round(float(m.get("at", 0.0) or 0.0), 2)
+        key = (sid_k, at_k, mtype_k)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(m)
+    return deduped
+
+
+def _evaluate_strobe_frame(
+    mp4_path: Path,
+    t_probe: float,
+    W: int,
+    H: int,
+    mtype: str,
+    exclude_boxes: Sequence[Tuple[float, float, float, float]],
+    t_ref: Optional[float] = None,
+) -> Tuple[bool, bool, float, float, int]:
+    """Sample outer 12% perimeter border bands and verify inner 35% center remains clear.
+    Returns `(edge_ok, center_clear, avg_r, avg_g, chroma_count)`.
+    """
+    expected_len = int(W) * int(H) * 3
+    raw = _read_rgb_frame(mp4_path, t_probe, W, H)
+    if expected_len <= 0 or len(raw) < expected_len:
+        return False, False, 0.0, 0.0, 0
+
+    try:
+        import numpy as np
+    except Exception:
+        np = None  # type: ignore[assignment]
+
+    if np is not None:
+        frame = np.frombuffer(raw[:expected_len], dtype=np.uint8).reshape(H, W, 3)
+        bh = max(1, int(round(H * 0.12)))
+        bw = max(1, int(round(W * 0.12)))
+        border_mask = np.zeros((H, W), dtype=bool)
+        border_mask[:bh, :] = True
+        border_mask[H - bh :, :] = True
+        border_mask[:, :bw] = True
+        border_mask[:, W - bw :] = True
+        for bx0, by0, bx1, by1 in exclude_boxes:
+            ex0 = max(0, int(math.floor(bx0 - 4.0)))
+            ey0 = max(0, int(math.floor(by0 - 4.0)))
+            ex1 = min(W, int(math.ceil(bx1 + 4.0)))
+            ey1 = min(H, int(math.ceil(by1 + 4.0)))
+            if ex1 > ex0 and ey1 > ey0:
+                border_mask[ey0:ey1, ex0:ex1] = False
+
+        edge_px = frame[border_mask]
+        chroma = (edge_px.max(axis=1) - edge_px.min(axis=1)) > 30
+        edge_count = int(chroma.sum())
+        avg_r = float(edge_px[chroma, 0].mean()) if edge_count > 0 else 0.0
+        avg_g = float(edge_px[chroma, 1].mean()) if edge_count > 0 else 0.0
+        dom_diff = (avg_r - avg_g) if mtype == "wrong" else (avg_g - avg_r)
+        edge_ok = edge_count >= 100 and dom_diff >= 20.0
+
+        cx0, cx1 = int(round(W * 0.325)), int(round(W * 0.675))
+        cy0, cy1 = int(round(H * 0.325)), int(round(H * 0.675))
+        center_mask = np.ones((max(1, cy1 - cy0), max(1, cx1 - cx0)), dtype=bool)
+        for bx0, by0, bx1, by1 in exclude_boxes:
+            ix0 = max(cx0, int(math.floor(bx0 - 40.0))) - cx0
+            iy0 = max(cy0, int(math.floor(by0 - 8.0))) - cy0
+            ix1 = min(cx1, int(math.ceil(bx1 + 40.0))) - cx0
+            iy1 = min(cy1, int(math.ceil(by1 + 8.0))) - cy0
+            if ix1 > ix0 and iy1 > iy0:
+                center_mask[iy0:iy1, ix0:ix1] = False
+
+        center_px = frame[cy0:cy1, cx0:cx1][center_mask]
+        center_clear = True
+        if len(center_px) > 0:
+            c_r = center_px[:, 0].astype(np.float32)
+            c_g = center_px[:, 1].astype(np.float32)
+            c_dom = (c_r - c_g) if mtype == "wrong" else (c_g - c_r)
+            tinted_share = float((c_dom >= 18.0).mean())
+            med_dom = float(np.median(c_dom))
+            if tinted_share >= 0.65 and med_dom >= 18.0:
+                if t_ref is not None:
+                    ref_raw = _read_rgb_frame(mp4_path, t_ref, W, H)
+                    if len(ref_raw) >= expected_len:
+                        ref_frame = np.frombuffer(ref_raw[:expected_len], dtype=np.uint8).reshape(H, W, 3)
+                        ref_px = ref_frame[cy0:cy1, cx0:cx1][center_mask]
+                        ref_dom = (
+                            (ref_px[:, 0].astype(np.float32) - ref_px[:, 1].astype(np.float32))
+                            if mtype == "wrong"
+                            else (ref_px[:, 1].astype(np.float32) - ref_px[:, 0].astype(np.float32))
+                        )
+                        if med_dom - float(np.median(ref_dom)) < 10.0:
+                            center_clear = True
+                        else:
+                            center_clear = False
+                    else:
+                        center_clear = False
+                else:
+                    center_clear = False
+        return edge_ok, center_clear, avg_r, avg_g, edge_count
+
+    # Pure-Python strided fallback when numpy is unavailable
+    bh = max(1, int(round(H * 0.12)))
+    bw = max(1, int(round(W * 0.12)))
+    r_vals: List[int] = []
+    g_vals: List[int] = []
+    for y in range(0, H, 2):
+        row_off = y * W * 3
+        in_y = y < bh or y >= H - bh
+        for x in range(0, W, 2):
+            if in_y or x < bw or x >= W - bw:
+                idx = row_off + x * 3
+                r, g, b = raw[idx], raw[idx + 1], raw[idx + 2]
+                if max(r, g, b) - min(r, g, b) > 30:
+                    r_vals.append(r)
+                    g_vals.append(g)
+    avg_r = sum(r_vals) / len(r_vals) if r_vals else 0.0
+    avg_g = sum(g_vals) / len(g_vals) if g_vals else 0.0
+    dom_diff = (avg_r - avg_g) if mtype == "wrong" else (avg_g - avg_r)
+    edge_ok = len(r_vals) >= 25 and dom_diff >= 20.0
+    return edge_ok, True, avg_r, avg_g, len(r_vals)
+
+
 def verify_marks_and_build_contact_sheet(
     mp4_path: Path,
     plan: Dict[str, Any],
@@ -787,10 +1243,26 @@ def verify_marks_and_build_contact_sheet(
     contact_sheet_path: Path,
 ) -> Tuple[bool, int, int, List[str], int]:
     """Perform deterministic RGB pixel check on every mark frame AND build a single
-    compact contact sheet (<80 KB) of all mark frames + jump-cut frames using FFmpeg `tile`.
+    compact contact sheet (<95 KB) of all mark frames + jump-cut frames using FFmpeg `tile`.
     """
-    marks = plan.get("marks", [])
+    marks = _collect_deduped_marks(plan)
     segs = plan.get("segments", [])
+    seg_by_id: Dict[str, Dict[str, Any]] = {
+        str(s.get("id", f"S{i + 1}")): s for i, s in enumerate(segs) if isinstance(s, dict)
+    }
+    fps = int(round(float((plan.get("canvas") or {}).get("fps") or 30) or 30))
+
+    try:
+        import layouts as _layouts_mod
+    except Exception:
+        _layouts_mod = None  # type: ignore[assignment]
+
+    marks_by_sid: Dict[str, List[Tuple[float, float]]] = {}
+    for mk in marks:
+        msid = str(mk.get("segment", ""))
+        m_at_v = float(mk.get("at", 0.0) or 0.0)
+        m_dur_v = float(mk.get("duration", 0.56) or 0.56)
+        marks_by_sid.setdefault(msid, []).append((m_at_v - 0.05, m_at_v + m_dur_v + 0.05))
 
     mark_results: List[str] = []
     passed_marks = 0
@@ -798,67 +1270,116 @@ def verify_marks_and_build_contact_sheet(
 
     default_pack = str(plan.get("mark_pack") or "flash").strip().lower()
     strobe_styles = {"flash", "vignette", "kn20228", "w42", "strobe"}
+    fc_meta_m, _ = _load_flashcards_meta(plan, mp4_path, is_square=False, plan_dir=contact_sheet_path.parent)
+    fc_cards_m = (fc_meta_m.get("cards") or []) if isinstance(fc_meta_m, dict) else []
+    fc_cw_m = float((fc_meta_m or {}).get("canvas_w") or W or 1)
+    fc_ch_m = float((fc_meta_m or {}).get("canvas_h") or H or 1)
 
     for m in marks:
-        mtype = _normalize_mark_type(m.get("type", "right"))
+        mtype = _normalize_mark_type(m.get("type") or m.get("kind") or "right")
         sid = str(m.get("segment", ""))
-        t_start = float(seg_start.get(sid, 0.0)) + float(m.get("at", 0.0))
-        dur = float(m.get("duration", 1.1))
+        seg_t0 = float(seg_start.get(sid, 0.0))
+        m_at = float(m.get("at", 0.0) or 0.0)
+        t_start = seg_t0 + m_at
+        dur = float(m.get("duration", 1.1) or 1.1)
         style_key = str(m.get("style") or m.get("pack") or default_pack).strip().lower()
         is_strobe = style_key in strobe_styles or bool(m.get("strobe", False))
-        # Probe at t_start + 0.05s for strobe (inside first [0.00, 0.11) ON pulse), or +0.35s for static badge
-        t_probe = t_start + (0.05 if is_strobe else min(0.35, dur * 0.4))
+        t_probe = t_start + (min(0.06, max(0.02, dur * 0.35)) if is_strobe else min(0.35, dur * 0.4))
         sample_events.append((t_probe, f"{mtype.upper()}@{tc(t_start)}"))
 
-        x0, y0, mw, mh = _mark_bbox(m.get("position", "top-right"), W, H, float(m.get("size", 0.22)))
-        cmd = [
-            str(FFMPEG),
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            f"{t_probe:.3f}",
-            "-i",
-            str(mp4_path),
-            "-vf",
-            f"crop={mw}:{mh}:{x0}:{y0}",
-            "-frames:v",
-            "1",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-",
-        ]
-        raw = subprocess.run(cmd, capture_output=True).stdout
-        r_vals: List[int] = []
-        g_vals: List[int] = []
-        for i in range(0, len(raw) - 2, 3):
-            r, g, b = raw[i], raw[i + 1], raw[i + 2]
-            if max(r, g, b) - min(r, g, b) > 45:
-                r_vals.append(r)
-                g_vals.append(g)
+        if is_strobe:
+            exclude_boxes: List[Tuple[float, float, float, float]] = []
+            t_ref: Optional[float] = None
+            seg_obj = seg_by_id.get(sid)
+            if seg_obj is not None:
+                seg_eff = max(1, round(_segment_duration(seg_obj) * fps)) / fps
+                if _layouts_mod is not None and hasattr(_layouts_mod, "banner_boxes"):
+                    try:
+                        for bx in _layouts_mod.banner_boxes(seg_obj, W, H, seg_eff):
+                            if float(bx.get("t0", 0.0)) - 0.05 <= m_at + 0.06 <= float(bx.get("t1", 0.0)) + 0.05:
+                                exclude_boxes.append((float(bx["x0"]), float(bx["y0"]), float(bx["x1"]), float(bx["y1"])))
+                    except Exception:
+                        pass
+                seg_mark_wins = marks_by_sid.get(sid, [])
+                for cand_rel in (m_at - 0.14, m_at + dur + 0.14):
+                    if 0.03 <= cand_rel <= seg_eff - 0.05 and not any(a <= cand_rel <= b for a, b in seg_mark_wins):
+                        t_ref = seg_t0 + cand_rel
+                        break
+            for fc_c in fc_cards_m:
+                if not isinstance(fc_c, dict):
+                    continue
+                fc_s = float(fc_c.get("start") if fc_c.get("start") is not None else fc_c.get("t0", 0.0))
+                fc_e = float(fc_c.get("end") if fc_c.get("end") is not None else fc_c.get("t1", 0.0))
+                if fc_s - 0.05 <= t_probe <= fc_e + 0.05:
+                    fx0 = float(fc_c.get("x0", 0.0)) * (W / max(1.0, fc_cw_m))
+                    fy0 = float(fc_c.get("y0", 0.0)) * (H / max(1.0, fc_ch_m))
+                    fx1 = float(fc_c.get("x1") if fc_c.get("x1") is not None else float(fc_c.get("x0", 0.0)) + float(fc_c.get("w", 0.0))) * (W / max(1.0, fc_cw_m))
+                    fy1 = float(fc_c.get("y1") if fc_c.get("y1") is not None else float(fc_c.get("y0", 0.0)) + float(fc_c.get("h", 0.0))) * (H / max(1.0, fc_ch_m))
+                    if fx1 > fx0 and fy1 > fy0:
+                        exclude_boxes.append((fx0, fy0, fx1, fy1))
 
-        avg_r = sum(r_vals) / len(r_vals) if r_vals else 0.0
-        avg_g = sum(g_vals) / len(g_vals) if g_vals else 0.0
-        diff_rg = avg_r - avg_g
-        diff_gr = avg_g - avg_r
-
-        if mtype == "wrong" and len(r_vals) >= 100 and diff_rg >= 35.0:
-            passed_marks += 1
-            mark_results.append(f"wrong@{tc(t_start)} R-G=+{diff_rg:.0f}{'[STROBE]' if is_strobe else ''}")
-        elif mtype == "right" and len(g_vals) >= 100 and diff_gr >= 35.0:
-            passed_marks += 1
-            mark_results.append(f"right@{tc(t_start)} G-R=+{diff_gr:.0f}{'[STROBE]' if is_strobe else ''}")
+            edge_ok, center_clear, avg_r, avg_g, _cnt = _evaluate_strobe_frame(
+                mp4_path, t_probe, W, H, mtype, exclude_boxes, t_ref=t_ref
+            )
+            diff_dom = (avg_r - avg_g) if mtype == "wrong" else (avg_g - avg_r)
+            if edge_ok and center_clear:
+                passed_marks += 1
+                lbl_diff = "R-G" if mtype == "wrong" else "G-R"
+                mark_results.append(f"{mtype}@{tc(t_start)} {lbl_diff}=+{diff_dom:.0f}[STROBE]")
+            elif edge_ok and not center_clear:
+                mark_results.append(f"{mtype}@{tc(t_start)} FAIL(center_not_clear,R={avg_r:.0f},G={avg_g:.0f})")
+            else:
+                mark_results.append(f"{mtype}@{tc(t_start)} FAIL(R={avg_r:.0f},G={avg_g:.0f})")
         else:
-            mark_results.append(f"{mtype}@{tc(t_start)} FAIL(R={avg_r:.0f},G={avg_g:.0f})")
+            x0, y0, mw, mh = _mark_bbox(m.get("position", "top-right"), W, H, float(m.get("size", 0.22)))
+            cmd = [
+                str(FFMPEG),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{t_probe:.3f}",
+                "-i",
+                str(mp4_path),
+                "-vf",
+                f"crop={mw}:{mh}:{x0}:{y0}",
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-",
+            ]
+            raw = subprocess.run(cmd, capture_output=True).stdout
+            r_vals: List[int] = []
+            g_vals: List[int] = []
+            for i in range(0, len(raw) - 2, 3):
+                r, g, b = raw[i], raw[i + 1], raw[i + 2]
+                if max(r, g, b) - min(r, g, b) > 45:
+                    r_vals.append(r)
+                    g_vals.append(g)
 
-    # Also add jump-cut frames (where consecutive segments share the same source clip)
+            avg_r = sum(r_vals) / len(r_vals) if r_vals else 0.0
+            avg_g = sum(g_vals) / len(g_vals) if g_vals else 0.0
+            diff_rg = avg_r - avg_g
+            diff_gr = avg_g - avg_r
+
+            if mtype == "wrong" and len(r_vals) >= 100 and diff_rg >= 35.0:
+                passed_marks += 1
+                mark_results.append(f"wrong@{tc(t_start)} R-G=+{diff_rg:.0f}")
+            elif mtype == "right" and len(g_vals) >= 100 and diff_gr >= 35.0:
+                passed_marks += 1
+                mark_results.append(f"right@{tc(t_start)} G-R=+{diff_gr:.0f}")
+            else:
+                mark_results.append(f"{mtype}@{tc(t_start)} FAIL(R={avg_r:.0f},G={avg_g:.0f})")
+
+    # Add jump-cut frames (where consecutive segments share the same source clip)
     for i in range(1, len(segs)):
         stem_prev = Path(str(segs[i - 1].get("src", ""))).stem
         stem_curr = Path(str(segs[i].get("src", ""))).stem
         if stem_prev == stem_curr:
-            sid = str(segs[i].get("id", f"S{i+1}"))
+            sid = str(segs[i].get("id", f"S{i + 1}"))
             t_jc = float(seg_start.get(sid, 0.0)) + 0.15
             sample_events.append((t_jc, f"JUMPCUT:{sid}@{tc(t_jc)}"))
 
@@ -917,14 +1438,11 @@ def verify_marks_and_build_contact_sheet(
     return all_marks_ok, passed_marks, len(marks), mark_results, sheet_kb
 
 
+SPLIT_MAX_ZOOM = 1.0
+
+
 def check_split_and_hook_rules(plan: Dict[str, Any]) -> Tuple[bool, str]:
-    """Verify split-screen and single-character hook rules on `plan`:
-      1. Split-screen segments (`split_h` / `split_v`) allow tasteful active-panel zooms in `[1.0, 1.15]`
-         (fail only if `< 1.0` or `> 1.15`), have zero intra-split transitions or turn-boundary whoosh SFX,
-         and share matched common headroom.
-      2. Single-character hook (`single`) permits crisp hook transitions up to `max(3, round(hook_secs / 5.0))`
-         (or `style_config` ceiling if higher).
-    """
+    """Verify split-screen and single-character hook rules on `plan`."""
     segs = plan.get("segments", [])
     sfx_entries = plan.get("sfx", [])
     whoosh_segs = {
@@ -941,15 +1459,44 @@ def check_split_and_hook_rules(plan: Dict[str, Any]) -> Tuple[bool, str]:
     hook_transitions = 0
     hook_secs = 0.0
     in_initial_hook = True
-    common_hr_val: Optional[float] = None
 
     try:
         from vision_tracker import compute_paired_split_crop_filters
     except Exception:
         compute_paired_split_crop_filters = None  # type: ignore[assignment]
 
+    _paired_params: set[str] = set()
+    if compute_paired_split_crop_filters is not None:
+        try:
+            _paired_params = set(inspect.signature(compute_paired_split_crop_filters).parameters.keys())
+        except Exception:
+            _paired_params = set()
+
+    canvas = plan.get("canvas") or {}
+    canvas_w = int(canvas.get("width") or 1080)
+    canvas_h = int(canvas.get("height") or 1920)
+    dim_cache: Dict[str, Tuple[int, int]] = {}
+
+    def _clip_dims(path_obj: Path) -> Tuple[int, int]:
+        key = str(path_obj)
+        if key not in dim_cache:
+            if path_obj.is_file():
+                try:
+                    inf = probe(path_obj)
+                    w_i = int(inf.get("width") or 0)
+                    h_i = int(inf.get("height") or 0)
+                    dim_cache[key] = (w_i, h_i) if (w_i > 0 and h_i > 0) else (720, 1280)
+                except Exception:
+                    dim_cache[key] = (720, 1280)
+            else:
+                dim_cache[key] = (720, 1280)
+        return dim_cache[key]
+
+    observed_headrooms: List[float] = []
+    slot_samples: Dict[Tuple[str, str], List[Tuple[str, float, float]]] = {}
+
     for i, s in enumerate(segs):
-        sid = str(s.get("id", f"S{i+1}"))
+        sid = str(s.get("id", f"S{i + 1}"))
         lay = str(s.get("layout") or "single").strip().lower()
         prev_lay = str(segs[i - 1].get("layout") or "single").strip().lower() if i > 0 else "single"
         tr = str(s.get("transition") or "cut").strip().lower()
@@ -958,67 +1505,140 @@ def check_split_and_hook_rules(plan: Dict[str, Any]) -> Tuple[bool, str]:
             in_initial_hook = False
 
         if in_initial_hook:
-            hook_secs += max(0.0, float(s.get("end", 0.0)) - float(s.get("start", 0.0)))
+            hook_secs += _segment_duration(s)
         if in_initial_hook and i > 0 and tr != "cut":
             hook_transitions += 1
 
         if lay in ("split_h", "split_v", "left_right", "top_bottom"):
             split_segs += 1
             z0, z1 = _extract_zoom_pair(s)
-            if min(z0, z1) < 0.995 or max(z0, z1) > 1.1505:
+            if min(z0, z1) < 0.995 or max(z0, z1) > SPLIT_MAX_ZOOM + 0.005:
                 split_violations.append(f"{sid}:excessive_split_zoom({z0:.2f}->{z1:.2f})")
             if i > 0 and prev_lay == lay:
                 if tr != "cut":
                     split_violations.append(f"{sid}:intra_split_transition({tr})")
                 if sid in whoosh_segs:
                     split_violations.append(f"{sid}:intra_split_whoosh")
-            if common_hr_val is None and compute_paired_split_crop_filters is not None:
+            if compute_paired_split_crop_filters is not None:
                 peer = s.get("peer") if isinstance(s.get("peer"), dict) else {}
                 if peer and peer.get("src"):
+                    lay_norm = "split_h" if lay in ("split_h", "left_right") else "split_v"
+                    slot_w, slot_h = (canvas_w // 2, canvas_h) if lay_norm == "split_h" else (canvas_w, canvas_h // 2)
+                    def_live = "left" if lay_norm == "split_h" else "top"
+                    def_peer = "right" if lay_norm == "split_h" else "bottom"
+                    live_slot = str(s.get("slot") or def_live).strip().lower()
+                    peer_slot = str(peer.get("slot") or (def_peer if live_slot == def_live else def_live)).strip().lower()
+                    try:
+                        live_off_y = float(s.get("offset_y") or 0.0)
+                    except (TypeError, ValueError):
+                        live_off_y = 0.0
+                    try:
+                        peer_off_y = float(peer.get("offset_y") or 0.0)
+                    except (TypeError, ValueError):
+                        peer_off_y = 0.0
+
+                    live_p = resolve(s["src"])
+                    peer_p = resolve(peer["src"])
+                    src_w, src_h = _clip_dims(live_p)
+                    peer_w, peer_h = _clip_dims(peer_p)
+                    extra_kw: Dict[str, Any] = {}
+                    if "live_offset_y" in _paired_params:
+                        extra_kw["live_offset_y"] = live_off_y
+                    if "peer_offset_y" in _paired_params:
+                        extra_kw["peer_offset_y"] = peer_off_y
+
                     c_live, c_peer = compute_paired_split_crop_filters(
-                        resolve(s["src"]), resolve(peer["src"]),
-                        720, 1280, 720, 1280, 540, 1920, 540, 1920,
+                        live_p, peer_p,
+                        src_w, src_h, peer_w, peer_h,
+                        slot_w, slot_h, slot_w, slot_h,
+                        **extra_kw,
                     )
-                    if c_live["common_headroom_pct"] != c_peer["common_headroom_pct"]:
-                        split_violations.append(f"{sid}:headroom_mismatch")
-                    else:
-                        common_hr_val = float(c_live["common_headroom_pct"])
+                    hr_live = float(c_live.get("common_headroom_pct", 14.0)) + float(c_live.get("offset_y") or 0.0) * 100.0
+                    hr_peer = float(c_peer.get("common_headroom_pct", 14.0)) + float(c_peer.get("offset_y") or 0.0) * 100.0
+                    fy_live = float((c_live.get("slot_focus") or [0.5, 0.38])[1])
+                    fy_peer = float((c_peer.get("slot_focus") or [0.5, 0.38])[1])
+                    observed_headrooms.extend([hr_live, hr_peer])
+
+                    if abs(live_off_y) <= 1e-4:
+                        slot_samples.setdefault((lay_norm, live_slot), []).append((sid, hr_live, fy_live))
+                    if abs(peer_off_y) <= 1e-4:
+                        slot_samples.setdefault((lay_norm, peer_slot), []).append((sid, hr_peer, fy_peer))
+                    if abs(live_off_y) <= 1e-4 and abs(peer_off_y) <= 1e-4:
+                        if abs(hr_live - hr_peer) > 8.0 or abs(fy_live - fy_peer) > 0.14:
+                            split_violations.append(
+                                f"{sid}:headroom_mismatch(live={hr_live:.1f}%,peer={hr_peer:.1f}%)"
+                            )
+
+    for (lay_norm, slot_name), entries in sorted(slot_samples.items()):
+        if len(entries) < 2:
+            continue
+        hrs = [e[1] for e in entries]
+        fys = [e[2] for e in entries]
+        if max(hrs) - min(hrs) > 8.0:
+            split_violations.append(
+                f"{lay_norm}:{slot_name}:headroom_drift({min(hrs):.1f}%..{max(hrs):.1f}%)"
+            )
+        elif max(fys) - min(fys) > 0.14:
+            split_violations.append(
+                f"{lay_norm}:{slot_name}:eyeline_drift({min(fys):.2f}..{max(fys):.2f})"
+            )
 
     explicit_max_hook = plan.get("max_hook_transitions")
     if explicit_max_hook is not None:
         max_hook_transitions = int(explicit_max_hook)
     else:
-        max_hook_transitions = max(2, int(round(hook_secs / 6.5)))
+        tuning_max = 4
+        try:
+            import style_config as _sc
+
+            t_val = _sc.get_tuning(plan=plan).get("max_hook_transitions")
+            if t_val is not None:
+                tuning_max = int(t_val)
+        except Exception:
+            tuning_max = 4
+        max_hook_transitions = max(tuning_max, int(round(hook_secs / 6.5)))
     if hook_transitions > max_hook_transitions:
         split_violations.append(f"hook_transitions={hook_transitions}(>{max_hook_transitions})")
 
     ok = len(split_violations) == 0
-    hr_str = f", common headroom {common_hr_val:.1f}%" if common_hr_val is not None else ""
+    if observed_headrooms:
+        lo_hr, hi_hr = min(observed_headrooms), max(observed_headrooms)
+        hr_str = (
+            f", headroom {lo_hr:.1f}%"
+            if (hi_hr - lo_hr) <= 0.05
+            else f", headroom {lo_hr:.1f}..{hi_hr:.1f}%"
+        )
+    else:
+        hr_str = ""
     summary = (
-        f"{split_segs} split-screen segs valid (z in 1.0..1.15{hr_str}, 0 intra-split transitions), {hook_transitions} hook clip transition(s)"
+        f"{split_segs} split-screen segs valid (z=1.0{hr_str}, 0 intra-split transitions), {hook_transitions} hook clip transition(s)"
         if ok
         else f"Violations: {', '.join(split_violations)}"
     )
     return ok, summary
 
 
-PICTURE_MAX_DIFF = 9.0   # mean grey-level difference (0-255) allowed between a cut's own render and the final video
+PICTURE_MAX_DIFF = 9.0
 
 
-def check_picture_timeline(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, List[str], int]:
-    """Does the picture in the final video match the plan at every moment? For each cut, the middle frame of the final video is compared with
-    the middle frame of that cut's own render. Catches a transition or join that moves or drops footage (the picture drifts away from the
-    sound while every other check still passes). Returns (ok, wrong cuts, cuts compared)."""
+def check_picture_timeline(
+    plan: Dict[str, Any],
+    mp4_path: Path,
+    *,
+    plan_dir: Optional[Path] = None,
+) -> Tuple[bool, List[str], int]:
+    """Verify the middle frame of every cut in the final video matches that cut's cached intermediate render."""
     try:
         import cv2
         import numpy as np
         import layouts
-    except Exception as exc:   # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         return True, [f"not checked ({exc})"], 0
     canvas = plan.get("canvas") or {}
     W, H, fps = int(canvas.get("width") or 1080), int(canvas.get("height") or 1920), int(canvas.get("fps") or 30)
+    full_H = H
     page_top = None
-    try:   # scrolling-text page format: the segments were rendered into the picture area in the top half
+    try:
         import scroll_page
         _pc = scroll_page.page_config(plan)
         if _pc:
@@ -1027,8 +1647,12 @@ def check_picture_timeline(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, 
     except Exception:
         pass
 
+    fc_meta, _ = _load_flashcards_meta(plan, mp4_path, is_square=False, plan_dir=plan_dir)
+    fc_cards = (fc_meta.get("cards") or []) if isinstance(fc_meta, dict) else []
+    fc_cw = float((fc_meta or {}).get("canvas_w") or W or 1)
+    fc_ch = float((fc_meta or {}).get("canvas_h") or full_H or 1)
+
     def sig(frame: Any) -> Any:
-        # the final video holds the same pixels as the cut's own render, so compare fine detail: only a re-encode separates them
         return cv2.cvtColor(cv2.resize(frame, (108, 192), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY).astype(np.float32)
 
     def frame_at(cap: Any, t: float) -> Any:
@@ -1039,42 +1663,88 @@ def check_picture_timeline(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, 
     out = cv2.VideoCapture(str(mp4_path))
     t0, bad, compared = 0.0, [], 0
     for seg in plan.get("segments", []):
-        dur = round((float(seg["end"]) - float(seg["start"])) * fps) / fps
+        play_dur = _segment_play_duration(seg)
+        play_dur_q = round(play_dur * fps) / fps
+        eff_dur = max(1, round(_segment_duration(seg) * fps)) / fps
         f = WORK / "_segments" / f"{layouts.build_segment_cache_key(seg, plan, W, H, fps, False)}.mkv"
         if not f.is_file():
             f = WORK / "_segments" / f"{layouts.build_segment_cache_key(seg, plan, W, H, fps, True)}.mkv"
-        if f.is_file() and dur >= 0.4:
+        if f.is_file() and play_dur_q >= 0.4:
             ref_cap = cv2.VideoCapture(str(f))
-            got = frame_at(out, t0 + dur / 2)
-            if got is not None and page_top is not None:      # compare only the picture area, not the progress strip and the page
+            probe_mid = play_dur_q / 2.0
+            t_probe = t0 + probe_mid
+            src_mid = _seg_to_src_time(seg, probe_mid)
+            got = frame_at(out, t_probe)
+            if got is not None and page_top is not None:
                 k = got.shape[0] / float(page_top + H + (int(canvas.get("height") or 1920) - page_top - H))
-                got = got[int(round(page_top * k)):int(round((page_top + H) * k))]
-            # handheld footage changes a lot between frames and a seek can be a frame off: take the closest of the frames around the middle
-            refs = [fr for fr in (frame_at(ref_cap, dur / 2 + k / fps) for k in range(-4, 5)) if fr is not None]
+                got = got[int(round(page_top * k)) : int(round((page_top + H) * k))]
+            refs = [fr for fr in (frame_at(ref_cap, probe_mid + k / fps) for k in range(-4, 5)) if fr is not None]
             ref_cap.release()
             if refs and got is not None:
                 compared += 1
-                best = min(float(np.abs(sig(r) - sig(got)).mean()) for r in refs)
+                active_masks: List[Tuple[int, int, int, int]] = []
+                for fc_c in fc_cards:
+                    if not isinstance(fc_c, dict):
+                        continue
+                    fc_s = float(fc_c.get("start") if fc_c.get("start") is not None else fc_c.get("t0", 0.0))
+                    fc_e = float(fc_c.get("end") if fc_c.get("end") is not None else fc_c.get("t1", 0.0))
+                    if fc_s - 0.05 <= t_probe <= fc_e + 0.05:
+                        cx0 = float(fc_c.get("x0", 0.0))
+                        cy0 = float(fc_c.get("y0", 0.0))
+                        cx1 = float(fc_c.get("x1") if fc_c.get("x1") is not None else cx0 + float(fc_c.get("w", 0.0)))
+                        cy1 = float(fc_c.get("y1") if fc_c.get("y1") is not None else cy0 + float(fc_c.get("h", 0.0)))
+                        if page_top is not None:
+                            scale_y_to_full = full_H / max(1.0, fc_ch)
+                            cy0_adj = max(0.0, cy0 * scale_y_to_full - page_top)
+                            cy1_adj = min(float(H), cy1 * scale_y_to_full - page_top)
+                            ref_h_den = float(max(1, H))
+                        else:
+                            cy0_adj, cy1_adj = cy0, cy1
+                            ref_h_den = max(1.0, fc_ch)
+                        sx0 = max(0, int(math.floor((cx0 - 4.0) * 108.0 / max(1.0, fc_cw))))
+                        sx1 = min(108, int(math.ceil((cx1 + 4.0) * 108.0 / max(1.0, fc_cw))))
+                        sy0 = max(0, int(math.floor((cy0_adj - 4.0) * 192.0 / ref_h_den)))
+                        sy1 = min(192, int(math.ceil((cy1_adj + 4.0) * 192.0 / ref_h_den)))
+                        if sx1 > sx0 and sy1 > sy0:
+                            active_masks.append((sx0, sy0, sx1, sy1))
+                g_sig = sig(got)
+                if active_masks:
+                    g_sig = g_sig.copy()
+                    for sx0, sy0, sx1, sy1 in active_masks:
+                        g_sig[sy0:sy1, sx0:sx1] = 0.0
+                best = float("inf")
+                for r in refs:
+                    r_sig = sig(r)
+                    if active_masks:
+                        r_sig = r_sig.copy()
+                        for sx0, sy0, sx1, sy1 in active_masks:
+                            r_sig[sy0:sy1, sx0:sx1] = 0.0
+                    d_val = float(np.abs(r_sig - g_sig).mean())
+                    if d_val < best:
+                        best = d_val
                 if best > PICTURE_MAX_DIFF:
-                    bad.append(f"{seg.get('id')} at {t0 + dur / 2:.1f}s shows other footage than the plan")
-        t0 += dur
+                    bad.append(f"{seg.get('id')} at {t0 + probe_mid:.1f}s (src {src_mid:.2f}s) shows other footage than the plan")
+        t0 += eff_dur
     out.release()
     return (not bad), bad, compared
 
 
-FRAME_STEP_SEC = 0.25          # one frame every quarter second, skipping the moments around joins and mark flashes
+FRAME_STEP_SEC = 0.25
 BLACK_MEAN, BLACK_STD = 10.0, 4.0
-BANNER_FACE_OVERLAP = 0.04     # a banner covering more than 4% of a face's area counts as on the face
-MISSING_FACE_SHARE = 0.35      # a panel without a face in more than this share of its frames is reported
+BANNER_FACE_OVERLAP = 0.04
+MISSING_FACE_SHARE = 0.35
+FROZEN_DIFF_EPS = 0.08
+FROZEN_MIN_STEPS = 6  # >= 1.50s continuous zero-motion digital freeze
+_DARK_FADE_TRANSITIONS = frozenset({"dip_to_black", "fadeblack", "fade"})
 
 
 def is_black_frame(gray: Any) -> bool:
-    """A frame that is dark or one flat colour (a render fault), not a dark scene: both the average and the spread are tiny."""
+    """Detect dark or flat single-color frames (render fault)."""
     return float(gray.mean()) < BLACK_MEAN or float(gray.std()) < BLACK_STD
 
 
 def box_overlap_share(face_norm: Sequence[float], box_px: Sequence[float], W: int, H: int) -> float:
-    """The share of a face's area (normalised box) that a pixel box covers."""
+    """Return the fraction of a normalized face bbox covered by `box_px`."""
     fx0, fy0, fx1, fy1 = face_norm[0] * W, face_norm[1] * H, face_norm[2] * W, face_norm[3] * H
     ix = max(0.0, min(fx1, box_px[2]) - max(fx0, box_px[0]))
     iy = max(0.0, min(fy1, box_px[3]) - max(fy0, box_px[1]))
@@ -1082,17 +1752,49 @@ def box_overlap_share(face_norm: Sequence[float], box_px: Sequence[float], W: in
     return (ix * iy) / area
 
 
+def _panel_bbox_to_canvas_norm(
+    bbox_norm: Sequence[float],
+    panel_rect: Tuple[int, int, int, int],
+    W: int,
+    H: int,
+) -> Tuple[float, float, float, float]:
+    """Map panel-relative normalized `[x0, y0, x1, y1]` to full-canvas normalized coordinates."""
+    x0, y0, x1, y1 = panel_rect
+    pw = max(1, x1 - x0)
+    ph = max(1, y1 - y0)
+    fx0, fy0, fx1, fy1 = float(bbox_norm[0]), float(bbox_norm[1]), float(bbox_norm[2]), float(bbox_norm[3])
+    cw = float(max(1, W))
+    ch = float(max(1, H))
+    return (
+        (x0 + fx0 * pw) / cw,
+        (y0 + fy0 * ph) / ch,
+        (x0 + fx1 * pw) / cw,
+        (y0 + fy1 * ph) / ch,
+    )
+
+
 def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
-    """Frame-by-frame QC of the finished video with the local YuNet face detector (no download, no model tokens):
-    black or flat frames, a banner covering a face, and a face missing from a panel. Black frames and banners on faces fail the check;
-    a missing face only warns, because a detector can miss a turned head or a hand over the face.
-    Frames inside inter-segment transition windows ([join_t - d, join_t + d]) are skipped to avoid mid-whip/flash/reveal false alarms."""
-    result: Dict[str, Any] = {"ok": True, "frames": 0, "black": [], "banner_on_face": [], "no_face": [], "note": ""}
+    """Frame-by-frame Deep QC of the 9:16 master video using the local YuNet face detector:
+    black or flat frames, frozen video streams, banners covering faces, face crop boundary safety,
+    and missing-face warnings across panels. Frames inside inter-segment transitions and mark flashes are skipped.
+    """
+    result: Dict[str, Any] = {
+        "ok": True,
+        "frames": 0,
+        "black": [],
+        "frozen": [],
+        "banner_on_face": [],
+        "lingering_banners": [],
+        "face_crop": [],
+        "no_face": [],
+        "note": "",
+    }
     try:
         import cv2
+        import numpy as np
         import layouts
         import vision_tracker
-    except Exception as exc:   # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         result["note"] = f"not checked ({exc})"
         return result
     cap = cv2.VideoCapture(str(mp4_path))
@@ -1103,44 +1805,130 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
     W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     marks_by_seg: Dict[str, List[Tuple[float, float]]] = {}
     for m in plan.get("marks", []):
-        marks_by_seg.setdefault(str(m.get("segment")), []).append((float(m.get("at", 0)), float(m.get("at", 0)) + float(m.get("duration", 0.56)) + 0.1))
+        marks_by_seg.setdefault(str(m.get("segment")), []).append(
+            (float(m.get("at", 0)), float(m.get("at", 0)) + float(m.get("duration", 0.56)) + 0.1)
+        )
     segs = plan.get("segments", [])
     t0 = 0.0
     for idx_seg, seg in enumerate(segs):
-        dur = round((float(seg["end"]) - float(seg["start"])) * fps) / fps
+        dur = max(1, round(_segment_duration(seg) * fps)) / fps
+        play_dur = min(dur, max(1, round(_segment_play_duration(seg) * fps)) / fps)
+        hold_tail = _segment_hold_tail(seg)
+        spd = _segment_speed(seg)
+        is_beat = _segment_is_beat(seg)
+        explicit_freezes = seg.get("freezes") or []
+        eff_frozen_steps = (
+            max(FROZEN_MIN_STEPS, int(math.ceil(FROZEN_MIN_STEPS / max(0.15, spd))))
+            if spd < 0.5
+            else FROZEN_MIN_STEPS
+        )
         sid, lay = str(seg.get("id")), str(seg.get("layout") or "single").lower()
         for m_in in seg.get("marks", []) or []:
-            marks_by_seg.setdefault(sid, []).append((float(m_in.get("at", 0)), float(m_in.get("at", 0)) + float(m_in.get("duration", 0.56)) + 0.1))
+            marks_by_seg.setdefault(sid, []).append(
+                (float(m_in.get("at", 0)), float(m_in.get("at", 0)) + float(m_in.get("duration", 0.56)) + 0.1)
+            )
 
         tr_in = str(seg.get("transition") or "cut").strip().lower() if idx_seg > 0 else "cut"
-        d_in = float(seg.get("transition_duration") or 0.36) if tr_in not in ("", "cut", "none") else 0.0
+        tr_in_base = tr_in.split("@", 1)[0].strip()
+        d_in = float(seg.get("transition_duration") or 0.36) if tr_in_base not in ("", "cut", "none") else 0.0
         tr_out = (
             str(segs[idx_seg + 1].get("transition") or "cut").strip().lower()
             if idx_seg + 1 < len(segs)
             else "cut"
         )
+        tr_out_base = tr_out.split("@", 1)[0].strip()
         d_out = (
             float(segs[idx_seg + 1].get("transition_duration") or 0.36)
-            if tr_out not in ("", "cut", "none")
+            if tr_out_base not in ("", "cut", "none")
             else 0.0
         )
 
-        boxes = layouts.banner_boxes(seg, W, H, dur)
-        panels = {"split_h": [("left", (0, 0, W // 2, H)), ("right", (W // 2, 0, W, H))],
-                  "split_v": [("top", (0, 0, W, H // 2)), ("bottom", (0, H // 2, W, H))]}.get(lay, [("frame", (0, 0, W, H))])
+        # Explicitly probe every cut seam (t_cut - 0.04s, t_cut, t_cut + 0.04s) for black flickers,
+        # skipping ONLY intentional dark fades (dip_to_black / fadeblack / fade).
+        if idx_seg >= 1 and tr_in_base not in _DARK_FADE_TRANSITIONS:
+            for dt_seam in (-0.04, 0.0, 0.04):
+                t_probe = t0 + dt_seam
+                if t_probe < 0.0:
+                    continue
+                cap.set(cv2.CAP_PROP_POS_MSEC, t_probe * 1000.0)
+                ok_seam, fr_seam = cap.read()
+                if ok_seam and fr_seam is not None:
+                    result["frames"] += 1
+                    gray_seam = cv2.cvtColor(fr_seam, cv2.COLOR_BGR2GRAY)
+                    if float(gray_seam.mean()) < BLACK_MEAN:
+                        result["black"].append(f"{sid} cut seam at {t_probe:.2f}s")
+
+        boxes = layouts.banner_boxes(seg, W, H, dur) if hasattr(layouts, "banner_boxes") else []
+        for b in boxes:
+            if not b.get("header"):
+                b_span = float(b.get("t1", 0.0)) - float(b.get("t0", 0.0))
+                if b_span > 1.5:
+                    result["lingering_banners"].append(
+                        f"{sid}: phrase banner '{b.get('text', '')}' lingers {b_span:.2f}s (>1.50s)"
+                    )
+        panels = {
+            "split_h": [("left", (0, 0, W // 2, H)), ("right", (W // 2, 0, W, H))],
+            "split_v": [("top", (0, 0, W, H // 2)), ("bottom", (0, H // 2, W, H))],
+        }.get(lay, [("frame", (0, 0, W, H))])
         seen = {name: 0 for name, _ in panels}
         missing: Dict[str, List[float]] = {name: [] for name, _ in panels}
+        prev_gray: Optional[Any] = None
+        run_anchor_gray: Optional[Any] = None
+        frozen_run = 0
+        freeze_start_t = 0.0
+        frozen_reported = False
+
         t = 0.2
         while t < dur - 0.2:
             in_transition = (d_in > 0.0 and t <= d_in + 0.05) or (d_out > 0.0 and t >= dur - d_out - 0.05)
             in_mark = any(a - 0.05 <= t <= b for a, b in marks_by_seg.get(sid, []))
+            in_hold_tail = (hold_tail > 0.0 and t >= play_dur - 0.05) or any(
+                isinstance(fz, dict)
+                and float(fz.get("at", 0.0)) - 0.05 <= t <= float(fz.get("at", 0.0)) + float(fz.get("duration", 0.0)) + 0.05
+                for fz in explicit_freezes
+            )
             if not in_transition and not in_mark:
                 cap.set(cv2.CAP_PROP_POS_MSEC, (t0 + t) * 1000.0)
                 ok, frame = cap.read()
                 if ok:
                     result["frames"] += 1
-                    if is_black_frame(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)):
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    if is_black_frame(gray):
                         result["black"].append(f"{sid} at {t0 + t:.1f}s")
+                    if in_hold_tail:
+                        # Exempt intentional hold_tail / explicit freeze windows from FROZEN alarms
+                        prev_gray = None
+                        run_anchor_gray = None
+                        frozen_run = 0
+                    else:
+                        if prev_gray is not None and gray.shape == prev_gray.shape:
+                            diff_mean = float(np.abs(gray.astype(np.float32) - prev_gray.astype(np.float32)).mean())
+                            if diff_mean < FROZEN_DIFF_EPS:
+                                if frozen_run == 0:
+                                    freeze_start_t = t0 + t - FRAME_STEP_SEC
+                                    run_anchor_gray = prev_gray
+                                # On smooth slo-mo (speed < 0.5), tiny per-step deltas accumulate over multiple steps;
+                                # genuine stuck frames stay identical to run_anchor_gray.
+                                anchor_moved = (
+                                    spd < 0.5
+                                    and run_anchor_gray is not None
+                                    and run_anchor_gray.shape == gray.shape
+                                    and float(np.abs(gray.astype(np.float32) - run_anchor_gray.astype(np.float32)).mean())
+                                    >= FROZEN_DIFF_EPS * 2.0
+                                )
+                                if anchor_moved:
+                                    frozen_run = 0
+                                    run_anchor_gray = gray
+                                else:
+                                    frozen_run += 1
+                                    if frozen_run >= eff_frozen_steps and not frozen_reported:
+                                        result["frozen"].append(f"{sid} frozen >=1.5s starting at {freeze_start_t:.1f}s")
+                                        frozen_reported = True
+                            else:
+                                frozen_run = 0
+                                run_anchor_gray = gray
+                        prev_gray = gray
+
                     for name, (x0, y0, x1, y1) in panels:
                         seen[name] += 1
                         faces = vision_tracker.prominent_faces(vision_tracker.detect_faces_in_frame(frame[y0:y1, x0:x1]))
@@ -1153,25 +1941,47 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
                                 pass
                         if not faces:
                             missing[name].append(round(t0 + t, 1))
-                        elif name == "frame":
+                        else:
+                            for f in faces:
+                                ex, ey = f.get("eye_center_norm", [0.5, 0.38])
+                                if ex <= 0.015 or ex >= 0.985 or ey <= 0.015 or ey >= 0.96:
+                                    lbl = f"{sid} ({name})" if name != "frame" else sid
+                                    result["face_crop"].append(f"{lbl} at {t0 + t:.1f}s: eyeline near crop edge ({ex:.2f},{ey:.2f})")
                             for b in boxes:
                                 if b["t0"] <= t <= b["t1"]:
                                     for f in faces:
-                                        if box_overlap_share(f["bbox_norm"], (b["x0"], b["y0"], b["x1"], b["y1"]), W, H) > BANNER_FACE_OVERLAP:
-                                            result["banner_on_face"].append(f"{sid} at {t0 + t:.1f}s: '{b['text']}' covers a face")
+                                        canvas_bbox = _panel_bbox_to_canvas_norm(
+                                            f["bbox_norm"], (x0, y0, x1, y1), W, H
+                                        )
+                                        if box_overlap_share(canvas_bbox, (b["x0"], b["y0"], b["x1"], b["y1"]), W, H) > BANNER_FACE_OVERLAP:
+                                            lbl = f"{sid} ({name})" if name != "frame" else sid
+                                            result["banner_on_face"].append(f"{lbl} at {t0 + t:.1f}s: '{b['text']}' covers a face")
+            else:
+                prev_gray = None
+                run_anchor_gray = None
+                frozen_run = 0
             t += FRAME_STEP_SEC
-        for name, times in missing.items():
-            if seen[name] >= 3 and len(times) / seen[name] > MISSING_FACE_SHARE:
-                label = f"{sid} {name} panel" if name != "frame" else sid
-                result["no_face"].append(f"{label}: no face in {len(times)} of {seen[name]} frames (for example at {times[0]}s)")
+        if not is_beat:
+            for name, times in missing.items():
+                if seen[name] >= 3 and len(times) / seen[name] > MISSING_FACE_SHARE:
+                    label = f"{sid} {name} panel" if name != "frame" else sid
+                    result["no_face"].append(f"{label}: no face in {len(times)} of {seen[name]} frames (for example at {times[0]}s)")
         t0 += dur
     cap.release()
-    result["ok"] = not result["black"] and len(result["banner_on_face"]) < 2
+    result["ok"] = (
+        not result["black"]
+        and not result["frozen"]
+        and len(result["banner_on_face"]) < 2
+    )
     return result
 
 
 def is_subs_enabled(plan: Dict[str, Any]) -> bool:
     """Return True when caption/subtitle rendering is enabled in `plan`."""
+    if not isinstance(plan, dict):
+        return False
+    if plan.get("page"):
+        return False
     spec = plan.get("subs")
     if spec is None or spec is False:
         return False
@@ -1182,21 +1992,100 @@ def is_subs_enabled(plan: Dict[str, Any]) -> bool:
     if isinstance(spec, dict):
         if not spec.get("enabled", True):
             return False
+        mode = str(spec.get("mode", "") or "").strip().lower()
+        if mode in ("off", "none", "false", "0", "no"):
+            return False
         style = str(spec.get("style", "auto") or "auto").strip().lower()
         return style not in ("", "none", "off", "false")
     return False
 
 
+def _segment_subs_suppressed(
+    seg: Dict[str, Any],
+    plan: Dict[str, Any],
+    seg_start: float,
+    seg_end: float,
+) -> bool:
+    """Return True when a segment intentionally skips bottom subtitles (muted, beat, `subs_off`, or active flashcard)."""
+    if _segment_is_muted(seg) or _segment_is_beat(seg):
+        return True
+    if seg.get("subs_off"):
+        return True
+    seg_subs_raw = seg.get("subs")
+    if seg_subs_raw is False:
+        return True
+    if isinstance(seg_subs_raw, str) and seg_subs_raw.strip().lower() in ("off", "none", "false", "0", "no"):
+        return True
+
+    subs_on = (
+        bool(seg.get("subs_on"))
+        or (seg_subs_raw is True)
+        or (isinstance(seg_subs_raw, str) and seg_subs_raw.strip().lower() in ("on", "true", "1", "yes"))
+    )
+    if subs_on:
+        return False
+
+    plan_subs = plan.get("subs")
+    if isinstance(plan_subs, dict) and plan_subs.get("with_cards"):
+        return False
+
+    if plan.get("cards_off") or plan.get("cards") is False or plan.get("flashcards") is False or seg.get("cards_off") or seg.get("cards") is False or seg.get("flashcards") is False:
+        return False
+    seg_fcs = seg.get("flashcards") or seg.get("cards")
+    if isinstance(seg_fcs, list) and len(seg_fcs) > 0:
+        return True
+    sid = str(seg.get("id") or "")
+    for fc in plan.get("flashcards") or []:
+        if not isinstance(fc, dict):
+            continue
+        fc_seg = str(fc.get("segment") or "")
+        if sid and fc_seg and fc_seg == sid:
+            return True
+        fc_segs = fc.get("segments")
+        if sid and isinstance(fc_segs, (list, tuple, set)) and sid in {str(x) for x in fc_segs}:
+            return True
+        fc_s = fc.get("start") if fc.get("start") is not None else fc.get("t0")
+        fc_e = fc.get("end") if fc.get("end") is not None else fc.get("t1")
+        if fc_s is not None and fc_e is not None:
+            try:
+                if float(fc_e) > seg_start + 0.15 and float(fc_s) < seg_end - 0.15:
+                    return True
+            except (TypeError, ValueError):
+                pass
+    return False
+
+
 def check_subtitles_srt(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, str]:
-    """Verify expected `.srt` sidecar exists and contains monotonic non-overlapping cues when `plan.get('subs')` is enabled."""
+    """Verify expected `.srt` sidecar exists, contains monotonic non-overlapping cues,
+    covers every eligible spoken segment (`>= 1.8s`), and respects canvas bounds.
+    """
     if not is_subs_enabled(plan):
         return True, "disabled"
     segs = plan.get("segments", [])
     if not segs:
         return True, "no dialogue segments"
 
-    srt_path = mp4_path.with_suffix(".srt")
+    fps = int(round(float((plan.get("canvas") or {}).get("fps") or 30))) or 30
+    starts, durs, _, _ = compute_timeline_starts(plan, fps)
+    all_suppressed = all(
+        _segment_subs_suppressed(s, plan, starts[i], starts[i] + durs[i])
+        for i, s in enumerate(segs)
+    )
+
+    srt_cands = [
+        mp4_path.with_suffix(".srt"),
+        mp4_path.parent / f"{strip_ratio_prefix(mp4_path.stem)}.srt",
+    ]
+    if plan.get("_plan_dir"):
+        pdir = Path(str(plan["_plan_dir"]))
+        srt_cands.extend([
+            pdir / f"{mp4_path.stem}.srt",
+            pdir / f"{strip_ratio_prefix(mp4_path.stem)}.srt",
+        ])
+    srt_path = next((c for c in srt_cands if c.is_file()), srt_cands[0])
     if not srt_path.is_file():
+        if all_suppressed:
+            return True, "all segments muted/suppressed"
         return False, f"missing expected SRT sidecar: {srt_path}"
 
     raw_srt = srt_path.read_text(encoding="utf-8", errors="replace")
@@ -1207,10 +2096,13 @@ def check_subtitles_srt(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, str
         )
     )
     if not cue_matches:
+        if all_suppressed:
+            return True, "all segments muted/suppressed"
         return False, f"0 subtitle cues found in {srt_path.name}"
 
     prev_end = 0.0
     prev_start = 0.0
+    cue_spans: List[Tuple[float, float]] = []
     for idx_c, m in enumerate(cue_matches):
         h1, m1, s1, ms1, h2, m2, s2, ms2 = (int(g) for g in m.groups())
         t_s = h1 * 3600.0 + m1 * 60.0 + s1 + ms1 / 1000.0
@@ -1224,15 +2116,637 @@ def check_subtitles_srt(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, str
                 return False, f"cue {idx_c + 1} overlaps previous cue ({t_s:.3f}s < {prev_end:.3f}s)"
         prev_start = t_s
         prev_end = t_e
+        cue_spans.append((t_s, t_e))
+
+    # Per-segment SRT coverage gate: every spoken, non-muted, non-beat, non-subs_off,
+    # non-flashcard-suppressed segment >= 1.8s must have >= 1 overlapping cue.
+    if not all_suppressed:
+        uncaptioned: List[str] = []
+        for i, s in enumerate(segs):
+            seg_s = starts[i]
+            seg_d = durs[i]
+            seg_e = seg_s + seg_d
+            if seg_d < 1.8:
+                continue
+            if _segment_subs_suppressed(s, plan, seg_s, seg_e):
+                continue
+            covered = any(
+                (c_e > seg_s + 0.25 and c_s < seg_e - 0.25)
+                or (c_s >= seg_s - 0.02 and c_e <= seg_e + 0.02)
+                for c_s, c_e in cue_spans
+            )
+            if not covered:
+                uncaptioned.append(str(s.get("id", f"S{i + 1}")))
+        if uncaptioned:
+            return False, f"uncaptioned spoken segment(s) >=1.8s: {', '.join(uncaptioned)} in {srt_path.name}"
+
+    # Check subtitle band vertical bounds against canvas height if subs_meta.json exists
+    canvas_h_raw = (plan.get("canvas") or {}).get("height")
+    if not canvas_h_raw and mp4_path.is_file():
+        canvas_h_raw = probe(mp4_path).get("height")
+    canvas_h = int(canvas_h_raw or 1920)
+    meta_cands = [WORK / "_subs" / "subs_meta.json"]
+    if plan.get("_plan_dir"):
+        meta_cands.insert(0, Path(str(plan["_plan_dir"])) / "_subs" / "subs_meta.json")
+    for mc in meta_cands:
+        if mc.is_file():
+            try:
+                mdata = read_json(mc)
+                if isinstance(mdata, dict):
+                    by0 = mdata.get("band_y0") if mdata.get("band_y0") is not None else mdata.get("bandTop")
+                    bh = mdata.get("band_h") if mdata.get("band_h") is not None else mdata.get("bandHeight", 0)
+                    if by0 is not None:
+                        y0_i = int(round(float(by0)))
+                        bh_i = int(round(float(bh or 0)))
+                        if y0_i < 0 or y0_i >= canvas_h or (bh_i > 0 and y0_i + bh_i > canvas_h + 2):
+                            return False, f"subtitle band out of canvas bounds (y0={y0_i}, h={bh_i}, canvas_h={canvas_h})"
+                break
+            except Exception:
+                pass
 
     return True, f"{len(cue_matches)} monotonic non-overlapping cue(s) -> {srt_path.name}"
+
+
+def _plan_has_flashcards(plan: Dict[str, Any]) -> bool:
+    """Return True when `plan` expects at least one bilingual flashcard overlay."""
+    if not isinstance(plan, dict):
+        return False
+    if plan.get("cards_off") or plan.get("cards") is False:
+        return False
+    if isinstance(plan.get("flashcards"), list) and len(plan["flashcards"]) > 0:
+        return True
+    for seg in plan.get("segments", []) or []:
+        if not isinstance(seg, dict) or seg.get("cards_off"):
+            continue
+        fcs = seg.get("flashcards") or seg.get("cards")
+        if isinstance(fcs, list) and len(fcs) > 0:
+            return True
+    return False
+
+
+def _load_flashcards_meta(
+    plan: Dict[str, Any],
+    mp4_path: Path,
+    *,
+    is_square: bool = False,
+    plan_dir: Optional[Path] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Path]]:
+    """Locate and read `overlays/flashcards_meta.json` (or `flashcards_sq_meta.json` for 1:1)."""
+    fname = "flashcards_sq_meta.json" if is_square else "flashcards_meta.json"
+    cands: List[Path] = []
+    if plan_dir is not None:
+        cands.append(Path(plan_dir) / "overlays" / fname)
+    if isinstance(plan, dict) and plan.get("_plan_dir"):
+        cands.append(Path(str(plan["_plan_dir"])) / "overlays" / fname)
+    cands.append(mp4_path.parent / "overlays" / fname)
+    stem_clean = strip_ratio_prefix(mp4_path.stem)
+    if stem_clean:
+        cands.append(WORK / stem_clean / "overlays" / fname)
+    cands.append(WORK / mp4_path.stem / "overlays" / fname)
+    cands.append(WORK / "overlays" / fname)
+
+    seen: set = set()
+    for cand in cands:
+        try:
+            key = str(cand.resolve())
+        except OSError:
+            key = str(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        if cand.is_file():
+            try:
+                data = read_json(cand)
+                if isinstance(data, dict):
+                    return data, cand
+            except Exception:
+                continue
+    return None, None
+
+
+def _norm_layout_for_verify(seg: Dict[str, Any], plan: Dict[str, Any]) -> str:
+    raw = str(seg.get("layout") or plan.get("preset") or "single").split(":")[0].strip().lower()
+    if raw in ("left_right", "hstack", "side_by_side"):
+        return "split_h"
+    if raw in ("top_bottom", "vstack"):
+        return "split_v"
+    if raw in ("", "auto", "none"):
+        return "single"
+    return raw
+
+
+def _detect_shields_for_verify(frame_bgr: Any, layout: str = "single") -> List[Tuple[float, float, float, float]]:
+    """Detect expanded head/hair/ears/chin face shields in canvas pixels via `flashcard_placer`
+    (falling back to panel-aware `vision_tracker` if `flashcard_placer` is unavailable).
+    """
+    raw_shields: List[Any] = []
+    try:
+        import flashcard_placer  # type: ignore[import-not-found]
+
+        if hasattr(flashcard_placer, "detect_expanded_face_shields"):
+            raw_shields = list(flashcard_placer.detect_expanded_face_shields(frame_bgr, layout=layout) or [])
+            out_fc: List[Tuple[float, float, float, float]] = []
+            for item in raw_shields:
+                if isinstance(item, dict):
+                    out_fc.append((float(item["x0"]), float(item["y0"]), float(item["x1"]), float(item["y1"])))
+                elif isinstance(item, (list, tuple)) and len(item) >= 4:
+                    out_fc.append((float(item[0]), float(item[1]), float(item[2]), float(item[3])))
+            return out_fc
+    except Exception:
+        pass
+
+    # Fallback when `flashcard_placer` is not available
+    try:
+        import vision_tracker
+    except Exception:
+        return []
+    fh_img, fw_img = frame_bgr.shape[:2]
+    lay = str(layout or "single").strip().lower()
+    if lay == "split_h":
+        mid_x = (fw_img // 2) & ~1
+        panels = [(0, 0, mid_x, fh_img), (mid_x, 0, fw_img, fh_img)]
+    elif lay == "split_v":
+        mid_y = (fh_img // 2) & ~1
+        panels = [(0, 0, fw_img, mid_y), (0, mid_y, fw_img, fh_img)]
+    else:
+        panels = [(0, 0, fw_img, fh_img)]
+    shields: List[Tuple[float, float, float, float]] = []
+    m_px = max(12.0, round(0.012 * min(fw_img, fh_img)))
+    for px0, py0, px1, py1 in panels:
+        pw, ph = max(1, px1 - px0), max(1, py1 - py0)
+        crop = frame_bgr[py0:py1, px0:px1]
+        if crop.size == 0:
+            continue
+        faces = vision_tracker.detect_faces_in_frame(crop, min_fw_ratio=0.05) or []
+        for f in faces:
+            if float(f.get("confidence", 1.0)) < 0.58:
+                continue
+            bn = f.get("bbox_norm")
+            if not bn or len(bn) < 4:
+                continue
+            bx0, by0, bx1, by1 = float(bn[0]) * pw, float(bn[1]) * ph, float(bn[2]) * pw, float(bn[3]) * ph
+            bw_f, bh_f = max(1.0, bx1 - bx0), max(1.0, by1 - by0)
+            sx0 = max(0.0, px0 + bx0 - 0.10 * bw_f - m_px)
+            sy0 = max(0.0, py0 + by0 - 0.16 * bh_f - m_px)
+            sx1 = min(float(fw_img), px0 + bx1 + 0.10 * bw_f + m_px)
+            sy1 = min(float(fh_img), py0 + by1 + 0.10 * bh_f + m_px)
+            shields.append((sx0, sy0, sx1, sy1))
+    return shields
+
+
+def _find_clean_mix_cap(
+    mp4_path: Path,
+    W: int,
+    H: int,
+    mp4_dur: float,
+    *,
+    is_square: bool = False,
+    plan_dir: Optional[Path] = None,
+) -> Tuple[Optional[Any], int, int, Optional[Path]]:
+    """Open clean pre-overlay `mix.mkv` when present and verified to match `mp4_path`."""
+    try:
+        import cv2
+    except Exception:
+        return None, 0, 0, None
+
+    cands: List[Tuple[Path, bool]] = []
+    if plan_dir is not None:
+        cands.append((Path(plan_dir) / "_segments" / "mix.mkv", False))
+        cands.append((Path(plan_dir).parent / "_segments" / "mix.mkv", False))
+    cands.append((mp4_path.parent / "_segments" / "mix.mkv", False))
+    cands.append((WORK / "_segments" / "mix.mkv", True))
+
+    try:
+        mp4_mtime = mp4_path.stat().st_mtime
+    except OSError:
+        mp4_mtime = 0.0
+
+    seen: set = set()
+    for cand, is_global in cands:
+        try:
+            key = str(cand.resolve())
+        except OSError:
+            key = str(cand)
+        if key in seen or not cand.is_file():
+            continue
+        seen.add(key)
+        if is_global and mp4_mtime > 0.0:
+            try:
+                if abs(cand.stat().st_mtime - mp4_mtime) > 300.0:
+                    continue
+            except OSError:
+                continue
+        cap = cv2.VideoCapture(str(cand))
+        if not cap.isOpened():
+            cap.release()
+            continue
+        mw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        mh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        mfps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0) or 30.0
+        mframes = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        mdur = (mframes / mfps) if mframes > 0 else 0.0
+        dims_ok = (mw == W and mh == H) if not is_square else (mw > 0 and mh > 0 and mh >= mw)
+        dur_ok = (mp4_dur <= 0.0 or mdur <= 0.0 or abs(mdur - mp4_dur) <= 0.35)
+        if dims_ok and dur_ok:
+            return cap, mw, mh, cand
+        cap.release()
+    return None, 0, 0, None
+
+
+def _load_subs_cues_for_verify(
+    plan: Dict[str, Any],
+    mp4_path: Path,
+    W: int,
+    H: int,
+    *,
+    is_square: bool = False,
+    plan_dir: Optional[Path] = None,
+) -> List[Tuple[float, float, float, float, float, float]]:
+    """Return active subtitle cue boxes `(start, end, x0, y0, x1, y1)` in canvas pixels from `subs_meta.json`."""
+    subdir = "_subs_sq" if is_square else "_subs"
+    cands: List[Path] = []
+    if plan_dir is not None:
+        cands.append(Path(plan_dir) / subdir / "subs_meta.json")
+    if isinstance(plan, dict) and plan.get("_plan_dir"):
+        cands.append(Path(str(plan["_plan_dir"])) / subdir / "subs_meta.json")
+    cands.append(mp4_path.parent / subdir / "subs_meta.json")
+    cands.append(WORK / subdir / "subs_meta.json")
+
+    mdata: Optional[Dict[str, Any]] = None
+    for cand in cands:
+        if cand.is_file():
+            try:
+                raw = read_json(cand)
+                if isinstance(raw, dict):
+                    mdata = raw
+                    break
+            except Exception:
+                continue
+    if not mdata:
+        return []
+    raw_cues = mdata.get("cues")
+    if not isinstance(raw_cues, list) or not raw_cues:
+        return []
+
+    out: List[Tuple[float, float, float, float, float, float]] = []
+    for c in raw_cues:
+        if not isinstance(c, dict):
+            continue
+        cs = c.get("start")
+        if cs is None:
+            cs = c.get("startTime", c.get("t0"))
+        ce = c.get("end")
+        if ce is None:
+            ce = c.get("endTime", c.get("t1"))
+        if cs is None or ce is None:
+            continue
+        try:
+            t_s, t_e = float(cs), float(ce)
+        except (TypeError, ValueError):
+            continue
+        if t_e <= t_s:
+            continue
+
+        y0_raw = c.get("y0_px") if c.get("y0_px") is not None else c.get("y0")
+        y1_raw = c.get("y1_px") if c.get("y1_px") is not None else c.get("y1")
+        if y0_raw is not None and y1_raw is not None:
+            try:
+                sy0, sy1 = float(y0_raw), float(y1_raw)
+            except (TypeError, ValueError):
+                continue
+        else:
+            y_pct = c.get("y_percent") if c.get("y_percent") is not None else c.get("positionY")
+            if y_pct is None:
+                continue
+            try:
+                cy = (float(y_pct) / 100.0) * float(H)
+                hh = float(c.get("height_px") or (H * 0.055)) * 0.5
+                sy0, sy1 = max(0.0, cy - hh), min(float(H), cy + hh)
+            except (TypeError, ValueError):
+                continue
+        if sy1 <= sy0:
+            continue
+        x0_raw = c.get("x0_px") if c.get("x0_px") is not None else c.get("x0")
+        x1_raw = c.get("x1_px") if c.get("x1_px") is not None else c.get("x1")
+        try:
+            sx0 = float(x0_raw) if x0_raw is not None else (0.06 * float(W))
+            sx1 = float(x1_raw) if x1_raw is not None else (0.94 * float(W))
+        except (TypeError, ValueError):
+            sx0, sx1 = 0.06 * float(W), 0.94 * float(W)
+        out.append((t_s, t_e, sx0, sy0, sx1, sy1))
+    return out
+
+
+def check_flashcards(
+    plan: Dict[str, Any],
+    mp4_path: Path,
+    *,
+    is_square: bool = False,
+    plan_dir: Optional[Path] = None,
+) -> Tuple[bool, str]:
+    """Strict dual-source anti-occlusion Deep QC gate for Stage 3b bilingual flashcards:
+    - Bounds & PNG existence verification for every card.
+    - Dual-source YuNet expanded face shield overlap check (`0` tolerance; `ix >= 2 and iy >= 2` hard-fails)
+      on BOTH clean `mix.mkv` (defeating occlusion blindness) AND final rendered `mp4_path`.
+    - Visible render delta verification vs clean `mix.mkv` (mean abs pixel diff `>= 6.0` on 9:16).
+    - Vertical non-overlap check against active subtitle cues from `subs_meta.json`.
+    """
+    eff_plan_dir = plan_dir or (Path(str(plan["_plan_dir"])) if isinstance(plan, dict) and plan.get("_plan_dir") else None)
+    meta, meta_path = _load_flashcards_meta(plan, mp4_path, is_square=is_square, plan_dir=eff_plan_dir)
+    expect_cards = _plan_has_flashcards(plan)
+
+    if meta is None:
+        if is_square:
+            # 1:1 Square wraps the completed 9:16 reel directly (2-layer blur + centered 9:16)
+            # without generating separate 1:1 flashcard metadata or PNGs.
+            return True, "none"
+        if expect_cards:
+            return False, "expected flashcards from plan, but overlays/flashcards_meta.json is missing"
+        return True, "none"
+
+    cards = meta.get("cards") if isinstance(meta, dict) else None
+    if not isinstance(cards, list) or not cards:
+        if expect_cards:
+            return False, f"expected flashcards from plan, but 0 cards recorded in {meta_path.name if meta_path else 'flashcards_meta.json'}"
+        return True, "none"
+
+    try:
+        import cv2
+        import numpy as np
+    except Exception as exc:  # noqa: BLE001
+        return True, f"{len(cards)} card(s) (frame check skipped: {exc})"
+
+    out_cap = cv2.VideoCapture(str(mp4_path))
+    if not out_cap.isOpened():
+        return False, f"could not open {mp4_path.name}"
+
+    mix_cap: Optional[Any] = None
+    try:
+        W = int(out_cap.get(cv2.CAP_PROP_FRAME_WIDTH) or meta.get("canvas_w") or 0)
+        H = int(out_cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or meta.get("canvas_h") or 0)
+        fps_vid = float(out_cap.get(cv2.CAP_PROP_FPS) or (plan.get("canvas") or {}).get("fps") or 30.0) or 30.0
+        n_frames = int(out_cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        mp4_dur = (n_frames / fps_vid) if n_frames > 0 else 0.0
+
+        mix_cap, mix_w, mix_h, _mix_path = _find_clean_mix_cap(
+            mp4_path, W, H, mp4_dur, is_square=is_square, plan_dir=eff_plan_dir
+        )
+
+        # 1:1 square foreground mapping parameters for projecting clean 9:16 `mix.mkv` shields
+        if is_square and H > 0:
+            if mix_cap is not None and mix_h > 0:
+                fg_w = max(2, int(round(H * (mix_w / float(mix_h)) / 2.0)) * 2)
+            else:
+                fg_w = max(2, int(round(H * 9.0 / 16.0 / 2.0)) * 2)
+            fg_w = min(W, fg_w)
+            fg_x0 = max(0, (W - fg_w) // 2)
+        else:
+            fg_w, fg_x0 = W, 0
+
+        # Build timeline segment -> layout map
+        segs = (plan.get("segments") or []) if isinstance(plan, dict) else []
+        seg_spans: List[Tuple[float, float, str]] = []
+        seg_by_id: Dict[str, str] = {}
+        if segs:
+            starts, durs, _, _ = compute_timeline_starts(plan, max(1, int(round(fps_vid))))
+            for s, st, d in zip(segs, starts, durs):
+                if isinstance(s, dict):
+                    lay = _norm_layout_for_verify(s, plan)
+                    seg_spans.append((st, st + d, lay))
+                    if s.get("id"):
+                        seg_by_id[str(s["id"])] = lay
+
+        def _layout_at(t_sec: float, card_seg_ids: Any) -> str:
+            for s0, s1, lay in seg_spans:
+                if s0 - 0.01 <= t_sec <= s1 + 0.01:
+                    return lay
+            if isinstance(card_seg_ids, list):
+                for csid in card_seg_ids:
+                    if str(csid) in seg_by_id:
+                        return seg_by_id[str(csid)]
+            return "single"
+
+        def _resolve_png(png_val: Any) -> Optional[Path]:
+            if not png_val:
+                return None
+            p = Path(str(png_val))
+            if p.is_absolute():
+                return p if p.is_file() and p.stat().st_size > 0 else None
+            search_roots: List[Path] = []
+            if meta_path is not None:
+                search_roots.extend([meta_path.parent, meta_path.parent.parent])
+            if eff_plan_dir is not None:
+                search_roots.append(eff_plan_dir)
+            search_roots.extend([mp4_path.parent, ROOT])
+            for root_d in search_roots:
+                cand_p = root_d / p
+                if cand_p.is_file() and cand_p.stat().st_size > 0:
+                    return cand_p
+            return None
+
+        sub_cues = (
+            _load_subs_cues_for_verify(plan, mp4_path, W, H, is_square=is_square, plan_dir=eff_plan_dir)
+            if is_subs_enabled(plan)
+            else []
+        )
+
+        failures: List[str] = []
+        tiers_used: List[str] = []
+
+        for idx_c, card in enumerate(cards, 1):
+            if not isinstance(card, dict):
+                failures.append(f"card #{idx_c}: invalid metadata entry")
+                continue
+            label = str(
+                card.get("text")
+                or (f"{card.get('en', '')} | {card.get('native', '')}" if (card.get("en") or card.get("native")) else "")
+                or f"card#{idx_c}"
+            ).strip()
+            t0 = float(card.get("start") if card.get("start") is not None else card.get("t0", 0.0))
+            t1 = float(card.get("end") if card.get("end") is not None else card.get("t1", 0.0))
+            x0 = float(card.get("x0", 0.0))
+            y0 = float(card.get("y0", 0.0))
+            x1 = float(card.get("x1") if card.get("x1") is not None else (x0 + float(card.get("w", 0.0))))
+            y1 = float(card.get("y1") if card.get("y1") is not None else (y0 + float(card.get("h", 0.0))))
+            tier = str(card.get("tier") or "unknown").strip() or "unknown"
+            tiers_used.append(tier)
+
+            # 1) Duration & canvas bounds check
+            if t1 <= t0:
+                failures.append(f"card #{idx_c} ('{label}'): non-positive span {t0:.2f}..{t1:.2f}s")
+                continue
+            bounds_ok = (
+                x0 >= -0.5
+                and y0 >= -0.5
+                and x1 <= W + 0.5
+                and y1 <= H + 0.5
+                and x1 > x0
+                and y1 > y0
+            )
+            if not bounds_ok:
+                failures.append(
+                    f"card #{idx_c} ('{label}'): out of bounds ({x0:.0f},{y0:.0f},{x1:.0f},{y1:.0f}) on {W}x{H}"
+                )
+
+            # 2) PNG asset existence check
+            png_raw = card.get("png")
+            if _resolve_png(png_raw) is None:
+                failures.append(f"card #{idx_c} ('{label}'): missing PNG ({png_raw})")
+
+            # 3) Timestamp sampling: every 0.25s + midpoint across [t0, t1]
+            span = t1 - t0
+            mid = 0.5 * (t0 + t1)
+            inset = min(0.12, span * 0.25)
+            s_lo = min(mid, t0 + inset)
+            s_hi = max(mid, t1 - inset)
+            raw_ts: List[float] = [mid]
+            cur_t = s_lo
+            while cur_t <= s_hi + 1e-6:
+                raw_ts.append(cur_t)
+                cur_t += 0.25
+            if s_hi - raw_ts[-1] > 0.05:
+                raw_ts.append(s_hi)
+            max_valid_t = max(0.0, mp4_dur - 0.04) if mp4_dur > 0.0 else t1
+            sample_ts = sorted({round(max(0.0, min(ts, max_valid_t)), 3) for ts in raw_ts})
+
+            card_face_hits: List[str] = []
+            vis_deltas: List[float] = []
+            mid_delta: Optional[float] = None
+            mid_rounded = round(max(0.0, min(mid, max_valid_t)), 3)
+
+            ix0_roi = max(0, min(W, int(math.floor(x0))))
+            iy0_roi = max(0, min(H, int(math.floor(y0))))
+            ix1_roi = max(0, min(W, int(math.ceil(x1))))
+            iy1_roi = max(0, min(H, int(math.ceil(y1))))
+
+            for t_s in sample_ts:
+                seg_layout = _layout_at(t_s, card.get("seg_ids"))
+
+                out_cap.set(cv2.CAP_PROP_POS_MSEC, t_s * 1000.0)
+                ok_out, out_fr = out_cap.read()
+                if not ok_out:
+                    out_fr = None
+
+                mix_fr = None
+                if mix_cap is not None:
+                    mix_cap.set(cv2.CAP_PROP_POS_MSEC, t_s * 1000.0)
+                    ok_mix, mf = mix_cap.read()
+                    if ok_mix and mf is not None:
+                        mix_fr = mf
+
+                # Source A: clean `mix.mkv` (anti-occlusion ground truth)
+                if mix_fr is not None:
+                    if is_square and fg_w > 0 and H > 0:
+                        mix_fg = (
+                            cv2.resize(mix_fr, (fg_w, H), interpolation=cv2.INTER_AREA)
+                            if (mix_fr.shape[1] != fg_w or mix_fr.shape[0] != H)
+                            else mix_fr
+                        )
+                        clean_shields = [
+                            (fg_x0 + fx0, fy0, fg_x0 + fx1, fy1)
+                            for fx0, fy0, fx1, fy1 in _detect_shields_for_verify(mix_fg, layout=seg_layout)
+                        ]
+                    else:
+                        clean_shields = _detect_shields_for_verify(mix_fr, layout=seg_layout)
+                    for fx0, fy0, fx1, fy1 in clean_shields:
+                        ov_x = min(x1, fx1) - max(x0, fx0)
+                        ov_y = min(y1, fy1) - max(y0, fy0)
+                        if ov_x >= 2.0 and ov_y >= 2.0:
+                            card_face_hits.append(
+                                f"card #{idx_c} ('{label}') @{t_s:.2f}s overlaps clean_mix face shield "
+                                f"({fx0:.0f},{fy0:.0f},{fx1:.0f},{fy1:.0f}) by {ov_x:.0f}x{ov_y:.0f}px"
+                            )
+                            break
+
+                # Source B: final rendered `out_mp4` (catches unoccluded faces & standalone runs;
+                # on 1:1 pillarboxed square frames, inspect the central 9:16 foreground strip only
+                # so blurred background sidebars never trigger false face overlaps).
+                if out_fr is not None:
+                    if is_square and fg_w > 0 and H > 0 and out_fr.shape[1] >= fg_x0 + fg_w:
+                        out_fg = np.ascontiguousarray(out_fr[:, fg_x0 : fg_x0 + fg_w])
+                        out_shields = [
+                            (fg_x0 + fx0, fy0, fg_x0 + fx1, fy1)
+                            for fx0, fy0, fx1, fy1 in _detect_shields_for_verify(out_fg, layout=seg_layout)
+                        ]
+                    else:
+                        out_shields = _detect_shields_for_verify(out_fr, layout=seg_layout)
+                    for fx0, fy0, fx1, fy1 in out_shields:
+                        ov_x = min(x1, fx1) - max(x0, fx0)
+                        ov_y = min(y1, fy1) - max(y0, fy0)
+                        if ov_x >= 2.0 and ov_y >= 2.0:
+                            card_face_hits.append(
+                                f"card #{idx_c} ('{label}') @{t_s:.2f}s overlaps rendered face shield "
+                                f"({fx0:.0f},{fy0:.0f},{fx1:.0f},{fy1:.0f}) by {ov_x:.0f}x{ov_y:.0f}px"
+                            )
+                            break
+
+                # Visible render check vs clean `mix.mkv` (9:16)
+                if (
+                    not is_square
+                    and mix_fr is not None
+                    and out_fr is not None
+                    and out_fr.shape == mix_fr.shape
+                    and ix1_roi > ix0_roi
+                    and iy1_roi > iy0_roi
+                ):
+                    out_roi = out_fr[iy0_roi:iy1_roi, ix0_roi:ix1_roi].astype(np.float32)
+                    mix_roi = mix_fr[iy0_roi:iy1_roi, ix0_roi:ix1_roi].astype(np.float32)
+                    delta = float(np.abs(out_roi - mix_roi).mean())
+                    vis_deltas.append(delta)
+                    if abs(t_s - mid_rounded) < 0.005:
+                        mid_delta = delta
+
+            if card_face_hits:
+                failures.append(card_face_hits[0])
+
+            if not is_square and mix_cap is not None and vis_deltas:
+                vis_check = mid_delta if mid_delta is not None else max(vis_deltas)
+                if vis_check < 6.0 and max(vis_deltas) < 6.0:
+                    failures.append(
+                        f"card #{idx_c} ('{label}') not visibly rendered inside ({ix0_roi},{iy0_roi},{ix1_roi},{iy1_roi}) "
+                        f"(mean delta {vis_check:.1f} < 6.0 vs clean mix.mkv)"
+                    )
+
+            # 4) Subtitle cue overlap check
+            for cs, ce, sx0, sy0, sx1, sy1 in sub_cues:
+                if ce > t0 + 0.04 and cs < t1 - 0.04:
+                    ix_sub = min(x1, sx1) - max(x0, sx0)
+                    iy_sub = min(y1, sy1) - max(y0, sy0)
+                    if ix_sub >= 2.0 and iy_sub >= 2.0:
+                        failures.append(
+                            f"card #{idx_c} ('{label}') [{t0:.2f}-{t1:.2f}s] y=[{y0:.0f},{y1:.0f}] "
+                            f"overlaps subtitle cue [{cs:.2f}-{ce:.2f}s] y=[{sy0:.0f},{sy1:.0f}] by {iy_sub:.0f}px"
+                        )
+                        break
+
+        tier_counts: Dict[str, int] = {}
+        for tr in tiers_used:
+            tier_counts[tr] = tier_counts.get(tr, 0) + 1
+        pref_order = ["top_empty", "alt_empty", "body_center", "bottom_safe"]
+        ordered_tiers = [k for k in pref_order if k in tier_counts] + [k for k in tier_counts if k not in pref_order]
+        tiers_str = ", ".join(f"{k}={tier_counts[k]}" for k in ordered_tiers)
+        src_note = ", dual-source clean mix.mkv" if mix_cap is not None else ""
+        prefix = "1:1 " if is_square else ""
+        if not failures:
+            return True, f"{prefix}{len(cards)} card(s) verified (0 face overlap, tiers: {tiers_str}{src_note})"
+        return False, f"{prefix}{len(cards)} card(s), {len(failures)} failure(s) (tiers: {tiers_str}): " + "; ".join(failures[:6])
+    finally:
+        out_cap.release()
+        if mix_cap is not None:
+            mix_cap.release()
 
 
 REVIEW_MAX_SIDE = 1024
 
 
-def check_square_output(sq_path: Path, sample_count: int = 5) -> Tuple[bool, str]:
-    """Lightweight 1:1 resolution (W == H) and black-frame check on 4-6 sampled frames of SQ_<name>.mp4."""
+def check_square_output(
+    sq_path: Path,
+    sample_count: int = 5,
+    *,
+    plan: Optional[Dict[str, Any]] = None,
+    plan_dir: Optional[Path] = None,
+) -> Tuple[bool, str]:
+    """1:1 resolution (W == H), black-frame, frozen-frame, and centered foreground face crop safety check on SQ_<name>.mp4."""
     if not sq_path.is_file():
         return False, f"missing {sq_path.name}"
     info = probe(sq_path)
@@ -1241,9 +2755,15 @@ def check_square_output(sq_path: Path, sample_count: int = 5) -> Tuple[bool, str
     sq_dur = float(info.get("duration") or 0.0)
     try:
         import cv2
+        import numpy as np
     except Exception:
         ok_dim = sq_w > 0 and sq_w == sq_h
         return ok_dim, f"1:1 {sq_w}x{sq_h}, {tc(sq_dur)} -> {sq_path.name}"
+
+    try:
+        import vision_tracker
+    except Exception:
+        vision_tracker = None  # type: ignore[assignment]
 
     cap = cv2.VideoCapture(str(sq_path))
     if not cap.isOpened():
@@ -1260,6 +2780,25 @@ def check_square_output(sq_path: Path, sample_count: int = 5) -> Tuple[bool, str
     spots = [round(0.10 + 0.80 * k / max(1, n_samples - 1), 3) for k in range(n_samples)]
     checked = 0
     black_spots: List[str] = []
+    frozen_pairs = 0
+    prev_sq_gray: Optional[Any] = None
+    fg_w = max(2, int(round(sq_h * 9.0 / 16.0 / 2)) * 2) if sq_h > 0 else 0
+    fg_x0 = max(0, (sq_w - fg_w) // 2)
+    fg_x1 = min(sq_w, fg_x0 + fg_w)
+    clipped_faces = 0
+
+    # Intentional dark-fade transition times from `plan` (only these may forgive a black sample within ±0.50s)
+    dark_fade_times: List[float] = []
+    if isinstance(plan, dict) and plan.get("segments"):
+        plan_fps = int(round(float((plan.get("canvas") or {}).get("fps") or fps or 30))) or 30
+        p_starts, _, _, _ = compute_timeline_starts(plan, plan_fps)
+        for idx_s, seg in enumerate(plan.get("segments") or []):
+            if idx_s == 0 or not isinstance(seg, dict):
+                continue
+            tr_base = str(seg.get("transition") or "cut").strip().lower().split("@", 1)[0].strip()
+            if tr_base in _DARK_FADE_TRANSITIONS:
+                dark_fade_times.append(p_starts[idx_s])
+
     for frac in spots:
         t_sec = max(0.0, sq_dur * frac) if sq_dur > 0 else 0.0
         cap.set(cv2.CAP_PROP_POS_MSEC, t_sec * 1000.0)
@@ -1268,14 +2807,22 @@ def check_square_output(sq_path: Path, sample_count: int = 5) -> Tuple[bool, str
             continue
         checked += 1
         gray = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+        if prev_sq_gray is not None and gray.shape == prev_sq_gray.shape:
+            if float(np.abs(gray.astype(np.float32) - prev_sq_gray.astype(np.float32)).mean()) < FROZEN_DIFF_EPS:
+                frozen_pairs += 1
+        prev_sq_gray = gray
+
         if float(gray.mean()) < BLACK_MEAN:
-            alt_t = min(max(0.0, sq_dur - 0.05), t_sec + 0.18) if sq_dur > 0.25 else t_sec
-            if abs(alt_t - t_sec) > 0.04:
-                cap.set(cv2.CAP_PROP_POS_MSEC, alt_t * 1000.0)
-                ok_alt, fr_alt = cap.read()
-                if ok_alt and fr_alt is not None and float(cv2.cvtColor(fr_alt, cv2.COLOR_BGR2GRAY).mean()) >= BLACK_MEAN:
-                    continue
+            if any(abs(t_sec - dt_f) <= 0.50 for dt_f in dark_fade_times):
+                continue
             black_spots.append(f"{t_sec:.1f}s")
+        elif vision_tracker is not None and fg_x1 > fg_x0:
+            fg_crop = fr[:, fg_x0:fg_x1]
+            faces = vision_tracker.prominent_faces(vision_tracker.detect_faces_in_frame(fg_crop))
+            for f in faces:
+                _ex, ey = f.get("eye_center_norm", [0.5, 0.38])
+                if ey <= 0.01 or ey >= 0.97:
+                    clipped_faces += 1
     cap.release()
 
     issues: List[str] = []
@@ -1285,9 +2832,22 @@ def check_square_output(sq_path: Path, sample_count: int = 5) -> Tuple[bool, str
         issues.append("0 readable frames")
     if black_spots:
         issues.append(f"black frames @ {', '.join(black_spots)}")
+    if checked >= 4 and sq_dur >= 2.0 and frozen_pairs >= checked - 1:
+        issues.append("frozen video stream")
+    if clipped_faces >= 2:
+        issues.append(f"clipped foreground faces ({clipped_faces})")
+    sq_cards_note = ""
+    if plan is not None or plan_dir is not None:
+        sq_cards_ok, sq_cards_summary = check_flashcards(
+            plan or {}, sq_path, is_square=True, plan_dir=plan_dir
+        )
+        if not sq_cards_ok:
+            issues.append(f"flashcards: {sq_cards_summary}")
+        elif sq_cards_summary != "none":
+            sq_cards_note = f", {sq_cards_summary}"
     ok = len(issues) == 0
     if ok:
-        return True, f"1:1 {sq_w}x{sq_h}, {checked} sampled frames clean -> {sq_path.name}"
+        return True, f"1:1 {sq_w}x{sq_h}, {checked} sampled frames clean{sq_cards_note} -> {sq_path.name}"
     return False, f"1:1 {sq_w}x{sq_h}, {'; '.join(issues)} -> {sq_path.name}"
 
 
@@ -1298,8 +2858,9 @@ def build_review_sheet(
     tile_w: int = 104,
     sq_path: Optional[Path] = None,
 ) -> Optional[Path]:
-    """One small picture of the whole finished video for the Director: 3 frames per cut (just after it starts, middle, just before it
-    ends), shrunk and labelled with the cut id and time, plus a 4-frame 1:1 square strip when SQ_<name>.mp4 exists."""
+    """Build compact whole-video review contact sheet: 3 frames per cut (start, middle, end)
+    labelled with cut ID and timestamp, plus a 4-frame 1:1 square strip when `SQ_<name>.mp4` exists.
+    """
     try:
         import cv2
         import numpy as np
@@ -1310,14 +2871,14 @@ def build_review_sheet(
         return None
     fps = float((plan.get("canvas") or {}).get("fps") or 30)
     tile_h = int(tile_w * 16 / 9)
-    cols_per_cut, label_h = 3, 14
+    label_h = 14
     cuts, t0 = [], 0.0
     seg_mids: List[float] = []
     for seg in plan.get("segments", []):
-        dur = round((float(seg["end"]) - float(seg["start"])) * fps) / fps
+        dur = max(1, round(_segment_duration(seg) * fps)) / fps
         seg_mids.append(t0 + dur / 2.0)
         row = []
-        for k, frac_t in enumerate((min(0.25, dur * 0.3), dur / 2, max(dur - 0.25, dur * 0.7))):
+        for frac_t in (min(0.25, dur * 0.3), dur / 2, max(dur - 0.25, dur * 0.7)):
             cap.set(cv2.CAP_PROP_POS_MSEC, (t0 + frac_t) * 1000.0)
             ok, fr = cap.read()
             tile = cv2.resize(fr, (tile_w, tile_h), interpolation=cv2.INTER_AREA) if ok else np.zeros((tile_h, tile_w, 3), np.uint8)
@@ -1333,7 +2894,7 @@ def build_review_sheet(
     per_row = max(1, min(len(cuts), 6))
     rows = []
     for r in range(0, len(cuts), per_row):
-        group = cuts[r:r + per_row]
+        group = cuts[r : r + per_row]
         while len(group) < per_row:
             group.append(np.full_like(cuts[0], 255))
         rows.append(np.hstack(group))
@@ -1409,10 +2970,14 @@ def build_review_sheet(
     return out_path
 
 
-def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = None) -> bool:
-    """Run all 5 deterministic verification checks and print the 5-line QA report."""
+def run_verification(
+    plan_path: str | Path,
+    script_path: Optional[str | Path] = None,
+    target_lufs: Optional[float] = None,
+) -> bool:
+    """Run all deterministic Deep QC checks and print the structured QA summary."""
     p_file, plan = load_plan(plan_path)
-    out_mp4 = resolve(plan.get("output") or (OUTPUT / f"{p_file.parent.name}.mp4"))
+    out_mp4 = _locate_output_mp4(plan, p_file)
     if not out_mp4.is_file():
         print(f"[VERIFY FAIL] Output MP4 missing: {out_mp4}")
         return False
@@ -1433,33 +2998,44 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
         and abs(dur_diff) <= 0.15
     )
 
-    target_lufs = float((plan.get("audio") or {}).get("loudness", -11.5))
-    audio_ok, i_lufs, tp_db = check_loudness(out_mp4, target_lufs=target_lufs)
+    if target_lufs is None:
+        audio_cfg = plan.get("audio") or {}
+        base_loud = audio_cfg.get("loudness")
+        if base_loud is None:
+            base_loud = getattr(common, "DEFAULT_LOUDNESS_LUFS", DEFAULT_LOUDNESS_LUFS)
+        gain_raw = audio_cfg.get("gain_db", 0.0)
+        if isinstance(gain_raw, str):
+            gain_raw = re.sub(r"\s*db\s*$", "", gain_raw.strip(), flags=re.IGNORECASE)
+        eff_target_lufs = float(base_loud) + float(gain_raw or 0.0)
+    else:
+        eff_target_lufs = float(target_lufs)
+    audio_ok, i_lufs, tp_db = check_loudness(out_mp4, target_lufs=eff_target_lufs)
 
+    plan["_plan_dir"] = str(p_file.parent)
     cuts_ok, clipped_w, long_pauses, jc_masked, b_clicks = check_cuts_and_pauses(plan, mp4_path=out_mp4)
 
     if not script_path:
-        # Use the script this plan was prepared from (recorded by prepare.py), not just the first file in input/script/
         side = p_file.parent / "plan.json"
         try:
             script_path = plan.get("script") or (read_json(side).get("script") if side.is_file() else None)
         except Exception:
             script_path = None
     resolved_script = resolve(script_path) if script_path else None
-    plan["_plan_dir"] = str(p_file.parent)
     script_ok, cov_lines, tot_lines, b_dups = check_script_coverage(plan, script_path=resolved_script)
 
-    # Write contact sheet to plan directory AND work/<output_stem>/ if it exists
     sheet_path = p_file.parent / "marks_contact_sheet.jpg"
     marks_ok, m_pass, m_tot, m_details, sheet_kb = verify_marks_and_build_contact_sheet(
         out_mp4, plan, seg_start, exp_w, exp_h, sheet_path
     )
     split_hook_ok, split_hook_summary = check_split_and_hook_rules(plan)
     subs_ok, subs_summary = check_subtitles_srt(plan, out_mp4)
-    pic_ok, pic_bad, pic_n = check_picture_timeline(plan, out_mp4)
+    cards_ok, cards_summary = check_flashcards(plan, out_mp4, is_square=False, plan_dir=p_file.parent)
+    pic_ok, pic_bad, pic_n = check_picture_timeline(plan, out_mp4, plan_dir=p_file.parent)
     sq_mp4 = square_job_output(out_mp4)
     has_square = sq_mp4.is_file() and sq_mp4.resolve() != out_mp4.resolve()
-    sq_ok, sq_summary = check_square_output(sq_mp4) if has_square else (True, "")
+    sq_ok, sq_summary = (
+        check_square_output(sq_mp4, plan=plan, plan_dir=p_file.parent) if has_square else (True, "")
+    )
     review = build_review_sheet(
         plan,
         out_mp4,
@@ -1475,7 +3051,6 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
     rel_out = str(out_mp4)
     rel_sheet = f"work/{p_file.parent.name}/marks_contact_sheet.jpg"
 
-    # Strict 5-line deterministic QA output
     print(
         f"[VERIFY {'PASS' if video_ok else 'FAIL'}] {rel_out} "
         f"({info['width']}x{info['height']} @ {int(round(info['fps'] or 0))}fps, "
@@ -1483,7 +3058,7 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
     )
     print(
         f"[AUDIO  {'PASS' if audio_ok else 'FAIL'}] Integrated Loudness: {i_lufs:.1f} LUFS "
-        f"(target {target_lufs:.1f} LUFS), True Peak: {tp_db:.1f} dBTP"
+        f"(target {eff_target_lufs:.1f} LUFS), True Peak: {tp_db:.1f} dBTP"
     )
     print(
         f"[CUTS   {'PASS' if cuts_ok else 'FAIL'}] {len(plan.get('segments', []))} segments verified: "
@@ -1498,6 +3073,8 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
         f"({', '.join(m_details)}) -> {rel_sheet} ({sheet_kb} KB)"
     )
     print(f"[SPLIT  {'PASS' if split_hook_ok else 'FAIL'}] {split_hook_summary}")
+    if cards_summary != "none" or not cards_ok:
+        print(f"[CARDS  {'PASS' if cards_ok else 'FAIL'}] {cards_summary}")
     if is_subs_enabled(plan) or not subs_ok:
         print(f"[SUBS   {'PASS' if subs_ok else 'FAIL'}] {subs_summary}")
     if has_square:
@@ -1508,11 +3085,25 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
         except ValueError:
             rel_review = review
         sq_note = " + 4-frame 1:1 square strip" if has_square else ""
-        print(f"[REVIEW] one picture of the whole video (3 frames per cut{sq_note}, <=1024px, ~750 tokens): {rel_review}")
-    detail = f"{frames['frames']} frames: {len(frames['black'])} black, {len(frames['banner_on_face'])} banner-on-face, {len(frames['no_face'])} panel(s) with missing faces"
+        print(f"[REVIEW] Whole-video review sheet (3 frames per cut{sq_note}, <=1024px): {rel_review}")
+    detail = (
+        f"{frames['frames']} frames: {len(frames['black'])} black, "
+        f"{len(frames['frozen'])} frozen, "
+        f"{len(frames['banner_on_face'])} banner-on-face, "
+        f"{len(frames['no_face'])} panel(s) with missing faces"
+    )
+    if frames.get("lingering_banners"):
+        detail += f", {len(frames['lingering_banners'])} lingering banner(s)"
     print(f"[FRAMES {'PASS' if frames['ok'] else 'FAIL'}] {frames['note'] or detail}")
-    for kind, lines in (("BLACK", frames["black"]), ("BANNER ON FACE", frames["banner_on_face"]), ("NO FACE (warning)", frames["no_face"])):
-        for ln in lines[:4]:
+    for kind, lines_list in (
+        ("BLACK", frames["black"]),
+        ("FROZEN", frames["frozen"]),
+        ("BANNER ON FACE", frames["banner_on_face"]),
+        ("LINGERING BANNER (warning)", frames.get("lingering_banners", [])),
+        ("FACE CROP (warning)", frames["face_crop"]),
+        ("NO FACE (warning)", frames["no_face"]),
+    ):
+        for ln in lines_list[:4]:
             print(f"          {kind}: {ln}")
     try:
         import events
@@ -1524,9 +3115,11 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
             ("Script order", script_ok, f"{cov_lines}/{tot_lines} lines present in order"),
             ("Marks", marks_ok, f"{m_pass}/{m_tot} verified"),
             ("Split screen", split_hook_ok, split_hook_summary),
-            ("Frames", frames['ok'], frames['note'] or detail),
+            ("Frames", frames["ok"], frames["note"] or detail),
             ("Picture vs plan", pic_ok, f"{pic_n} cuts matched" if pic_ok else "; ".join(pic_bad)[:200]),
         ]
+        if cards_summary != "none" or not cards_ok:
+            ev_list.append(("Flashcards", cards_ok, cards_summary))
         if is_subs_enabled(plan) or not subs_ok:
             ev_list.append(("Subtitles", subs_ok, subs_summary))
         if has_square:
@@ -1535,18 +3128,34 @@ def run_verification(plan_path: str | Path, script_path: Optional[str | Path] = 
             events.emit("verify", f"{_tag}: {'pass' if _ok else 'FAIL'}, {_txt}", ok=bool(_ok), tag=_tag)
     except Exception:
         pass
-    print(f"[PICTURE {'PASS' if pic_ok else 'FAIL'}] {pic_n} cuts: the picture at the middle of each cut matches the plan" + ("" if pic_ok else ": " + "; ".join(pic_bad)))
+    print(
+        f"[PICTURE {'PASS' if pic_ok else 'FAIL'}] {pic_n} cuts: middle frame of each cut matches the plan"
+        + ("" if pic_ok else ": " + "; ".join(pic_bad))
+    )
 
-    return bool(video_ok and audio_ok and cuts_ok and script_ok and marks_ok and split_hook_ok and subs_ok and pic_ok and frames['ok'] and sq_ok)
+    return bool(
+        video_ok
+        and audio_ok
+        and cuts_ok
+        and script_ok
+        and marks_ok
+        and split_hook_ok
+        and cards_ok
+        and subs_ok
+        and pic_ok
+        and frames["ok"]
+        and sq_ok
+    )
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Post-render deterministic verifier for Claude Editor.")
+    ap = argparse.ArgumentParser(description="Post-render deterministic Deep QC verifier for Zeno.")
     ap.add_argument("plan", help="Path to plan.json or plan.edl")
     ap.add_argument("--script", default=None, help="Optional script file path for coverage verification")
+    ap.add_argument("--loudness", type=float, default=None, help="Optional target LUFS override")
     args = ap.parse_args()
 
-    ok = run_verification(args.plan, script_path=args.script)
+    ok = run_verification(args.plan, script_path=args.script, target_lufs=args.loudness)
     if not ok:
         sys.exit(1)
 

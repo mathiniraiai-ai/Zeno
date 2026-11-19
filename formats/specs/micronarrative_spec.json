@@ -1,0 +1,281 @@
+{
+  "style": "micronarrative",
+  "status": "measured from reference deliveries; all numeric thresholds calibrated for 1080x1920 @ 30 fps output",
+  "learned_from": {
+    "reference_video": "input/reference/micronarrative_ml_ref.mp4",
+    "duration_sec": 93.33,
+    "size": "720x1280",
+    "fps": 24,
+    "language": "Malayalam (Scene 1 in English)",
+    "script_tab": "t.o4usjjssj43l",
+    "date": "2026-10-31"
+  },
+  "render_note": "Primary reference was measured at 720x1280 @ 24 fps. Zeno Pro renders at 1080x1920 @ 30 fps (pixel dimensions scaled by 1.5x).",
+  "visuals": "AI-generated footage: live-action cafe problem scene, 3D AI teacher (Miss Nova), and learner in night room",
+  "structure": [
+    {
+      "scene": 1,
+      "name": "restaurant problem hook (English)",
+      "start": 0.0,
+      "end": 20.69,
+      "layout": "single",
+      "cutting": "speaker-follow cuts across 6 shots",
+      "shots": "wide establishing shot, close-ups per speaker, and silent friend reaction close-up"
+    },
+    {
+      "scene": 2,
+      "name": "post-lunch bridge (Malayalam)",
+      "start": 20.69,
+      "end": 36.98,
+      "layout": "single",
+      "cutting": "continuous shared two-shot, hard turn pacing, z=1.0"
+    },
+    {
+      "scene": 3,
+      "name": "night AI teacher drill & CTA (Malayalam + English)",
+      "start": 36.98,
+      "end": 93.25,
+      "layout": "split_h",
+      "cutting": "still 50/50 split panels (z=1); active speaker swaps with live silent listener at turn boundaries"
+    }
+  ],
+  "script_cues": [
+    "Scene N / SCENE N headings",
+    "SPLIT SCREEN panel tags (Left: / Right: or Top: / Bottom:)",
+    "Speaker dialogue lines formatted as Name: line",
+    "Stage and tone directions in parentheses or brackets"
+  ],
+  "scene1_shot_grammar": {
+    "plain_cuts_sec": [2.208, 4.708, 7.292, 12.167, 19.0],
+    "shots": [
+      {"id": 1, "type": "wide establishing", "dur": 2.21, "face_width_frac": 0.09},
+      {"id": 2, "type": "close-up speaker", "dur": 2.50, "face_width_frac": 0.36},
+      {"id": 3, "type": "close-up speaker", "dur": 2.58, "face_width_frac": 0.41},
+      {"id": 4, "type": "close-up speaker", "dur": 4.87, "face_width_frac": 0.42},
+      {"id": 5, "type": "close-up speaker then laughter", "dur": 6.83, "face_width_frac": 0.30},
+      {"id": 6, "type": "reaction close-up (friend)", "dur": 1.67, "face_width_frac": 0.33}
+    ],
+    "cut_lead_sec": "speech starts 0.12-0.22s after cutting to speaker (L2 includes a 1.05s reaction beat before speech)",
+    "cut_tail_sec": "cut to next speaker lands 0.03-0.21s after previous phrase ends",
+    "after_last_line": "mocking laughter holds over speaker close-up, followed by 1.67s friend reaction shot before scene transition"
+  },
+  "framing": {
+    "face_center_y_frac": "0.32-0.37 across close-ups and split panels (14% headroom)",
+    "close_up_face_width_frac": "0.30-0.42",
+    "two_shot_face_width_frac": 0.19,
+    "two_shot_face_center_x_frac": 0.73
+  },
+  "split_h": {
+    "orientation": "left | right, full canvas height",
+    "left": "Miss Nova (3D AI teacher)",
+    "right": "Woman (live-action learner)",
+    "divider_px_at_720": {
+      "left_panel_x": [0, 357],
+      "divider_x": [357, 360],
+      "right_panel_x": [360, 720]
+    },
+    "divider": "thin light vertical rule (~4px at 1080w, #E1DBE1), no border glow, no dimming on listener panel",
+    "canvas_1080_equivalent": {
+      "left_w": 536,
+      "divider_w": 4,
+      "right_w": 540
+    },
+    "face_in_panel": {
+      "face_width_frac_of_panel": 0.63,
+      "face_center_y_frac": 0.36,
+      "left_face_center_x_in_panel": 0.50,
+      "right_face_center_x_in_panel": 0.54
+    },
+    "panel_swaps": "7 clean turn swaps (44.21, 47.96, 50.96, 58.92, 65.46, 73.96, 84.38s) between speaking and silent listener clips; outer split frame stays completely still (z=1)",
+    "turn_gap_sec": {
+      "median": 0.16,
+      "min": 0.03,
+      "max": 1.05
+    }
+  },
+  "zoom": {
+    "digital_zoom": "none in raw W42 reference; W47 approved full-frame zoom grammar enabled in production",
+    "production_policy": "Full-frame single cuts use zoom_in[:1.08] smooth push-ins (calm Act 2 Ken Burns resetting cleanly to z=1 on speaker/clip cuts), zoom_out[:1.10] opening reveals, sudden_in:1.08@t 3-5f silent emphasis punch-ins and sudden_out:1.08@t recoil pullbacks in Hook/Climax, bell:1.20->1.55->1.0 on slo-mo/action opening hooks, 1.08 step punch-ins on >0.25s pause cuts, and at most one flash_zoom:1.12@t climax while keeping >=25% calm 1.0 cuts (including calm CTA lock-off or phone pan+zoom). Every split screen (split_h, split_v, top_pip, baked split) and 3D hologram locks z=1. Governed by formats/core_rules.md and formats/registry.json.",
+    "w47_defaults": ["zoom_in", "zoom_out", "sudden_in", "sudden_out", "bell"],
+    "note": "subject motion inside raw AI clips accounts for 4-13% natural face-width variation in longer takes"
+  },
+  "transition_between_scenes": {
+    "name": "warm_flash",
+    "count": 2,
+    "at_sec": [20.5, 36.79],
+    "duration_frames_24fps": 9,
+    "duration_sec": 0.375,
+    "envelope_frames": "9 screen-blended flash frames in assets/transitions/warm_flash.json shifting yellow -> red -> dark red",
+    "content_swap": "frame 6 on Scene 1->2, frame 4 on Scene 2->3",
+    "audio": "clean speech tail with zero syllable clipping; W47 defaults use whip_left/whip_right/slide_up on scene switches and story->CTA, dip_to_black on time/location jumps, zoom_in/zoom_out/zoom_blur on hook/emphasis/split entry, split_reveal@0.40 on split entry/exit, and warm_flash_punch on act pivots/seamless AI stitch masks while keeping majority of dialogue cuts as crisp hard cuts and zero intra-split transitions",
+    "w47_defaults": ["zoom_in", "zoom_out", "zoom_blur", "dip_to_black", "whip_left", "whip_right", "slide_up", "slide_down", "split_reveal", "warm_flash_punch"],
+    "implementation": "assets/transitions/warm_flash.json applied via lutrgb screen-blend in scripts/render.py",
+    "same_in_both_transitions": true
+  },
+  "timing": {
+    "scene_boundary": "transition starts within +/-0.05s of final word end; next scene begins 0.10-0.50s after transition completes",
+    "turn_gap_median_sec": 0.16,
+    "dramatic_beat_gaps_sec": [1.26, 1.05, 1.0],
+    "measured_with": "wav2vec2-base-95M forced alignment with 10ms RMS onset snap and tail extension"
+  },
+  "audio": {
+    "music_bed": "none",
+    "sfx": "post-loudnorm calibrated surgical SFX (-4 to 0 dB beat accents; +1.0 dB sn_wrong.wav; +0.5 dB correct_ding.wav + sn_correct.wav; sn_riser_1.wav tension risers)",
+    "room_tone_db": "-52 to -44",
+    "speech_median_db": -22.9,
+    "reference_loudness_lufs": -19.3,
+    "zeno_target_lufs": -10.5,
+    "true_peak_dbtp": -1.5,
+    "alimiter_limit": 0.80,
+    "note": "W47 dry/diegetic dialogue (zero continuous BGM by default) mastered to -10.5 LUFS (-1.5 dBTP target, alimiter_limit=0.80) before mixing surgical peak-calibrated SFX"
+  },
+  "on_screen_text": {
+    "non_subtitle": "scripted stacked banners only (e.g. Stop Saying strikethrough stack or flashcard drills)",
+    "subtitles": "enabled by default via #subs auto y=68 (single row, 54px at 1080w; auto-locks to y=50 seam on split_v; #subs off only on explicit request)"
+  },
+  "unknowns": [],
+  "engine": {
+    "note": "consumed by style planning and layout helpers",
+    "scene_layouts": {
+      "1": "single",
+      "2": "single",
+      "3": "split_h"
+    },
+    "scene_transition": {
+      "name": "split_reveal",
+      "swap_frames": [6, 4]
+    },
+    "split": {
+      "left": "Miss Nova",
+      "right": "Woman",
+      "mode": "live",
+      "divider": {
+        "x_frac": 0.49583,
+        "w_frac": 0.00417,
+        "color": "E1DBE1",
+        "alpha": 1.0
+      }
+    },
+    "canvas_default": {
+      "width": 1080,
+      "height": 1920,
+      "fps": 30
+    },
+    "color_match": false,
+    "lut": null
+  },
+  "tuning": {
+    "macro_silence_db": -35.0,
+    "macro_silence_min_sec": 0.25,
+    "micro_dip_db": -28.0,
+    "micro_dip_min_sec": 0.05,
+    "breath_onset_db": -32.0,
+    "breath_lead_pad_sec": 0.04,
+    "breath_tail_pad_sec": 0.04,
+    "tight_join_sec": 0.18,
+    "tight_pause_sec": 0.25,
+    "pause_split_monologue_sec": 0.25,
+    "pause_split_dialogue_sec": 0.50,
+    "pause_beat_gap_sec": 0.15,
+    "pause_mid_thought_gap_sec": 0.12,
+    "max_internal_silence_sec": 0.25,
+    "pacing_max_static_sec": 4.0,
+    "long_monologue_zoom_sec": 5.0,
+    "jump_cut_zoom": 1.08,
+    "push_in_zoom": 1.06,
+    "zoom_in_default": 1.08,
+    "zoom_out_default": 1.10,
+    "split_active_max_zoom": 1.0,
+    "closing_cta_zoom": 1.06,
+    "focus_pan_deadband": 0.04,
+    "static_camera_motion_max": 2.8,
+    "mark_duration_sec": 0.48,
+    "mark_tail_hold_sec": 0.38,
+    "mark_alpha": 0.5,
+    "wrong_sfx_primary": "sn_wrong.wav",
+    "wrong_sfx_layer": "none",
+    "right_sfx_primary": "correct_ding.wav",
+    "right_sfx_layer": "sn_correct.wav",
+    "whoosh_sfx": "whoosh.wav",
+    "riser_sfx": "sn_riser_1.wav",
+    "wrong_sfx_gain_db": 1.0,
+    "right_sfx_gain_db": 0.5,
+    "whoosh_sfx_gain_db": -0.5,
+    "max_hook_transitions": 4,
+    "w47_zoom_defaults": ["zoom_in", "zoom_out", "sudden_in", "sudden_out", "bell"],
+    "w47_transition_defaults": ["zoom_in", "zoom_out", "zoom_blur", "dip_to_black", "whip_left", "whip_right", "slide_up", "slide_down", "warm_flash_punch"],
+    "default_subs_style": "auto",
+    "default_subs_y": 68,
+    "split_v_subs_y": 50,
+    "use_hw_accel": true,
+    "edge_fade_sec": 0.012,
+    "audio_crossfade_sec": 0.045,
+    "room_tone_dbfs": -48.0,
+    "clip_rms_target_dbfs": -18.0,
+    "target_loudness_lufs": -10.5,
+    "true_peak_dbtp": -1.5,
+    "alimiter_limit": 0.80,
+    "music_duck_gain_db": -18.0,
+    "max_alt_takes_in_brief": 2,
+    "max_brief_chars": 3900
+  },
+  "rebuild_check": {
+    "date": "2026-10-31",
+    "method": "frame-by-frame rebuild against reference stand-in clips at 720x1280 @ 24 fps (mean absolute pixel difference 0-255 at 180x320)",
+    "frames": "2238 vs 2238",
+    "scene1_clean_mean_diff": 1.8,
+    "scene2_clean_mean_diff": 1.9,
+    "scene3_clean_mean_diff": 3.3,
+    "flash_frames_mean_diff": "10-18 on screen-blend transition frames",
+    "audio": "in sync (lag 0), -13.9 LUFS on reference stand-in pass",
+    "caveat": "validates deterministic render pipeline parity on reference stand-ins"
+  },
+  "variants": [
+    {
+      "id": "w43_hi_farm",
+      "reference": "Reel - W43 - Hindi - AI Only - Micro Narrative - Grandma in Cotton Field (121.7s)",
+      "script_tab": "t.v1r5i0luz71b",
+      "language": "Hindi with English drill phrases",
+      "duration_sec": 121.72,
+      "size": "1080x1920",
+      "fps": 60,
+      "date": "2026-11-04",
+      "structure": [
+        {
+          "scene": 1,
+          "start": 0.0,
+          "end": 30.4,
+          "layout": "single",
+          "cutting": "field phone-call close-ups of grandmother and young woman with cuts at 3.2, 5.6, 7.2, 19.2, 23.0s"
+        },
+        {
+          "scene": 2,
+          "start": 30.4,
+          "end": 121.7,
+          "layout": "split_v",
+          "cutting": "continuous 91s top/bottom split screen (Female Humanoid Robot top, Lady 1 bottom, z=1)"
+        }
+      ],
+      "split_v": {
+        "seam_position_frac_of_height": 0.472,
+        "frames_with_seam": 0.96,
+        "faces_per_frame": 2,
+        "face_width_frac_of_width": 0.224,
+        "face_center_x_frac": 0.504,
+        "panels_from_script": {
+          "top": "Female Humanoid Robot",
+          "bottom": "Lady 1"
+        }
+      },
+      "script": {
+        "lines": 24,
+        "spoken": 23,
+        "silent_beats": 1,
+        "all_spoken_lines_matched": true,
+        "match_score_range": [0.97, 1.0],
+        "turn_gap_median_sec": 0.0,
+        "marks": "wrong mark after L8 and right mark after L10, cued by script emoji"
+      }
+    }
+  ]
+}

@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
-"""One-command cross-platform bootstrap & health check for Claude Editor (macOS & Windows).
+"""One-command cross-platform bootstrap & health check for Zeno (macOS & Windows).
 
 Usage:
     python3 scripts/setup.py              # Verify FFmpeg, venv, wav2vec2 cache, and all asset packs
     python3 scripts/setup.py --init-venv  # Create local .venv and install ML/audio dependencies
     python3 scripts/setup.py --prewarm    # Pre-download torchaudio wav2vec2 checkpoint
+    python3 scripts/setup.py --smoke      # Run real checks (FFmpeg filters, wav2vec2, auth)
+    python3 scripts/setup.py --login      # Open browser for Google Sign-In and save session
+    python3 scripts/setup.py --whoami     # Check active Zeno Cloud / Gemini auth status
+    python3 scripts/setup.py --logout     # Clear saved local Zeno Cloud session token
 """
 import argparse
+import json
 import os
 import platform
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+sys.dont_write_bytecode = True
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
@@ -24,12 +32,18 @@ REQUIRED_ASSETS = {
     "Overlay (video_call_bar)": common.OVERLAYS_DIR / "video_call_bar.png",
     "Overlay (split_border)": common.OVERLAYS_DIR / "split_border.png",
     "Overlay (nova_phone)": common.OVERLAYS_DIR / "nova_phone.png",
+    "Premiere Base (base_1080x1920)": common.PREMIERE_DIR / "base_1080x1920.prproj.gz",
     "Template (mark_packs.json)": common.TEMPLATES_DIR / "mark_packs.json",
     "Template (supernova_layouts.json)": common.TEMPLATES_DIR / "supernova_layouts.json",
     "Template (video_call_pip.json)": common.TEMPLATES_DIR / "video_call_pip.json",
     "Template (stop_saying_banners.json)": common.TEMPLATES_DIR / "stop_saying_banners.json",
     "Template (caption_pill.json)": common.TEMPLATES_DIR / "caption_pill.json",
+    "Transition (warm_flash.json)": common.TRANSITIONS_DIR / "warm_flash.json",
     "SFX Library Map": common.SFX_DIR / "sfx_library_map.json",
+    "SFX Notification (mp3)": common.SFX_DIR / "zeno_notification.mp3",
+    "SFX Notification (wav)": common.SFX_DIR / "zeno_notification.wav",
+    "UI App Icon (zeno_icon.png)": common.ASSETS / "ui" / "zeno_icon.png",
+    "UI Toast (zeno_toast.html)": common.ASSETS / "ui" / "zeno_toast.html",
 }
 
 
@@ -77,29 +91,40 @@ def check_or_setup_ffmpeg() -> bool:
 
 def check_or_setup_venv(init_venv: bool = False, prewarm: bool = False) -> bool:
     print("\n[2/5] Checking Python Virtual Environment & ML Packages...")
-    if init_venv and not (common.ROOT / ".venv").exists():
-        print("  + Creating local virtual environment at .venv ...")
-        subprocess.run([sys.executable, "-m", "venv", str(common.ROOT / ".venv")], check=True)
+    if init_venv:
+        if not (common.ROOT / ".venv").exists():
+            print("  + Creating local virtual environment at .venv ...")
+            subprocess.run([sys.executable, "-m", "venv", str(common.ROOT / ".venv")], check=True)
         venv_py = common.find_venv_python()
-        pkgs = [
-            "torch",
-            "torchaudio",
-            "transformers",
-            "opencv-python-headless",
-            "numpy",
-            "soundfile",
-            "Pillow",
-            "google-genai",
-        ]
-        print(f"  + Installing packages into {venv_py} ...")
-        subprocess.run([str(venv_py), "-m", "pip", "install", "--upgrade", "pip", *pkgs], check=True)
+        gpu_installer = Path(__file__).resolve().parent / "gpu_install.py"
+        if gpu_installer.is_file():
+            print(f"  + Installing Zeno dependencies via gpu_install.py into {venv_py} ...")
+            subprocess.run([str(venv_py), "-B", str(gpu_installer)], check=True)
+        else:
+            req_file = common.ROOT / "requirements.txt"
+            print(f"  + Installing requirements into {venv_py} ...")
+            subprocess.run([str(venv_py), "-m", "pip", "install", "-r", str(req_file)], check=True)
 
     venv_py = common.find_venv_python()
     print(f"  [OK] Venv Python: {venv_py}")
 
+    required_mods = [
+        "torch",
+        "torchaudio",
+        "cv2",
+        "numpy",
+        "soundfile",
+        "PIL",
+        "librosa",
+        "google.genai",
+        "httpx",
+        "certifi",
+        "dotenv",
+    ]
+    optional_mods = ["silero_vad"]
     check_code = (
         "import importlib, json\n"
-        "mods = ['torch', 'torchaudio', 'transformers', 'cv2', 'numpy', 'soundfile', 'PIL']\n"
+        f"mods = {required_mods + optional_mods!r}\n"
         "status = {}\n"
         "for m in mods:\n"
         "    try:\n"
@@ -109,20 +134,29 @@ def check_or_setup_venv(init_venv: bool = False, prewarm: bool = False) -> bool:
         "        status[m] = None\n"
         "print(json.dumps(status))\n"
     )
+    pkgs_ok = True
     try:
-        r = subprocess.run([str(venv_py), "-c", check_code], capture_output=True, text=True, timeout=30)
+        r = subprocess.run([str(venv_py), "-B", "-c", check_code], capture_output=True, text=True, timeout=30)
         if r.returncode == 0 and r.stdout.strip():
-            pkg_status = common. json.loads(r.stdout.strip().splitlines()[-1])
+            pkg_status = json.loads(r.stdout.strip().splitlines()[-1])
             found = [f"{k} ({v})" for k, v in pkg_status.items() if v]
-            missing = [k for k, v in pkg_status.items() if not v]
+            missing_req = [k for k in required_mods if not pkg_status.get(k)]
+            missing_opt = [k for k in optional_mods if not pkg_status.get(k)]
             print(f"  [OK] Installed  : {', '.join(found)}")
-            if missing:
-                print(f"  [!] Missing optional packages in {venv_py}: {', '.join(missing)}")
+            if missing_req:
+                print(f"  [FAIL] Missing required packages in {venv_py}: {', '.join(missing_req)}")
+                pkgs_ok = False
+            if missing_opt:
+                print(f"  [!] Missing optional packages in {venv_py}: {', '.join(missing_opt)}")
+        else:
+            print(f"  [!] Could not inspect packages in {venv_py}: {(r.stderr or '').strip()[:200]}")
+            pkgs_ok = False
     except Exception as exc:
         print(f"  [!] Could not inspect packages in {venv_py}: {exc}")
+        pkgs_ok = False
 
     print("\n[3/5] Checking Meta wav2vec2 Alignment Checkpoint Cache...")
-    ckpt_dir = Path(__file__).resolve().parents[1] / "models" / "torch" / "hub" / "checkpoints"
+    ckpt_dir = common.MODELS_DIR / "torch" / "hub" / "checkpoints"
     wav2vec_ckpts = list(ckpt_dir.glob("*wav2vec2*")) if ckpt_dir.is_dir() else []
     if wav2vec_ckpts:
         for ckpt in wav2vec_ckpts:
@@ -130,12 +164,19 @@ def check_or_setup_venv(init_venv: bool = False, prewarm: bool = False) -> bool:
             print(f"  [OK] Cached checkpoint: {ckpt} ({mb:.1f} MB)")
     elif prewarm:
         print("  + Pre-warming torchaudio wav2vec2 checkpoint (~360 MB)...")
-        prewarm_code = "import sys; sys.path.insert(0, r'%s'); from align_engine.acoustic import AcousticModel; AcousticModel()._ensure_model_loaded()" % (Path(__file__).resolve().parent)
-        subprocess.run([str(venv_py), "-c", prewarm_code], check=False)
+        prewarm_code = (
+            "import sys; sys.path.insert(0, r'%s'); "
+            "from align_engine.acoustic import AcousticModel; "
+            "AcousticModel()._ensure_model_loaded()" % Path(__file__).resolve().parent
+        )
+        r = subprocess.run([str(venv_py), "-B", "-c", prewarm_code], check=False)
+        if r.returncode != 0:
+            print("  [!] wav2vec2 pre-warm failed; verify network/SSL and retry with --prewarm.")
+            return False
     else:
         print(f"  [i] wav2vec2 checkpoint not yet cached in {ckpt_dir} (will auto-download on first CTC alignment or run with --prewarm).")
 
-    return True
+    return pkgs_ok
 
 
 def verify_assets() -> bool:
@@ -152,7 +193,9 @@ def verify_assets() -> bool:
     for pack in ("default", "supernova", "kn20228", "w42"):
         r_sfx = common.resolve_sfx_asset("right", pack=pack)
         w_sfx = common.resolve_sfx_asset("wrong", pack=pack)
-        ok = r_sfx.is_file() and w_sfx.is_file()
+        pack_files = common.SFX_PACKS.get(pack, {}).values()
+        pack_complete = all((common.SFX_DIR / fn).is_file() for fn in pack_files)
+        ok = r_sfx.is_file() and w_sfx.is_file() and pack_complete
         all_ok = all_ok and ok
         status = "OK" if ok else "MISSING"
         print(f"  [{status}] SFX Pack  '{pack:<8}' -> right={r_sfx.name}, wrong={w_sfx.name}")
@@ -161,7 +204,11 @@ def verify_assets() -> bool:
         exists = path.is_file()
         all_ok = all_ok and exists
         status = "OK" if exists else "MISSING"
-        print(f"  [{status}] {label:<38}: {path.relative_to(common.ROOT)}")
+        try:
+            rel_disp = path.relative_to(common.ROOT)
+        except ValueError:
+            rel_disp = path
+        print(f"  [{status}] {label:<38}: {rel_disp}")
 
     return all_ok
 
@@ -224,11 +271,15 @@ def smoke_test() -> bool:
         "import numpy as np, soundfile as sf\n"
         "from align_engine.acoustic import AcousticModel\n"
         "t = time.time(); m = AcousticModel()\n"
-        "p = os.path.join(tempfile.gettempdir(), 'zeno_smoke.wav'); sf.write(p, np.zeros(16000, dtype='float32'), 16000)\n"
-        "lp, _, dur, tpf = m.extract_emissions(p)\n"
+        "fd, p = tempfile.mkstemp(prefix='zeno_smoke_', suffix='.wav'); os.close(fd)\n"
+        "try:\n"
+        "    sf.write(p, np.zeros(16000, dtype='float32'), 16000)\n"
+        "    lp, _, dur, tpf = m.extract_emissions(p)\n"
+        "finally:\n"
+        "    if os.path.exists(p): os.unlink(p)\n"
         "print('OK device=%s frames=%d seconds=%.1f' % (m.device, lp.shape[0], time.time() - t))\n"
     )
-    r = subprocess.run([str(venv_py), "-c", code], capture_output=True, text=True)
+    r = subprocess.run([str(venv_py), "-B", "-c", code], capture_output=True, text=True)
     line = (r.stdout.strip().splitlines() or [""])[-1]
     good = r.returncode == 0 and line.startswith("OK")
     print(f"  [{'OK' if good else 'FAIL'}] wav2vec2 alignment model: {line if good else (r.stderr.strip()[-300:] or 'no output')}")
@@ -250,76 +301,15 @@ def smoke_test() -> bool:
     return ok
 
 
-def _claude_bin():
-    """The `claude` command: on PATH, as the running Claude Code names it, or inside the desktop app's own folder."""
-    try:
-        import direct_mode
-        return direct_mode.find_claude_binary()
-    except Exception:
-        import shutil
-        return shutil.which("claude")
-
-
-def connect_claude(ask=input, interactive=None):
-    """One-time step at the end of the install: connect Claude Code to Zeno (the Zeno connector, a local MCP server).
-    It changes the editor's own Claude Code settings, so it asks first. Returns 0 when connected or politely skipped."""
-    import subprocess
-
-    claude = _claude_bin()
-    if not claude:
-        print("  [i] Claude Code was not found on this computer, so the Zeno connector was not added. Install Claude Code, then run: python3 scripts/setup.py --connect-claude")
-        return 0
-    try:
-        have = subprocess.run([claude, "mcp", "get", "zeno"], capture_output=True, text=True, timeout=60)
-        if have.returncode == 0 and "Connected" in have.stdout:
-            print("  [OK] Claude is already connected to Zeno.")
-            return 0
-    except Exception:   # noqa: BLE001
-        pass
-    if interactive is None:
-        interactive = sys.stdin is not None and sys.stdin.isatty()
-    if not interactive:
-        print("  [i] Not asking about the Claude connection (no keyboard). Later, run: python3 scripts/setup.py --connect-claude")
-        return 0
-    answer = ask("  Connect Claude Code to Zeno now? It adds one entry to your Claude settings on this computer. (y/N) ").strip().lower()
-    if answer not in ("y", "yes"):
-        print("  Skipped. You can connect later: python3 scripts/setup.py --connect-claude")
-        return 0
-    py = common.ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    py = py if py.exists() else Path(sys.executable)
-    r = subprocess.run([claude, "mcp", "add", "--scope", "user", "zeno", "--", str(py), str(common.ROOT / "scripts" / "zeno_mcp.py")], capture_output=True, text=True, timeout=120)
-    if r.returncode == 0:
-        print("  [OK] Claude is connected to Zeno.")
-        return 0
-    print(f"  [i] Could not connect Claude: {(r.stderr or r.stdout).strip()[:200]}")
-    return 1
-
-
 def main():
     ap = argparse.ArgumentParser(description="Bootstrap and verify Zeno cross-platform setup.")
     ap.add_argument("--init-venv", action="store_true", help="Create local .venv and install dependencies")
     ap.add_argument("--prewarm", action="store_true", help="Pre-download wav2vec2 checkpoint into models/torch")
-    ap.add_argument("--smoke", action="store_true", help="Run real checks: FFmpeg filters, wav2vec2 forward pass, Gemini key")
+    ap.add_argument("--smoke", action="store_true", help="Run real checks: FFmpeg filters, wav2vec2 forward pass, auth")
     ap.add_argument("--login", action="store_true", help="Open browser for Google Sign-In and auto-save session token")
     ap.add_argument("--whoami", action="store_true", help="Check active Zeno Cloud / Gemini authentication status")
     ap.add_argument("--logout", action="store_true", help="Clear saved local Zeno Cloud session token")
-    ap.add_argument("--lean-session", action="store_true", help="Switch the claude.ai connectors off for edit sessions in this folder (saves about 4.6k tokens a session)")
-    ap.add_argument("--connect-claude", action="store_true", help="Offer to connect Claude Code to Zeno (asks first; skips when already connected or when there is no keyboard)")
-    ap.add_argument("--session-check", action="store_true", help="Show how many tokens the newest edit session started with, and warn when it is heavy")
     args = ap.parse_args()
-
-    if args.connect_claude:
-        sys.exit(connect_claude())
-
-    if args.lean_session or args.session_check:
-        import session_check
-
-        if args.lean_session:
-            r = session_check.write_lean_settings(common.ROOT)
-            print(f"  [OK] Claude connectors are off for edit sessions in this folder ({'updated' if r['changed'] else 'already set'}): {r['path']}")
-        if args.session_check:
-            print("  " + session_check.report(common.ROOT))
-        sys.exit(0)
 
     common.load_dotenv()
     import auth_session

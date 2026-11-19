@@ -957,7 +957,7 @@ def add_observation(body: ObservationBody, authorization: Optional[str] = Header
 
 @app.get("/v1/formats")
 def approved_formats(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
-    """Recipes an editor has approved. Computers copy these into styles/formats/team/."""
+    """Recipes an editor has approved for client format libraries."""
     authenticate(authorization)
     return {"formats": store().approved_formats()}
 
@@ -1127,7 +1127,7 @@ def post_learned_rule(
     body: LearnedRuleBody,
     authorization: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
-    """Store a new learned editorial rule pushed from `zeno.py --remember` into the shared team database."""
+    """Store a new learned editorial rule into the shared team database."""
     name, key_id = authenticate(authorization)
     check_rate(name)
     rule_text = (body.rule or body.rule_text or "").strip()

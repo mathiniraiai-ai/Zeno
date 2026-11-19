@@ -84,7 +84,7 @@ const CaptionRenderer = (() => {
   }
 
   // Fallback font stack for Indic + international scripts
-  const FALLBACK_FONTS = '"Noto Sans Telugu", "Noto Sans Tamil", "Noto Sans Malayalam", "Noto Sans Kannada", "Noto Sans Devanagari", "Noto Sans Bengali", "Noto Sans Gujarati", "Noto Sans Gurmukhi", "Anek Odia", "Noto Sans", "Arial", sans-serif';
+  const FALLBACK_FONTS = '"Noto Sans Telugu", "Noto Sans Tamil", "Noto Sans Malayalam", "Noto Sans Kannada", "Noto Sans Devanagari", "Noto Sans Bengali", "Noto Sans Gujarati", "Noto Sans Gurmukhi", "Noto Sans Oriya", "Hind", "Mukta", "Hind Guntur", "Hind Madurai", "Manjari", "Hind Siliguri", "Hind Vadodara", "Mukta Mahee", "Baloo Bhaina 2", "Anek Odia", "Noto Sans", "Roboto", "Open Sans", "Arial", sans-serif';
 
   const ANIMATION_PRESETS = [
     { id: 'bottom-to-top', name: 'Bottom-to-Top Keyframe Rise', description: 'Smooth keyframed rise from bottom to top as character speaks' },
@@ -333,6 +333,10 @@ const CaptionRenderer = (() => {
       const boldFonts = [
         'Anton', 'Bebas Neue', 'Archivo Black', 'Montserrat', 'Plus Jakarta Sans', 'Outfit',
         'Noto Sans', 'Poppins', 'Oswald', 'Impact', 'Acme Gothic Condensed Semibold', 'Acme',
+        'Roboto', 'Open Sans', 'Lato', 'Nunito', 'Rubik', 'DM Sans', 'Work Sans', 'Manrope',
+        'Barlow', 'Raleway', 'Hind', 'Mukta', 'Teko', 'Hind Guntur', 'Hind Madurai',
+        'Mukta Malar', 'Manjari', 'Hind Siliguri', 'Hind Vadodara', 'Mukta Vaani',
+        'Mukta Mahee', 'Baloo Bhaina 2',
       ];
       const retroFonts = ['VCR OSD Mono', 'Cooper Black', 'Cooper Std Black', 'Bungee', 'Righteous', 'Chunk Five'];
       const displayFonts = ['Luckiest Guy', 'Fredoka', 'Bangers', 'Bagel Fat One'];
@@ -348,47 +352,20 @@ const CaptionRenderer = (() => {
         }
       };
 
-      if (isKannada) {
-        if (isDisplay) add('"Baloo Tamma 2"', '"Anek Kannada"', '"Noto Sans Kannada"');
-        else if (isBold) add('"Anek Kannada"', '"Noto Sans Kannada"');
-        else add('"Noto Sans Kannada"');
-      }
-      if (isTamil) {
-        if (isBold) add('"Anek Tamil"', '"Catamaran"', '"Noto Sans Tamil"');
-        else add('"Noto Sans Tamil"');
-      }
-      if (isTelugu) {
-        if (isDisplay) add('"Baloo Tamma 2"', '"Anek Telugu"', '"Noto Sans Telugu"');
-        else if (isRetro) add('"Ramabhadra"', '"Anek Telugu"', '"Noto Sans Telugu"');
-        else if (isBold) add('"Anek Telugu"', '"Ramabhadra"', '"Noto Sans Telugu"');
-        else add('"Noto Sans Telugu"');
-      }
-      if (isMalayalam) {
-        if (isBold) add('"Anek Malayalam"', '"Noto Sans Malayalam"');
-        else add('"Noto Sans Malayalam"');
-      }
-      if (isDevanagari) {
-        if (isBold) add('"Anek Devanagari"', '"Noto Sans Devanagari"');
-        else add('"Noto Sans Devanagari"');
-      }
-      if (isBengali) {
-        if (isBold) add('"Anek Bangla"', '"Noto Sans Bengali"');
-        else add('"Noto Sans Bengali"');
-      }
-      if (isGujarati) {
-        if (isBold) add('"Anek Gujarati"', '"Noto Sans Gujarati"');
-        else add('"Noto Sans Gujarati"');
-      }
-      if (isGurmukhi) {
-        if (isBold) add('"Anek Gurmukhi"', '"Noto Sans Gurmukhi"');
-        else add('"Noto Sans Gurmukhi"');
-      }
-      if (isOdia) {
-        add('"Anek Odia"');
-      }
+      // Noto Sans is the primary fallback for every Indian script (one consistent look, full glyph coverage),
+      // backed by bundled static Google Indic fonts (Hind, Mukta, Manjari, Noto Serif, Anek, Baloo 2).
+      if (isKannada) add('"Noto Sans Kannada"', '"Anek Kannada"', '"Noto Serif Kannada"', '"Tiro Kannada"', isDisplay ? '"Baloo Tamma 2"' : null);
+      if (isTamil) add('"Noto Sans Tamil"', '"Hind Madurai"', '"Mukta Malar"', '"Anek Tamil"', '"Baloo Thambi 2"', '"Catamaran"');
+      if (isTelugu) add('"Noto Sans Telugu"', '"Hind Guntur"', '"Anek Telugu"', '"Noto Serif Telugu"', isDisplay ? '"Baloo Tamma 2"' : null, isRetro ? '"Ramabhadra"' : null);
+      if (isMalayalam) add('"Noto Sans Malayalam"', '"Manjari"', '"Anek Malayalam"', '"Noto Serif Malayalam"', '"Baloo Chettan 2"');
+      if (isDevanagari) add('"Noto Sans Devanagari"', '"Hind"', '"Mukta"', '"Teko"', '"Anek Devanagari"', '"Baloo 2"', '"Noto Serif Devanagari"');
+      if (isBengali) add('"Noto Sans Bengali"', '"Hind Siliguri"', '"Anek Bangla"', '"Baloo Da 2"', '"Noto Serif Bengali"');
+      if (isGujarati) add('"Noto Sans Gujarati"', '"Hind Vadodara"', '"Mukta Vaani"', '"Anek Gujarati"', '"Baloo Bhai 2"');
+      if (isGurmukhi) add('"Noto Sans Gurmukhi"', '"Mukta Mahee"', '"Anek Gurmukhi"', '"Baloo Paaji 2"');
+      if (isOdia) add('"Noto Sans Oriya"', '"Baloo Bhaina 2"', '"Anek Odia"', '"Noto Serif Oriya"');
 
       if (acc.length === 0) return FALLBACK_FONTS;
-      add('"Noto Sans Devanagari"', '"Noto Sans Kannada"', '"Noto Sans Tamil"', '"Noto Sans Telugu"', '"Noto Sans Malayalam"', '"Noto Sans"', '"Arial"', 'sans-serif');
+      add('"Noto Sans Devanagari"', '"Noto Sans Kannada"', '"Noto Sans Tamil"', '"Noto Sans Telugu"', '"Noto Sans Malayalam"', '"Noto Sans Bengali"', '"Noto Sans Gujarati"', '"Noto Sans Gurmukhi"', '"Noto Sans Oriya"', '"Noto Sans"', '"Roboto"', '"Arial"', 'sans-serif');
       return acc.join(', ');
     }
 
@@ -398,7 +375,10 @@ const CaptionRenderer = (() => {
 
     function makeFontStr(pxSize, isIndic = false) {
       const sz = isIndic ? Math.max(12, Math.round(pxSize * 1.06)) : pxSize;
-      return `${fst} ${fw} ${sz}px "${fontFamily}", ${scriptFallbacks}`;
+      // Bundled static Noto Sans <Script> bold TTFs are weight 700; locking Indic bold runs
+      // to 700 prevents Pango/CoreText from leaking to unbundled/system fonts at 800/900.
+      const runWeight = (isIndic && Number(fw) >= 700) ? 700 : fw;
+      return `${fst} ${runWeight} ${sz}px "${fontFamily}", ${scriptFallbacks}`;
     }
 
     let fontString = makeFontStr(effectiveFontSize, false);
@@ -444,8 +424,8 @@ const CaptionRenderer = (() => {
 
       // Word-pill styles where active pill extends horizontally beyond startX / startX + totalW
       if (highlightMode === 'word-box' || style.id === 4) {
-        leftBleed = Math.max(leftBleed, effSize * 0.18);
-        rightBleed = Math.max(rightBleed, effSize * 0.18);
+        leftBleed = Math.max(leftBleed, effSize * 0.23);
+        rightBleed = Math.max(rightBleed, effSize * 0.23);
       } else if (highlightMode === 'hormozi' || style.id === 9) {
         leftBleed = Math.max(leftBleed, effSize * 0.18);
         rightBleed = Math.max(rightBleed, effSize * 0.18);
@@ -468,8 +448,8 @@ const CaptionRenderer = (() => {
         leftBleed = Math.max(leftBleed, effSize * 0.16);
         rightBleed = Math.max(rightBleed, effSize * 0.16);
       } else if (highlightMode === 'cinema' || style.id === 13) {
-        leftBleed = Math.max(leftBleed, effSize * 0.16);
-        rightBleed = Math.max(rightBleed, effSize * 0.16);
+        leftBleed = Math.max(leftBleed, effSize * 0.21);
+        rightBleed = Math.max(rightBleed, effSize * 0.21);
       }
 
       return { leftBleed, rightBleed, extraPadW: leftBleed + rightBleed };
@@ -495,7 +475,8 @@ const CaptionRenderer = (() => {
         const heroFontSize = Math.round(effSize * 1.25);
         const subFontSize = Math.round(effSize * 0.52);
 
-        ctx.font = `${fst} ${fw || 900} ${heroFontSize}px "${fontFamily}", ${scriptFallbacks}`;
+        const heroWeight = (isIndicWord(heroWord) && Number(fw || 900) >= 700) ? 700 : (fw || 900);
+        ctx.font = `${fst} ${heroWeight} ${heroFontSize}px "${fontFamily}", ${scriptFallbacks}`;
         const heroW = ctx.measureText(heroWord).width;
 
         ctx.font = `${fst} 700 ${subFontSize}px "${fontFamily}", ${scriptFallbacks}`;
@@ -617,11 +598,12 @@ const CaptionRenderer = (() => {
       };
     }
 
+    const minFontSize = Math.max(24, Math.round(fontSize * 0.72));
     let layoutState = buildWrappedLines(effectiveFontSize);
     let iterations = 0;
-    while ((layoutState.maxLineW + layoutState.bleed.extraPadW) > maxAllowedWidth && effectiveFontSize > 12 && iterations < 6) {
+    while ((layoutState.maxLineW + layoutState.bleed.extraPadW) > maxAllowedWidth && effectiveFontSize > minFontSize && iterations < 6) {
       const shrinkRatio = maxAllowedWidth / (layoutState.maxLineW + layoutState.bleed.extraPadW);
-      effectiveFontSize = Math.max(12, Math.floor(effectiveFontSize * shrinkRatio * 0.96));
+      effectiveFontSize = Math.max(minFontSize, Math.floor(effectiveFontSize * shrinkRatio * 0.96));
       layoutState = buildWrappedLines(effectiveFontSize);
       iterations++;
     }
@@ -677,7 +659,8 @@ const CaptionRenderer = (() => {
       const heroFontSize = Math.round(effectiveFontSize * 1.25);
       const subFontSize = Math.round(effectiveFontSize * 0.52);
 
-      const heroFont = `${fst} ${fw || 900} ${heroFontSize}px "${fontFamily}", ${scriptFallbacks}`;
+      const heroWeight = (isIndicWord(heroWord) && Number(fw || 900) >= 700) ? 700 : (fw || 900);
+      const heroFont = `${fst} ${heroWeight} ${heroFontSize}px "${fontFamily}", ${scriptFallbacks}`;
       const subFont = `${fst} 700 ${subFontSize}px "${fontFamily}", ${scriptFallbacks}`;
 
       const heroCleaned = formatWordCase(
@@ -1244,7 +1227,7 @@ const CaptionRenderer = (() => {
       try {
         // Style 4 (Blue Highlight / word-box): real Indic glyph ascent/descent rounded pill + subtle specular border
         if (highlightMode === 'word-box' && isHighlighted && wordBoxColor !== 'transparent') {
-          const padX = fontSize * 0.18;
+          const padX = fontSize * 0.23;
           const padY = fontSize * (wordIsIndic ? 0.18 : 0.13);
           const wordBoxH = contentH + padY * 2;
           const wordBoxY = textY - wordBoxH / 2;
@@ -1699,7 +1682,7 @@ const CaptionRenderer = (() => {
           const cinemaStroke = style.strokeColor || '#000000';
 
           if (isHighlighted) {
-            const padX = fontSize * 0.15;
+            const padX = fontSize * 0.21;
             const padY = fontSize * (wordIsIndic ? 0.15 : 0.10);
             const pillH = contentH + padY * 2;
             const pillY = textY - pillH / 2;
@@ -2304,7 +2287,7 @@ const CaptionRenderer = (() => {
 
           ctx.save();
           if (isCurrent) {
-            const pillPadX = fontSize * 0.14;
+            const pillPadX = fontSize * 0.21;
             const pillPadY = fontSize * (wordIsIndic ? 0.14 : 0.10);
             const pillW = wordW + pillPadX * 2;
             const pillH = Math.max(inkH + pillPadY * 2, contentH + pillPadY * 1.4);

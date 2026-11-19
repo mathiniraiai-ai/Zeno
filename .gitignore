@@ -1,56 +1,55 @@
-# Working and output directories (keep folder structure via .gitkeep)
+# Working and staging directories (keep folder structure via .gitkeep)
 work/*
 !work/.gitkeep
 output/*
 !output/.gitkeep
 
-# Environment variables and secrets
+# Environment variables and session credentials
 .env
 .env.*
 !.env.example
 .zeno_session.json
 .zeno_owner_session.json
 
-# Virtual environments
+# Virtual environments & test caches
 .venv/
 venv/
 .pytest_cache/
 
-# Raw video footage and scripts (keep folder structure via .gitkeep)
+# Raw footage, scripts, voices, and stand-ins (keep .gitkeep)
 input/footage/*
 !input/footage/.gitkeep
 input/script/*
 !input/script/.gitkeep
+input/voices/*
+!input/voices/.gitkeep
+input/standins/*
+!input/standins/.gitkeep
 
 # Large (>50MB) native binaries & model weights
 tools/ffmpeg/ffmpeg*
 tools/ffmpeg/ffprobe*
 models/torch/
 
-# Explicitly keep reusable assets, lightweight ONNX face model, and scripts
+# Explicitly keep reusable assets, segregated formats, ONNX face model, and scripts
 !assets/**
+!formats/**
 !models/face_detection_yunet_2023mar.onnx
 !scripts/**
 
-# Always ignore Python caches and OS metadata everywhere (must come last)
+# Generated databases & local Node dependencies
+scripts/align_engine/kavioo_lexicon.db
+zeno_keys.db*
+node_modules/
+subtitles/node_modules/
+.claude/settings.local.json
+.zeno-dev
+
+# Python bytecode and OS metadata everywhere (must come last)
 **/__pycache__/
 **/*.py[cod]
 **/*$py.class
 **/.DS_Store
 **/Thumbs.db
-
-# Reference videos learned from (large; frames and measurements live in styles/<name>/refs/)
-input/reference/*
-!input/reference/.gitkeep
-input/standins/*
-
-# Generated on first run from scripts/align_engine/lexicons/*.py and data/lexicon_db.json (row ids change every run)
-scripts/align_engine/kavioo_lexicon.db
-zeno_keys.db*
-
-# Owner dev copy marker: installers never move this folder
-.zeno-dev
-node_modules/
-.claude/settings.local.json
 app/node_modules/
 app/dist/

@@ -207,7 +207,7 @@ function clusterRuns(rs) {  // renders of one video share the job start, so each
   return out.map(c => c.row);
 }
 function jobOutcome(j) {
-  if (j.kind === 'blocked' || j.kind === 'render_failed') return 'bad';
+  if (j.kind === 'blocked' || j.kind === 'render_failed' || j.kind === 'failed') return 'bad';
   if (j.kind === 'render') return j.idx > 0 ? 'rework' : 'good';
   if (j.kind === 'feedback') return 'rework';
   return 'open';
@@ -231,7 +231,7 @@ function buildEdits(jobs, runs) {  // one video edit = one editor + one script; 
     e.finished = ok.length ? n(ok[0].updated_at) : 0;
     e.last = Math.max(...e.jobs.map(j => n(j.updated_at)));
     e.nJobs = e.jobs.length; e.rendersOk = ok.length;
-    e.failed = e.jobs.filter(j => j.kind === 'render_failed').length;
+    e.failed = e.jobs.filter(j => j.kind === 'render_failed' || j.kind === 'failed').length;
     e.feedback = e.jobs.filter(j => j.kind === 'feedback').length;
     e.blocked = e.jobs.filter(j => j.kind === 'blocked').length;
     e.result = !ok.length ? 'open' : e.nJobs === 1 ? 'one' : 'rework';
@@ -547,7 +547,7 @@ function Timeline({jobs, day, setDay, days}) {
   list.forEach(j => { const k = j.editor_name || '?'; if (!by.has(k)) by.set(k, []); by.get(k).push(j); });
   const rows = [...by.entries()].sort((a, b) => Math.min(...a[1].map(j => n(j.created_at))) - Math.min(...b[1].map(j => n(j.created_at))));
   const hhmm = t => { const d = new Date(t * 1000); return clock12(d); };
-  const kindText = {render: 'finished', feedback: 'feedback job', render_failed: 'render failed', blocked: 'blocked at the check', inspected: 'started, not finished', checking: 'started, not finished'};
+  const kindText = {render: 'finished', feedback: 'feedback job', render_failed: 'render failed', failed: 'render failed', blocked: 'blocked at the check', inspect: 'started, not finished', inspected: 'started, not finished', checking: 'started, not finished'};
   return h('div', null,
     h('div', {className: 'bar', style: {margin: '0 0 8px'}}, h('span', {className: 'note', style: {margin: 0}}, 'Day'),
       h('select', {className: 'dt', value: day, onChange: e => setDay(e.target.value)}, days.map(d => h('option', {key: d, value: d}, dayLabel(d))))),

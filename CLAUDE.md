@@ -1,33 +1,22 @@
-# Zeno — agent instructions
+# Zeno v2.0.0 — AI Video Editor
 
-Zeno edits script-led videos (`plan.edl` by agent; Python measures/renders/checks). Start: `agent/DIRECTOR.md` (`DEVELOPING.md` for code work).
+Use `.venv/bin/python` (macOS/Linux) or `.venv\Scripts\python.exe` (Windows) as `<PY>`. Zeno v2.0.0 uses the **Host-AI Direct workflow** (zero MCP servers, direct Host-AI planning). Process 1, 2, or 3+ videos **sequentially one by one** with **zero Yes/No prompts** until every video is delivered to `~/Downloads/Zeno Outs/<Name>/`. Never poll background jobs (`sleep`, `write_stdin`, `manage_task`); if a command backgrounds, end your turn and wait for async wakeup, otherwise wait for each command to finish. For missing inputs, run `<PY> scripts/zeno.py --preflight --compact` and ask only for what is missing.
 
-## Working boundaries
-- Stay in this Zeno repo (footage from user's folder; outputs to `~/Downloads/Zeno Outputs/<Notion name>/`). Other projects off-limits.
-- Run `.venv/bin/python` (Mac/Linux) or `.venv\Scripts\python.exe` (Windows), never bare Python (`bash install.command` / `scripts/install_windows.ps1` once).
-- Never open/print `.env`, `.zeno_session.json`, `.zeno_owner_session.json`, or creds (`<PY> scripts/setup.py --smoke` / `--whoami`).
-- Preserve local work; never clear caches (`--fresh` only for proven cache bugs). Cleanup needs dry-run approval.
+## Host-AI Direct Workflow
 
-## Video workflow
-- Automatic edits may share a chat; always use isolated `--auto-plan`. Manual planning needs a small chat. `--inspect` never resets the project budget. Require script `?tab=...` or local path, local footage and exact editor-supplied Notion name; never re-ask supplied inputs.
-- **Turn 1 (Automatic planning)**: Missing inputs -> `<PY> scripts/zeno.py --preflight --compact`, show results, ask. Else run `<PY> scripts/zeno.py --inspect <footage> --script <script> --name "<name>" --auto-plan --compact` (never `--skip-preflight`): preflight, clip reuse, plan plus at most one targeted correction per invocation, `--check-plan`, Pitch Card, auto 9:16 + 1:1 render without Yes/No. After render, review QC + `review_sheet.jpg` once before delivery; do not reopen planning packets/rules.
-- **[PLANNER STOPPED]**: Stop model work, report `[BLOCKED]` lines and ask the editor. No retry, manual planning or packet reread. A new chat cannot reset the budget; reconcile pending/unknown charges.
-- **Manual fallback only when explicitly returned before planning, or authorized by the editor (4–5 turns max)**; never use it to bypass a planner or budget stop:
-  - **Turn 2**: Read `editing_packet_p*.md` (or `editing_packet.md`) + ALL `clip_sheet_*.jpg` in ONE parallel batch.
-  - **Turn 3**: Write `script_analysis.md` and `plan.edl` (plus `decisions.txt` if needed) in ONE parallel batch. Script is timeline (every line once, ordered, no repeats/stumbles); pick takes from words/pictures; every cut needs `sp="Name"`; wrong voice needs reshoot/take (disclose unchecked voices).
-  - **Turn 4**: Unless plan-only, run ONE check+render without Yes/No: `<PY> scripts/zeno.py --execute <plan> --square --compact`. Separate `--check-plan` only if needed/plan fails. If backgrounded, **END TURN immediately**, wait for completion; NEVER poll `manage_task`, `write_stdin`, `send_input`, or logs.
-  - **Turn 5**: `verify.py` checks 9:16 + 1:1 and builds `review_sheet.jpg` (no custom frame scripts). Read `review_sheet.jpg` ONCE (unless verify fails) and present deliverables + token report. Log feedback verbatim (`--feedback "<words>" --plan <plan>`); fixes use `<PY> scripts/edit_packet.py <project> --line L12` + `--check-plan`.
-- **[DO NOT] during edits**: NEVER open `agent/REFERENCE.md`, `CONCEPT.md`, `agent/EDIT_RULES.md`, `agent/FORMATS.md`, `scripts/*.py`, `clip_caches.json`, `facts.md`, `line_map.md`, `ffprobe`, or `dir`/`Get-ChildItem`/`ls`; the packet contains syntax, inventory, diagnostics and evidence.
+### Single Video
+1. **Inspect**: `<PY> scripts/zeno.py "<footage>" --script "<gdoc_tab_url_or_path>" --name "<Name>" --inspect --compact`
+2. **Read Once (1 batch)**: Read **only** `work/<project>/editing_packet.md` (or `editing_packet_p*.md` if chunked) and `work/<project>/clip_sheet_*.jpg` in one batch. Never open `formats/*`, `scripts/*`, `facts.md`, `line_map.md`, or `clip_caches.json`.
+3. **Plan**: Write `work/<project>/script_analysis.md` (`Format: <id> (<title>)` on line 1) and `work/<project>/plan.edl` (plus `work/<project>/decisions.txt` only if needed for genuine unscripted gaps, e.g. `accept <id> <reason>`).
+4. **Execute, Repair & Deliver**: `<PY> scripts/zeno.py --execute work/<project>/plan.edl --square --compact` — validates script order/cuts/voices, snaps pauses, renders `9:16` + `1:1` + Premiere `.prproj`/`.xml`, runs Deep QC (`review_sheet.jpg`), delivers to `~/Downloads/Zeno Outs/<Name>/`, and triggers automatic desktop sound & popup notification. For `[BLOCKED]` fixes, run `<PY> scripts/edit_packet.py work/<project> --line <ID>` instead of re-reading the full packet, update `plan.edl`, and re-run `--execute`. Inspect `~/Downloads/Zeno Outs/<Name>/review_sheet.jpg` once.
 
-## Owner's visual rules
-- All split screens, including baked splits, stay at `z=1` in fixed frames with 14% headroom. Characters keep their panels; the other character listens silently. Advance listener footage across turns and disclose fallback/loops.
-- Captions default to `#subs auto y=68`, one style and fixed size (54 px at 1080 width), one row. Top/bottom split captions sit at y=50. Colours adapt only with `adapt=on`. Disable only when requested.
-- Scrolling text uses `#page scroll`: two still pictures above a blue rule and a white dialogue page with spoken-word highlight. All cuts `split_h z=1`. The page replaces captions. No extra decorations.
-- Transitions follow changes in place, time or layout. Never inside splits or continuous same-shot dialogue. Marks and banners follow the script. SFX normally -4 to 0 dB; mark exceptions are defined in the brief.
+### Multi-Video Queue (`2+` videos)
+1. **Inspect All**: `<PY> scripts/zeno.py --queue <queue.json> --inspect-only --compact` (e.g. `work/queue.json`) to prepare every queued video's compact packet outside the main chat.
+2. **Isolate 1 Subagent Per Queued Video**: Spawn **1 isolated subagent per queued video** (returning only `~/Downloads/Zeno Outs/<Name>/` + status so packets and contact sheets stay out of the main chat). Each subagent runs Read Once -> Plan -> `--execute work/<project>/plan.edl --square --compact` + `scripts/edit_packet.py work/<project> --line <ID>` repairs until delivered to `~/Downloads/Zeno Outs/<Name>/` with automatic desktop sound & popup notification. Fix any `[BLOCKED]` line before starting the next video.
 
-## Reporting and diagnostics
-- Limits (`config/cost_controls.json`): 2 planner calls/invocation; 8 managed requests/project lifetime; 2 full-context requests with combined 100,000 conservative input reserve; corrections 24,000 UTF-8 bytes. Preserve `request_budget.sqlite3` and pending-call records. Details: `LOW_COST_WORKFLOW.md`.
-- Host checkpoints: 8 requests, 5,000,000-token chat limit; model cost estimate INR 40. These cannot cap the chat app/account or guarantee billed total/cache tokens. If retries repeat, run `<PY> scripts/cost_control.py <project>`; if blocked, stop model work, save plan, explain (approved renders finish; unknown != 0).
-- Direct API (opt-in): `<PY> scripts/direct_mode.py <project> --provider openai --dry-run` first (same planning limits, separate billing; never use Codex creds, switch silently, or retry unresolved charges).
-- Report saved uncached input, cache reads, cache writes, output, combined total, measured requests, elapsed time, new vs reused transcription and unknowns (API-equivalent estimate, not invoice). README & TOKEN_LEDGER auto-update. Four to six total calls is a workflow aim, not a guarantee.
-- `<PY> scripts/zeno.py --check` verifies deps (GPU/low-priority auto). Debug via `DEVELOPING.md`; keep edits/caches.
+## Editorial & Technical Invariants
+- **Script Order & Word Bounds**: Play every spoken line once in script order with `sp="ExactSpeaker"`; guard speech `0.02-0.05s`, join turns `0.06-0.15s`, trim `! REPEAT / STUMBLE`, snap cuts to pauses, and keep scripted laughs/cries `<=1.2s`.
+- **Splits & Motion**: `split_h`, `split_v`, `top_pip`, and baked splits are ALWAYS `z=1` with `14%` headroom and advancing silent listener (`peer="Name:clip.mp4"@in-out@side`); `single` pause `>0.25s` -> split + `1.08` punch-in; turns `>=2.5s` -> smooth `1.0->1.06` push; pass `focus=x,y` from the packet.
+- **Transitions, Marks & Banners**: Add `+1-2` purposeful story-driven transitions/reel on real scene/location/act shifts (dialogue cuts stay crisp hard cuts; zero intra-split, same-shot, or mid-line transitions). Use script-accurate `✓`/`✗` marks, `card:"English | Native"` for `Flashcard Text:`, and `banner:` only for Stop Saying strikethrough; zero fake `"Install Now"` CTA buttons; keep bottom `20-25%` CTA-safe; zero continuous BGM by default (`-10.5 LUFS`).
+- **Subtitles & 1:1 Square**: Default `#subs auto y=68` (`54px` single row at `1080w`; `y=50` on `split_v`), or `#page scroll` (replaces `#subs`, banners, marks, SFX). `--square` 1:1 is always a 2-layer 5–10% Gaussian blur wrap of the completed `9:16` reel (no separate 1:1 images, flashcards, timestamps, or subtitles).
+- **Deliverables (`~/Downloads/Zeno Outs/<Name>/`)**: `reel_<Name>.mp4`, `SQ_<Name>.mp4`, `<Name>.prproj`, `<Name>.xml`, `review_sheet.jpg`, `<Name>.plan.edl`, `<Name>.script.txt`.

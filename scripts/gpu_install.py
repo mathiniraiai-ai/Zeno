@@ -12,10 +12,14 @@ Mac (Apple Silicon): the normal PyPI build already uses the Apple GPU (MPS) and 
 from __future__ import annotations
 
 import os
+import sys
+
+sys.dont_write_bytecode = True
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import urllib.request
 import zipfile
@@ -57,11 +61,19 @@ def _find_uv() -> Optional[str]:
     if found:
         return found
     home = Path.home()
-    ext = ".exe" if (sys.platform.startswith("win") or os.name == "nt") else ""
-    for cand in (
+    is_win = sys.platform.startswith("win") or os.name == "nt"
+    ext = ".exe" if is_win else ""
+    candidates = [
         home / ".local" / "bin" / f"uv{ext}",
         home / ".cargo" / "bin" / f"uv{ext}",
-    ):
+    ]
+    if is_win:
+        local_app = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
+        candidates.extend([
+            local_app / "uv" / "uv.exe",
+            local_app / "Programs" / "uv" / "uv.exe",
+        ])
+    for cand in candidates:
         if cand.is_file():
             return str(cand)
     return None
@@ -134,12 +146,12 @@ def installed_torch(py: str) -> str:
 
 
 def is_cuda_ready(py: str) -> bool:
-    code = "import torch,sys;sys.exit(0 if ('+cu' in torch.__version__ and torch.cuda.is_available()) else 1)"
+    code = "import torch,torchaudio,sys;sys.exit(0 if ('+cu' in torch.__version__ and torch.cuda.is_available()) else 1)"
     return subprocess.run([py, "-c", code], capture_output=True, text=True).returncode == 0
 
 
 def requirements_without_torch(src: Path) -> List[str]:
-    return [ln for ln in src.read_text(encoding="utf-8").splitlines() if not re.match(r"\s*(torch|torchaudio)\s*[=<>!~]", ln)]
+    return [ln for ln in src.read_text(encoding="utf-8").splitlines() if not re.match(r"\s*(torch|torchaudio)(?:\s*[=<>!~]|$)", ln)]
 
 
 def _uv(*args: str) -> int:
@@ -212,9 +224,10 @@ def install_requirements() -> int:
     """Install `requirements.txt`, preserving any existing CUDA PyTorch build."""
     req = ROOT / "requirements.txt"
     if "+cu" in installed_torch(_py()):
-        tmp = Path(tempfile.mkdtemp()) / "requirements_no_torch.txt"
-        tmp.write_text("\n".join(requirements_without_torch(req)) + "\n", encoding="utf-8")
-        rc = _uv("-r", str(tmp))
+        with tempfile.TemporaryDirectory(prefix="zeno_req_") as tmp_dir:
+            tmp = Path(tmp_dir) / "requirements_no_torch.txt"
+            tmp.write_text("\n".join(requirements_without_torch(req)) + "\n", encoding="utf-8")
+            rc = _uv("-r", str(tmp))
     else:
         rc = _uv("-r", str(req))
     # Silero VAD (MIT, 2 MB): finds speech over background noise without onnxruntime.
@@ -263,7 +276,8 @@ def ensure_nvenc_ffmpeg() -> str:
         return ""
     if not find_nvidia_smi():
         return ""
-    sys.path.insert(0, str(ROOT / "scripts"))
+    if str(ROOT / "scripts") not in sys.path:
+        sys.path.insert(0, str(ROOT / "scripts"))
     try:
         import common
 
@@ -310,7 +324,8 @@ def ensure_nvenc_ffmpeg() -> str:
 
 def main() -> None:
     if "--status" in sys.argv:
-        sys.path.insert(0, str(ROOT / "scripts"))
+        if str(ROOT / "scripts") not in sys.path:
+            sys.path.insert(0, str(ROOT / "scripts"))
         import common
 
         print(common.gpu_report())

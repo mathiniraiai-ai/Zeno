@@ -1,29 +1,36 @@
 #!/usr/bin/env python3
-"""
-Zeno Live Stage Progress & Heartbeat Reporter (`scripts/progress.py`).
+"""Zeno Live Stage Progress & Heartbeat Reporter (`scripts/progress.py`).
 
-Tracks the 5 canonical editing stages in `work/<project>/progress.json` and emits
-unbuffered console heartbeat updates every ~45-50 seconds (and on every stage
-transition) so both standalone terminal users and chat-box agents (Claude Code /
-Antigravity) can show live backend progress without silence.
+Tracks the 5 canonical editing stages in `work/<project>/progress.json` and `work/latest_progress.json`,
+and emits unbuffered console heartbeat updates every ~45-50 seconds (and on every stage transition).
 
 Stages:
   Stage 1/5: Mapping       — Scanning raw clips, probing resolution/FPS & extracting audio
   Stage 2/5: Transcribing  — Transcribing clips, scoring retakes & checking speaker voices
   Stage 3/5: Matching      — Aligning script lines, building plan.edl & Editorial Pitch Card
   Stage 4/5: Editing       — Cutting segments, compositing layouts/overlays & transitions
-  Stage 5/5: Mastering     — Normalizing -11.5 LUFS audio, exporting .prproj & running Deep QC
+  Stage 5/5: Mastering     — Normalizing -10.5 LUFS audio, exporting .prproj & running Deep QC
 """
 from __future__ import annotations
+
+import os
+import sys
+
+sys.dont_write_bytecode = True
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
 
 import datetime
 import json
 import pathlib
-import queue
-import sys
 import threading
 import time
 from typing import Optional
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+try:
+    from common import DEFAULT_LOUDNESS_LUFS  # noqa: E402
+except Exception:
+    DEFAULT_LOUDNESS_LUFS = -10.5
 
 STAGE_NAMES = {
     0: "System Readiness Check",
@@ -31,7 +38,7 @@ STAGE_NAMES = {
     2: "Transcribing — Speech-to-Text & Voice Matching",
     3: "Matching — Script Alignment & Editorial Pitch",
     4: "Editing — Cutting Segments, Layouts & Effects",
-    5: "Mastering — Audio -11.5 LUFS, Premiere .prproj & Deep QC",
+    5: f"Mastering — Audio {DEFAULT_LOUDNESS_LUFS:.1f} LUFS, Premiere .prproj & Deep QC",
 }
 
 
@@ -41,11 +48,11 @@ def _fmt_mmss(seconds: float) -> str:
 
 
 class ProgressTracker:
-    """
-    Thread-safe stage progress writer + 45-50s background heartbeat emitter.
+    """Thread-safe stage progress writer + background console heartbeat emitter.
+
     Writes atomic snapshots to:
       - `work/<project>/progress.json`
-      - `work/latest_progress.json` (so any external watcher can read current status)
+      - `work/latest_progress.json`
     """
 
     def __init__(
@@ -79,10 +86,6 @@ class ProgressTracker:
         self.video_name = video_name or str((previous or {}).get("video_name") or "")
         self.stage_started_at = time.time()
         self.last_progress_at = self.stage_started_at
-        self._publish_queue = queue.Queue(maxsize=1)
-        self._publisher = None
-        self._last_publish = 0.0
-        self._published_stage = None
 
         self.stage = 1
         self.stage_name = STAGE_NAMES.get(1, "Mapping")
@@ -109,13 +112,6 @@ class ProgressTracker:
         if self._thread is not None and self._thread.is_alive():
             return self
         self._stop_evt.clear()
-        try:
-            import job_archive
-            if job_archive.enabled():
-                self._publisher = threading.Thread(target=self._publish_loop, name="zeno-progress-cloud", daemon=True)
-                self._publisher.start()
-        except Exception:
-            pass
         self._thread = threading.Thread(target=self._heartbeat_loop, name="zeno-heartbeat", daemon=True)
         self._thread.start()
         return self
@@ -131,8 +127,6 @@ class ProgressTracker:
         self._stop_evt.set()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=1.0)
-        if self._publisher is not None:
-            self._publisher.join(timeout=4.0)
 
     def update(
         self,
@@ -174,8 +168,12 @@ class ProgressTracker:
                 except Exception:
                     pass
 
+    def snapshot(self) -> dict:
+        with self._lock:
+            return self._snapshot_dict_unlocked()
+
     def _snapshot_dict_unlocked(self) -> dict:
-        elapsed = round(max(0, time.time() - self.started_at), 1)
+        elapsed = round(max(0.0, time.time() - self.started_at), 1)
         owner_email = ""
         try:
             import common
@@ -225,33 +223,6 @@ class ProgressTracker:
                 tmp.replace(out)
             except Exception:
                 pass
-        if self._publisher is not None and (
-            self.state != "running" or self.stage != self._published_stage or time.monotonic() - self._last_publish >= 15
-        ):
-            self._last_publish = time.monotonic()
-            self._published_stage = self.stage
-            try:
-                self._publish_queue.get_nowait()
-            except queue.Empty:
-                pass
-            self._publish_queue.put_nowait(snap)
-
-    def _publish_loop(self) -> None:
-        """Send small status snapshots off the edit thread; never dispatch a model call."""
-        while True:
-            try:
-                snap = self._publish_queue.get(timeout=0.2)
-            except queue.Empty:
-                if self._stop_evt.is_set():
-                    return
-                continue
-            try:
-                import job_archive
-                job_archive.publish_progress(self.work_dir, snap)
-            except Exception:
-                pass
-            if self._stop_evt.is_set() and self._publish_queue.empty():
-                return
 
     def _print_line_unlocked(self, prefix: str = "HEARTBEAT") -> None:
         elapsed = time.monotonic() - self._start_ts
@@ -272,13 +243,9 @@ class ProgressTracker:
 
 
 def read_latest_progress(work_dir: Optional[pathlib.Path] = None) -> Optional[dict]:
-    """Read the latest progress snapshot for a project or workspace."""
+    """Read the latest progress snapshot for a project folder or the workspace."""
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    candidates = []
-    if work_dir:
-        candidates.append(pathlib.Path(work_dir) / "progress.json")
-    else:
-        candidates.append(repo_root / "work" / "latest_progress.json")
+    candidates = [pathlib.Path(work_dir) / "progress.json"] if work_dir else [repo_root / "work" / "latest_progress.json"]
     for c in candidates:
         if c.is_file():
             try:

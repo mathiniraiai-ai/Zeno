@@ -1,6 +1,6 @@
-// Zeno desktop app: the window, Google Workspace sign-in, native Cloud OTA updater, and per-user bridge to scripts/jobs.py.
+// Zeno desktop app: the window, Google Workspace sign-in, native Cloud OTA updater, and workspace setup.
 const { app, BrowserWindow, Notification, ipcMain, shell, nativeTheme, dialog, clipboard } = require('electron');
-const { execFile, spawn } = require('child_process');
+const { spawn } = require('child_process');
 const crypto = require('crypto');
 const zlib = require('zlib');
 const path = require('path');
@@ -47,7 +47,11 @@ function findRoot() {
     path.join(home, 'Documents', 'Office project', 'Claude Editor'),
   ].filter(Boolean);
   for (const c of cands) {
-    try { if (fs.existsSync(path.join(c, 'scripts', 'jobs.py'))) return c; } catch (e) { /* skip */ }
+    try {
+      if (fs.existsSync(path.join(c, 'scripts', 'zeno.py')) || fs.existsSync(path.join(c, 'scripts', 'jobs.py'))) {
+        return c;
+      }
+    } catch (e) { /* skip */ }
   }
   return null;
 }
@@ -219,10 +223,71 @@ function clearRootAuth(root) {
 }
 
 // ---------------------------------------------------------------- Pure Node.js Cloud OTA Bundle Extractor & Updater
-const PRESERVE_REL = new Set(['.env', '.zeno_session.json', '.zeno_owner_session.json', '.zeno-dev']);
+const PRESERVE_REL = new Set(['.env', '.zeno_session.json', '.zeno_owner_session.json', '.zeno-dev', '.claude/settings.local.json']);
 const PRESERVE_PREFIX = ['.git/', '.venv/', 'models/', 'tools/', 'work/', 'input/', 'output/', 'scratch/', 'service/'];
 const OTA_MANIFEST_NAME = '_zeno_manifest.json';
 const OTA_RUNTIME_SKIP = new Set(['node_modules', '__pycache__', '.git', '.venv', 'dist']);
+
+function isLegacyZenoHook(hook) {
+  if (!hook || typeof hook !== 'object') return false;
+  const parts = [String(hook.command || ''), ...(Array.isArray(hook.args) ? hook.args.map(String) : [])];
+  const combined = parts.join(' ').replace(/\\/g, '/');
+  return /\b(?:call_cap|chat_guard)\.py\b/i.test(combined);
+}
+
+function stripLegacyZenoHooks(destDir) {
+  if (!destDir) return false;
+  const p = path.join(destDir, '.claude', 'settings.local.json');
+  if (!fs.existsSync(p)) return false;
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(p, 'utf8') || '{}');
+  } catch (e) {
+    return false;
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  if (!data.hooks || typeof data.hooks !== 'object' || Array.isArray(data.hooks)) return false;
+
+  let changed = false;
+  const cleanedHooks = {};
+  for (const [event, groups] of Object.entries(data.hooks)) {
+    if (!Array.isArray(groups)) {
+      cleanedHooks[event] = groups;
+      continue;
+    }
+    const keptGroups = [];
+    for (const group of groups) {
+      if (group && typeof group === 'object' && !Array.isArray(group) && Array.isArray(group.hooks)) {
+        const kept = group.hooks.filter((h) => {
+          const drop = isLegacyZenoHook(h);
+          if (drop) changed = true;
+          return !drop;
+        });
+        if (kept.length > 0) {
+          keptGroups.push({ ...group, hooks: kept });
+        } else if (group.hooks.length > 0) {
+          changed = true;
+        }
+      } else {
+        keptGroups.push(group);
+      }
+    }
+    if (keptGroups.length > 0) cleanedHooks[event] = keptGroups;
+  }
+  if (!changed) return false;
+
+  if (Object.keys(cleanedHooks).length > 0) data.hooks = cleanedHooks;
+  else delete data.hooks;
+
+  try {
+    const tmp = `${p}.zeno_tmp_${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
+    fs.renameSync(tmp, p);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 
 function isPreservedRel(cleanRel) {
   const rel = String(cleanRel || '').replace(/\\/g, '/').replace(/^\/+/, '');
@@ -460,6 +525,7 @@ async function applyCloudUpdateNative(auth, targetRoot) {
   const count = extractZipBuffer(buf, dest);
   const installedVer = headerVer || localVersion(dest);
   pruneFromManifest(dest, installedVer, prevVer);
+  stripLegacyZenoHooks(dest);
   writeUpdateState(dest, {
     installed_version: installedVer,
     last_bundle_sha256: actualSha,
@@ -491,40 +557,7 @@ async function applyCloudUpdateNative(auth, targetRoot) {
   return { ok: true, updated: true, version: installedVer, files: count, root: dest, text: `Updated to Zeno v${installedVer}` };
 }
 
-function runJobs(root, args, timeout = 20000) {
-  return new Promise((resolve) => {
-    if (!root) return resolve({ error: 'Zeno folder not ready' });
-    execFile(pythonFor(root), [path.join(root, 'scripts', 'jobs.py'), ...args], { cwd: root, timeout, maxBuffer: 20 * 1024 * 1024, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } },
-      (err, stdout, stderr) => {
-        if (err && !stdout) return resolve({ error: (stderr || err.message || 'failed').toString().slice(-400) });
-        try { resolve(JSON.parse(stdout)); } catch (e) { resolve({ error: 'Could not read the answer from Zeno.' }); }
-      });
-  });
-}
-
 let ROOT = null;
-// ---------------------------------------------------------------- Claude connection (Claude Code runs behind the chat box)
-function claudePath() {
-  const home = process.env.HOME || process.env.USERPROFILE || '';
-  const dirs = IS_WIN ? [path.join(process.env.APPDATA || '', 'npm'), path.join(home, '.local', 'bin')] : [path.join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'];
-  for (const d of dirs) { for (const n of (IS_WIN ? ['claude.exe', 'claude.cmd'] : ['claude'])) { const p = path.join(d, n); if (fs.existsSync(p)) return p; } }
-  return null;
-}
-function claudeEnv() {
-  const extra = process.env.ZENO_CLAUDE_CONFIG_DIR ? { CLAUDE_CONFIG_DIR: process.env.ZENO_CLAUDE_CONFIG_DIR } : {};
-  const auth = readAppAuth();
-  const userEnv = auth && auth.email ? { ZENO_USER_EMAIL: String(auth.email).trim().toLowerCase(), ZENO_CLOUD_TOKEN: String(auth.token || '').trim() } : {};
-  const home = process.env.HOME || '';
-  return { ...process.env, ...extra, ...userEnv, PATH: [path.join(home, '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', process.env.PATH || ''].join(path.delimiter), ZENO_EVENTS: 'on' };
-}
-function runClaude(args, timeout = 30000) {
-  return new Promise((resolve) => {
-    const bin = claudePath(); if (!bin) return resolve({ ok: false, text: 'Claude Code is not installed on this computer.' });
-    execFile(bin, args, { cwd: ROOT || undefined, timeout, env: claudeEnv(), maxBuffer: 10 * 1024 * 1024 }, (err, out, errout) => resolve({ ok: !err, text: String(out || errout || (err && err.message) || '') }));
-  });
-}
-const ZENO_MCP_NAME = 'zeno';
-let chatProc = null;
 
 function createWindow() {
   nativeTheme.themeSource = 'dark';
@@ -559,7 +592,12 @@ let lastNotifiedVer = '';
 
 app.whenReady().then(() => {
   ROOT = findRoot();
-  if (ROOT) saveRoot(ROOT);
+  if (ROOT) {
+    saveRoot(ROOT);
+    if (!fs.existsSync(path.join(ROOT, 'scripts', 'call_cap.py')) && !fs.existsSync(path.join(ROOT, 'scripts', 'chat_guard.py'))) {
+      stripLegacyZenoHooks(ROOT);
+    }
+  }
 
   const activeEmail = () => {
     if (arg('skip-auth') === '1') return 'preview@gosupernova.live';
@@ -582,17 +620,6 @@ app.whenReady().then(() => {
   };
 
   ipcMain.handle('zeno:root', () => ROOT);
-  ipcMain.handle('zeno:jobs', () => {
-    const em = activeEmail();
-    if (!em || !ROOT || !hasVenv(ROOT)) return [];
-    return runJobs(ROOT, ['list', '--user', em]);
-  });
-  ipcMain.handle('zeno:detail', (_e, name, since) => {
-    const em = activeEmail();
-    if (!em) return { error: 'Not signed in' };
-    if (!ROOT || !hasVenv(ROOT)) return { error: 'Engine not ready' };
-    return runJobs(ROOT, ['detail', String(name), '--since', String(since || 0), '--user', em]);
-  });
 
   ipcMain.handle('zeno:info', async (_e, check) => {
     if (!ROOT) ROOT = findRoot();
@@ -675,66 +702,11 @@ app.whenReady().then(() => {
     try { await fs.promises.copyFile(p, r.filePath); shell.showItemInFolder(r.filePath); return { ok: true, path: r.filePath }; } catch (err) { return { ok: false, text: String(err.message || err) }; }
   });
 
-  // is Claude Code installed, which account is it signed in with, and does it have the Zeno connector?
-  ipcMain.handle('zeno:claudeStatus', async () => {
-    if (!claudePath()) return { installed: false, loggedIn: false, connected: false };
-    const [auth, mcp] = await Promise.all([runClaude(['auth', 'status'], 20000), runClaude(['mcp', 'get', ZENO_MCP_NAME], 45000)]);
-    let a = {}; try { a = JSON.parse(auth.text); } catch (e) { a = {}; }
-    const connected = mcp.ok && /Connected/.test(mcp.text);
-    return { installed: true, loggedIn: !!a.loggedIn, email: a.email || '', plan: a.subscriptionType || '', connected };
-  });
-  ipcMain.handle('zeno:claudeLogin', async (_e, opts) => {
-    const o = opts || {};
-    if (o.switch) await runClaude(['auth', 'logout'], 20000);
-    const bin = claudePath(); if (!bin) return { ok: false, text: 'Claude Code is not installed on this computer.' };
-    const args = ['auth', 'login'].concat(o.email ? ['--email', String(o.email)] : []);
-    spawn(bin, args, { env: claudeEnv(), detached: true, stdio: 'ignore' }).unref();
-    return { ok: true };
-  });
-  ipcMain.handle('zeno:claudeConnect', async () => {
-    if (!ROOT) return { ok: false, text: 'Zeno folder not found.' };
-    const r = await runClaude(['mcp', 'add', '--scope', 'user', ZENO_MCP_NAME, '--', pythonFor(ROOT), path.join(ROOT, 'scripts', 'zeno_mcp.py')], 45000);
-    return { ok: r.ok, text: r.text.slice(0, 300) };
-  });
   ipcMain.handle('zeno:pickFolder', async (e) => {
     const r = await dialog.showOpenDialog(BrowserWindow.fromWebContents(e.sender), { properties: ['openDirectory'] });
     return r.canceled ? null : r.filePaths[0];
   });
   ipcMain.handle('zeno:copy', (_e, text) => { clipboard.writeText(String(text || '')); return true; });
-  ipcMain.handle('zeno:chatSend', (e, message, sessionId, opts) => {
-    const bin = claudePath(); if (!bin || !ROOT) return { ok: false, text: 'Claude Code is not installed on this computer.' };
-    if (chatProc) return { ok: false, text: 'Claude is still working on the last message.' };
-    const send = (evt) => { try { e.sender.send('zeno:chat', evt); } catch (er) { /* window closed */ } };
-    const args = ['-p', String(message), '--output-format', 'stream-json', '--verbose', '--permission-mode', 'acceptEdits',
-      '--setting-sources', 'project,local', '--no-chrome',
-      '--allowedTools', 'Bash(python3:*)', 'Bash(python:*)', 'Bash(.venv/bin/python:*)', 'Bash(.venv/Scripts/python.exe:*)', 'Bash(ls:*)', 'Bash(grep:*)', 'Bash(cat:*)', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'mcp__zeno', 'mcp__claude_ai_Notion', 'mcp__claude_ai_Meta_Ads', 'mcp__claude_ai_Metabase', 'mcp__notion', 'mcp__meta'];
-    args.push('--mcp-config', JSON.stringify({ mcpServers: { [ZENO_MCP_NAME]: { command: pythonFor(ROOT), args: [path.join(ROOT, 'scripts', 'zeno_mcp.py')] } } }));
-    const o = opts || {};
-    if (/^[\w.\-]+$/.test(String(o.model || ''))) args.push('--model', String(o.model));
-    if (['low', 'medium', 'high', 'xhigh', 'max'].includes(String(o.effort || ''))) args.push('--effort', String(o.effort));
-    if (sessionId) args.push('--resume', String(sessionId));
-    chatProc = spawn(bin, args, { cwd: ROOT, env: claudeEnv(), stdio: ['ignore', 'pipe', 'pipe'] });
-    let buf = '';
-    chatProc.stdout.on('data', (d) => {
-      buf += d.toString('utf8'); let i;
-      while ((i = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue;
-        let j; try { j = JSON.parse(line); } catch (er) { continue; }
-        if (j.type === 'system' && j.session_id) send({ kind: 'session', id: j.session_id });
-        else if (j.type === 'assistant' && j.message && Array.isArray(j.message.content)) {
-          for (const b of j.message.content) {
-            if (b.type === 'text' && b.text) send({ kind: 'text', text: b.text });
-            else if (b.type === 'tool_use') send({ kind: 'tool', name: b.name, input: (b.input && (b.input.command || b.input.file_path || b.input.pattern || '')) || '' });
-          }
-        } else if (j.type === 'result') send({ kind: 'result', ok: !j.is_error, text: j.result || '', session: j.session_id, cost: j.total_cost_usd });
-      }
-    });
-    let errTxt = '';
-    chatProc.stderr.on('data', (d) => { errTxt += d.toString('utf8'); });
-    chatProc.on('close', (code) => { chatProc = null; send({ kind: 'done', code, error: code ? errTxt.slice(-300) : '' }); });
-    return { ok: true };
-  });
-  ipcMain.handle('zeno:chatStop', () => { if (chatProc) { chatProc.kill('SIGTERM'); } return true; });
 
   ipcMain.handle('zeno:update', async () => {
     const auth = readAppAuth();

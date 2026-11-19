@@ -1,0 +1,252 @@
+{
+  "_about": "Segregated format registry for Zeno Pro. Preserves top-level keys ('formats', 'families', 'flash_kinds', 'same_shot_structure') for script_order.py compatibility while mapping each format to its standalone catalog card, classification keywords, and default subtitle directive.",
+  "formats": [
+    {
+      "id": "skit",
+      "title": "1.1 Skit-Based Micro-Narrative",
+      "family": "1. Micro narrative",
+      "catalog_file": "formats/catalog/skit.md",
+      "spec_file": "formats/specs/micronarrative_spec.json",
+      "names": ["skit", "skit based", "skit-based"],
+      "fallback_names": ["micro narrative", "micro-narrative", "micronarrative", "macro narrative"],
+      "keywords": [
+        "scene 1",
+        "scene 2",
+        "scene 3",
+        "split screen",
+        "miss nova",
+        "female robot",
+        "female humanoid robot",
+        "making fun",
+        "mockingly",
+        "top_pip"
+      ],
+      "layouts": ["single", "split_h", "split_v", "top_pip"],
+      "default_subs": "#subs auto y=68",
+      "max_transitions": null,
+      "kinds": ["whip_left", "whip_right", "slide_up", "slide_down", "split_reveal", "dip_to_black", "dissolve", "fade", "zoom_burst", "zoom_in", "zoom_out", "zoom_blur", "warm_flash_punch"]
+    },
+    {
+      "id": "direct_hook",
+      "title": "1.2 Direct Hook Micro-Narrative",
+      "family": "1. Micro narrative",
+      "catalog_file": "formats/catalog/direct_hook.md",
+      "spec_file": "formats/specs/micronarrative_spec.json",
+      "names": ["direct hook", "direct-hook"],
+      "keywords": [
+        "concept reference",
+        "direct hook",
+        "selfie",
+        "talking head",
+        "straight to camera",
+        "teacher left",
+        "human right"
+      ],
+      "layouts": ["single", "split_h", "split_v"],
+      "default_subs": "#subs auto y=68",
+      "max_transitions": 4,
+      "kinds": ["split_reveal", "whip_left", "whip_right", "slide_up", "slide_down", "zoom_in", "zoom_out", "zoom_blur", "dip_to_black", "warm_flash_punch"]
+    },
+    {
+      "id": "street_interview",
+      "title": "1.3 Street Interview Micro-Narrative",
+      "family": "1. Micro narrative",
+      "catalog_file": "formats/catalog/street_interview.md",
+      "spec_file": "formats/specs/micronarrative_spec.json",
+      "names": ["street interview", "public interview", "vox pop", "asking strangers"],
+      "keywords": [
+        "street interview",
+        "microphone",
+        "handheld",
+        "interviewer",
+        "interviewee",
+        "on the street",
+        "vox pop",
+        "let me show you"
+      ],
+      "layouts": ["single", "split_h", "split_v"],
+      "default_subs": "#subs auto y=68",
+      "max_transitions": 4,
+      "kinds": ["split_reveal", "whip_left", "whip_right", "slide_up", "slide_down", "zoom_in", "zoom_out", "zoom_blur", "dip_to_black"]
+    },
+    {
+      "id": "stop_saying",
+      "title": "1.4 Stop Saying / Never Say Micro-Narrative",
+      "family": "1. Micro narrative",
+      "catalog_file": "formats/catalog/stop_saying.md",
+      "spec_file": "formats/specs/micronarrative_spec.json",
+      "names": ["stop saying", "never say"],
+      "keywords": [
+        "stop saying",
+        "never say",
+        "don't say",
+        "instead of saying",
+        "strikethrough",
+        "struck through",
+        "red x"
+      ],
+      "layouts": ["single", "split_h", "split_v"],
+      "default_subs": "#subs auto y=68",
+      "max_transitions": 5,
+      "kinds": ["split_reveal", "whip_left", "whip_right", "slide_up", "slide_down", "zoom_in", "zoom_out", "zoom_blur", "dip_to_black", "warm_flash_punch"]
+    },
+    {
+      "id": "live_conversation",
+      "title": "Live Conversation (Hologram, Tablet, Interactive, Live Grammar Correction)",
+      "family": "2. Live conversation",
+      "catalog_file": "formats/catalog/live_conversation.md",
+      "names": ["live conversation", "live grammar correction", "grammar correction", "hologram", "tablet", "interactive"],
+      "keywords": [
+        "hologram",
+        "3d hologram",
+        "tablet",
+        "in the same shot",
+        "giant phone",
+        "speak more politely",
+        "they continue talking",
+        "live grammar correction"
+      ],
+      "layouts": ["single", "video_call"],
+      "default_subs": "#subs auto y=68",
+      "max_transitions": null,
+      "kinds": ["whip_left", "whip_right", "slide_up", "slide_down", "dip_to_black", "dissolve", "fade", "zoom_burst", "zoom_in", "zoom_out", "zoom_blur", "warm_flash_punch"]
+    },
+    {
+      "id": "split_screen",
+      "title": "Split Screen (Horizontal, Vertical, Video Call)",
+      "family": "3. Split screen",
+      "catalog_file": "formats/catalog/split_screen.md",
+      "names": ["split screen", "video call"],
+      "keywords": [
+        "left:",
+        "right:",
+        "top:",
+        "bottom:",
+        "video call",
+        "split screen throughout"
+      ],
+      "layouts": ["split_h", "split_v", "video_call", "chat_bar"],
+      "default_subs": "#subs auto y=68",
+      "max_transitions": 4,
+      "kinds": ["split_reveal", "whip_left", "whip_right", "slide_up", "slide_down", "zoom_in", "zoom_out", "zoom_blur", "dip_to_black"]
+    },
+    {
+      "id": "scrolling_text",
+      "title": "Scrolling Text",
+      "family": "4. Scrolling text",
+      "catalog_file": "formats/catalog/scrolling_text.md",
+      "names": ["scrolling text", "scroll page", "scrolling"],
+      "keywords": [
+        "scrolling text",
+        "scroll page",
+        "#page scroll",
+        "scrolling page"
+      ],
+      "layouts": ["split_h"],
+      "default_subs": "#page scroll",
+      "max_transitions": 0,
+      "kinds": []
+    },
+    {
+      "id": "translate_drill",
+      "title": "How Would You Translate / Flashcard Drill (Solo & Split Screen)",
+      "family": "5. How would you translate",
+      "catalog_file": "formats/catalog/translate_drill.md",
+      "names": [
+        "translate drill",
+        "how would you translate",
+        "translate",
+        "split screen with flash card",
+        "split screen with flash cards",
+        "flash card split",
+        "flashcard split",
+        "flash card drill",
+        "flashcard drill",
+        "flashcard",
+        "flash card"
+      ],
+      "keywords": [
+        "flashcard text:",
+        "flash card text:",
+        "flashcard:",
+        "flash card:",
+        "card text:",
+        "how do you say",
+        "how would you translate",
+        "in english?",
+        "say it with me"
+      ],
+      "layouts": ["single", "split_h", "split_v", "chat_bar"],
+      "default_subs": "#subs auto y=68",
+      "max_transitions": 3,
+      "kinds": ["split_reveal", "whip_left", "whip_right", "slide_up", "slide_down", "zoom_in", "zoom_out", "dip_to_black"]
+    },
+    {
+      "id": "story_pitch",
+      "title": "Skit-Based / Story-Based Direct Pitch",
+      "family": "6. Skit based / story based",
+      "catalog_file": "formats/catalog/story_pitch.md",
+      "names": ["story pitch", "story based", "direct pitch", "story"],
+      "keywords": [
+        "flashback",
+        "faded flashback",
+        "narration",
+        "direct pitch",
+        "story based",
+        "continuous kitchen shot"
+      ],
+      "layouts": ["single"],
+      "default_subs": "#subs auto y=68",
+      "max_transitions": null,
+      "kinds": ["dissolve", "fade", "dip_to_black", "whip_left", "whip_right", "slide_up", "slide_down", "zoom_in", "zoom_out", "zoom_blur", "warm_flash_punch"]
+    },
+    {
+      "id": "realistic_to_3d",
+      "title": "Realistic Video to 3D",
+      "family": "7. Realistic video to 3D",
+      "catalog_file": "formats/catalog/realistic_to_3d.md",
+      "names": ["realistic to 3d", "realistic video to 3d", "live to 3d"],
+      "keywords": [
+        "realistic to 3d",
+        "realistic video to 3d",
+        "live to 3d",
+        "remade as 3d",
+        "3d remake"
+      ],
+      "layouts": ["single", "split_h", "split_v"],
+      "default_subs": "#subs auto y=68",
+      "max_transitions": null,
+      "kinds": ["whip_left", "whip_right", "slide_up", "slide_down", "split_reveal", "dip_to_black", "dissolve", "fade", "zoom_burst", "zoom_in", "zoom_out", "zoom_blur", "warm_flash_punch"]
+    },
+    {
+      "id": "3d_to_2d",
+      "title": "3D to 2D (Generation Format: Edit by Underlying Sub-Format)",
+      "family": "8. 3D to 2D",
+      "catalog_file": "formats/catalog/3d_to_2d.md",
+      "names": [],
+      "generation_only": true,
+      "keywords": [
+        "3d to 2d",
+        "2d animation",
+        "remade as 2d",
+        "2d remake"
+      ],
+      "layouts": ["single", "split_h", "split_v"],
+      "default_subs": "#subs auto y=68",
+      "max_transitions": null,
+      "kinds": []
+    }
+  ],
+  "families": {
+    "1. Micro narrative": ["skit", "direct_hook", "street_interview", "stop_saying"],
+    "2. Live conversation": ["live_conversation"],
+    "3. Split screen": ["split_screen"],
+    "4. Scrolling text": ["scrolling_text"],
+    "5. How would you translate": ["translate_drill"],
+    "6. Skit based / story based": ["story_pitch"],
+    "7. Realistic video to 3D": ["realistic_to_3d"],
+    "8. 3D to 2D": ["3d_to_2d"]
+  },
+  "flash_kinds": ["warm_flash", "warm_flash_punch", "dip_to_white", "flash_zoom"],
+  "same_shot_structure": 0.70
+}

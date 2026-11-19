@@ -1,0 +1,28 @@
+{
+  "id": "top_pip",
+  "layout": "top_pip",
+  "names": [
+    "top pip",
+    "top_pip",
+    "pip top",
+    "top-center window",
+    "top center window",
+    "top floating window",
+    "top window"
+  ],
+  "description": "Full-screen background speaker paired with a stationary 750x420 rounded rectangle window centered near the top (x=165, y=20, radius=36). Both streams stay locked at z=1.",
+  "when": "an AI teacher or partner sits in a fixed 750x420 top-center rounded window above a full-frame speaker",
+  "geometry": {
+    "canvas": "1080x1920",
+    "window": "750x420",
+    "window_w": 750,
+    "window_h": 420,
+    "x": 165,
+    "y": 20,
+    "radius": 36,
+    "subs_y": 68,
+    "zoom": "none: top_pip keeps z=1"
+  },
+  "confidence": "defined",
+  "source": "Zeno Pro layout specification (750x420 at x=165, y=20, radius=36 over 1080x1920)"
+}

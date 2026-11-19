@@ -1,30 +1,25 @@
-"""
-Kavioo Transcription Guardian Layer (Auditor & Auto-Healing Engine)
+"""Transcription Guardian Layer: orthographic auditing and deterministic loanword healing."""
 
-Provides real-time validation and self-healing for ASR / Gemini transcriptions:
-1. Audits raw transcripts against language-specific orthography policies.
-2. Detects English loanwords or entire English sentences mistakenly transliterated into native Indic script.
-3. Detects single-letter hallucinations and token loops.
-4. Tier 1 Auto-Healing: Instant, deterministic in-memory normalization via 22-Language Lexicon Engine (<1ms).
-5. Tier 2 Auto-Healing: Targeted single-turn correction re-prompt if multi-word English sentences or severe anomalies are found.
-"""
+from __future__ import annotations
 
-import re
 import logging
-from enum import Enum
-from typing import Dict, List, Optional, Any, Tuple
+import re
 from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
 
 from .lexicon import lexicon_engine
 
-logger = logging.getLogger("kavioo.guardian")
+logger = logging.getLogger("align_engine.guardian")
 
 VALID_SINGLE_LETTERS = {"a", "i", "o", "u", "s", "1", "2", "3", "4", "5", "6", "7", "8", "9", "0"}
 
+
 class ViolationSeverity(str, Enum):
     INFO = "INFO"
-    TIER1_HEALABLE = "TIER1_HEALABLE"  # Can be healed instantly in-memory without LLM call
-    TIER2_CRITICAL = "TIER2_CRITICAL"   # Requires targeted LLM correction call
+    TIER1_HEALABLE = "TIER1_HEALABLE"
+    TIER2_CRITICAL = "TIER2_CRITICAL"
+
 
 class ViolationType(str, Enum):
     TRANSLITERATED_WORD = "TRANSLITERATED_WORD"
@@ -32,6 +27,7 @@ class ViolationType(str, Enum):
     SINGLE_LETTER_HALLUCINATION = "SINGLE_LETTER_HALLUCINATION"
     REPETITIVE_LOOP = "REPETITIVE_LOOP"
     COVERAGE_ANOMALY = "COVERAGE_ANOMALY"
+
 
 @dataclass
 class GuardianViolation:
@@ -41,6 +37,7 @@ class GuardianViolation:
     suggested_fix: Optional[str] = None
     details: str = ""
 
+
 @dataclass
 class GuardianAuditReport:
     is_valid: bool
@@ -49,10 +46,9 @@ class GuardianAuditReport:
     healed_text: Optional[str] = None
     healed_words: Optional[List[Dict[str, Any]]] = None
 
+
 class TranscriptionGuardian:
-    """
-    Guardian layer that audits and heals transcripts from LLM/ASR engines.
-    """
+    """Audits ASR/LLM transcripts and heals transliterated loanwords and single-letter artifacts."""
 
     def audit(
         self,
@@ -60,12 +56,9 @@ class TranscriptionGuardian:
         words: List[Any],
         target_language: str = "te",
         script_type: str = "Native",
-        audio_duration: Optional[float] = None
+        audio_duration: Optional[float] = None,
     ) -> GuardianAuditReport:
-        """
-        Performs a full audit of the transcript.
-        Returns a structured GuardianAuditReport with detected violations and recommended actions.
-        """
+        """Audit a raw transcript and apply Tier 1 deterministic lexicon healing."""
         violations: List[GuardianViolation] = []
         requires_tier2 = False
 
@@ -75,86 +68,91 @@ class TranscriptionGuardian:
                 w_txt = str(w.get("word") or w.get("w") or w.get("text") or "").strip()
                 if w_txt:
                     normalized_word_list.append(w_txt)
-            elif isinstance(w, str):
-                if w.strip():
-                    normalized_word_list.append(w.strip())
+            elif isinstance(w, str) and w.strip():
+                normalized_word_list.append(w.strip())
 
         raw_text = full_transcript or " ".join(normalized_word_list)
 
-        # 1. Check for single-letter hallucinations
+        # 1. Isolated invalid single ASCII letters
         for token in normalized_word_list:
             clean = token.strip(".,?!:;\"'()[]")
             if len(clean) == 1 and clean.isalpha() and clean.isascii() and clean.lower() not in VALID_SINGLE_LETTERS:
-                violations.append(GuardianViolation(
-                    violation_type=ViolationType.SINGLE_LETTER_HALLUCINATION,
-                    severity=ViolationSeverity.TIER1_HEALABLE,
-                    token_or_phrase=token,
-                    suggested_fix=None,
-                    details=f"Isolated invalid single ASCII letter '{clean}' detected."
-                ))
+                violations.append(
+                    GuardianViolation(
+                        violation_type=ViolationType.SINGLE_LETTER_HALLUCINATION,
+                        severity=ViolationSeverity.TIER1_HEALABLE,
+                        token_or_phrase=token,
+                        suggested_fix=None,
+                        details=f"Isolated invalid single ASCII letter '{clean}' detected.",
+                    )
+                )
 
-        # 2. Check for repetitive loops
+        # 2. Repetitive token loops
         rep_count = 1
         for i in range(1, len(normalized_word_list)):
-            if normalized_word_list[i].lower() == normalized_word_list[i-1].lower() and len(normalized_word_list[i]) > 1:
+            if normalized_word_list[i].lower() == normalized_word_list[i - 1].lower() and len(normalized_word_list[i]) > 1:
                 rep_count += 1
                 if rep_count >= 4:
-                    violations.append(GuardianViolation(
-                        violation_type=ViolationType.REPETITIVE_LOOP,
-                        severity=ViolationSeverity.TIER2_CRITICAL,
-                        token_or_phrase=normalized_word_list[i],
-                        details=f"Token '{normalized_word_list[i]}' repeated {rep_count} times in sequence."
-                    ))
+                    violations.append(
+                        GuardianViolation(
+                            violation_type=ViolationType.REPETITIVE_LOOP,
+                            severity=ViolationSeverity.TIER2_CRITICAL,
+                            token_or_phrase=normalized_word_list[i],
+                            details=f"Token '{normalized_word_list[i]}' repeated {rep_count} times in sequence.",
+                        )
+                    )
                     requires_tier2 = True
                     break
             else:
                 rep_count = 1
 
-        # 3. Check for transliterated English words or phrases in Indic script
+        # 3. Transliterated English words or sentences in Indic script
         lang_code = (target_language or "te").lower()[:2]
         consecutive_transliterated = 0
         transliterated_spans: List[str] = []
 
         for token in normalized_word_list:
             clean_tok = token.strip(".,?!:;\"'()[]")
-            # Check if token is a known loanword in the lexicon
             normalized_tok = lexicon_engine.sanitize_token(clean_tok, lang_code)
             if normalized_tok != clean_tok:
-                # Transliterated loanword found!
                 consecutive_transliterated += 1
                 transliterated_spans.append(f"{clean_tok} -> {normalized_tok}")
-                
-                # Check if it is a multi-word sequence of transliterated tokens (like "వన్ బాయ్ ఇస్ వాకింగ్")
+
                 if consecutive_transliterated >= 3:
                     requires_tier2 = True
-                    violations.append(GuardianViolation(
-                        violation_type=ViolationType.TRANSLITERATED_SENTENCE,
-                        severity=ViolationSeverity.TIER2_CRITICAL,
-                        token_or_phrase=" ".join(transliterated_spans[-3:]),
-                        details="Consecutive transliterated English words detected. Multi-word English sentence was written in native script."
-                    ))
+                    violations.append(
+                        GuardianViolation(
+                            violation_type=ViolationType.TRANSLITERATED_SENTENCE,
+                            severity=ViolationSeverity.TIER2_CRITICAL,
+                            token_or_phrase=" ".join(transliterated_spans[-3:]),
+                            details="Consecutive transliterated English words detected in native script.",
+                        )
+                    )
                 else:
-                    violations.append(GuardianViolation(
-                        violation_type=ViolationType.TRANSLITERATED_WORD,
-                        severity=ViolationSeverity.TIER1_HEALABLE,
-                        token_or_phrase=clean_tok,
-                        suggested_fix=normalized_tok,
-                        details=f"Loanword '{clean_tok}' should be in standard English '{normalized_tok}'."
-                    ))
+                    violations.append(
+                        GuardianViolation(
+                            violation_type=ViolationType.TRANSLITERATED_WORD,
+                            severity=ViolationSeverity.TIER1_HEALABLE,
+                            token_or_phrase=clean_tok,
+                            suggested_fix=normalized_tok,
+                            details=f"Loanword '{clean_tok}' normalized to '{normalized_tok}'.",
+                        )
+                    )
             else:
                 consecutive_transliterated = 0
 
-        # 4. Check audio duration coverage anomaly
+        # 4. Audio duration coverage check
         if audio_duration and audio_duration > 5.0 and len(normalized_word_list) < 2:
-            violations.append(GuardianViolation(
-                violation_type=ViolationType.COVERAGE_ANOMALY,
-                severity=ViolationSeverity.TIER2_CRITICAL,
-                token_or_phrase=raw_text,
-                details=f"Audio duration is {audio_duration:.1f}s but only {len(normalized_word_list)} words transcribed."
-            ))
+            violations.append(
+                GuardianViolation(
+                    violation_type=ViolationType.COVERAGE_ANOMALY,
+                    severity=ViolationSeverity.TIER2_CRITICAL,
+                    token_or_phrase=raw_text,
+                    details=f"Audio duration is {audio_duration:.1f}s but only {len(normalized_word_list)} words transcribed.",
+                )
+            )
             requires_tier2 = True
 
-        # Perform Tier 1 In-Memory Healing
         healed_words_res, healed_text_res = self.heal_tier1(words, lang_code)
 
         return GuardianAuditReport(
@@ -162,20 +160,15 @@ class TranscriptionGuardian:
             requires_tier2_healing=requires_tier2,
             violations=violations,
             healed_text=healed_text_res,
-            healed_words=healed_words_res
+            healed_words=healed_words_res,
         )
 
     def heal_tier1(
         self,
         words: List[Any],
-        target_language: str = "te"
+        target_language: str = "te",
     ) -> Tuple[List[Dict[str, Any]], str]:
-        """
-        Executes instant, deterministic in-memory healing (<1ms) on word tokens:
-        - Replaces known transliterated loanwords with standard English.
-        - Detaches agglutinative suffixes (e.g. teacher-ని, performance-ని, office-ல).
-        - Strips isolated single-letter hallucination artifacts.
-        """
+        """Apply deterministic in-memory loanword normalization, suffix detachment, and noise removal."""
         healed_words: List[Dict[str, Any]] = []
         lang_code = (target_language or "te").lower()[:2]
 
@@ -194,25 +187,24 @@ class TranscriptionGuardian:
             if not raw_w:
                 continue
 
-            # Strip single-letter hallucinations
             clean_w = raw_w.strip(".,?!:;\"'()[]")
             if len(clean_w) == 1 and clean_w.isalpha() and clean_w.isascii() and clean_w.lower() not in VALID_SINGLE_LETTERS:
                 continue
 
-            # Apply Lexicon Sanitization & Suffix Decoupling
-            # Preserve trailing punctuation
             punct_match = re.search(r"([.,?!:;]+)$", raw_w)
             trailing_punct = punct_match.group(1) if punct_match else ""
-            core_token = raw_w[:-len(trailing_punct)] if trailing_punct else raw_w
+            core_token = raw_w[: -len(trailing_punct)] if trailing_punct else raw_w
 
             sanitized_core = lexicon_engine.sanitize_token(core_token, lang_code) or core_token
             final_word = f"{sanitized_core}{trailing_punct}"
 
-            healed_words.append({
-                "word": final_word,
-                "start": s_time,
-                "end": e_time
-            })
+            healed_words.append(
+                {
+                    "word": final_word,
+                    "start": s_time,
+                    "end": e_time,
+                }
+            )
 
         healed_text = " ".join(w["word"] for w in healed_words)
         return healed_words, healed_text
@@ -222,19 +214,17 @@ class TranscriptionGuardian:
         audit_report: GuardianAuditReport,
         original_transcript: str,
         target_language: str = "te",
-        language_label: str = "Telugu"
+        language_label: str = "Telugu",
     ) -> str:
-        """
-        Constructs a minimal, hyper-targeted healing prompt for Gemini to fix only the defective segments.
-        """
-        issues_summary = []
-        for v in audit_report.violations:
-            if v.severity == ViolationSeverity.TIER2_CRITICAL:
-                issues_summary.append(f"- {v.details} (Offending phrase: '{v.token_or_phrase}')")
-
+        """Build a targeted correction prompt to repair severe bilingual script violations."""
+        issues_summary = [
+            f"- {v.details} (Offending phrase: '{v.token_or_phrase}')"
+            for v in audit_report.violations
+            if v.severity == ViolationSeverity.TIER2_CRITICAL
+        ]
         issues_block = "\n".join(issues_summary) or "- Spoken English dialogue sentences were transliterated into native script."
 
-        prompt = f"""You are correcting an automated transcription for professional video subtitles.
+        return f"""You are correcting an automated transcription for video subtitles.
 
 ## Target Configuration
 - Language: {language_label}
@@ -259,6 +249,6 @@ class TranscriptionGuardian:
   "words": ["word1", "word2", "word3"]
 }}
 """
-        return prompt
+
 
 guardian_engine = TranscriptionGuardian()
