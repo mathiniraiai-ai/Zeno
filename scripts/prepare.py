@@ -405,6 +405,36 @@ _WRONG_MARKS = "❌✗✘❎"
 _RIGHT_MARKS = "✅✓✔☑"
 _CONTEXT_DIR_RE = re.compile(r"\b(?:is|are)\s+(?:talking|speaking|saying)\b|\btalking\s+to\b|\bwhile\b", re.I)
 _STRIKE_CUE_RE = re.compile(r"\s*[\(\[][^\)\]]*strike[^\)\]]*[\)\]]\s*$", re.I)
+_SCENE_STRIKE_RE = re.compile(
+    r"\bstruck[\s-]+out\b|\bstrike[\s-]*through\b|\bred\s+x\b|\bx\s+sign\b|\bcross(?:ed)?\s+out\b",
+    re.I,
+)
+_WRONG_FEEDBACK_OPEN_RE = re.compile(
+    r"^(?:no[,!.:]+(?:\s|$)|no\s+(?:that'?s|you\b|don'?t|do\s+not|say|actually|never|not)\b|"
+    r"nope\b|not\s+quite\b|almost\b|wrong\b|"
+    r"never(?:,?\s*ever)?\s+(?:to\s+)?say\b|don'?t\s+(?:ever\s+)?say\b|do\s+not\s+say\b|stop\s+saying\b)",
+    re.I,
+)
+_WRONG_FEEDBACK_NATIVE_PREFIXES = (
+    "ನೀವು ಸಿಂಪಲ್ಲಾಗಿ",
+    "ಹೀಗೆ ಹೇಳಿ",
+    "మీరు ఇలా చెప్పాలి",
+    "ఇలా చెప్పండి",
+    "అలా చెప్పకూడదు",
+    "అలా కాదు",
+    "ऐसे कहो",
+    "ऐसे बोलो",
+    "ऐसे बोलिए",
+    "गलत",
+    "नहीं,",
+    "नहीं!",
+    "ഇങ്ങനെ പറയണം",
+    "ഇങ്ങനെ പറയൂ",
+    "അങ്ങനെ പറയരുത്",
+    "இப்படிச் சொல்லுங்கள்",
+    "இப்படி சொல்லணும்",
+    "அப்படி சொல்லக்கூடாது",
+)
 _TEXT_CUE_RE = re.compile(r"\s*\[\s*TEXT\s*:\s*(?P<body>[^\]]*)\]\s*$", re.I)
 # "horizontal split screen" has a horizontal divider (top / bottom panels = split_v); "vertical split" is left / right (split_h)
 SCRIPT_SPLIT_LAYOUT = {"horizontal": "split_v", "vertical": "split_h", "default": "split_v"}
@@ -950,6 +980,17 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             tokens = []
         phonetic_tokens = [_phonetic_token(w) for w in tokens if _phonetic_token(w)]
 
+        if (
+            mark is None
+            and not beat
+            and speaker
+            and tokens
+            and len(tokens) <= 16
+            and "?" not in text
+            and _SCENE_STRIKE_RE.search(current_visual or "")
+        ):
+            mark = "wrong"
+
         line_fc = dict(current_flashcard) if (current_flashcard and not beat) else None
         line_fc_start = (not card_started) if line_fc else False
         if line_fc:
@@ -1013,11 +1054,12 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
     for idx in range(len(lines) - 1):
         curr_l = lines[idx]
         next_l = lines[idx + 1]
-        if curr_l.get("mark") or len(curr_l.get("tokens", [])) > 12:
+        if curr_l.get("mark") or not curr_l.get("tokens") or len(curr_l.get("tokens", [])) > 16:
             continue
         if curr_l.get("flashcard") or next_l.get("flashcard"):
             continue
         if curr_l.get("speaker") and next_l.get("speaker") and curr_l["speaker"] != next_l["speaker"]:
+            curr_txt = (curr_l.get("text") or "").strip()
             nxt_txt = next_l["text"].strip().lower()
             nxt_clean = re.sub(r'^[\s"\'“”‘’]+', "", nxt_txt)
             nxt_bare = re.sub(r"[^\w\u0900-\u0D7F\s]", "", nxt_clean).strip()
@@ -1032,19 +1074,27 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             ):
                 continue
             nxt_tok_count = len(next_l.get("tokens") or [])
-            is_teach_prompt = "?" in (curr_l.get("text") or "") and bool(
+            is_teach_prompt = "?" in curr_txt or bool(
                 re.search(
-                    r"english|translate|how\s+do\s+you\s+say|repeat\s+after|say\s+it\s+with\s+me|ಏನಂತಾರೆ|ಹಿಂದೇ?ನೆ\s*ಹೇಳಿ",
-                    curr_l.get("text") or "",
+                    r"english|translate|how\s+do\s+you\s+say|repeat\s+after|say\s+it\s+with\s+me|ಏನಂತಾರೆ|ಹಿಂದೇ?ನೆ\s*ಹೇಳಿ|ఎలా\s*చెప్పాలి|कैसे\s*बोलें|എങ്ങനെ\s*പറയും|எப்படி",
+                    curr_txt,
                     re.I,
                 )
             )
-            if nxt_txt.startswith("almost"):
-                if nxt_tok_count >= 3 and not is_teach_prompt:
+            if _WRONG_FEEDBACK_OPEN_RE.match(nxt_clean):
+                if (nxt_clean.startswith("almost") and nxt_tok_count < 3) or is_teach_prompt:
+                    pass
+                else:
                     curr_l["mark"] = "wrong"
-            elif nxt_txt.startswith(("ನೀವು ಸಿಂಪಲ್ಲಾಗಿ", "ಹೀಗೆ ಹೇಳಿ", "no,", "not quite")):
+            elif nxt_txt.startswith(_WRONG_FEEDBACK_NATIVE_PREFIXES):
                 if not is_teach_prompt:
                     curr_l["mark"] = "wrong"
+            elif (
+                not is_teach_prompt
+                and next_l.get("quoted")
+                and re.match(r"^(?:say|try\s+saying|instead[,:\s]|better\s+way|you\s+(?:can|should)\s+say)\b", nxt_clean, re.I)
+            ):
+                curr_l["mark"] = "wrong"
             elif nxt_txt.startswith(("perfect", "nice", "great", "correct", "ನಿಜ", "ಸರಿ")):
                 if not is_teach_prompt:
                     curr_l["mark"] = "right"

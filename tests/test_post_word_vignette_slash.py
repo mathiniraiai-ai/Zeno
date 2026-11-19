@@ -416,6 +416,71 @@ class PostWordVignetteSlashTests(unittest.TestCase):
             self.assertFalse(verify.is_subs_enabled({"subs": {"mode": "off"}}))
             self.assertIn("#subs off", edl_parser.plan_to_edl({"subs": {"mode": "off"}, "segments": []}))
 
+    def test_wrong_detection_scene_strike_telugu_and_split_multisegment_beats(self) -> None:
+        """Scene strike directions, 'Never, ever say', 'No!', and Telugu correction cues mark wrong lines
+        while preserving '?' student questions; multi-sentence wrong lines attach marks to every sub-cut.
+        """
+        raw_script = "\n".join([
+            "Characters",
+            "* Rahul -- candidate",
+            "* Interviewer -- HR manager",
+            "* Female Robot -- AI teacher",
+            "Scene 1",
+            "Rahul: Sir, Myself Rahul",
+            "Interviewer: Never, ever say Myself Rahul",
+            "Scene 2 -- Flashback",
+            "Flashback. Each line gets struck out on screen with a big red X.",
+            "Rahul: Myself Rahul. I'm Graduated. I'm hardworking.",
+            "Scene 3",
+            "Rahul: Myself Rahul. I am from Hyderabad, but working at Bangalore.",
+            'Female Robot: No! ఎప్పుడూ "myself" తో మొదలుపెట్టకూడదు. Say: "I\'m Rahul."',
+            "Rahul: I am having three years experience in Fullstack.",
+            'Female Robot: మీరు ఇలా చెప్పాలి: "I have three years of experience in fullstack development."',
+            "Rahul: ఇది English లో ఎలా చెప్పాలి??",
+            'Female Robot: Say: "I\'m looking for a role where I can grow with the company."',
+        ])
+        _, parsed = prepare._parse_script_raw(raw_script, "w47_wrong_marks")
+        by_txt = {ln["text"]: ln for ln in parsed}
+        self.assertEqual(by_txt["Sir, Myself Rahul"].get("mark"), "wrong")
+        self.assertEqual(by_txt["Myself Rahul. I'm Graduated. I'm hardworking."].get("mark"), "wrong")
+        self.assertEqual(by_txt["Myself Rahul. I am from Hyderabad, but working at Bangalore."].get("mark"), "wrong")
+        self.assertEqual(by_txt["I am having three years experience in Fullstack."].get("mark"), "wrong")
+        self.assertIsNone(by_txt["ఇది English లో ఎలా చెప్పాలి??"].get("mark"))
+        self.assertIsNone(by_txt["Never, ever say Myself Rahul"].get("mark"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            clip_dir = tmp_dir / "clip_2"
+            clip_dir.mkdir()
+            (clip_dir / "hq_words.json").write_text(
+                json.dumps([
+                    {"w": "Myself", "start": 0.25, "end": 0.68},
+                    {"w": "Rahul.", "start": 0.69, "end": 1.15},
+                    {"w": "I'm", "start": 1.79, "end": 2.02},
+                    {"w": "Graduated.", "start": 2.03, "end": 2.63},
+                    {"w": "I'm", "start": 3.20, "end": 3.45},
+                    {"w": "hardworking.", "start": 3.46, "end": 4.18},
+                ]),
+                encoding="utf-8",
+            )
+            scr_file = tmp_dir / "script.txt"
+            scr_file.write_text(raw_script, encoding="utf-8")
+            multi_line = [ln for ln in parsed if ln["text"].startswith("Myself Rahul. I'm Graduated")][0]
+            lid = multi_line["id"]
+            plan = {
+                "mark_pack": "vignette",
+                "segments": [
+                    {"id": f"{lid}a", "src": str(tmp_dir / "2.mp4"), "start": 0.25, "end": 1.17, "layout": "single", "zoom": 1.0},
+                    {"id": f"{lid}b", "src": str(tmp_dir / "2.mp4"), "start": 1.79, "end": 2.65, "layout": "single", "zoom": 1.0},
+                    {"id": f"{lid}c", "src": str(tmp_dir / "2.mp4"), "start": 3.20, "end": 4.21, "layout": "single", "zoom": 1.0},
+                ],
+                "marks": [],
+            }
+            with mock.patch("common.clip_work_dir", return_value=clip_dir):
+                script_order.calibrate_post_word_beats(plan, scr_file, tmp_dir)
+            marked_segs = [m["segment"] for m in plan["marks"] if m.get("type") == "wrong"]
+            self.assertEqual(marked_segs, [f"{lid}a", f"{lid}b", f"{lid}c"])
+
 
 
 if __name__ == "__main__":

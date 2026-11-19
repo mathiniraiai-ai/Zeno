@@ -926,6 +926,51 @@ class EditorSheetFixesTests(unittest.TestCase):
 
         self.assertAlmostEqual(layout_total, verify_total, delta=1e-6)
 
+    def test_cross_res_smooth_background_ecc_registration_and_mismatch_rejection(self) -> None:
+        """Smooth studio ring backgrounds across 1080p vs 720p align via masked ECC without jumping,
+        while unrelated backgrounds still return `None`.
+        """
+        import cv2
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            a_ref = np.full((1280, 720), 28, dtype=np.uint8)
+            cv2.circle(a_ref, (360, 420), 250, 235, 10, lineType=cv2.LINE_AA)
+            a_hi = cv2.resize(a_ref, (1080, 1920), interpolation=cv2.INTER_CUBIC)
+            a_hi[340:820, 380:720] = 210  # subject inside person mask
+
+            M = np.float32([[1, 0, -10.0], [0, 1, 6.0]])
+            b_lo = cv2.warpAffine(a_ref, M, (720, 1280), borderValue=28)
+            b_lo[210:540, 245:495] = 175  # slightly moved mouth/head inside mask
+
+            # Unrelated studio background with tilted gradient bands
+            c_lo = np.fromfunction(lambda y, x: ((x * 2 + y) % 180) + 40, (1280, 720)).astype(np.uint8)
+
+            def _mock_gray(src: Path | str, _t: float):
+                s = str(src)
+                if s.endswith("silent.mp4"):
+                    return a_hi
+                if s.endswith("live.mp4"):
+                    return b_lo
+                return c_lo
+
+            bbox_a = [0.35, 0.17, 0.69, 0.43]
+            bbox_b = [0.33, 0.13, 0.70, 0.42]
+            with mock.patch.object(vision_tracker, "_read_gray_frame", side_effect=_mock_gray):
+                reg_ok = vision_tracker.register_background(
+                    tmp_dir / "silent.mp4", 0.0, tmp_dir / "live.mp4", 0.5, bbox_a, bbox_b
+                )
+                reg_bad = vision_tracker.register_background(
+                    tmp_dir / "silent.mp4", 0.0, tmp_dir / "other.mp4", 0.5, bbox_a, bbox_b
+                )
+
+            self.assertIsNotNone(reg_ok, "Cross-res smooth studio pair should register via masked ECC")
+            assert reg_ok is not None
+            self.assertAlmostEqual(reg_ok["a"], 720.0 / 1080.0, delta=0.02)
+            self.assertAlmostEqual(reg_ok["tx"], -10.0, delta=2.5)
+            self.assertAlmostEqual(reg_ok["ty"], 6.0, delta=2.5)
+            self.assertIsNone(reg_bad, "Unrelated studio background must be rejected")
+
 
 if __name__ == "__main__":
     unittest.main()

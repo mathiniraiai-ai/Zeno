@@ -1831,6 +1831,19 @@ def _find_phrase_end_in_words(
     return round(max(0.0, raw_end - float(seg_start)), 3)
 
 
+def _multi_sentence_end_words(text: str) -> set:
+    """Return cleaned terminal tokens of non-final sentences when a line holds >=2 sentences."""
+    parts = [p.strip() for p in re.split(r"[.!?।]+", str(text or "")) if p.strip()]
+    if len(parts) < 2:
+        return set()
+    ends: set = set()
+    for part in parts[:-1]:
+        toks = clean(part.split())
+        if toks:
+            ends.add(toks[-1])
+    return ends
+
+
 def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: Path) -> int:
     """Deterministically snap Stop Saying phrase banners and wrong/right marks to exact post-word
     timestamps (`word_end_rel` or phrase-matched end), enforce `0.48s` beat durations, ensure
@@ -1866,6 +1879,7 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
             plan["marks"] = marks
 
         last_seg_for_line: Dict[str, int] = {}
+        line_seg_counts: Dict[str, int] = {}
         line_has_explicit_banner: set = set()
         line_has_explicit_mark: Dict[str, set] = {}
         for idx, seg in enumerate(segs):
@@ -1873,6 +1887,7 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
             lids = _seg_lines(sid)
             for lid in lids:
                 last_seg_for_line[lid] = idx
+                line_seg_counts[lid] = line_seg_counts.get(lid, 0) + 1
             b_list, _ = _normalize_banners_list(seg)
             if any(not _is_header_banner_text(b.get("text") or b.get("phrase")) for b in b_list):
                 for lid in lids:
@@ -1896,6 +1911,9 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
         beat_dur = POST_WORD_BEAT_DURATION
         changed = 0
 
+        line_has_wrong_initial = {
+            lid for lid, mks in line_has_explicit_mark.items() if "wrong" in mks
+        }
         for idx, seg in enumerate(segs):
             sid = str(seg.get("id", ""))
             st = float(seg["start"])
@@ -1903,7 +1921,38 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
             raw_dur = max(0.08, _segment_play_duration(seg))
 
             lids = _seg_lines(sid)
-            finishing_lines = [by_id[lid] for lid in lids if lid in by_id and last_seg_for_line.get(lid) == idx]
+            seg_words: Optional[List[Dict[str, Any]]] = None
+
+            def _get_seg_words() -> List[Dict[str, Any]]:
+                nonlocal seg_words
+                if seg_words is None:
+                    seg_words = _cut_words_for_beat(seg)
+                return seg_words
+
+            finishing_lines: List[Dict[str, Any]] = []
+            multi_wrong_subseg = False
+            for lid in lids:
+                if lid not in by_id:
+                    continue
+                l_obj = by_id[lid]
+                is_wrong_line = bool(l_obj.get("strike_text")) or str(l_obj.get("mark") or "").strip().lower() == "wrong"
+                has_multi_sents = is_wrong_line and line_seg_counts.get(lid, 0) > 1 and bool(
+                    _multi_sentence_end_words(l_obj.get("text", ""))
+                )
+                if last_seg_for_line.get(lid) == idx:
+                    finishing_lines.append(l_obj)
+                    if has_multi_sents:
+                        multi_wrong_subseg = True
+                    continue
+                if has_multi_sents:
+                    sent_ends = _multi_sentence_end_words(l_obj.get("text", ""))
+                    ws_sub = _get_seg_words()
+                    if ws_sub:
+                        last_raw = str(ws_sub[-1].get("w") or ws_sub[-1].get("word") or "").strip()
+                        last_toks = clean(last_raw.split())
+                        if last_raw.endswith((".", "!", "?", "।")) or (last_toks and last_toks[-1] in sent_ends):
+                            finishing_lines.append(l_obj)
+                            multi_wrong_subseg = True
 
             b_list, from_legacy = _normalize_banners_list(seg)
             header_banners = [b for b in b_list if _is_header_banner_text(b.get("text") or b.get("phrase"))]
@@ -1923,7 +1972,10 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
 
             line_has_wrong = any(
                 str(l.get("mark") or "").strip().lower() == "wrong"
-                and "wrong" not in line_has_explicit_mark.get(str(l.get("id", "")).upper(), set())
+                and (
+                    (multi_wrong_subseg and not wrong_marks)
+                    or str(l.get("id", "")).upper() not in line_has_wrong_initial
+                )
                 and str(l.get("id", "")).upper() not in line_has_explicit_banner
                 for l in finishing_lines
             )
@@ -1938,7 +1990,7 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
             if not is_wrong_beat and not is_right_beat:
                 continue
 
-            words = _cut_words_for_beat(seg)
+            words = _get_seg_words()
             if words:
                 first_word_end_rel = max(0.0, _src_to_seg_time(seg, min(en, float(words[0].get("end", en)))))
                 last_word_end_rel = max(0.0, _src_to_seg_time(seg, min(en, float(words[-1].get("end", en)))))

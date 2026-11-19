@@ -983,6 +983,99 @@ def _person_mask(
     return mask
 
 
+def _register_background_ecc(
+    a_img: "np.ndarray",
+    b_img: "np.ndarray",
+    ref_bbox: Optional[Sequence[float]] = None,
+    clip_bbox: Optional[Sequence[float]] = None,
+) -> Optional[Dict[str, float]]:
+    """Masked normalized ECC registration fallback for smooth/blurry studio backgrounds where ORB is sparse."""
+    if cv2 is None or np is None:
+        return None
+    ha, wa = a_img.shape[:2]
+    hb, wb = b_img.shape[:2]
+    if min(ha, wa, hb, wb) < 32:
+        return None
+    ar_a = wa / float(ha)
+    ar_b = wb / float(hb)
+    if abs(ar_a - ar_b) > max(ar_a, ar_b) * 0.08:
+        return None
+
+    sw = max(64, min(360, wa, wb))
+    sh = max(64, int(round(sw / ar_b)))
+    pre_a_x = sw / float(wa)
+    pre_b_x = sw / float(wb)
+    pre_b_y = sh / float(hb)
+
+    a_small = cv2.resize(a_img, (sw, sh), interpolation=cv2.INTER_AREA)
+    b_small = cv2.resize(b_img, (sw, sh), interpolation=cv2.INTER_AREA)
+    ma = _person_mask((sh, sw), ref_bbox)
+    mb = _person_mask((sh, sw), clip_bbox)
+    if ma is not None and mb is not None:
+        mask = cv2.bitwise_and(ma, mb)
+    else:
+        mask = ma if ma is not None else mb
+    if mask is not None:
+        valid = mask > 0
+        if int(valid.sum()) < int(0.15 * sw * sh):
+            return None
+        if float(a_small[valid].std()) < 4.0 or float(b_small[valid].std()) < 4.0:
+            return None
+    elif float(a_small.std()) < 4.0 or float(b_small.std()) < 4.0:
+        return None
+
+    warp = np.eye(2, 3, dtype=np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 60, 1e-4)
+    try:
+        cc, warp = cv2.findTransformECC(
+            a_small,
+            b_small,
+            warp,
+            cv2.MOTION_AFFINE,
+            criteria,
+            inputMask=mask,
+            gaussFiltSize=15,
+        )
+        refined_warp = warp.copy()
+        try:
+            cc_ref, refined_warp = cv2.findTransformECC(
+                a_small,
+                b_small,
+                refined_warp,
+                cv2.MOTION_AFFINE,
+                criteria,
+                inputMask=mask,
+                gaussFiltSize=5,
+            )
+            if float(cc_ref) >= float(cc) - 0.01:
+                cc, warp = cc_ref, refined_warp
+        except Exception:
+            pass
+    except Exception:
+        return None
+    if float(cc) < 0.88:
+        return None
+
+    sx = float(math.hypot(warp[0, 0], warp[1, 0]))
+    sy = float(math.hypot(warp[0, 1], warp[1, 1]))
+    rot = abs(math.degrees(math.atan2(float(warp[1, 0]), float(warp[0, 0]))))
+    if sx <= 1e-3 or sy <= 1e-3 or abs(sx - sy) > 0.06 or rot > 1.5:
+        return None
+    a_rel = 0.5 * (sx + sy)
+    if not (0.75 <= a_rel <= 1.35):
+        return None
+    eff_a = a_rel * (pre_a_x / max(1e-6, pre_b_x))
+    if not (0.45 <= eff_a <= 2.25):
+        return None
+    return {
+        "a": eff_a,
+        "tx": float(warp[0, 2]) / max(1e-6, pre_b_x),
+        "ty": float(warp[1, 2]) / max(1e-6, pre_b_y),
+        "inliers": float(round(float(cc) * 1000.0, 1)),
+        "matches": 1000.0,
+    }
+
+
 def register_background(
     ref_src: Union[str, Path],
     ref_t: float,
@@ -1040,6 +1133,8 @@ def register_background(
                                 "inliers": float(n_in),
                                 "matches": float(len(matches)),
                             }
+            if out is None:
+                out = _register_background_ecc(a_img, b_img, ref_bbox, clip_bbox)
     except Exception:
         out = None
     _REGISTER_CACHE[key] = out

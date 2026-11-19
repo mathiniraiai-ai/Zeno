@@ -2200,11 +2200,17 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
                     continue
                 reg = register_background(cl["ref"], cl["ref_t"], path, first_t[k], cl["bbox"], bb)
                 how = "background"
-                if reg is None and dims == cl["dims"] and bb and cl["bbox"]:
+                same_aspect = (
+                    dims == cl["dims"]
+                    or abs((dims[0] / float(max(1, dims[1]))) - (cl["dims"][0] / float(max(1, cl["dims"][1])))) <= 0.02
+                )
+                if reg is None and same_aspect and bb and cl["bbox"]:
                     dx = abs(0.5 * (bb[0] + bb[2]) - 0.5 * (cl["bbox"][0] + cl["bbox"][2]))
                     dy = abs(bb[1] - cl["bbox"][1])
                     if dx <= 0.06 and dy <= 0.06:
-                        reg, how = {"a": 1.0, "tx": 0.0, "ty": 0.0}, "assumed"
+                        rw, rh = cl["dims"]
+                        eff_a = 0.5 * (dims[0] / float(max(1, rw)) + dims[1] / float(max(1, rh)))
+                        reg, how = {"a": eff_a, "tx": 0.0, "ty": 0.0}, "assumed"
                 if reg is not None:
                     member[(key[0], key[1], k)] = (cl, reg, how)
                     cl["clips"][k] = {"path": path, "t": first_t[k], "live_n": live_n.get(k, 0)}
