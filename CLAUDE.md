@@ -27,7 +27,7 @@ Zeno edits script-led videos (`plan.edl` by agent; Python measures/renders/check
 
 ## Reporting and diagnostics
 - Limits (`config/cost_controls.json`): 2 planner calls/invocation; 8 managed requests/project lifetime; 2 full-context requests with combined 100,000 conservative input reserve; corrections 24,000 UTF-8 bytes. Preserve `request_budget.sqlite3` and pending-call records. Details: `LOW_COST_WORKFLOW.md`.
-- Host checkpoints: 8 requests, 100,000-token starting context; model cost estimate INR 40. These cannot cap the chat app/account or guarantee billed total/cache tokens. If retries repeat, run `<PY> scripts/cost_control.py <project>`; if blocked, stop model work, save plan, explain (approved renders finish; unknown != 0).
+- Host checkpoints: 8 requests, 1,000,000-token chat limit (the model's own window); model cost estimate INR 40. These cannot cap the chat app/account or guarantee billed total/cache tokens. If retries repeat, run `<PY> scripts/cost_control.py <project>`; if blocked, stop model work, save plan, explain (approved renders finish; unknown != 0).
 - Direct API (opt-in): `<PY> scripts/direct_mode.py <project> --provider openai --dry-run` first (same planning limits, separate billing; never use Codex creds, switch silently, or retry unresolved charges).
 - Report saved uncached input, cache reads, cache writes, output, combined total, measured requests, elapsed time, new vs reused transcription and unknowns (API-equivalent estimate, not invoice). README & TOKEN_LEDGER auto-update. Four to six total calls is a workflow aim, not a guarantee.
 - `<PY> scripts/zeno.py --check` verifies deps (GPU/low-priority auto). Debug via `DEVELOPING.md`; keep edits/caches.

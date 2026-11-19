@@ -237,7 +237,7 @@ class TestReportIntegration(unittest.TestCase):
 class TestV1018TokenArrestAndNotionQueue(unittest.TestCase):
     def test_100k_intake_limit_and_notion_meta_preserved_in_launcher(self):
         import cost_control, launch_edit, tomllib
-        self.assertEqual(cost_control.settings()["new_chat_context_limit"], 100_000)
+        self.assertEqual(cost_control.settings()["new_chat_context_limit"], 1_000_000)
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "config.toml"
             p.write_text(
@@ -864,7 +864,7 @@ class OptionBBatchedWorkflowTests(unittest.TestCase):
         usage = agent_log.antigravity_window_usage(lines, cutoff, ceiling, session_id="agy-test")
         self.assertIsNotNone(usage)
         self.assertEqual(usage["turns"], 2)
-        self.assertEqual(cost_control.settings()["new_chat_context_limit"], 100_000)
+        self.assertEqual(cost_control.settings()["new_chat_context_limit"], 1_000_000)
 
 
 if __name__ == "__main__":

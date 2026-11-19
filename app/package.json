@@ -1,7 +1,7 @@
 {
   "name": "zeno-desktop",
   "productName": "Zeno",
-  "version": "1.0.24",
+  "version": "1.0.25",
   "description": "Zeno desktop app: watch every edit, step by step",
   "author": "Supernova AI",
   "main": "main.js",
