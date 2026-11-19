@@ -10,7 +10,8 @@
   "when": "full-frame dialogue scenes cutting between speakers",
   "geometry": {
     "canvas": "1080x1920",
-    "subs_y": 68
+    "subs_y": 65,
+    "subs_single_line": true
   },
   "confidence": "measured",
   "source": "measured from micronarrative_rebuild.mp4 (0.0-20.0 s, 24 frames) on 2026-11-04",

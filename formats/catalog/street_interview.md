@@ -28,6 +28,6 @@ Header line 1 of `script_analysis.md`: `Format: street_interview (1.3 Street Int
   - At most `1` transition exiting the split to a separate street CTA shot (`2` total max).
 
 ## Marks, SFX & Subtitles
-- **Marks**: Trigger `mark:wrong@t/0.48@style=flash` (`sn_wrong.wav`/`buzzer.wav`/`w42_wrong.wav` `+1dB`) and `mark:right@t/0.48@style=flash` (`correct_ding.wav`/`sn_correct.wav`/`w42_right.wav` `+0.5dB`) at `t = last_word_end - cut_start - 0.06` with a `0.35-0.42s` tail strictly where marked in the script.
+- **Marks**: Trigger `mark:wrong@t/0.48@style=flash` (`sn_wrong.wav`/`buzzer.wav`/`w42_wrong.wav` `+1dB`) and `mark:right@t/0.48@style=flash` (`correct_ding.wav`/`sn_correct.wav`/`w42_right.wav` `+0.5dB`) post-word over live non-frozen video visuals without dialogue overlap strictly where marked in the script.
 - **SFX**: Punctuate the surprise fluent answer, transitions, and drill reveals with varied `-4 to 0 dB` SFX (`pop.wav`, `click.wav`, `sn_click.mp3`, `sn_punch_1.wav`, `sn_punch_2.wav`, `sn_riser_1.wav`, `whoosh.wav`, `sn_swish_1.wav`, `w42_swoosh.wav`, `w42_transition.wav`, `kn20228_*`, max 1/beat, never on silent listener).
-- **Subtitles**: `#subs auto y=68` (`54px` single row; auto-centers to `y=50` on `split_v` divider).
+- **Subtitles**: `#subs auto y=65` (strict single-line only, `54px`; auto-centers to `y=50` on `split_v` divider).

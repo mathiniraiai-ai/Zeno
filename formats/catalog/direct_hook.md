@@ -28,6 +28,6 @@ Header line 1 of `script_analysis.md`: `Format: direct_hook (1.2 Direct Hook Mic
   - Keep majority of dialogue cuts as crisp hard cuts; `0` transitions inside the split drill.
 
 ## Marks, SFX & Subtitles
-- **Marks**: Scripted `wrong`/`strike_text` & `right` lines auto-attach post-word `0.48s` outer vignette (+ strip slash on `strike_text`) + calibrated SFX & hold tail (manual `mark:wrong|right@t/0.48@style=flash` / `hold=` optional).
+- **Marks**: Scripted `wrong`/`strike_text` & `right` lines auto-attach post-word `0.48s` outer vignette (+ strip slash on `strike_text`) + calibrated SFX over live non-frozen video visuals without dialogue overlap (manual `mark:wrong|right@t/0.48@style=flash` optional; never freeze).
 - **SFX**: Accent the opening hook punch, transitions, and drill reveals with varied `-4 to 0 dB` SFX (`pop.wav`, `click.wav`, `sn_click.mp3`, `sn_punch_1.wav`, `sn_punch_2.wav`, `sn_riser_1.wav`, `whoosh.wav`, `sn_swish_1.wav`, `w42_swoosh.wav`, `w42_transition.wav`, `kn20228_*`, max 1/beat, never on silent listener).
-- **Subtitles**: `#subs auto y=68` (`54px` single row; auto-centers to `y=50` if `split_v` is used).
+- **Subtitles**: `#subs auto y=65` (strict single-line only, `54px`; auto-centers to `y=50` if `split_v` is used).

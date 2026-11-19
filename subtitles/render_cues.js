@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* Zeno subtitles: render caption PNGs (with 3-subframe active-word karaoke pop & cropped horizontal band) on node-canvas.
  * Usage: node render_cues.js <job.json>
- * job.json: {"width":1080,"height":1920,"fps":30,"styleId":4,"outDir":"/abs/dir","positionY":72,"cues":[...]}
+ * job.json: {"width":1080,"height":1920,"fps":30,"styleId":4,"outDir":"/abs/dir","positionY":65,"cues":[...]}
  * Prints one JSON line: {"style":...,"bandY0":...,"bandHeight":...,"width":...,"height":...,"fps":...,"frames":[...]}
  */
 const fs = require('fs');
@@ -102,7 +102,7 @@ const { CaptionRenderer } = require('./caption-renderer.js');
   const fullWidth = Number(job.width) || 1080;
   const fullHeight = Number(job.height) || 1920;
   const fps = Math.max(24, Number(job.fps) || 25);
-  const defaultPosY = job.positionY !== undefined ? Number(job.positionY) : (base.positionY !== undefined ? Number(base.positionY) : 72);
+  const defaultPosY = job.positionY !== undefined ? Number(job.positionY) : (base.positionY !== undefined ? Number(base.positionY) : 65);
   const style = { ...base, positionY: defaultPosY };
   if (job.fontFamily && String(job.fontFamily).trim()) {
     const resolvedFam = resolveRegisteredFamily(job.fontFamily);
@@ -111,7 +111,8 @@ const { CaptionRenderer } = require('./caption-renderer.js');
   }
   // One fixed caption size for every style (set by Zeno), so captions stay neat and never oversized.
   if (Number(job.fontSize) > 0) style.fontSize = Number(job.fontSize);
-  style.singleLine = job.singleLine !== false;   // one row only (owner's rule)
+  style.maxLines = job.maxLines !== undefined ? Number(job.maxLines) : (base.maxLines !== undefined ? Number(base.maxLines) : 1);
+  style.singleLine = job.singleLine !== false && style.maxLines !== 2;   // one row only (owner's rule)
 
   const cues = Array.isArray(job.cues) ? job.cues : [];
   const cropBand = job.cropBand !== false;

@@ -4,15 +4,21 @@ hold_tail roundtripping, format/budget invariants, and Deep QC `verify.py` check
 """
 from __future__ import annotations
 
+import array
 import json
+import math
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import wave
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest import mock
 
+import cv2
+import numpy as np
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,10 +32,78 @@ import edl_parser  # noqa: E402
 import format_library  # noqa: E402
 import layouts  # noqa: E402
 import prepare  # noqa: E402
+import premiere_export  # noqa: E402
 import script_order  # noqa: E402
 import style_config  # noqa: E402
 import ui_generator  # noqa: E402
 import verify  # noqa: E402
+
+
+def _write_pcm_wav(
+    path: Path,
+    duration_sec: float,
+    *,
+    sample_rate: int = 16000,
+    tone_windows: list[tuple[float, float, float]] | None = None,
+    freq_hz: float = 440.0,
+) -> Path:
+    """Write a deterministic 16-bit mono PCM WAV with optional `(t0, t1, dbFS)` sine tone bursts."""
+    n_samples = int(round(duration_sec * sample_rate))
+    buf = array.array("h", [0] * n_samples)
+    for t0, t1, db in (tone_windows or []):
+        amp = int(round(32767.0 * (10.0 ** (db / 20.0))))
+        i0 = max(0, int(round(t0 * sample_rate)))
+        i1 = min(n_samples, int(round(t1 * sample_rate)))
+        for idx in range(i0, i1):
+            val = int(round(amp * math.sin(2.0 * math.pi * freq_hz * (idx / float(sample_rate)))))
+            buf[idx] = max(-32767, min(32767, val))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(buf.tobytes())
+    return path
+
+
+def _make_synthetic_av_clip(
+    out_path: Path,
+    *,
+    duration: float,
+    width: int = 360,
+    height: int = 640,
+    fps: int = 25,
+    source_filter: str = "testsrc2",
+    vf_extra: str = "",
+    tone_windows: list[tuple[float, float, float]] | None = None,
+    include_audio: bool = True,
+) -> Path:
+    """Generate a fast synthetic moving MP4 with optional bursty audio."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    src_expr = f"{source_filter}=size={width}x{height}:rate={fps}:duration={duration:.3f}"
+    cmd: list[str] = [
+        str(common.FFMPEG), "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", src_expr,
+    ]
+    wav_tmp: Path | None = None
+    if include_audio:
+        wav_tmp = out_path.with_suffix(".mux.wav")
+        _write_pcm_wav(wav_tmp, duration, sample_rate=48000, tone_windows=tone_windows)
+        cmd.extend(["-i", str(wav_tmp)])
+    if vf_extra:
+        cmd.extend(["-vf", vf_extra])
+    cmd.extend(["-t", f"{duration:.3f}", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"])
+    if include_audio:
+        cmd.extend(["-c:a", "aac", "-b:a", "128k"])
+    else:
+        cmd.append("-an")
+    cmd.append(str(out_path))
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    finally:
+        if wav_tmp is not None and wav_tmp.exists():
+            wav_tmp.unlink()
+    return out_path
 
 
 class PostWordVignetteSlashTests(unittest.TestCase):
@@ -481,6 +555,487 @@ class PostWordVignetteSlashTests(unittest.TestCase):
             marked_segs = [m["segment"] for m in plan["marks"] if m.get("type") == "wrong"]
             self.assertEqual(marked_segs, [f"{lid}a", f"{lid}b", f"{lid}c"])
 
+    def test_edl_parser_hold_src_and_audio_end_roundtrip(self) -> None:
+        """`hold_src="Silent Clip.mp4"@0.10-0.55` and `audio_end=0.80` parse and format losslessly."""
+        edl = (
+            '#src_dir "/tmp/raw"\n'
+            'L3 ordering.mp4 0.04-0.97 z=1 hold=0.45 hold_src="Silent Clip.mp4"@0.10-0.55 '
+            'audio_end=0.80 sp=Lady banner:"A"\n'
+        )
+        parsed = edl_parser.parse_edl(edl)
+        seg = parsed["segments"][0]
+        self.assertEqual(seg.get("hold_src"), "/tmp/raw/Silent Clip.mp4")
+        self.assertEqual(seg.get("hold_span"), [0.1, 0.55])
+        self.assertAlmostEqual(float(seg.get("audio_end", 0.0)), 0.80, places=3)
+        self.assertAlmostEqual(float(seg.get("hold_tail", 0.0)), 0.45, places=3)
+
+        formatted = edl_parser.format_edl(parsed)
+        self.assertIn('hold_src="Silent Clip.mp4"@0.1-0.55', formatted)
+        self.assertIn("audio_end=0.8", formatted)
+        self.assertIn("hold=0.45", formatted)
+
+        reparsed = edl_parser.parse_edl(formatted)
+        seg_rt = reparsed["segments"][0]
+        self.assertEqual(seg_rt.get("hold_src"), "/tmp/raw/Silent Clip.mp4")
+        self.assertEqual(seg_rt.get("hold_span"), [0.1, 0.55])
+        self.assertAlmostEqual(float(seg_rt.get("audio_end", 0.0)), 0.80, places=3)
+        self.assertAlmostEqual(float(seg_rt.get("hold_tail", 0.0)), 0.45, places=3)
+
+    def test_priority1_live_tail_extension_ghost_immunity_and_audio_gate(self) -> None:
+        """Priority 1 extends `seg["end"]` into live silent reaction frames (`>= 1.25s`),
+        sets `audio_end` near `0.77s`, keeps `hold_tail == 0.0` (no `hold_src` / no freeze),
+        ignores silent-tail ghost `"I'm"` in `seg_tokens` and `check_script_coverage`,
+        and renders moving pixels in `[0.85..1.25s]` with silent audio after `audio_end`.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            work_dir = tmp_dir / "work"
+            clip_cache_root = work_dir / "_clips"
+            proj_dir = work_dir / "proj_p1"
+            raw_dir = tmp_dir / "raw"
+            work_dir.mkdir(parents=True)
+            clip_cache_root.mkdir(parents=True)
+            proj_dir.mkdir(parents=True)
+            raw_dir.mkdir(parents=True)
+
+            prev_common_work = common.WORK
+            prev_common_clip_cache = common.CLIP_CACHE
+            prev_verify_work = verify.WORK
+            prev_so_wd = script_order._ACTIVE_WORK_DIR
+            has_so_work_dir = hasattr(script_order, "WORK_DIR")
+            prev_so_work_dir = getattr(script_order, "WORK_DIR", None)
+            try:
+                common.WORK = work_dir
+                common.CLIP_CACHE = clip_cache_root
+                verify.WORK = work_dir
+                script_order._ACTIVE_WORK_DIR = proj_dir
+                if has_so_work_dir:
+                    script_order.WORK_DIR = work_dir
+
+                src_mp4 = _make_synthetic_av_clip(
+                    raw_dir / "alice_p1.mp4",
+                    duration=2.2,
+                    width=360,
+                    height=640,
+                    fps=25,
+                    source_filter="testsrc2",
+                    tone_windows=[(0.0, 0.78, -14.0)],
+                    include_audio=True,
+                )
+                cdir = common.clip_work_dir(src_mp4)
+                cdir.mkdir(parents=True, exist_ok=True)
+                (cdir / "hq_words.json").write_text(
+                    json.dumps([
+                        {"w": "Wrong", "start": 0.05, "end": 0.72},
+                        {"w": "I'm", "start": 1.10, "end": 2.00},
+                    ]),
+                    encoding="utf-8",
+                )
+                (cdir / "speech_spans.json").write_text(
+                    json.dumps({"spans": [[0.0, 0.78]]}),
+                    encoding="utf-8",
+                )
+                _write_pcm_wav(
+                    cdir / "audio16k.wav",
+                    2.2,
+                    sample_rate=16000,
+                    tone_windows=[(0.0, 0.78, -14.0)],
+                )
+
+                script_path = proj_dir / "script.txt"
+                script_path.write_text(
+                    "L1 Alice: Wrong (X Sign and Text Strikethrough)\n",
+                    encoding="utf-8",
+                )
+
+                plan = {
+                    "_plan_dir": str(proj_dir),
+                    "canvas": {"width": 360, "height": 640, "fps": 25},
+                    "segments": [
+                        {
+                            "id": "L1",
+                            "src": str(src_mp4),
+                            "start": 0.0,
+                            "end": 0.78,
+                            "layout": "single",
+                            "zoom": 1.0,
+                            "speaker": "Alice",
+                        }
+                    ],
+                    "marks": [
+                        {
+                            "type": "wrong",
+                            "segment": "L1",
+                            "at": 0.72,
+                            "duration": 0.56,
+                            "style": "vignette",
+                        }
+                    ],
+                }
+
+                changed = script_order.calibrate_post_word_beats(plan, script_path, proj_dir)
+                self.assertGreater(changed, 0)
+
+                seg = plan["segments"][0]
+                self.assertGreaterEqual(float(seg["end"]), 1.25, f"Expected live extension >= 1.25s: {seg}")
+                self.assertIsNotNone(seg.get("audio_end"))
+                self.assertAlmostEqual(float(seg["audio_end"]), 0.77, delta=0.04)
+                self.assertAlmostEqual(float(seg.get("hold_tail", 0.0)), 0.0, places=3)
+                self.assertIsNone(seg.get("hold_src"))
+
+                # Ghost "I'm" is filtered from seg_tokens (with and without audio_end) and check_script_coverage
+                self.assertEqual(script_order.seg_tokens(seg), ["wrong"])
+                probe_no_ae = {k: v for k, v in seg.items() if k != "audio_end"}
+                probe_no_ae["end"] = 2.05
+                self.assertEqual(script_order.seg_tokens(probe_no_ae), ["wrong"])
+
+                ok_cov, cov_lines, tot_lines, b_dups = verify.check_script_coverage(
+                    plan, script_path=script_path
+                )
+                self.assertTrue(ok_cov)
+                self.assertEqual((cov_lines, tot_lines, b_dups), (1, 1, 0))
+
+                # Ghost-only cut (even spanning [1.05..2.05]) must NOT satisfy coverage for a line containing "I'm"
+                ghost_script = proj_dir / "ghost_script.txt"
+                ghost_script.write_text("L1 Alice: I'm\n", encoding="utf-8")
+                ghost_plan = {
+                    "_plan_dir": str(proj_dir),
+                    "segments": [{"id": "S1", "src": str(src_mp4), "start": 1.05, "end": 2.05}],
+                }
+                ok_ghost, cov_g, tot_g, _ = verify.check_script_coverage(ghost_plan, script_path=ghost_script)
+                self.assertFalse(ok_ghost, "Silent-tail ghost word must not satisfy check_script_coverage")
+                self.assertEqual((cov_g, tot_g), (0, 1))
+
+                # Combined script (Wrong + I'm) with unlabelled segment covering [0..2.05] only proves Wrong, never I'm
+                both_script = proj_dir / "both_script.txt"
+                both_script.write_text("L1 Alice: Wrong\nL2 Alice: I'm\n", encoding="utf-8")
+                both_plan = {
+                    "_plan_dir": str(proj_dir),
+                    "segments": [{"id": "S1", "src": str(src_mp4), "start": 0.0, "end": 2.05}],
+                }
+                ok_both, cov_b, tot_b, _ = verify.check_script_coverage(both_plan, script_path=both_script)
+                self.assertFalse(ok_both)
+                self.assertEqual((cov_b, tot_b), (1, 2))
+
+                # Render via layouts.build_segment_ffmpeg_args and verify live motion + audio gate
+                out_mkv = proj_dir / "p1_rendered.mkv"
+                args, exact, n_frames = layouts.build_segment_ffmpeg_args(
+                    seg, plan, 360, 640, 25, out_mkv, draft=True
+                )
+                self.assertGreater(n_frames, 25)
+                subprocess.run(
+                    [str(common.FFMPEG), "-hide_banner", "-loglevel", "error", "-y", *[str(x) for x in args]],
+                    check=True,
+                    capture_output=True,
+                )
+                self.assertTrue(out_mkv.is_file())
+
+                with mock.patch(
+                    "vision_tracker.detect_faces_in_frame",
+                    return_value=[{"bbox_norm": [0.3, 0.2, 0.7, 0.5], "eye_center_norm": [0.5, 0.35]}],
+                ), mock.patch("vision_tracker.prominent_faces", side_effect=lambda fs: fs):
+                    f_res = verify.check_frames(plan, out_mkv)
+                self.assertEqual(f_res["frozen"], [], f"Unexpected frozen frames: {f_res}")
+
+                cap = cv2.VideoCapture(str(out_mkv))
+                tail_frames: list[np.ndarray] = []
+                for ts in (0.85, 0.95, 1.05, 1.15, 1.24):
+                    cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000.0)
+                    ok_f, fr = cap.read()
+                    self.assertTrue(ok_f and fr is not None, f"Failed reading tail frame at {ts}s")
+                    tail_frames.append(fr)
+                cap.release()
+                tail_diffs = [
+                    float(np.abs(tail_frames[i + 1].astype(np.float32) - tail_frames[i].astype(np.float32)).mean())
+                    for i in range(len(tail_frames) - 1)
+                ]
+                self.assertTrue(
+                    all(d > 1.0 for d in tail_diffs),
+                    f"Expected live moving pixels across [0.85..1.25s], got diffs={tail_diffs}",
+                )
+
+                out_wav = proj_dir / "p1_audio.wav"
+                subprocess.run(
+                    [
+                        str(common.FFMPEG), "-hide_banner", "-loglevel", "error", "-y",
+                        "-i", str(out_mkv), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+                        str(out_wav),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                with wave.open(str(out_wav), "rb") as wf:
+                    sr = wf.getframerate()
+                    pcm = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float64) / 32768.0
+                spoken_slice = pcm[int(0.10 * sr) : int(0.65 * sr)]
+                tail_slice = pcm[int((float(seg["audio_end"]) + 0.06) * sr) : int((exact - 0.02) * sr)]
+                self.assertGreater(len(tail_slice), 200)
+                spoken_db = 20.0 * math.log10(max(float(np.sqrt(np.mean(spoken_slice * spoken_slice))), 1e-10))
+                tail_db = 20.0 * math.log10(max(float(np.sqrt(np.mean(tail_slice * tail_slice))), 1e-10))
+                self.assertGreater(spoken_db, -30.0, f"Spoken portion too quiet: {spoken_db:.1f} dBFS")
+                self.assertLess(tail_db, -55.0, f"Audio not gated after audio_end: {tail_db:.1f} dBFS")
+            finally:
+                common.WORK = prev_common_work
+                common.CLIP_CACHE = prev_common_clip_cache
+                verify.WORK = prev_verify_work
+                script_order._ACTIVE_WORK_DIR = prev_so_wd
+                if has_so_work_dir:
+                    script_order.WORK_DIR = prev_so_work_dir
+
+    def test_priority2_live_hold_src_split_v_and_premiere_xml(self) -> None:
+        """Priority 2 assigns `hold_src` + advancing `hold_span` across two back-to-back segments
+        when next speech blocks Priority 1; `split_v` renders live moving pixels in both top and
+        bottom panels during the hold tail (`frozen == []`); and `premiere_export` emits `0`
+        `hold_*.png` files with `Alice_silent.mp4` on `V1` and continuous `Peer.mp4` on `V2`.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            work_dir = tmp_dir / "work"
+            clip_cache_root = work_dir / "_clips"
+            proj_dir = work_dir / "proj_p2"
+            raw_dir = tmp_dir / "raw"
+            out_pr_dir = tmp_dir / "premiere_out"
+            work_dir.mkdir(parents=True)
+            clip_cache_root.mkdir(parents=True)
+            proj_dir.mkdir(parents=True)
+            raw_dir.mkdir(parents=True)
+            out_pr_dir.mkdir(parents=True)
+
+            prev_common_work = common.WORK
+            prev_common_clip_cache = common.CLIP_CACHE
+            prev_verify_work = verify.WORK
+            prev_so_wd = script_order._ACTIVE_WORK_DIR
+            has_so_work_dir = hasattr(script_order, "WORK_DIR")
+            prev_so_work_dir = getattr(script_order, "WORK_DIR", None)
+            try:
+                common.WORK = work_dir
+                common.CLIP_CACHE = clip_cache_root
+                verify.WORK = work_dir
+                script_order._ACTIVE_WORK_DIR = proj_dir
+                if has_so_work_dir:
+                    script_order.WORK_DIR = work_dir
+
+                # Spoken clip with 3 contiguous speech windows so both L1 and L2 are blocked from Priority 1
+                alice_speaking = _make_synthetic_av_clip(
+                    raw_dir / "Alice_speaking.mp4",
+                    duration=2.1,
+                    width=360,
+                    height=640,
+                    fps=25,
+                    source_filter="testsrc2",
+                    tone_windows=[(0.04, 0.60, -14.0), (0.65, 1.22, -14.0), (1.27, 1.85, -14.0)],
+                    include_audio=True,
+                )
+                alice_silent = _make_synthetic_av_clip(
+                    raw_dir / "Alice_silent.mp4",
+                    duration=1.6,
+                    width=360,
+                    height=640,
+                    fps=25,
+                    source_filter="testsrc2",
+                    vf_extra="eq=brightness=0.02",
+                    include_audio=False,
+                )
+                peer_mp4 = _make_synthetic_av_clip(
+                    raw_dir / "Peer.mp4",
+                    duration=2.5,
+                    width=360,
+                    height=640,
+                    fps=25,
+                    source_filter="testsrc2",
+                    vf_extra="hflip,hue=h=120",
+                    include_audio=False,
+                )
+
+                cdir = common.clip_work_dir(alice_speaking)
+                cdir.mkdir(parents=True, exist_ok=True)
+                (cdir / "hq_words.json").write_text(
+                    json.dumps([
+                        {"w": "Wrong", "start": 0.06, "end": 0.58},
+                        {"w": "Never", "start": 0.68, "end": 1.20},
+                        {"w": "Stop", "start": 1.30, "end": 1.80},
+                    ]),
+                    encoding="utf-8",
+                )
+                (cdir / "speech_spans.json").write_text(
+                    json.dumps({"spans": [[0.04, 0.60], [0.65, 1.22], [1.27, 1.85]]}),
+                    encoding="utf-8",
+                )
+                _write_pcm_wav(
+                    cdir / "audio16k.wav",
+                    2.1,
+                    sample_rate=16000,
+                    tone_windows=[(0.04, 0.60, -14.0), (0.65, 1.22, -14.0), (1.27, 1.85, -14.0)],
+                )
+
+                script_path = proj_dir / "script.txt"
+                script_path.write_text(
+                    "L1 Alice: Wrong (X Sign and Text Strikethrough)\n"
+                    "L2 Alice: Never (X Sign and Text Strikethrough)\n",
+                    encoding="utf-8",
+                )
+
+                plan = {
+                    "_plan_dir": str(proj_dir),
+                    "output": str(proj_dir / "reel_p2.mp4"),
+                    "src_dir": str(raw_dir),
+                    "canvas": {"width": 360, "height": 640, "fps": 25},
+                    "segments": [
+                        {
+                            "id": "L1",
+                            "src": str(alice_speaking),
+                            "start": 0.0,
+                            "end": 0.60,
+                            "layout": "split_v",
+                            "zoom": 1.0,
+                            "speaker": "Alice",
+                            "slot": "top",
+                            "peer": {"src": str(peer_mp4), "speaker": "Peer", "slot": "bottom"},
+                        },
+                        {
+                            "id": "L2",
+                            "src": str(alice_speaking),
+                            "start": 0.65,
+                            "end": 1.25,
+                            "layout": "split_v",
+                            "zoom": 1.0,
+                            "speaker": "Alice",
+                            "slot": "top",
+                            "peer": {"src": str(peer_mp4), "speaker": "Peer", "slot": "bottom"},
+                        },
+                    ],
+                    "marks": [],
+                }
+
+                changed = script_order.calibrate_post_word_beats(plan, script_path, proj_dir)
+                self.assertGreater(changed, 0)
+
+                s1, s2 = plan["segments"][0], plan["segments"][1]
+                for seg in (s1, s2):
+                    self.assertTrue(seg.get("hold_src"), f"Expected Priority 2 hold_src on {seg['id']}: {seg}")
+                    self.assertEqual(Path(str(seg["hold_src"])).resolve(), alice_silent.resolve())
+                    self.assertGreater(float(seg.get("hold_tail", 0.0)), 0.35)
+                    h_span = seg.get("hold_span")
+                    self.assertIsInstance(h_span, list)
+                    self.assertEqual(len(h_span), 2)
+                    self.assertGreater(float(h_span[1]) - float(h_span[0]), 0.20)
+                self.assertGreaterEqual(
+                    float(s2["hold_span"][0]),
+                    float(s1["hold_span"][1]) - 1e-6,
+                    f"Expected advancing hold_span across L1->L2: {s1['hold_span']} -> {s2['hold_span']}",
+                )
+
+                # Render L1 split_v via layouts.build_segment_ffmpeg_args and verify both panels move during hold tail
+                out_split_mkv = proj_dir / "p2_split_v.mkv"
+                args, exact, _ = layouts.build_segment_ffmpeg_args(
+                    s1, plan, 360, 640, 25, out_split_mkv, draft=True
+                )
+                subprocess.run(
+                    [str(common.FFMPEG), "-hide_banner", "-loglevel", "error", "-y", *[str(x) for x in args]],
+                    check=True,
+                    capture_output=True,
+                )
+                self.assertTrue(out_split_mkv.is_file())
+
+                play_dur_s1 = float(s1["end"]) - float(s1["start"])
+                with mock.patch(
+                    "vision_tracker.detect_faces_in_frame",
+                    return_value=[{"bbox_norm": [0.3, 0.2, 0.7, 0.5], "eye_center_norm": [0.5, 0.35]}],
+                ), mock.patch("vision_tracker.prominent_faces", side_effect=lambda fs: fs):
+                    f_res = verify.check_frames(
+                        {"canvas": {"width": 360, "height": 640, "fps": 25}, "segments": [s1], "marks": []},
+                        out_split_mkv,
+                    )
+                self.assertEqual(f_res["frozen"], [], f"Unexpected frozen frames on split_v: {f_res}")
+
+                cap = cv2.VideoCapture(str(out_split_mkv))
+                hold_times = [round(play_dur_s1 + dt, 3) for dt in (0.06, 0.16, 0.26, 0.36) if play_dur_s1 + dt < exact - 0.03]
+                self.assertGreaterEqual(len(hold_times), 3)
+                top_frames: list[np.ndarray] = []
+                bot_frames: list[np.ndarray] = []
+                for ts in hold_times:
+                    cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000.0)
+                    ok_f, fr = cap.read()
+                    self.assertTrue(ok_f and fr is not None, f"Failed reading split_v hold frame at {ts}s")
+                    top_frames.append(fr[:315, :, :])
+                    bot_frames.append(fr[325:, :, :])
+                cap.release()
+                top_diffs = [
+                    float(np.abs(top_frames[i + 1].astype(np.float32) - top_frames[i].astype(np.float32)).mean())
+                    for i in range(len(top_frames) - 1)
+                ]
+                bot_diffs = [
+                    float(np.abs(bot_frames[i + 1].astype(np.float32) - bot_frames[i].astype(np.float32)).mean())
+                    for i in range(len(bot_frames) - 1)
+                ]
+                self.assertTrue(all(d > 1.0 for d in top_diffs), f"Top hold panel froze: {top_diffs}")
+                self.assertTrue(all(d > 1.0 for d in bot_diffs), f"Bottom peer panel froze: {bot_diffs}")
+
+                # Export Premiere XML & verify 0 hold_*.png + Alice_silent.mp4 on V1 + continuous Peer.mp4 on V2
+                plan_edl_path = proj_dir / "plan.edl"
+                plan_edl_path.write_text(edl_parser.format_edl(plan), encoding="utf-8")
+                pr_res = premiere_export.export_premiere_project(
+                    plan,
+                    plan_edl_path,
+                    out_dir=out_pr_dir,
+                    work_dir=proj_dir,
+                    fps=25,
+                    width=360,
+                    height=640,
+                )
+                xml_path = Path(pr_res["xml"])
+                self.assertTrue(xml_path.is_file())
+                hold_pngs = list((proj_dir / "overlays").glob("hold_*.png")) if (proj_dir / "overlays").is_dir() else []
+                self.assertEqual(hold_pngs, [], f"Expected 0 hold_*.png files, found {hold_pngs}")
+
+                tree = ET.parse(xml_path)
+                root = tree.getroot()
+                file_info: dict[str, str] = {}
+                for f_el in root.findall(".//file"):
+                    fid = f_el.get("id")
+                    name_el = f_el.find("name")
+                    url_el = f_el.find("pathurl")
+                    if fid and (name_el is not None or url_el is not None):
+                        file_info[fid] = (name_el.text if name_el is not None else "") or (url_el.text or "")
+
+                v_tracks = root.findall("./sequence/media/video/track")
+                self.assertGreaterEqual(len(v_tracks), 2, "Expected V1 and V2 tracks in Premiere XML")
+
+                def _track_items(track_el: ET.Element) -> list[dict]:
+                    items = []
+                    for ci in track_el.findall("clipitem"):
+                        f_el = ci.find("file")
+                        fid = f_el.get("id") if f_el is not None else ""
+                        fname = file_info.get(fid, "")
+                        items.append({
+                            "name": (ci.findtext("name") or ""),
+                            "file": fname,
+                            "start": int(ci.findtext("start") or 0),
+                            "end": int(ci.findtext("end") or 0),
+                        })
+                    return items
+
+                v1_items = _track_items(v_tracks[0])
+                v2_items = _track_items(v_tracks[1])
+                v1_hold_items = [it for it in v1_items if "Alice_silent.mp4" in it["file"]]
+                self.assertGreaterEqual(len(v1_hold_items), 2, f"Expected Alice_silent.mp4 hold clips on V1: {v1_items}")
+                self.assertFalse(
+                    any(it["file"].endswith(".png") and "hold_" in it["file"] for it in v1_items),
+                    f"Unexpected PNG still hold on V1: {v1_items}",
+                )
+
+                v2_peer_items = [it for it in v2_items if "Peer.mp4" in it["file"]]
+                self.assertEqual(len(v2_peer_items), 2, f"Expected 2 Peer.mp4 clips on V2: {v2_items}")
+                self.assertEqual(v2_peer_items[0]["start"], 0)
+                self.assertEqual(v2_peer_items[0]["end"], v2_peer_items[1]["start"])
+                self.assertEqual(v2_peer_items[-1]["end"], v1_items[-1]["end"])
+            finally:
+                common.WORK = prev_common_work
+                common.CLIP_CACHE = prev_common_clip_cache
+                verify.WORK = prev_verify_work
+                script_order._ACTIVE_WORK_DIR = prev_so_wd
+                if has_so_work_dir:
+                    script_order.WORK_DIR = prev_so_work_dir
 
 
 if __name__ == "__main__":

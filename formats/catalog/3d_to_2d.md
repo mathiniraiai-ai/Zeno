@@ -19,7 +19,7 @@ Declare on line 1 of `script_analysis.md`: `Format: <subformat> (3D to 2D)`
 ## 2D Animation Editing Details
 - **Visual verification**: Confirm active speakers and mouth closure on clip contact sheets, since stylized 2D animation has flatter lip contrast; choose clean closed-mouth spans for silent split `peer=` listener loops.
 - **Camera & zoom discipline**: Keep all splits (`split_h`, `split_v`, `top_pip`, and baked splits) strictly at `z=1` with **14% headroom**. On full-frame `single` cuts, apply standard emotion zooms (`1.0->1.06`, `sudden_in:1.08@t`, `1.08` pause punch-ins) only when the 2D background is static — never zoom over drawn pans.
-- **Captions, marks & transitions**: Keep `#subs auto y=68` (`y=50` on `split_v`), place `mark:` / `banner:` / `-4 to 0 dB` beat & transition SFX (`pop.wav`, `click.wav`, `sn_click.mp3`, `sn_punch_1.wav`, `sn_punch_2.wav`, `sn_riser_1.wav`, `whoosh.wav`, `sn_swish_1.wav`, `w42_*`, `kn20228_*`) strictly per script cues, and apply only the chosen sub-format's story-driven transitions (including script-cued `warm_flash` / `dip_to_white` / `flash_zoom` at most once).
+- **Captions, marks & transitions**: Keep `#subs auto y=65` (strict single-line only; `y=50` on `split_v`), place `mark:` / `banner:` / `-4 to 0 dB` beat & transition SFX (`pop.wav`, `click.wav`, `sn_click.mp3`, `sn_punch_1.wav`, `sn_punch_2.wav`, `sn_riser_1.wav`, `whoosh.wav`, `sn_swish_1.wav`, `w42_*`, `kn20228_*`) with live non-frozen video visuals during post-word marks/SFX without dialogue overlap strictly per script cues, and apply only the chosen sub-format's story-driven transitions (including script-cued `warm_flash` / `dip_to_white` / `flash_zoom` at most once).
 
 ## Example Declaration & Cut
 ```text

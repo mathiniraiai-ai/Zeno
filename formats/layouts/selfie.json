@@ -12,7 +12,8 @@
   "when": "single-speaker direct hooks, vox-pop intros, and direct-to-camera testimonials",
   "geometry": {
     "canvas": "1080x1920",
-    "subs_y": 68,
+    "subs_y": 65,
+    "subs_single_line": true,
     "zoom": "1.0 with 1.0->1.06 pushes or 1.08 punch-ins on stressed words"
   },
   "confidence": "defined",

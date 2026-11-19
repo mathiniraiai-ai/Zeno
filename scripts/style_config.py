@@ -56,7 +56,7 @@ DEFAULT_TUNING: Dict[str, Any] = {
     "whoosh_sfx_gain_db": -0.5,
     "max_hook_transitions": 5,
     "default_subs_style": "auto",
-    "default_subs_y": 68,
+    "default_subs_y": 65,
     "split_v_subs_y": 50,
     "use_hw_accel": True,
     # Audio crossfades, room tone & loudness mastering (layouts.py / render.py / verify.py)

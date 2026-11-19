@@ -18,7 +18,7 @@ Declare on line 1 of `script_analysis.md`: `Format: live_conversation (<sub-form
 - Use conversational speaker-follow cuts (`0.06–0.15s` dialogue joins).
 - On solo full-frame turns (`single` without hologram or camera pan/dolly), use `1.0->1.06` slow pushes on sustained lines (`>=2.5s`) and `sudden_in:1.08@t` (`0.05s` before the stressed word) on emotional peaks.
 - Cut internal monologue pauses `>0.25s` and mask same-shot joins with a `1.08` step punch-in.
-- Apply `mark:wrong@t/0.48@style=flash` (`sn_wrong.wav`/`buzzer.wav`/`w42_wrong.wav` `+1.0 dB`) and `mark:right@t/0.48@style=flash` (`correct_ding.wav`/`sn_correct.wav`/`w42_right.wav` `+0.5 dB`) with a `0.35–0.42s` tail only where scripted. Keep `#subs auto y=68`.
+- Apply `mark:wrong@t/0.48@style=flash` (`sn_wrong.wav`/`buzzer.wav`/`w42_wrong.wav` `+1.0 dB`) and `mark:right@t/0.48@style=flash` (`correct_ding.wav`/`sn_correct.wav`/`w42_right.wav` `+0.5 dB`) post-word over live non-frozen video visuals without dialogue overlap only where scripted. Keep `#subs auto y=65` (strict single-line subtitles only; `y=50` on `split_v`).
 - Punctuate selected teaching/reaction beats with varied `-4 to 0 dB` SFX (`pop.wav`, `click.wav`, `sn_click.mp3`, `sn_punch_1.wav`, `sn_punch_2.wav`, `sn_riser_1.wav`, `whoosh.wav`, `sn_swish_1.wav`, `w42_swoosh.wav`, `w42_transition.wav`, `kn20228_*`, max 1/beat, `<=40%`/file).
 
 ## Transitions

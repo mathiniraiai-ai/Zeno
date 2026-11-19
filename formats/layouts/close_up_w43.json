@@ -6,7 +6,8 @@
   "when": "outdoor dialogue scenes cutting between close and medium speaker angles",
   "geometry": {
     "canvas": "1080x1920",
-    "subs_y": 68
+    "subs_y": 65,
+    "subs_single_line": true
   },
   "confidence": "measured",
   "source": "measured from W43 Hindi Micro Narrative reference (0.0-28.0 s, 24 frames) on 2026-11-04",

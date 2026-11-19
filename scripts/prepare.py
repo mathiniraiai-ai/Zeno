@@ -1937,7 +1937,7 @@ def _format_edl_fallback(plan: Dict[str, Any]) -> str:
         lines.append(f'#page {plan["page"]["mode"]}')
     elif isinstance(plan.get("subs"), dict):
         subs = plan["subs"]
-        lines.append(f'#subs {subs.get("style", "auto")} y={subs.get("y", 68)}')
+        lines.append(f'#subs {subs.get("style", "auto")} y={subs.get("y", 65)}')
     audio = plan.get("audio") or {}
     lines.append(f'#audio loudness={audio.get("loudness", DEFAULT_LOUDNESS_LUFS)}')
     lines.append("")
@@ -2018,8 +2018,8 @@ def main() -> None:
         default="",
         help="Format or style name written into the plan header as '#style <name>'",
     )
-    ap.add_argument("--subs", default=None, help="Burn-in subtitle style (default: 'auto' at y=68; pass 'off' to disable)")
-    ap.add_argument("--no-subs", action="store_true", help="Do not write default '#subs auto y=68' into initial plan.edl")
+    ap.add_argument("--subs", default=None, help="Burn-in subtitle style (default: 'auto' at y=65; pass 'off' to disable)")
+    ap.add_argument("--no-subs", action="store_true", help="Do not write default '#subs auto y=65' into initial plan.edl")
     ap.add_argument(
         "--fresh",
         action="store_true",
@@ -2165,7 +2165,7 @@ def main() -> None:
     subs_header: Optional[Dict[str, Any]] = None
     if not subs_disabled:
         subs_style = subs_arg if (subs_arg and subs_arg.lower() not in ("on", "true", "yes", "1")) else "auto"
-        subs_header = {"style": subs_style, "y": 68}
+        subs_header = {"style": subs_style, "y": 65}
 
     page_header: Optional[Dict[str, Any]] = None
     try:

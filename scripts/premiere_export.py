@@ -707,23 +707,39 @@ def _collect_timeline_model(
         avail_src_dur = max(0.033, media_dur - src_in)
         clip_src_dur = min(raw_src_dur, avail_src_dur)
         clip_play_dur = max(0.033, clip_src_dur / spd)
+        hold_src_ref = str(seg.get("hold_src") or "").strip()
+        hold_path = _resolve_clip_path(hold_src_ref, plan_path, clip_lookup) if hold_src_ref else None
+        has_live_hold = bool(hold_tail > 0.015 and hold_path is not None and hold_path.exists())
         hold_png = (
             _extract_hold_frame_png(
                 clip_path,
                 max(0.0, min(max(0.0, media_dur - 0.10), src_out - 0.04)),
                 work_dir / "overlays" / f"hold_{seg_id}_{idx:02d}.png",
             )
-            if hold_tail > 0.015
+            if (hold_tail > 0.015 and not has_live_hold)
             else None
         )
-        if hold_png is not None:
+        if has_live_hold or hold_png is not None:
             v_safe_dur = clip_play_dur
             v_src_out = src_out
         else:
             v_safe_dur = min(dur, avail_src_dur / spd)
             v_src_out = min(media_dur, src_in + v_safe_dur * spd)
         v_t_end = t_start + v_safe_dur
-        a_t_end = t_start + clip_play_dur
+
+        audio_end_val: float | None = None
+        ae_raw = seg.get("audio_end")
+        if ae_raw is not None and not isinstance(ae_raw, bool):
+            try:
+                ae_f = float(ae_raw)
+                if math.isfinite(ae_f) and ae_f > 0.04:
+                    audio_end_val = ae_f
+            except (TypeError, ValueError):
+                pass
+        has_audio_end = audio_end_val is not None and audio_end_val < clip_play_dur - 0.005
+        a_clip_dur = min(clip_play_dur, audio_end_val) if (has_audio_end and audio_end_val is not None) else clip_play_dur
+        a_t_end = t_start + a_clip_dur
+        a_src_out = min(src_out, src_in + a_clip_dur * spd)
         motion_dur = v_safe_dur
         clip_w, clip_h = get_media_dims(clip_path, is_still=False)
         base_scale = (width / float(clip_w)) if clip_w else 1.0
@@ -882,7 +898,65 @@ def _collect_timeline_model(
             "comment": str(seg.get("note") or ""),
         })
 
-        seg_link_id = None if is_muted else f"link_seg_{idx}"
+        def _append_live_hold_track_items(
+            track_idx: int,
+            h_sc_val: float,
+            h_ctr_val: tuple[float, float],
+            h_crop_val: dict[str, float] | None,
+            hw_px: int,
+            hh_px: int,
+        ) -> None:
+            if not has_live_hold or hold_path is None or t_end <= v_t_end + 0.015:
+                return
+            hold_media_dur = get_media_dur(hold_path, is_still=False)
+            h_span = seg.get("hold_span")
+            if isinstance(h_span, (list, tuple)) and len(h_span) >= 2:
+                h_in = max(0.0, float(h_span[0]))
+                h_bound = min(hold_media_dur, max(h_in + 0.12, float(h_span[1])))
+            elif seg.get("hold_start") is not None:
+                h_in = max(0.0, float(seg["hold_start"]))
+                h_end_raw = seg.get("hold_end")
+                h_bound = min(hold_media_dur, max(h_in + 0.12, float(h_end_raw))) if h_end_raw is not None else hold_media_dur
+            else:
+                h_in = 0.0
+                h_bound = hold_media_dur
+            if h_in >= max(0.05, hold_media_dur - 0.10):
+                h_in = max(0.0, hold_media_dur - max(0.25, t_end - v_t_end))
+                h_bound = hold_media_dur
+            span_avail = max(0.12, h_bound - h_in)
+            rem_h = t_end - v_t_end
+            cur_h = v_t_end
+            while rem_h > 0.015:
+                chunk_h = min(rem_h, span_avail)
+                v_tracks[track_idx].append({
+                    "seg_idx": idx,
+                    "name": f"{seg_id}_Hold_{hold_path.stem}",
+                    "path": hold_path,
+                    "media_type": "video",
+                    "t_start": cur_h,
+                    "t_end": cur_h + chunk_h,
+                    "src_in": h_in,
+                    "src_out": min(hold_media_dur, h_in + chunk_h),
+                    "media_dur": hold_media_dur,
+                    "clip_w": hw_px,
+                    "clip_h": hh_px,
+                    "speed": 1.0,
+                    "mute": True,
+                    "scale_start": h_sc_val,
+                    "scale_end": h_sc_val,
+                    "scale_keyframes": [],
+                    "center": h_ctr_val,
+                    "center_keyframes": None,
+                    "crop": h_crop_val,
+                    "crop_keyframes": None,
+                    "opacity_keyframes": None,
+                    "transition": None,
+                    "link_id": None,
+                })
+                cur_h += chunk_h
+                rem_h -= chunk_h
+
+        seg_link_id = None if (is_muted or has_audio_end) else f"link_seg_{idx}"
         if layout_mode == "top_pip" and active_first:
             pip_scale, pip_center, pip_crop = _pip_transform(clip_w, clip_h)
             v_tracks[1].append({
@@ -910,7 +984,11 @@ def _collect_timeline_model(
                 "transition": tr_spec,
                 "link_id": seg_link_id,
             })
-            if hold_png is not None and t_end > v_t_end + 0.015:
+            if has_live_hold and hold_path is not None and t_end > v_t_end + 0.015:
+                hw, hh = get_media_dims(hold_path, is_still=False)
+                h_pip_sc, h_pip_ctr, h_pip_crop = _pip_transform(hw, hh)
+                _append_live_hold_track_items(1, h_pip_sc, h_pip_ctr, h_pip_crop, hw, hh)
+            elif hold_png is not None and t_end > v_t_end + 0.015:
                 hw, hh = get_media_dims(hold_png, is_still=True)
                 h_pip_sc, h_pip_ctr, h_pip_crop = _pip_transform(hw, hh)
                 v_tracks[1].append({
@@ -962,7 +1040,19 @@ def _collect_timeline_model(
                 "transition": tr_spec,
                 "link_id": seg_link_id,
             })
-            if hold_png is not None and t_end > v_t_end + 0.015:
+            if has_live_hold and hold_path is not None and t_end > v_t_end + 0.015:
+                hw, hh = get_media_dims(hold_path, is_still=False)
+                h_base_sc = (width / float(hw)) if hw else base_scale
+                h_sc = round((scale_kfs[-1][1] if scale_kfs else v1_scale_end) * (h_base_sc / max(1e-6, base_scale)), 2)
+                h_ctr = v1_center_kfs[-1][1] if v1_center_kfs else v1_center
+                h_crop = v1_crop
+                if v1_crop and v1_crop_kfs:
+                    h_crop = dict(v1_crop)
+                    for side_k, kf_seq in v1_crop_kfs.items():
+                        if kf_seq:
+                            h_crop[side_k] = kf_seq[-1][1]
+                _append_live_hold_track_items(0, h_sc, h_ctr, h_crop, hw, hh)
+            elif hold_png is not None and t_end > v_t_end + 0.015:
                 hw, hh = get_media_dims(hold_png, is_still=True)
                 h_base_sc = (width / float(hw)) if hw else base_scale
                 h_sc = round((scale_kfs[-1][1] if scale_kfs else v1_scale_end) * (h_base_sc / max(1e-6, base_scale)), 2)
@@ -1006,7 +1096,7 @@ def _collect_timeline_model(
                 "t_start": t_start,
                 "t_end": a_t_end,
                 "src_in": src_in,
-                "src_out": src_out,
+                "src_out": a_src_out,
                 "media_dur": media_dur,
                 "clip_w": clip_w,
                 "clip_h": clip_h,

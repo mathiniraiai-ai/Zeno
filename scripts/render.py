@@ -1005,8 +1005,21 @@ def render_segment(seg: Dict[str, Any], W: int, H: int, fps: int, out: Path, dra
     raw_frames = max(1, round(raw_dur * fps))
     raw_exact = raw_frames / fps
     frames = max(1, round(dur * fps))
+    hold_frames = max(0, frames - raw_frames)
     exact = frames / fps
     zoom_span = raw_exact if hold_tail > 0.01 else exact
+
+    audio_end_val: Optional[float] = None
+    ae_raw = seg.get("audio_end")
+    if ae_raw is not None and not isinstance(ae_raw, bool):
+        try:
+            ae_f = float(ae_raw)
+            if math.isfinite(ae_f) and ae_f > 0.04:
+                audio_end_val = ae_f
+        except (TypeError, ValueError):
+            pass
+    has_audio_end = audio_end_val is not None and audio_end_val < raw_exact
+
     if layouts is not None and hasattr(layouts, "resolve_segment_zoom_spec"):
         z_spec = layouts.resolve_segment_zoom_spec(seg, zoom_span)
         z0, z1, zoom_style, zoom_at, zoom_dur = z_spec[:5]
@@ -1048,8 +1061,7 @@ def render_segment(seg: Dict[str, Any], W: int, H: int, fps: int, out: Path, dra
         except (TypeError, ValueError):
             pass
         vf.extend(layouts._build_subpixel_zoom_filter(**z_kw))
-    clone_frames = max(3, frames - raw_frames + 3) if hold_tail > 0.01 else 3
-    vf += ["setsar=1", "format=yuv420p", f"tpad=stop_mode=clone:stop={clone_frames}"]
+
     seg_loud = float(seg.get("loudness") if seg.get("loudness") is not None else DEFAULT_LOUDNESS_LUFS)
     seg_gain_db = float(seg.get("gain_db") or 0.0)
     if is_muted:
@@ -1062,31 +1074,13 @@ def render_segment(seg: Dict[str, Any], W: int, H: int, fps: int, out: Path, dra
             f"atrim=0:{exact:.6f}",
             "asetpts=PTS-STARTPTS",
         ]
-    elif hold_tail > 0.01:
-        af = [
-            "aresample=48000",
-            "aformat=channel_layouts=stereo",
-            "asetpts=PTS-STARTPTS",
-        ]
-        if has_speed:
-            af.append(f"atempo={speed:.6f}")
-        af += [
-            f"atrim=0:{raw_exact:.6f}",
-            "asetpts=PTS-STARTPTS",
-            "highpass=f=70",
-            f"loudnorm=I={seg_loud}:TP={DEFAULT_PEAK_CAP_DB}:LRA=9",
-        ]
-        if abs(seg_gain_db) >= 0.05:
-            af.append(f"volume={seg_gain_db:+.2f}dB")
-        af += [
-            f"alimiter=limit={DEFAULT_PEAK_CAP_DB}dB:level=false",
-            f"afade=t=in:d={EDGE_FADE}",
-            f"afade=t=out:st={max(0.0, raw_exact - EDGE_FADE):.6f}:d={EDGE_FADE}",
-            "apad",
-            f"atrim=0:{exact:.6f}",
-            "asetpts=PTS-STARTPTS",
-        ]
     else:
+        a_active_dur = (
+            min(raw_exact, audio_end_val)
+            if (has_audio_end and audio_end_val is not None)
+            else (raw_exact if hold_tail > 0.01 else exact)
+        )
+        a_fade_out = min(0.030, max(EDGE_FADE, a_active_dur * 0.25)) if has_audio_end else EDGE_FADE
         af = [
             "aresample=48000",
             "aformat=channel_layouts=stereo",
@@ -1096,7 +1090,7 @@ def render_segment(seg: Dict[str, Any], W: int, H: int, fps: int, out: Path, dra
             af.append(f"atempo={speed:.6f}")
         af += [
             "apad",
-            f"atrim=0:{exact:.6f}",
+            f"atrim=0:{a_active_dur:.6f}",
             "asetpts=PTS-STARTPTS",
             "highpass=f=70",
             f"loudnorm=I={seg_loud}:TP={DEFAULT_PEAK_CAP_DB}:LRA=9",
@@ -1106,26 +1100,128 @@ def render_segment(seg: Dict[str, Any], W: int, H: int, fps: int, out: Path, dra
         af += [
             f"alimiter=limit={DEFAULT_PEAK_CAP_DB}dB:level=false",
             f"afade=t=in:d={EDGE_FADE}",
-            f"afade=t=out:st={max(0.0, exact - EDGE_FADE):.6f}:d={EDGE_FADE}",
+            f"afade=t=out:st={max(0.0, a_active_dur - a_fade_out):.6f}:d={a_fade_out:.6f}",
         ]
+        if hold_tail > 0.01 or has_audio_end:
+            af += [
+                "apad",
+                f"atrim=0:{exact:.6f}",
+                "asetpts=PTS-STARTPTS",
+            ]
+
     src = resolve(seg["src"])
     has_audio = probe(src)["has_audio"]
     read_dur = src_dur
-    args = ["-ss", f"{float(seg['start']):.3f}", "-t", f"{read_dur + 0.5:.3f}", "-i", src]
-    if not has_audio:
-        args += ["-f", "lavfi", "-t", f"{exact:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
-    args += [
-        "-map", "0:v:0",
-        "-map", "0:a:0" if has_audio else "1:a:0",
-        "-vf", ",".join(vf),
-        "-af", ",".join(af),
-        "-frames:v", str(frames),
-        "-c:v", "libx264",
-        "-preset", "ultrafast" if draft else "veryfast",
-        "-crf", "12",
-        "-c:a", "pcm_s16le",
-        out,
-    ]
+
+    hold_src_raw = seg.get("hold_src")
+    hold_src_path = resolve(hold_src_raw) if hold_src_raw else None
+    has_live_hold = bool(
+        hold_tail > 0.01
+        and hold_frames > 0
+        and hold_src_path is not None
+        and hold_src_path.is_file()
+    )
+
+    if has_live_hold and hold_src_path is not None:
+        hold_info = probe(hold_src_path)
+        hold_media_dur = float(hold_info.get("duration") or 6.0)
+        h_span = seg.get("hold_span")
+        if isinstance(h_span, (list, tuple)) and len(h_span) >= 2:
+            h_start, h_end = float(h_span[0]), float(h_span[1])
+        else:
+            h_start = float(seg.get("hold_start") or 0.0)
+            h_end = float(seg["hold_end"]) if seg.get("hold_end") is not None else None
+        h_start = max(0.0, h_start)
+        if h_start >= max(0.05, hold_media_dur - 0.10):
+            h_start = max(0.0, hold_media_dur - max(0.30, hold_frames / float(fps)))
+        hold_dur_target = max(0.04, hold_frames / float(fps))
+        h_avail = max(0.04, hold_media_dur - h_start)
+        span_len = min(h_avail, h_end - h_start) if (h_end is not None and h_end > h_start + 0.08) else h_avail
+
+        args: List[Any] = ["-ss", f"{float(seg['start']):.3f}", "-t", f"{read_dur + 0.5:.3f}", "-i", src]
+        hold_ops = ["setpts=PTS-STARTPTS", f"fps={fps}"]
+        if span_len >= hold_dur_target - 0.02:
+            args += ["-ss", f"{h_start:.3f}", "-t", f"{hold_dur_target + 0.35:.3f}", "-i", hold_src_path]
+        elif span_len >= 0.15:
+            args += ["-ss", f"{h_start:.3f}", "-t", f"{span_len:.3f}", "-i", hold_src_path]
+            loop_frames = max(2, int(round(span_len * fps)))
+            hold_ops.extend([f"loop=loop=-1:size={loop_frames}:start=0", f"setpts=N/({fps}*TB)"])
+        else:
+            args += ["-ss", f"{max(0.0, hold_media_dur - 0.5):.3f}", "-t", "0.500", "-i", hold_src_path]
+
+        a_idx = 0 if has_audio else 2
+        if not has_audio:
+            args += ["-f", "lavfi", "-t", f"{exact:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
+
+        focus_end = seg.get("focus_end") or [fx, fy]
+        hfx = float(focus_end[0]) if hold_src_path == src else float(fx)
+        hfy = float(focus_end[1]) if hold_src_path == src else float(fy)
+        hold_ops.extend([
+            f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos",
+            f"crop={W}:{H}:x='(iw-{W})*{hfx:.4f}':y='(ih-{H})*{hfy:.4f}'",
+        ])
+        z_hold = z1 if zoom_style != "none" else 1.0
+        if z_hold > 1.004:
+            zw_h, zh_h = even(W * z_hold), even(H * z_hold)
+            hold_ops.extend([
+                f"scale={zw_h}:{zh_h}:flags=lanczos",
+                f"crop={W}:{H}:x='(iw-{W})*{hfx:.4f}':y='(ih-{H})*{hfy:.4f}'",
+            ])
+        hold_ops.extend([
+            "setsar=1",
+            "format=yuv420p",
+            f"tpad=stop_mode=clone:stop={hold_frames + 4}",
+            f"trim=end_frame={hold_frames}",
+            "setpts=PTS-STARTPTS",
+            "settb=AVTB",
+            f"setpts=N/({fps}*TB)",
+            f"fps={fps}",
+        ])
+        live_chain = vf + [
+            "setsar=1",
+            "format=yuv420p",
+            "tpad=stop_mode=clone:stop=4",
+            f"trim=end_frame={raw_frames}",
+            "setpts=PTS-STARTPTS",
+            "settb=AVTB",
+            f"setpts=N/({fps}*TB)",
+            f"fps={fps}",
+        ]
+        fc_parts = [
+            f"[0:v]{','.join(live_chain)}[vlive]",
+            f"[1:v]{','.join(hold_ops)}[vhold]",
+            f"[vlive][vhold]concat=n=2:v=1:a=0,settb=AVTB,setpts=N/({fps}*TB),fps={fps}[vout]",
+            f"[{a_idx}:a]{','.join(af)}[aout]",
+        ]
+        args += [
+            "-filter_complex", ";".join(fc_parts),
+            "-map", "[vout]",
+            "-map", "[aout]",
+            "-frames:v", str(frames),
+            "-c:v", "libx264",
+            "-preset", "ultrafast" if draft else "veryfast",
+            "-crf", "12",
+            "-c:a", "pcm_s16le",
+            out,
+        ]
+    else:
+        clone_frames = max(3, frames - raw_frames + 3) if hold_tail > 0.01 else 3
+        vf += ["setsar=1", "format=yuv420p", f"tpad=stop_mode=clone:stop={clone_frames}"]
+        args = ["-ss", f"{float(seg['start']):.3f}", "-t", f"{read_dur + 0.5:.3f}", "-i", src]
+        if not has_audio:
+            args += ["-f", "lavfi", "-t", f"{exact:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
+        args += [
+            "-map", "0:v:0",
+            "-map", "0:a:0" if has_audio else "1:a:0",
+            "-vf", ",".join(vf),
+            "-af", ",".join(af),
+            "-frames:v", str(frames),
+            "-c:v", "libx264",
+            "-preset", "ultrafast" if draft else "veryfast",
+            "-crf", "12",
+            "-c:a", "pcm_s16le",
+            out,
+        ]
     ffmpeg_encode(*args, draft=draft)
     return exact
 
@@ -1406,6 +1502,14 @@ def main() -> None:
             ]
             if hold_tail_val > 0.0:
                 key_items.append(hold_tail_val)
+            if s.get("hold_src") or s.get("audio_end") is not None:
+                key_items.extend([
+                    s.get("hold_src"),
+                    s.get("hold_span"),
+                    s.get("hold_start"),
+                    s.get("hold_end"),
+                    s.get("audio_end"),
+                ])
             if lay and lay != "single":
                 key_items.extend([lay, s.get("peer"), s.get("chat"), s.get("slot")])
             cache_hex = hashlib.md5(json.dumps(key_items, sort_keys=True).encode()).hexdigest()[:16]

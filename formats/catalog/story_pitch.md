@@ -9,7 +9,7 @@ Declare on line 1 of `script_analysis.md`: `Format: story_pitch (Direct pitch)`
 ## Layouts & Framing
 - **`layout=single` throughout** the entire video — never switch to `split_h`, `split_v`, `video_call`, or `chat_bar`.
 - Apply measured `focus=x,y` on every cut to keep speaker framing and headroom steady across primary narration and flashback inserts.
-- Keep default subtitles `#subs auto y=68`.
+- Keep default subtitles `#subs auto y=65` (strict single-line subtitles only; `y=50` on `split_v`).
 
 ## Pacing, Zooms & Cuts
 - **Teaching & story blocks**: Use slow, composed `z=1.0->1.06` pushes across longer spoken blocks (`>=2.5s`), alternating with calm `z=1.0` beats so movement retains weight.
@@ -17,7 +17,7 @@ Declare on line 1 of `script_analysis.md`: `Format: story_pitch (Direct pitch)`
 - **Hologram & moving-camera rule**: Keep any shot featuring an in-frame 3D hologram or baked camera pan/dolly locked at `z=1.0`.
 
 ## Marks, Graphics & Sound
-- Omit `mark:wrong`, `mark:right`, and strike banners unless explicitly called for by the script.
+- Omit `mark:wrong`, `mark:right`, and strike banners unless explicitly called for by the script (when used, keep live non-frozen video visuals during post-word marks/SFX without dialogue overlap).
 - Keep sound effects sparse and subtle (`-4` to `-3 dB` on major reveals/flashbacks only, choosing from `pop.wav`, `click.wav`, `sn_punch_1.wav`, `sn_riser_1.wav`, `whoosh.wav`, `sn_swish_1.wav`, `w42_transition.wav`) so the storytelling voice carries the edit.
 
 ## Transitions

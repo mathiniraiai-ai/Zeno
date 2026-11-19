@@ -8,15 +8,15 @@ Declare on line 1 of `script_analysis.md`: `Format: translate_drill (Split scree
 - Cards always normalize **English top / Native bottom** regardless of script order and clear on full-screen takeover/pitch.
 
 ## Flashcard Overlays & Captions
-- **Use `card:` (never `banner:`)**: `card:"English | Native"` (optional `@at[/dur]`, `@pos=auto|top|empty|body|bottom`, `@style=clean|classic`; opt out via `card:none` or `#cards off`). Scripted `Flashcard Text:` cues auto-attach bilingual top flashcards with face-safe placement across both teacher & learner cuts even if omitted.
+- **Use `card:` (never `banner:`)**: `card:"English | Native"` (`@at[/dur]`, `@pos=auto|top|empty|body|bottom`, `@style=clean|classic`; opt out `card:none`/`#cards off`). Scripted `Flashcard Text:` auto-attaches face-safe top flashcards across teacher & learner cuts.
 - On `split_h`, default `pos=auto`/`top` spans top-center headroom clear of faces; keep the identical card pinned continuously across Robot+Woman turns with zero blink, and clear it on full-screen takeover.
-- Bottom `#subs` auto-suppresses during active flashcards (use `subs=on` to force, `subs=off` to suppress on any segment) and runs normally on takeover/CTA.
+- `#subs auto y=65` (strict single-line only; `y=50` on `split_v`) auto-suppresses during active flashcards (`subs=on`/`subs=off`) and runs normally on takeover/CTA.
 
 ## Card-Beat Timing, Motion & Sound
 - **Split drill (`split_h`/`split_v`)**: Lock `z=1` (`14%` headroom; use `offset_y=+0.08` / `@offset_y=+0.08` to shift a speaker downward across dialogue & silent cuts), advance silent `peer=`, tight turn joins (`0.06–0.15s`), trim pauses `>=0.50s`.
 - **Solo drill (`single`)**: Alternate still `z=1.0` and slow push `z=1.0->1.06` across consecutive cards with fixed `focus=x,y`.
 - **Takeover & CTA (`single`)**: Clear cards on takeover; slow `1.0->1.06` pushes (`>=2.5s`), `sudden_in:1.08@t` on peaks, `1.08` punch-ins across `>0.25s` pauses (`>=25%` still `z=1`).
-- **SFX**: Flashcards stay silent by default (no unsolicited click/pop SFX unless explicitly scripted); `mark:wrong`/`mark:right` only if scripted.
+- **SFX**: Flashcards stay silent by default (no unsolicited click/pop SFX); `mark:wrong`/`mark:right` only if scripted (live non-frozen post-word visuals, no dialogue overlap).
 
 ## Transitions (Max 3)
 - **Zero transitions between flashcards or inside split turns** — crisp hard cuts on every card beat.

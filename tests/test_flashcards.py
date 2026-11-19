@@ -749,7 +749,7 @@ class FlashcardsRegressionTests(unittest.TestCase):
                     f'#script "{script_file}"\n'
                     f'#src_dir "{raw_dir}"\n'
                     "#canvas 360x640@25\n"
-                    "#subs auto y=68\n"
+                    "#subs auto y=65\n"
                     'L1 "robot.mp4" 0.00-1.72 layout=split_h z=1 sp="Robot" slot=left '
                     'peer="Woman:woman.mp4"@0.00-1.72@right card:"Nothing | ಏನಿಲ್ಲ"@pos=auto\n'
                     'L2 "woman.mp4" 0.00-1.40 layout=split_h z=1 sp="Woman" slot=right '

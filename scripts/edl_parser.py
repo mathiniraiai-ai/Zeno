@@ -16,7 +16,7 @@ Supported Header Directives:
     #cards off
     #loudness -11.5
     #canvas 1080x1920@30 loudness=-11.5 preset=hybrid mark_pack=flash
-    #subs auto y=68 adapt=off size=54 split_y=50
+    #subs auto y=65 adapt=off size=54 split_y=50
     #page scroll size=44 bar=off dash=off fade=off bg=#FFFFFF
     #page_wrong "I myself"
     #page_right "I"
@@ -28,6 +28,7 @@ Supported Segment Line Syntax:
     [focus=0.5,0.38 | focus=0.45,0.38->0.55,0.38] [sp="Speaker Name"]
     [slot=top|bottom|left|right] [active=top|bottom|left|right]
     [peer="Speaker:clip.mp4"@0.00-3.20@bottom[@offset_y=+0.08]] [offset_y=+0.08]
+    [hold=0.48] [hold_src="clip.mp4"@0.50-1.00] [audio_end=1.40]
     [subs=off|on] [tr=split_reveal@0.40] [vol=+1.5dB]
     [mark:wrong@3.35/0.48] [banner:"STOP SAYING"@0.15] [card:"Nothing | ಏನಿಲ್ಲ"@pos=top]
     [sfx:pop.wav@0.00/-3] [chat:ravi@"Hello"@0.10@wrong] [# editorial note]
@@ -236,7 +237,7 @@ def _merge_unquoted_src_tokens(toks: List[str], src_dir: str = "") -> List[str]:
 
 
 def _merge_unquoted_peer_tokens(toks: List[str]) -> List[str]:
-    """Merge unquoted `peer=`/`pip=` tokens whose speaker or clip name contains spaces."""
+    """Merge unquoted `peer=`/`pip=`/`hold_src=` tokens whose speaker or clip name contains spaces."""
     if len(toks) < 2:
         return toks
     out: List[str] = []
@@ -244,7 +245,7 @@ def _merge_unquoted_peer_tokens(toks: List[str]) -> List[str]:
     while i < len(toks):
         tok = toks[i]
         low = tok.lower()
-        if (low.startswith("peer=") or low.startswith("pip=")) and "@" not in tok:
+        if (low.startswith("peer=") or low.startswith("pip=") or low.startswith("hold_src=")) and "@" not in tok:
             merged_until: Optional[int] = None
             for k in range(i + 1, min(len(toks), i + 6)):
                 nxt = toks[k]
@@ -1139,6 +1140,35 @@ def parse_edl(path_or_text: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
                         hv = float(hv_s)
                         if hv > 0:
                             seg["hold_tail"] = round(hv, 4)
+                elif k == "hold_src":
+                    h_parts = _split_top_level(v_unq, "@")
+                    h_clip = _unquote(h_parts[0]).strip() if h_parts else ""
+                    if h_clip:
+                        seg["hold_src"] = _join_src_dir(src_dir, h_clip)
+                    for extra in h_parts[1:]:
+                        ex = _unquote(extra).strip()
+                        if not ex:
+                            continue
+                        m_hr = _TIME_RANGE_RE.match(ex)
+                        if m_hr:
+                            seg["hold_span"] = [
+                                round(float(m_hr.group(1)), 4),
+                                round(float(m_hr.group(2)), 4),
+                            ]
+                        else:
+                            try:
+                                seg["hold_start"] = round(float(ex.rstrip("sS")), 4)
+                            except ValueError:
+                                pass
+                elif k in ("audio_end", "aud_end"):
+                    ae_s = v_unq.lower().rstrip("s").strip()
+                    if ae_s:
+                        try:
+                            ae_v = float(ae_s)
+                            if ae_v > 0:
+                                seg["audio_end"] = round(ae_v, 4)
+                        except ValueError:
+                            pass
                 elif k in ("speed", "slomo"):
                     sv_low = v_unq.strip().lower()
                     if k == "slomo" and sv_low in ("", "on", "true", "yes"):
@@ -1667,6 +1697,27 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
                 hold_f = 0.0
             if hold_f > 0.001:
                 toks.append(f"hold={_fmt_num(hold_f)}")
+
+        if s.get("hold_src"):
+            h_src = _strip_src_dir(str(s["hold_src"]))
+            h_tok = f"hold_src={_quote_if_needed(h_src)}"
+            h_span = s.get("hold_span")
+            if isinstance(h_span, (list, tuple)) and len(h_span) >= 2:
+                h_tok += f"@{_fmt_num(float(h_span[0]))}-{_fmt_num(float(h_span[1]))}"
+            elif s.get("hold_start") is not None and s.get("hold_end") is not None:
+                h_tok += f"@{_fmt_num(float(s['hold_start']))}-{_fmt_num(float(s['hold_end']))}"
+            elif s.get("hold_start") is not None:
+                h_tok += f"@{_fmt_num(float(s['hold_start']))}"
+            toks.append(h_tok)
+
+        ae_raw = s.get("audio_end")
+        if ae_raw is not None and not isinstance(ae_raw, bool):
+            try:
+                ae_f = float(ae_raw)
+            except (TypeError, ValueError):
+                ae_f = 0.0
+            if ae_f > 0.001:
+                toks.append(f"audio_end={_fmt_num(ae_f)}")
 
         spd_raw = s.get("speed")
         if spd_raw is not None and not isinstance(spd_raw, bool):

@@ -17,7 +17,8 @@
     "canvas": "1080x1920",
     "card": "rounded rectangle in upper frame",
     "main": "full frame (1080x1920)",
-    "subs_y": 68
+    "subs_y": 65,
+    "subs_single_line": true
   },
   "confidence": "defined",
   "source": "Zeno Pro layout specification (video_call)"

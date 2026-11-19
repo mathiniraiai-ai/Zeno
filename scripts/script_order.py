@@ -859,6 +859,56 @@ def _resolve_clip_cache_dir(src: Any, work_dir: Optional[Path] = None) -> Path:
     return wdir
 
 
+def _effective_audio_end_src(seg: Dict[str, Any], st: float, en: float) -> float:
+    """Return `en` clamped to `seg['audio_end']` in source seconds when valid (`audio_end > 0.04`)."""
+    ae_raw = seg.get("audio_end")
+    if ae_raw is not None and not isinstance(ae_raw, bool):
+        try:
+            ae_f = float(ae_raw)
+            if ae_f > 0.04:
+                return min(en, _seg_to_src_time(seg, ae_f))
+        except (TypeError, ValueError):
+            pass
+    return en
+
+
+def _filter_non_ghost_words(
+    seg: Dict[str, Any],
+    ws: List[Dict[str, Any]],
+    st: float,
+    en: float,
+    margin: float = 0.08,
+    use_speech_spans: bool = True,
+) -> List[Dict[str, Any]]:
+    """Filter `ws` to real spoken words inside `[st, en]` excluding `no_sound`, `words_in_silence`, and `audio_end` tails."""
+    from prepare import compute_10ms_rms_envelope, words_in_silence
+
+    en_eff = _effective_audio_end_src(seg, st, en)
+    wdir = _resolve_clip_cache_dir(seg.get("src", ""))
+    wav = wdir / "audio16k.wav"
+    env = compute_10ms_rms_envelope(wav) if wav.is_file() else []
+    bad_ids = {id(w) for w in words_in_silence(ws, env)} if (ws and env) else set()
+    spoken = _speech_spans_for(seg) if use_speech_spans else []
+
+    out: List[Dict[str, Any]] = []
+    for w in ws:
+        if not isinstance(w, dict):
+            continue
+        if w.get("no_sound") or id(w) in bad_ids:
+            continue
+        ws0 = float(w.get("start", 0.0))
+        ws1 = float(w.get("end", 0.0))
+        if not (ws1 > st + margin and ws0 < en_eff - margin):
+            continue
+        ov_s, ov_e = max(st, ws0), min(en_eff, ws1)
+        if env and max((db for tt, db in env if ov_s <= tt <= ov_e), default=-140.0) < -55.0:
+            continue
+        if spoken and not any(min(ov_e, b + 0.06) > max(ov_s, a - 0.06) for a, b in spoken):
+            continue
+        out.append(w)
+    return out
+
+
 def seg_tokens(seg: Dict[str, Any]) -> List[str]:
     if _segment_is_muted(seg) or _segment_is_beat(seg):
         return []
@@ -873,11 +923,8 @@ def seg_tokens(seg: Dict[str, Any]) -> List[str]:
                 ws = read_json(f)
             except Exception:
                 continue
-            return clean([
-                w.get("w", "")
-                for w in ws
-                if float(w.get("end", 0)) > st + 0.08 and float(w.get("start", 0)) < en - 0.08
-            ])
+            kept = _filter_non_ghost_words(seg, ws, st, en, margin=0.08, use_speech_spans=True)
+            return clean([w.get("w") or w.get("word") or "" for w in kept])
     return []
 
 
@@ -1844,11 +1891,427 @@ def _multi_sentence_end_words(text: str) -> set:
     return ends
 
 
+_VIDEO_EXTS_ORDER = (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v")
+_SILENT_CLIP_HINT_RE = re.compile(r"(?:listen|listening|idle|silent|\bsv\b|\bsfv\b|extra)", re.I)
+
+
+def _resolve_seg_media_path(src_ref: Any, plan: Dict[str, Any], work_dir: Optional[Path]) -> Path:
+    """Resolve a segment source reference using `common.resolve`, `plan['src_dir']`, or `clip_caches.json`."""
+    from common import CLIP_CACHE, WORK, read_json, resolve
+
+    raw = str(src_ref or "").strip()
+    if not raw:
+        return Path("")
+    cand = resolve(raw)
+    if cand.is_file():
+        return cand
+    for dir_key in ("src_dir", "source", "source_dir"):
+        base = str(plan.get(dir_key) or "").strip()
+        if base:
+            joined = resolve(Path(base) / raw)
+            if joined.is_file():
+                return joined
+    if work_dir is not None:
+        cmap_file = Path(work_dir) / "clip_caches.json"
+        if cmap_file.is_file():
+            try:
+                cmap = read_json(cmap_file)
+                if isinstance(cmap, dict):
+                    p_raw = Path(raw)
+                    for k in (raw, p_raw.name, p_raw.stem):
+                        mapped = cmap.get(k)
+                        if not mapped:
+                            continue
+                        for croot in (CLIP_CACHE / str(mapped), WORK / str(mapped)):
+                            info_f = croot / "info.json"
+                            if info_f.is_file():
+                                ip = str(read_json(info_f).get("path") or "").strip()
+                                if ip and resolve(ip).is_file():
+                                    return resolve(ip)
+            except Exception:
+                pass
+    return cand
+
+
+def _collect_project_media_clips(
+    plan: Dict[str, Any],
+    work_dir: Optional[Path],
+    extra_dir: Optional[Path] = None,
+) -> List[Path]:
+    """Collect unique existing video files from `plan`, `clip_caches.json`, and `#src_dir`."""
+    from common import CLIP_CACHE, WORK, read_json, resolve
+
+    seen: set = set()
+    out: List[Path] = []
+
+    def _add(p: Optional[Path]) -> None:
+        if p is None or not str(p):
+            return
+        try:
+            rp = p.resolve() if p.exists() else p
+        except OSError:
+            rp = p
+        if rp.is_file() and rp.suffix.lower() in _VIDEO_EXTS_ORDER:
+            ks = str(rp)
+            if ks not in seen:
+                seen.add(ks)
+                out.append(rp)
+
+    for s in plan.get("segments") or []:
+        if not isinstance(s, dict):
+            continue
+        if s.get("src"):
+            _add(_resolve_seg_media_path(s["src"], plan, work_dir))
+        if s.get("hold_src"):
+            _add(_resolve_seg_media_path(s["hold_src"], plan, work_dir))
+        peer = s.get("peer")
+        if isinstance(peer, dict) and peer.get("src"):
+            _add(_resolve_seg_media_path(peer["src"], plan, work_dir))
+
+    scan_dirs: List[Path] = []
+    if extra_dir is not None and extra_dir.is_dir():
+        scan_dirs.append(extra_dir)
+    for dir_key in ("src_dir", "source", "source_dir"):
+        base = str(plan.get(dir_key) or "").strip()
+        if base:
+            bp = resolve(base)
+            if bp.is_dir():
+                scan_dirs.append(bp)
+
+    if work_dir is not None:
+        cmap_file = Path(work_dir) / "clip_caches.json"
+        if cmap_file.is_file():
+            try:
+                cmap = read_json(cmap_file)
+                if isinstance(cmap, dict):
+                    for mapped in cmap.values():
+                        if not mapped:
+                            continue
+                        for croot in (CLIP_CACHE / str(mapped), WORK / str(mapped)):
+                            info_f = croot / "info.json"
+                            if info_f.is_file():
+                                try:
+                                    ip = str(read_json(info_f).get("path") or "").strip()
+                                    if ip:
+                                        rp = resolve(ip)
+                                        _add(rp)
+                                        if rp.is_file() and rp.parent not in scan_dirs:
+                                            scan_dirs.append(rp.parent)
+                                except Exception:
+                                    pass
+            except Exception:
+                pass
+
+    for d in scan_dirs:
+        try:
+            for item in sorted(d.iterdir()):
+                _add(item)
+        except OSError:
+            pass
+    return out
+
+
+def _is_clip_silent_cached(
+    clip_path: Path,
+    work_dir: Optional[Path],
+    silent_cache: Dict[str, bool],
+) -> bool:
+    """Determine whether `clip_path` is a silent listening/reaction clip via `prepare.clip_is_silent`."""
+    ks = str(clip_path)
+    if ks in silent_cache:
+        return silent_cache[ks]
+    from common import probe, read_json
+    from prepare import clip_is_silent, compute_10ms_rms_envelope
+
+    wdir = _resolve_clip_cache_dir(clip_path, work_dir)
+    hq_f = wdir / "hq_words.json"
+    w_f = wdir / "words.json"
+    wav_f = wdir / "audio16k.wav"
+    info_f = wdir / "info.json"
+    has_cache = hq_f.is_file() or w_f.is_file() or wav_f.is_file()
+
+    if not has_cache:
+        try:
+            p_info = probe(clip_path) if clip_path.is_file() else {}
+            no_audio = p_info.get("has_audio") is False
+        except Exception:
+            no_audio = False
+        res = bool(no_audio or _SILENT_CLIP_HINT_RE.search(clip_path.stem))
+        silent_cache[ks] = res
+        return res
+
+    info: Dict[str, Any] = {}
+    if info_f.is_file():
+        try:
+            info = read_json(info_f)
+        except Exception:
+            info = {}
+    if not info and clip_path.is_file():
+        try:
+            info = probe(clip_path)
+        except Exception:
+            info = {}
+
+    words: List[Dict[str, Any]] = []
+    for wf in (hq_f, w_f):
+        if wf.is_file():
+            try:
+                words = read_json(wf)
+                if isinstance(words, list):
+                    break
+            except Exception:
+                words = []
+    env = compute_10ms_rms_envelope(wav_f) if wav_f.is_file() else []
+    res = bool(clip_is_silent({"src": str(clip_path), "info": info, "hq_words": words, "rms_env": env}))
+    silent_cache[ks] = res
+    return res
+
+
+def _real_speech_bounds_after(
+    seg: Dict[str, Any],
+    speech_end_src: float,
+    src_path: Path,
+    segs: List[Dict[str, Any]],
+    idx: int,
+    plan: Dict[str, Any],
+    work_dir: Optional[Path],
+) -> float:
+    """Compute `safe_src_limit` after `speech_end_src` using non-silent words, `speech_spans.json`,
+    clip duration, and any subsequent segment on `src_path`, avoiding ghost tokens in silent tails.
+    """
+    from common import probe
+    from prepare import words_in_silence
+
+    en = float(seg["end"])
+    try:
+        clip_dur = float(probe(src_path).get("duration") or 0.0)
+    except Exception:
+        clip_dur = 0.0
+    if clip_dur <= en + 0.03:
+        return en
+
+    limits: List[float] = [max(en, clip_dur - 0.03)]
+
+    for j_other, other in enumerate(segs):
+        if j_other == idx:
+            continue
+        if _resolve_seg_media_path(other.get("src", ""), plan, work_dir) == src_path:
+            o_st = float(other.get("start", 0.0))
+            if o_st >= speech_end_src - 0.05:
+                limits.append(max(en, o_st))
+
+    all_ws = _words_of(seg)
+    env = _env_of(seg)
+    spoken = _speech_spans_for(seg)
+    bad_ids = {id(w) for w in words_in_silence(all_ws, env)} if (all_ws and env) else set()
+
+    for w in all_ws:
+        if not isinstance(w, dict) or w.get("no_sound") or id(w) in bad_ids:
+            continue
+        ws0 = float(w.get("start", 0.0))
+        ws1 = float(w.get("end", 0.0))
+        if ws1 <= speech_end_src + 0.04:
+            continue
+        eff_ws0 = ws0
+        if spoken:
+            # Ignore hangover bleed of the already-finished word (span ending <= speech_end_src + 0.12)
+            # so a silence-stretched ghost token starting right at speech_end_src doesn't block live tail extension.
+            ov_sp = [
+                (float(a), float(b))
+                for a, b in spoken
+                if min(ws1, float(b)) > max(ws0, speech_end_src + 0.02) and float(b) > speech_end_src + 0.12
+            ]
+            if not ov_sp:
+                continue
+            eff_ws0 = max(ws0, min(a for a, _ in ov_sp))
+        if env:
+            gate_t = max(eff_ws0 - 0.01, speech_end_src + 0.08)
+            voiced_late = [tt for tt, db in env if gate_t <= tt <= ws1 + 0.01 and db > -52.0]
+            if not voiced_late:
+                continue
+            # If the word starts at/near speech_end_src with a silence gap before voiced_late, anchor at voiced_late[0].
+            if eff_ws0 < gate_t:
+                gap_samples = [tt for tt, db in env if eff_ws0 <= tt < voiced_late[0] and db <= -52.0]
+                if gap_samples and (voiced_late[0] - eff_ws0) > 0.12:
+                    eff_ws0 = voiced_late[0]
+            else:
+                voiced_early = [tt for tt, db in env if eff_ws0 - 0.01 <= tt <= ws1 + 0.01 and db > -52.0]
+                if voiced_early:
+                    eff_ws0 = max(eff_ws0, voiced_early[0])
+        if eff_ws0 > speech_end_src - 0.02:
+            limits.append(max(en, eff_ws0 - 0.04))
+
+    for sp_a, _sp_b in spoken:
+        a_f = float(sp_a)
+        if a_f > speech_end_src + 0.02:
+            limits.append(max(en, a_f - 0.04))
+
+    return max(en, min(limits))
+
+
+def _resolve_matching_silent_clip(
+    seg: Dict[str, Any],
+    src_path: Path,
+    plan: Dict[str, Any],
+    work_dir: Optional[Path],
+    candidate_clips: List[Path],
+    sig_cache: Dict[str, Any],
+    silent_cache: Dict[str, bool],
+) -> Optional[Path]:
+    """Resolve the silent reaction clip matching `seg`'s speaker via `clip_is_silent` and visual similarity."""
+    try:
+        import vision_tracker
+    except Exception:
+        vision_tracker = None  # type: ignore[assignment]
+
+    def _get_sig(p: Path) -> Any:
+        ks = str(p)
+        if ks not in sig_cache:
+            if vision_tracker is not None and p.is_file():
+                try:
+                    sig_cache[ks] = vision_tracker.clip_visual_signature(p)
+                except Exception:
+                    sig_cache[ks] = None
+            else:
+                sig_cache[ks] = None
+        return sig_cache[ks]
+
+    peer = seg.get("peer") if isinstance(seg.get("peer"), dict) else {}
+    peer_path = _resolve_seg_media_path(peer.get("src", ""), plan, work_dir) if peer.get("src") else None
+    seg_sp = str(seg.get("speaker") or seg.get("sp") or "").strip().lower()
+    src_stem_low = re.sub(r"[\s_-]+", " ", src_path.stem.lower()).strip()
+
+    all_speakers: set = set()
+    for sp_k, sp_v in (plan.get("speakers") or {}).items() if isinstance(plan.get("speakers"), dict) else ():
+        all_speakers.add(str(sp_k).strip().lower())
+        if isinstance(sp_v, dict) and sp_v.get("name"):
+            all_speakers.add(str(sp_v["name"]).strip().lower())
+        elif isinstance(sp_v, str):
+            all_speakers.add(sp_v.strip().lower())
+    for s_any in plan.get("segments") or []:
+        if isinstance(s_any, dict) and s_any.get("speaker"):
+            all_speakers.add(str(s_any["speaker"]).strip().lower())
+    other_speakers = {sp for sp in all_speakers if sp and sp != seg_sp and len(sp) >= 3}
+
+    silent_cands = [
+        p for p in candidate_clips
+        if p != src_path
+        and (peer_path is None or p != peer_path)
+        and _is_clip_silent_cached(p, work_dir, silent_cache)
+    ]
+    if not silent_cands:
+        return None
+
+    speaking_others = [
+        p for p in candidate_clips
+        if p != src_path and not _is_clip_silent_cached(p, work_dir, silent_cache)
+    ]
+
+    src_sig = _get_sig(src_path) if src_path.is_file() else None
+    ranked: List[Tuple[int, float, Path]] = []
+    for sil in silent_cands:
+        sil_stem_low = re.sub(r"[\s_-]+", " ", sil.stem.lower()).strip()
+        if seg_sp and any(re.search(rf"\b{re.escape(osp)}\b", sil_stem_low) for osp in other_speakers):
+            if not re.search(rf"\b{re.escape(seg_sp)}\b", sil_stem_low):
+                continue
+
+        name_match = bool(
+            (seg_sp and re.search(rf"\b{re.escape(seg_sp)}\b", sil_stem_low))
+            or (src_stem_low and sil_stem_low.startswith(src_stem_low))
+        )
+        sil_sig = _get_sig(sil)
+        if src_sig is not None and sil_sig is not None and vision_tracker is not None:
+            dist = float(vision_tracker.signature_distance(src_sig, sil_sig))
+            min_other = min(
+                (
+                    float(vision_tracker.signature_distance(_get_sig(op), sil_sig))
+                    for op in speaking_others
+                    if _get_sig(op) is not None
+                ),
+                default=1.0,
+            )
+            max_dist = 0.45 if name_match else 0.35
+            if dist > max_dist:
+                continue
+            if not name_match and dist > min_other + 0.05:
+                continue
+            ranked.append((0 if name_match else 1, dist, sil))
+        elif name_match:
+            ranked.append((0, 0.0, sil))
+
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: (item[0], item[1], str(item[2])))
+    return ranked[0][2]
+
+
+def _pick_advancing_hold_span(
+    hold_path: Path,
+    needed_hold: float,
+    is_dedicated_silent: bool,
+    work_dir: Optional[Path],
+    hold_cursors: Dict[str, float],
+    seg: Optional[Dict[str, Any]] = None,
+) -> List[float]:
+    """Choose a fresh advancing `[t0, t1]` slice inside `hold_path` for `needed_hold` seconds."""
+    from common import probe
+
+    try:
+        clip_dur = float(probe(hold_path).get("duration") or 0.0)
+    except Exception:
+        clip_dur = 0.0
+
+    if is_dedicated_silent and clip_dur >= 0.45:
+        s_lo = 0.02 if clip_dur > 0.4 else 0.0
+        s_hi = max(s_lo + 0.15, clip_dur - 0.02)
+    else:
+        speech_spans: List[Tuple[float, float]] = []
+        if seg is not None:
+            speech_spans.extend(_speech_spans_for(seg))
+            for w in _words_of(seg):
+                if isinstance(w, dict) and not w.get("no_sound"):
+                    ws0, ws1 = float(w.get("start", 0.0)), float(w.get("end", 0.0))
+                    if ws1 > ws0:
+                        speech_spans.append((ws0, ws1))
+            speech_spans.append((float(seg["start"]), float(seg["end"])))
+        try:
+            import vision_tracker
+
+            idle_win = vision_tracker.find_listening_idle_window(
+                hold_path,
+                speech_spans=speech_spans if speech_spans else None,
+                duration=clip_dur if clip_dur > 0.0 else None,
+            )
+            raw_span = idle_win.get("idle_span") or [0.0, max(0.3, min(1.5, clip_dur or 1.5))]
+            s_lo = max(0.0, float(raw_span[0]))
+            s_hi = max(s_lo + 0.12, float(raw_span[1]))
+            if clip_dur > 0.1:
+                s_hi = min(clip_dur - 0.02, s_hi)
+                s_lo = min(s_lo, max(0.0, s_hi - 0.12))
+        except Exception:
+            s_lo = 0.0
+            s_hi = max(0.25, (clip_dur - 0.02) if clip_dur > 0.3 else 0.5)
+
+    key = str(hold_path)
+    avail = max(0.12, s_hi - s_lo)
+    cur = hold_cursors.get(key, s_lo)
+    if cur < s_lo or cur >= s_hi - 0.10 or (cur + needed_hold > s_hi + 0.04 and needed_hold <= avail):
+        cur = s_lo
+
+    end_t = min(s_hi, cur + max(0.12, needed_hold))
+    if end_t <= cur + 0.06:
+        cur = s_lo
+        end_t = min(s_hi, cur + max(0.12, needed_hold))
+    hold_cursors[key] = end_t if end_t < s_hi - 0.10 else s_lo
+    return [round(cur, 3), round(end_t, 3)]
+
+
 def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: Path) -> int:
     """Deterministically snap Stop Saying phrase banners and wrong/right marks to exact post-word
     timestamps (`word_end_rel` or phrase-matched end), enforce `0.48s` beat durations, ensure
-    wrong-phrase beats carry a gradient red outer mark, and extend `hold_tail` when contiguous cuts
-    leave `< 0.48s` trailing room.
+    wrong-phrase beats carry a gradient red outer mark, extend into live source tails (`Priority 1`)
+    or matching silent reaction clips (`Priority 2`) so beats never freeze, and fall back to
+    `hold_tail` freeze only when no video files exist on disk.
     """
     global _ACTIVE_WORK_DIR
     if not isinstance(plan, dict) or not plan.get("segments"):
@@ -1910,6 +2373,21 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
         wrong_style = pack if pack.lower() in ("flash", "vignette", "kn20228", "w42", "strobe") else "vignette"
         beat_dur = POST_WORD_BEAT_DURATION
         changed = 0
+
+        sig_cache: Dict[str, Any] = {}
+        silent_cache: Dict[str, bool] = {}
+        hold_cursors: Dict[str, float] = {}
+        project_clips_cache: Optional[List[Path]] = None
+        for seg_pre in segs:
+            if seg_pre.get("hold_src") and isinstance(seg_pre.get("hold_span"), (list, tuple)) and len(seg_pre["hold_span"]) >= 2:
+                hp_pre = _resolve_seg_media_path(seg_pre["hold_src"], plan, work_dir)
+                try:
+                    hold_cursors[str(hp_pre)] = max(
+                        hold_cursors.get(str(hp_pre), 0.0),
+                        float(seg_pre["hold_span"][1]),
+                    )
+                except (TypeError, ValueError):
+                    pass
 
         line_has_wrong_initial = {
             lid for lid, mks in line_has_explicit_mark.items() if "wrong" in mks
@@ -2227,8 +2705,88 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
                 latest_beat_end = max(beat_ends)
                 needed_hold = round(max(0.0, latest_beat_end - raw_dur), 3)
                 existing_hold = _segment_hold_tail(seg)
-                if needed_hold > 0.015 and existing_hold < needed_hold - 0.005:
-                    seg["hold_tail"] = needed_hold
+                src_path = _resolve_seg_media_path(seg.get("src", ""), plan, work_dir)
+                src_exists = src_path.is_file()
+
+                # Priority 1: Live source tail extension on seg["src"] before falling back to hold_src/freeze
+                if needed_hold > 0.015 and src_exists and not seg.get("hold_src"):
+                    speech_end_src = (
+                        min(en, max(float(w.get("end", st)) for w in words))
+                        if words
+                        else en
+                    )
+                    speech_end_rel = round(max(0.0, _src_to_seg_time(seg, speech_end_src)), 3)
+                    safe_src_limit = _real_speech_bounds_after(
+                        seg, speech_end_src, src_path, segs, idx, plan, work_dir
+                    )
+                    spd = _segment_speed(seg)
+                    target_en = min(safe_src_limit, st + latest_beat_end * spd)
+                    if target_en > en + 0.02:
+                        en = round(target_en, 3)
+                        seg["end"] = en
+                        raw_dur = max(0.08, _segment_play_duration(seg))
+                        if raw_dur - speech_end_rel >= 0.08 and seg.get("audio_end") is None:
+                            seg["audio_end"] = round(speech_end_rel + 0.05, 3)
+                        needed_hold = round(max(0.0, latest_beat_end - raw_dur), 3)
+                        if needed_hold <= 0.015 and existing_hold > 0.0:
+                            seg["hold_tail"] = 0.0
+                            existing_hold = 0.0
+                        changed += 1
+
+                # Priority 2: Live silent clip or idle window for any remaining shortfall
+                if needed_hold > 0.015:
+                    if not seg.get("hold_src"):
+                        if project_clips_cache is None:
+                            project_clips_cache = _collect_project_media_clips(
+                                plan,
+                                work_dir,
+                                extra_dir=src_path.parent if src_exists else None,
+                            )
+                        elif src_exists and src_path not in project_clips_cache:
+                            project_clips_cache = _collect_project_media_clips(
+                                plan,
+                                work_dir,
+                                extra_dir=src_path.parent,
+                            )
+                        have_real_video = src_exists or bool(project_clips_cache)
+                        if have_real_video:
+                            sil_clip = _resolve_matching_silent_clip(
+                                seg,
+                                src_path,
+                                plan,
+                                work_dir,
+                                project_clips_cache,
+                                sig_cache=sig_cache,
+                                silent_cache=silent_cache,
+                            )
+                            hold_target: Optional[Path] = None
+                            is_ded_silent = False
+                            if sil_clip is not None and sil_clip.is_file():
+                                hold_target = sil_clip
+                                is_ded_silent = True
+                            elif src_exists:
+                                hold_target = src_path
+                                is_ded_silent = False
+
+                            if hold_target is not None:
+                                hold_span = _pick_advancing_hold_span(
+                                    hold_target,
+                                    needed_hold,
+                                    is_ded_silent,
+                                    work_dir=work_dir,
+                                    hold_cursors=hold_cursors,
+                                    seg=seg if hold_target == src_path else None,
+                                )
+                                seg["hold_src"] = str(hold_target)
+                                seg["hold_span"] = hold_span
+                                seg["hold_tail"] = needed_hold
+                                changed += 1
+                                existing_hold = needed_hold
+                    if existing_hold < needed_hold - 0.005:
+                        seg["hold_tail"] = needed_hold
+                        changed += 1
+                elif existing_hold > 0.0 and not seg.get("hold_src"):
+                    seg["hold_tail"] = 0.0
                     changed += 1
 
         return changed
@@ -2737,31 +3295,50 @@ def tight_report(plan: Dict[str, Any]) -> List[str]:
     segs = plan.get("segments", [])
     mark_end: Dict[str, float] = {}
     marks_by_seg: Dict[str, List[Dict[str, Any]]] = {}
-    for m in plan.get("marks", []):
-        msid = str(m.get("segment"))
+    seen_marks: set = set()
+
+    def _add_mark(msid: str, m: Dict[str, Any]) -> None:
         m_at = float(m.get("at", 0.0))
         m_dur = float(m["duration"]) if m.get("duration") is not None else MARK_TAIL_MAX_SEC
+        mk_key = (msid, _norm_mark_kind(m.get("type")), round(m_at, 2))
+        if mk_key in seen_marks:
+            return
+        seen_marks.add(mk_key)
         mark_end[msid] = max(mark_end.get(msid, 0.0), m_at + m_dur)
         marks_by_seg.setdefault(msid, []).append(m)
+
+    for m in plan.get("marks", []) or []:
+        if isinstance(m, dict) and m.get("segment"):
+            _add_mark(str(m.get("segment")), m)
+    for s in segs:
+        sid_m = str(s.get("id") or "")
+        if sid_m and isinstance(s.get("marks"), list):
+            for m in s["marks"]:
+                if isinstance(m, dict):
+                    _add_mark(sid_m, m)
+
     rows = []
     for s in segs:
         st, en = float(s["start"]), float(s["end"])
         if _segment_is_muted(s) or _segment_is_beat(s):
             ws = []
         else:
-            ws = [w for w in _words_of(s) if float(w["end"]) > st + 0.05 and float(w["start"]) < en - 0.05]
+            ws = _filter_non_ghost_words(s, _words_of(s), st, en, margin=0.05, use_speech_spans=False)
         rows.append((s, st, en, ws))
     for k, (s, st, en, ws) in enumerate(rows):
         sid = str(s.get("id"))
         seg_dur = _segment_duration(s)
         play_dur = _segment_play_duration(s)
+        has_live_beat = (s.get("audio_end") is not None) or bool(s.get("hold_src"))
+        max_post_mark = 0.56 if has_live_beat else (MARK_TAIL_MAX_SEC + 0.02)
         for m in marks_by_seg.get(sid, []):
             m_at = float(m.get("at", 0.0))
             post_mark = seg_dur - m_at
-            if post_mark > MARK_TAIL_MAX_SEC + 0.02:
+            if post_mark > max_post_mark:
+                eff_cap = 0.56 if has_live_beat else MARK_TAIL_MAX_SEC
                 out.append(
                     f"{sid}: {post_mark:.2f}s tail after mark onset at {m_at:.2f}s "
-                    f"(keep <= {MARK_TAIL_MAX_SEC:.2f}s; end {sid} near {_seg_to_src_time(s, m_at + MARK_TAIL_MAX_SEC):.2f})"
+                    f"(keep <= {eff_cap:.2f}s; end {sid} near {_seg_to_src_time(s, m_at + eff_cap):.2f})"
                 )
         if not ws:
             continue

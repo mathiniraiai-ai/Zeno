@@ -426,6 +426,51 @@ def _segment_hold_tail(seg: Optional[Dict[str, Any]]) -> float:
         return 0.0
 
 
+def _segment_audio_end(seg: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Return optional relative segment seconds after which clip audio fades cleanly to digital silence."""
+    if not isinstance(seg, dict):
+        return None
+    raw = seg.get("audio_end")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(val) or val <= 0.0:
+        return None
+    return round(val, 4)
+
+
+def _segment_hold_span(seg: Optional[Dict[str, Any]]) -> Tuple[Optional[float], Optional[float]]:
+    """Return `(hold_start, hold_end)` seconds from `seg['hold_span']` or `hold_start`/`hold_end`."""
+    if not isinstance(seg, dict):
+        return None, None
+    span = seg.get("hold_span")
+    if isinstance(span, (list, tuple)) and len(span) >= 2:
+        try:
+            s0, s1 = float(span[0]), float(span[1])
+            if math.isfinite(s0) and math.isfinite(s1):
+                return round(max(0.0, s0), 4), round(max(0.0, s1), 4)
+        except (TypeError, ValueError):
+            pass
+    s0_v: Optional[float] = None
+    s1_v: Optional[float] = None
+    for key, is_start in (("hold_start", True), ("hold_end", False)):
+        raw = seg.get(key)
+        if raw is not None and not isinstance(raw, bool):
+            try:
+                val = float(raw)
+                if math.isfinite(val):
+                    if is_start:
+                        s0_v = round(max(0.0, val), 4)
+                    else:
+                        s1_v = round(max(0.0, val), 4)
+            except (TypeError, ValueError):
+                pass
+    return s0_v, s1_v
+
+
 def _segment_speed(seg: Optional[Dict[str, Any]]) -> float:
     """Return clamped playback speed factor (`0.25..4.0`, default `1.0`) via `common.segment_speed`."""
     fn = getattr(_common, "segment_speed", None)
@@ -1686,9 +1731,9 @@ def _build_subpixel_zoom_filter(
 def banner_stack_top(seg: Dict[str, Any], num_rows: Optional[int] = None) -> float:
     """Pick the vertical start fraction of a 'Stop Saying' banner stack that avoids
     overlapping any prominent face box (accounting for zoom and crop) while favoring the
-    natural chest/collar belt (`0.55..0.64`) and staying clear of the `y=0.68..0.80` caption band.
+    natural chest/collar belt (`0.52..0.55`) and staying clear of the `y=0.60..0.72` (`65%`) caption band.
     """
-    candidates = (0.55, 0.60, 0.64, 0.50, 0.45, 0.20, 0.26, 0.72)
+    candidates = (0.52, 0.55, 0.45, 0.73, 0.20, 0.26, 0.60, 0.64)
     if num_rows is None:
         raw_banners = seg.get("banners") or seg.get("stop_saying") or []
         if isinstance(raw_banners, str):
@@ -1771,7 +1816,7 @@ def banner_stack_top(seg: Dict[str, Any], num_rows: Optional[int] = None) -> flo
                 ov = (ix * iy) / f_area
                 if ov > max_ov:
                     max_ov = ov
-            cap_ov = max(0.0, min(span_y1, 0.82) - max(span_y0, 0.69)) / max(1e-6, span_y1 - span_y0)
+            cap_ov = max(0.0, min(span_y1, 0.72) - max(span_y0, 0.60)) / max(1e-6, span_y1 - span_y0)
             score = (round(max_ov, 4), round(cap_ov, 3), idx)
             if best_score is None or score < best_score:
                 best_score = score
@@ -1912,6 +1957,7 @@ def _split_peer_time(peer: Dict[str, Any]) -> float:
 
 def _split_seg_sig(seg: Dict[str, Any]) -> str:
     peer = seg.get("peer") if isinstance(seg.get("peer"), dict) else {}
+    h_start, _ = _segment_hold_span(seg)
     return json.dumps([
         normalize_layout_name(seg.get("layout")),
         str(seg.get("src")),
@@ -1924,6 +1970,8 @@ def _split_seg_sig(seg: Dict[str, Any]) -> str:
         str(peer.get("speaker") or ""),
         _parse_offset_y(seg.get("offset_y")),
         _parse_offset_y(peer.get("offset_y")),
+        str(seg.get("hold_src") or ""),
+        round(float(h_start or 0.0), 3),
     ], default=str)
 
 
@@ -2051,6 +2099,26 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
             slot_speakers.setdefault((lay, live_slot), set()).add(live_sp)
         if peer_sp:
             slot_speakers.setdefault((lay, peer_slot), set()).add(peer_sp)
+        hold_part: Optional[Dict[str, Any]] = None
+        hold_raw = seg.get("hold_src")
+        if hold_raw:
+            try:
+                hold_path = resolve(hold_raw)
+                if hold_path.is_file():
+                    h_start_val, _ = _segment_hold_span(seg)
+                    hold_part = {
+                        "slot": live_slot,
+                        "src": hold_path,
+                        "t": max(0.0, float(h_start_val or 0.0)),
+                        "size": live_size,
+                        "role": "hold",
+                        "speaker": live_sp,
+                        "offset_y_raw": _parse_offset_y(seg.get("offset_y")),
+                    }
+                    if live_sp:
+                        src_to_speaker.setdefault(str(hold_path), live_sp)
+            except Exception:
+                hold_part = None
         row = {
             "sig": _split_seg_sig(seg),
             "seg": seg,
@@ -2073,13 +2141,16 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
                 "speaker": peer_sp,
                 "offset_y_raw": _parse_offset_y(peer.get("offset_y")),
             },
+            "hold": hold_part,
         }
         rows.append(row)
 
-    # Infer missing speaker on unlabeled silent peer cuts from single-speaker slot ownership
+    # Infer missing speaker on unlabeled silent peer/hold cuts from single-speaker slot ownership
     for row in rows:
         lay = row["lay"]
-        for part in (row["live"], row["peer"]):
+        for part in (row["live"], row["peer"], row.get("hold")):
+            if not part:
+                continue
             if not part["speaker"]:
                 sps = slot_speakers.get((lay, part["slot"]), set())
                 if len(sps) == 1:
@@ -2095,7 +2166,9 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
 
     for row in rows:
         lay = row["lay"]
-        for part in (row["live"], row["peer"]):
+        for part in (row["live"], row["peer"], row.get("hold")):
+            if not part:
+                continue
             oy = float(part.get("offset_y_raw") or 0.0)
             if abs(oy) <= 1e-4:
                 continue
@@ -2155,7 +2228,9 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
 
     for row in rows:
         lay = row["lay"]
-        for part in (row["live"], row["peer"]):
+        for part in (row["live"], row["peer"], row.get("hold")):
+            if not part:
+                continue
             part["offset_y"] = _resolve_part_offset_y(lay, part)
             part["clip_key"] = _part_clip_key(part)
             uses.setdefault((lay, part["slot"]), []).append(part)
@@ -2343,8 +2418,15 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
         live_crop, peer_crop = _crop_for(lay, row["live"]), _crop_for(lay, row["peer"])
         if live_crop is None or peer_crop is None:
             continue
-        out["segs"][row["sig"]] = {"live": live_crop, "peer": peer_crop}
-        for part, crop in ((row["live"], live_crop), (row["peer"], peer_crop)):
+        seg_lock_entry: Dict[str, Any] = {"live": live_crop, "peer": peer_crop}
+        hold_crop = _crop_for(lay, row["hold"]) if row.get("hold") else None
+        if hold_crop is not None:
+            seg_lock_entry["hold"] = hold_crop
+        out["segs"][row["sig"]] = seg_lock_entry
+        report_pairs = [(row["live"], live_crop), (row["peer"], peer_crop)]
+        if row.get("hold") and hold_crop is not None:
+            report_pairs.append((row["hold"], hold_crop))
+        for part, crop in report_pairs:
             tag = (lay, part["slot"], str(part["src"]))
             if tag in seen:
                 continue
@@ -2386,7 +2468,12 @@ def split_panel_lock(seg: Dict[str, Any], plan: Optional[Dict[str, Any]], W: int
         key = hashlib.md5(
             json.dumps(
                 [
-                    [_split_seg_sig(s), _file_mtime_sig(s["src"]), bool(_has_flashcards(s, plan))]
+                    [
+                        _split_seg_sig(s),
+                        _file_mtime_sig(s["src"]),
+                        _file_mtime_sig(s["hold_src"]) if s.get("hold_src") else None,
+                        bool(_has_flashcards(s, plan)),
+                    ]
                     for s in plan["segments"]
                     if isinstance(s, dict)
                     and normalize_layout_name(s.get("layout")) in ("split_h", "split_v")
@@ -2478,11 +2565,16 @@ def build_segment_cache_key(
                 lock["peer"]["filter"],
                 lock["live"].get("offset_y", 0.0),
                 lock["peer"].get("offset_y", 0.0),
+                lock["hold"]["filter"] if isinstance(lock.get("hold"), dict) else None,
             ]
+
+    hold_src_sig = _file_mtime_sig(seg["hold_src"]) if seg.get("hold_src") else None
+    hold_start, hold_end = _segment_hold_span(seg)
+    audio_end_val = _segment_audio_end(seg)
 
     plan_loudness = float((plan or {}).get("audio", {}).get("loudness", DEFAULT_LOUDNESS_LUFS))
     payload = {
-        "v": 19,
+        "v": 20,
         "src": _file_mtime_sig(seg["src"]),
         "start": round(float(seg["start"]), 4),
         "end": round(float(seg["end"]), 4),
@@ -2490,6 +2582,10 @@ def build_segment_cache_key(
         "mute": bool(is_muted),
         "beat": bool(is_beat),
         "hold_tail": round(hold_tail, 4),
+        "hold_src": hold_src_sig,
+        "hold_start": hold_start,
+        "hold_end": hold_end,
+        "audio_end": audio_end_val,
         "layout": lay,
         "slot": seg.get("slot"),
         "active": active_panel,
@@ -2795,6 +2891,42 @@ def _append_peer_video_input(
     return f"[{peer_idx}:v]"
 
 
+def _append_hold_video_input(
+    hold_src: Path,
+    hold_start: Optional[float],
+    hold_end: Optional[float],
+    hold_dur: float,
+    hold_media_dur: float,
+    fps: int,
+    inputs: List[Any],
+    fc: List[str],
+    hold_idx: int,
+) -> str:
+    """Append FFmpeg input arguments for a live `hold_src` tail reaction clip and return its video label."""
+    h_dur_target = max(0.08, float(hold_dur))
+    h_start = max(0.0, float(hold_start) if hold_start is not None else 0.0)
+    if h_start >= max(0.05, hold_media_dur - 0.10):
+        h_start = max(0.0, hold_media_dur - max(0.30, h_dur_target))
+    h_avail = max(0.04, hold_media_dur - h_start)
+    has_bound = hold_end is not None and float(hold_end) > h_start + 0.08
+    span_len = min(h_avail, float(hold_end) - h_start) if has_bound else h_avail
+
+    if span_len >= h_dur_target - 0.02 and (h_start + h_dur_target <= hold_media_dur - 0.02 or span_len >= h_dur_target):
+        inputs.extend(["-ss", f"{h_start:.3f}", "-t", f"{h_dur_target + 0.35:.3f}", "-i", hold_src])
+        return f"[{hold_idx}:v]"
+    if span_len >= 0.15:
+        inputs.extend(["-ss", f"{h_start:.3f}", "-t", f"{span_len:.3f}", "-i", hold_src])
+        loop_frames = max(2, int(round(span_len * fps)))
+        fc.append(
+            f"[{hold_idx}:v]fps={fps},loop=loop=-1:size={loop_frames}:start=0,"
+            f"setpts=N/({fps}*TB),trim=0:{h_dur_target + 0.20:.4f},setpts=PTS-STARTPTS[hold_loop_in]"
+        )
+        return "[hold_loop_in]"
+    safe_s0 = max(0.0, hold_media_dur - 0.5)
+    inputs.extend(["-ss", f"{safe_s0:.3f}", "-t", "0.500", "-i", hold_src])
+    return f"[{hold_idx}:v]"
+
+
 def build_segment_ffmpeg_args(
     seg: Dict[str, Any],
     plan: Optional[Dict[str, Any]],
@@ -2818,6 +2950,8 @@ def build_segment_ffmpeg_args(
     dur = _segment_play_duration(seg) if is_retimed else max(0.08, src_dur)
     hold_tail = _segment_hold_tail(seg)
     play_frames, hold_frames, frames, play_exact, exact = _quantize_segment_frames(seg, fps)
+    audio_end_val = _segment_audio_end(seg)
+    has_audio_end = audio_end_val is not None and 0.04 < audio_end_val < play_exact
 
     lay = normalize_layout_name(seg.get("layout"))
     z0, z1, zoom_style, zoom_at, zoom_dur = resolve_segment_zoom_spec(seg, play_exact)
@@ -2839,10 +2973,12 @@ def build_segment_ffmpeg_args(
         seg_gain_db = float(seg.get("gain_db") or 0.0)
         clip_gain_db = _measure_clip_rms_gain_db(src)
         total_gain_db = round(clip_gain_db + seg_gain_db, 2)
+        a_active_dur = min(play_exact, audio_end_val) if has_audio_end else play_exact
+        a_fade_out = min(0.030, max(EDGE_FADE, a_active_dur * 0.25)) if has_audio_end else EDGE_FADE
 
         af_parts = [
             "asetpts=PTS-STARTPTS",
-            f"atrim=0:{(src_dur if is_retimed else play_exact):.6f}",
+            f"atrim=0:{(src_dur if is_retimed else a_active_dur):.6f}",
             "asetpts=PTS-STARTPTS",
         ]
         if is_retimed:
@@ -2856,12 +2992,12 @@ def build_segment_ffmpeg_args(
             "aresample=48000",
             "aformat=channel_layouts=stereo",
             "apad",
-            f"atrim=0:{play_exact:.6f}",
+            f"atrim=0:{a_active_dur:.6f}",
             "asetpts=PTS-STARTPTS",
             f"afade=t=in:d={EDGE_FADE}",
-            f"afade=t=out:st={max(0.0, play_exact - EDGE_FADE):.6f}:d={EDGE_FADE}",
+            f"afade=t=out:st={max(0.0, a_active_dur - a_fade_out):.6f}:d={a_fade_out:.6f}",
         ])
-        if hold_tail > 0.001:
+        if hold_tail > 0.001 or has_audio_end:
             af_parts.extend([
                 "apad",
                 f"atrim=0:{exact:.6f}",
@@ -2878,10 +3014,112 @@ def build_segment_ffmpeg_args(
     fc: List[str] = []
     v_curr = "[vbase]"
 
+    hold_src_raw = seg.get("hold_src")
+    hold_src_path = resolve(hold_src_raw) if hold_src_raw else None
+    has_live_hold = bool(
+        hold_tail > 0.001
+        and hold_frames > 0
+        and hold_src_path is not None
+        and hold_src_path.is_file()
+    )
+    hold_in_label: Optional[str] = None
+    hold_w, hold_h = src_w, src_h
+    hold_vis: Dict[str, Any] = {}
+    if has_live_hold and hold_src_path is not None:
+        hold_info = probe(hold_src_path)
+        hold_w = int(hold_info.get("width") or src_w)
+        hold_h = int(hold_info.get("height") or src_h)
+        hold_media_dur = float(hold_info.get("duration") or 6.0)
+        hold_s0, hold_s1 = _segment_hold_span(seg)
+        hold_dur_exact = max(0.04, hold_frames / float(fps))
+        hold_idx = next_idx
+        next_idx += 1
+        hold_in_label = _append_hold_video_input(
+            hold_src_path, hold_s0, hold_s1, hold_dur_exact, hold_media_dur, fps, inputs, fc, hold_idx
+        )
+        try:
+            hold_vis = analyze_clip_vision(hold_src_path) or {}
+        except Exception:
+            hold_vis = {}
+
+    def _attach_live_hold(
+        live_lbl: str,
+        out_lbl: str,
+        slot_w: int,
+        slot_h: int,
+        *,
+        prebuilt_crop_filter: Optional[str] = None,
+        use_slot_crop: bool = False,
+        headroom_pct: float = TARGET_HEADROOM_PCT,
+        hold_focus: Optional[Sequence[float]] = None,
+        z_hold: float = 1.0,
+        exact_fit: bool = False,
+        apply_color: bool = True,
+    ) -> None:
+        if not has_live_hold or hold_in_label is None:
+            if live_lbl != out_lbl:
+                fc.append(f"{live_lbl}null{out_lbl}")
+            return
+        slot_w_e, slot_h_e = even(slot_w), even(slot_h)
+        hold_dur_exact = max(0.04, hold_frames / float(fps))
+        h_foc = list(hold_focus) if (hold_focus and len(hold_focus) >= 2) else (
+            list(hold_vis.get("focus") or [fx1, fy1]) if hold_src_path != src else [fx1, fy1]
+        )
+        hfx = max(0.05, min(0.95, float(h_foc[0])))
+        hfy = max(0.08, min(0.85, float(h_foc[1])))
+        if prebuilt_crop_filter:
+            h_ops = ["setpts=PTS-STARTPTS", f"fps={fps}", prebuilt_crop_filter]
+            if apply_color and color_filter:
+                h_ops.append(color_filter)
+            h_ops.extend(["setsar=1", "format=yuv420p"])
+            fc.append(f"{hold_in_label}{','.join(h_ops)}[hold_slot_raw]")
+        elif use_slot_crop:
+            fc.append(
+                _build_slot_video_chain(
+                    hold_in_label, "[hold_slot_raw]", hold_w, hold_h, slot_w_e, slot_h_e,
+                    fps, hold_dur_exact, [hfx, hfy], 1.0, 1.0,
+                    bbox_norm=hold_vis.get("bbox_norm"),
+                    exact=exact_fit,
+                    zoom_style="none",
+                    color_filter=(color_filter if apply_color else None),
+                    headroom_pct=headroom_pct,
+                )
+            )
+        else:
+            h_ops = [
+                "setpts=PTS-STARTPTS",
+                f"fps={fps}",
+                f"scale={slot_w_e}:{slot_h_e}:force_original_aspect_ratio=increase:flags=lanczos",
+                f"crop={slot_w_e}:{slot_h_e}:x='(iw-{slot_w_e})*{hfx:.4f}':y='(ih-{slot_h_e})*{hfy:.4f}'",
+            ]
+            if z_hold > 1.004:
+                zw_h, zh_h = even(slot_w_e * z_hold), even(slot_h_e * z_hold)
+                h_ops.extend([
+                    f"scale={zw_h}:{zh_h}:flags=lanczos",
+                    f"crop={slot_w_e}:{slot_h_e}:x='(iw-{slot_w_e})*{hfx:.4f}':y='(ih-{slot_h_e})*{hfy:.4f}'",
+                ])
+            if apply_color and color_filter:
+                h_ops.append(color_filter)
+            h_ops.extend(["setsar=1", "format=yuv420p"])
+            fc.append(f"{hold_in_label}{','.join(h_ops)}[hold_slot_raw]")
+
+        fc.append(
+            f"{live_lbl}tpad=stop_mode=clone:stop=4,trim=end_frame={play_frames},"
+            f"setpts=PTS-STARTPTS,settb=AVTB,setpts=N/({fps}*TB),fps={fps},setsar=1,format=yuv420p[_hlv]"
+        )
+        fc.append(
+            f"[hold_slot_raw]tpad=stop_mode=clone:stop={hold_frames + 4},trim=end_frame={hold_frames},"
+            f"setpts=PTS-STARTPTS,settb=AVTB,setpts=N/({fps}*TB),fps={fps},setsar=1,format=yuv420p[_hhd]"
+        )
+        fc.append(
+            f"[_hlv][_hhd]concat=n=2:v=1:a=0,settb=AVTB,setpts=N/({fps}*TB),fps={fps}{out_lbl}"
+        )
+
     # ------------------------------------------------------------------
     # Layout 1: SINGLE (Full-frame or Pre-Stitched Baked Split Sub-Panel)
     # ------------------------------------------------------------------
     if lay == "single":
+        single_out = "[vbase_live]" if has_live_hold else v_curr
         has_active_zoom = (
             abs(z0 - 1.0) > 0.004
             or abs(z1 - 1.0) > 0.004
@@ -2974,7 +3212,7 @@ def build_segment_ffmpeg_args(
                 if color_filter:
                     post_ops.append(color_filter)
                 post_ops.extend(["setsar=1", "format=yuv420p"])
-                fc.append(f"[vb_top][vb_bot]{','.join(post_ops)}{v_curr}")
+                fc.append(f"[vb_top][vb_bot]{','.join(post_ops)}{single_out}")
             else:
                 split_frac = (b_lo if b_active == "left" else b_hi) if (b_hi > b_lo + 0.0005) else sf
                 left_w = max(16, min(W - 16, even(W * split_frac)))
@@ -3008,7 +3246,9 @@ def build_segment_ffmpeg_args(
                 if color_filter:
                     post_ops.append(color_filter)
                 post_ops.extend(["setsar=1", "format=yuv420p"])
-                fc.append(f"[vb_left][vb_right]{','.join(post_ops)}{v_curr}")
+                fc.append(f"[vb_left][vb_right]{','.join(post_ops)}{single_out}")
+            if has_live_hold:
+                _attach_live_hold(single_out, v_curr, W, H, hold_focus=[0.5, 0.5], z_hold=1.0)
         else:
             vf = [
                 *speed_prefix,
@@ -3036,7 +3276,14 @@ def build_segment_ffmpeg_args(
             if color_filter:
                 vf.append(color_filter)
             vf.extend(["setsar=1", "format=yuv420p"])
-            fc.append(f"[0:v]{','.join(vf)}{v_curr}")
+            fc.append(f"[0:v]{','.join(vf)}{single_out}")
+            if has_live_hold:
+                z_hold = z1
+                if zoom_style in ("sudden_in", "flash_zoom") and play_exact > zoom_at + zoom_dur + 0.02 and z1 > 1.004:
+                    z_hold = z1 + 0.015
+                elif zoom_style == "none":
+                    z_hold = 1.0
+                _attach_live_hold(single_out, v_curr, W, H, z_hold=z_hold)
 
     # ------------------------------------------------------------------
     # Layout 2 & 3: SPLIT_V (`top_bottom`) & SPLIT_H (`left_right`)
@@ -3099,9 +3346,10 @@ def build_segment_ffmpeg_args(
                 if has_explicit_pan
                 else None
             )
+            live_out_lbl = "[live_slot_pre]" if has_live_hold else "[live_slot]"
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[live_slot]", src_w, src_h, slot_w, live_h, fps, play_exact,
+                    "[0:v]", live_out_lbl, src_w, src_h, slot_w, live_h, fps, play_exact,
                     live_slot_focus, z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=live_slot_focus_end,
@@ -3109,6 +3357,19 @@ def build_segment_ffmpeg_args(
                     zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
+            if has_live_hold:
+                hold_crop_locked = (_lock or {}).get("hold") if _lock else None
+                hold_prebuilt = (
+                    hold_crop_locked["filter"]
+                    if isinstance(hold_crop_locked, dict)
+                    else (live_crop["filter"] if hold_src_path == src else None)
+                )
+                _attach_live_hold(
+                    live_out_lbl, "[live_slot]", slot_w, live_h,
+                    prebuilt_crop_filter=hold_prebuilt,
+                    use_slot_crop=(hold_prebuilt is None),
+                    hold_focus=live_slot_focus if hold_prebuilt else None,
+                )
             fc.append(
                 _build_slot_video_chain(
                     peer_in_label, "[peer_slot]", peer_w, peer_h, slot_w, peer_h_slot, fps, exact,
@@ -3166,9 +3427,10 @@ def build_segment_ffmpeg_args(
                 if has_explicit_pan
                 else None
             )
+            live_out_lbl = "[live_slot_pre]" if has_live_hold else "[live_slot]"
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[live_slot]", src_w, src_h, live_w, slot_h, fps, play_exact,
+                    "[0:v]", live_out_lbl, src_w, src_h, live_w, slot_h, fps, play_exact,
                     live_slot_focus, z0, z1,
                     exact=exact_fit,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
@@ -3177,6 +3439,20 @@ def build_segment_ffmpeg_args(
                     zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
+            if has_live_hold:
+                hold_crop_locked = (_lock or {}).get("hold") if _lock else None
+                hold_prebuilt = (
+                    hold_crop_locked["filter"]
+                    if isinstance(hold_crop_locked, dict)
+                    else (live_crop["filter"] if hold_src_path == src else None)
+                )
+                _attach_live_hold(
+                    live_out_lbl, "[live_slot]", live_w, slot_h,
+                    prebuilt_crop_filter=hold_prebuilt,
+                    use_slot_crop=(hold_prebuilt is None),
+                    hold_focus=live_slot_focus if hold_prebuilt else None,
+                    exact_fit=exact_fit,
+                )
             fc.append(
                 _build_slot_video_chain(
                     peer_in_label, "[peer_slot]", peer_w, peer_h, peer_w_slot, slot_h, fps, exact,
@@ -3215,26 +3491,32 @@ def build_segment_ffmpeg_args(
         if str(mode).lower() in ("docked", "dock", "top_strip"):
             dock_h = even(H * dock_frac)
             vid_h = H - dock_h
+            sp_lbl = "[v_sp_pre]" if has_live_hold else "[v_sp]"
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[v_sp]", src_w, src_h, W, vid_h, fps, play_exact, [fx, fy], z0, z1,
+                    "[0:v]", sp_lbl, src_w, src_h, W, vid_h, fps, play_exact, [fx, fy], z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1], color_filter=color_filter,
                     zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
+            if has_live_hold:
+                _attach_live_hold(sp_lbl, "[v_sp]", W, vid_h, use_slot_crop=True)
             fc.append(f"[v_sp]pad={W}:{H}:0:{dock_h}:color=#0f172a[v_padded]")
             fc.append(f"[{chat_idx}:v]scale={W}:{H},format=rgba[chat_ov]")
             fc.append(f"[v_padded][chat_ov]overlay=0:0:eof_action=pass,format=yuv420p{v_curr}")
         else:
+            sp_lbl = "[v_sp_pre]" if has_live_hold else "[v_sp]"
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[v_sp]", src_w, src_h, W, H, fps, play_exact, [fx, fy], z0, z1,
+                    "[0:v]", sp_lbl, src_w, src_h, W, H, fps, play_exact, [fx, fy], z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1], color_filter=color_filter,
                     zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
+            if has_live_hold:
+                _attach_live_hold(sp_lbl, "[v_sp]", W, H, use_slot_crop=True)
             fc.append(f"[{chat_idx}:v]scale={W}:{H},format=rgba,fade=t=in:st=0:d=0.15:alpha=1[chat_ov]")
             fc.append(f"[v_sp][chat_ov]overlay=0:0:eof_action=pass,format=yuv420p{v_curr}")
 
@@ -3281,14 +3563,17 @@ def build_segment_ffmpeg_args(
             inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", chrome_png])
 
             fc.append(f"color=c=#14161c:s={W}x{H}:r={fps}:d={exact:.4f}[bg]")
+            live_lbl = "[v_live_pre]" if has_live_hold else "[v_live]"
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[v_live]", src_w, src_h, tw, th, fps, play_exact, [fx, fy], z0, z1,
+                    "[0:v]", live_lbl, src_w, src_h, tw, th, fps, play_exact, [fx, fy], z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1], color_filter=color_filter,
                     zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
+            if has_live_hold:
+                _attach_live_hold(live_lbl, "[v_live]", tw, th, use_slot_crop=True)
             fc.append(
                 _build_slot_video_chain(
                     peer_in_label, "[v_peer]", peer_w, peer_h, tw, th, fps, exact, peer_focus, 1.0, 1.0,
@@ -3322,14 +3607,17 @@ def build_segment_ffmpeg_args(
             inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", mask_png])
             inputs.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{exact:.4f}", "-i", chrome_png])
 
+            main_lbl = "[v_main_pre]" if has_live_hold else "[v_main]"
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[v_main]", src_w, src_h, W, H, fps, play_exact, [fx, fy], z0, z1,
+                    "[0:v]", main_lbl, src_w, src_h, W, H, fps, play_exact, [fx, fy], z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1], color_filter=color_filter,
                     zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
+            if has_live_hold:
+                _attach_live_hold(main_lbl, "[v_main]", W, H, use_slot_crop=True)
             fc.append(
                 _build_slot_video_chain(
                     peer_in_label, "[v_pip_raw]", peer_w, peer_h, pw, ph, fps, exact, peer_focus, 1.0, 1.0,
@@ -3380,27 +3668,33 @@ def build_segment_ffmpeg_args(
                     bbox_norm=bg_vis.get("bbox_norm"), headroom_pct=25.8,
                 )
             )
+            pip_lbl = "[v_pip_pre]" if has_live_hold else "[v_pip_raw]"
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[v_pip_raw]", src_w, src_h, pw, ph, fps, play_exact, [fx, fy], z0, z1,
+                    "[0:v]", pip_lbl, src_w, src_h, pw, ph, fps, play_exact, [fx, fy], z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1],
                     bbox_norm=pip_vis.get("bbox_norm"), color_filter=color_filter,
                     zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
+            if has_live_hold:
+                _attach_live_hold(pip_lbl, "[v_pip_raw]", pw, ph, use_slot_crop=True)
         else:
             bg_vis = analyze_clip_vision(src) if src.is_file() else {}
             pip_vis = analyze_clip_vision(peer_src) if peer_src.is_file() else {}
+            bg_lbl = "[v_bg_pre]" if has_live_hold else "[v_bg]"
             fc.append(
                 _build_slot_video_chain(
-                    "[0:v]", "[v_bg]", src_w, src_h, W, H, fps, play_exact, [fx, fy], z0, z1,
+                    "[0:v]", bg_lbl, src_w, src_h, W, H, fps, play_exact, [fx, fy], z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1],
                     bbox_norm=bg_vis.get("bbox_norm"), color_filter=color_filter, headroom_pct=25.8,
                     zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
+            if has_live_hold:
+                _attach_live_hold(bg_lbl, "[v_bg]", W, H, use_slot_crop=True, headroom_pct=25.8)
             fc.append(
                 _build_slot_video_chain(
                     peer_in_label, "[v_pip_raw]", peer_w, peer_h, pw, ph, fps, exact, peer_focus, 1.0, 1.0,
@@ -3413,19 +3707,21 @@ def build_segment_ffmpeg_args(
         fc.append("[v_pip_raw]format=yuva420p[v_pip_a];[v_pip_a][pip_mask]alphamerge[v_pip]")
         fc.append(f"[v_bg][v_pip]overlay=x={px}:y={py}:eof_action=pass,format=yuv420p{v_curr}")
 
-    # Freeze trailing speech frame across `hold_tail` BEFORE overlaying banners so banners stay sharp during the beat
+    # Freeze trailing speech frame across `hold_tail` ONLY when no live `hold_src` is present;
+    # otherwise `v_curr` already carries live concatenated motion across `frames` before banner overlays.
     parsed_banners = parse_banners(seg, exact)
     freeze_pad_frames = max(3, int(round(fps * (hold_tail + 1.25))))
     pre_bn_label = "[vprebn]" if parsed_banners else "[vout]"
-    if hold_tail > 0.001:
+    if hold_tail > 0.001 and not has_live_hold:
         fc.append(
             f"{v_curr}trim=end_frame={play_frames},setpts=PTS-STARTPTS,"
             f"tpad=stop_mode=clone:stop={freeze_pad_frames},"
             f"settb=AVTB,setpts=N/({fps}*TB),fps={fps}{pre_bn_label}"
         )
     else:
+        safety_pad = 3 if has_live_hold else freeze_pad_frames
         fc.append(
-            f"{v_curr}tpad=stop_mode=clone:stop={freeze_pad_frames},"
+            f"{v_curr}tpad=stop_mode=clone:stop={safety_pad},"
             f"settb=AVTB,setpts=N/({fps}*TB),fps={fps}{pre_bn_label}"
         )
     v_curr = pre_bn_label

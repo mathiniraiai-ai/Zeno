@@ -1,4 +1,4 @@
-"""Burn-in subtitle engine for rendered edits (`#subs <style> [y=68]` in `plan.edl`).
+"""Burn-in subtitle engine for rendered edits (`#subs <style> [y=65]` in `plan.edl`).
 
 Spoken words are mapped from each clip's aligned word timestamps onto the finished timeline,
 with script-line + speech-span synthesis as a zero-blank fallback whenever an edit cut lacks
@@ -38,11 +38,11 @@ CLAUSE_END = re.compile(r"[,;:—–][\"'”’)\]]*$")
 INDIC_RE = re.compile(r"[\u0900-\u0D7F]")
 
 DEFAULT_FONT_SIZE = 54         # Fixed single-row caption size in pixels on a 1080px-wide canvas
-SINGLE_Y = 68.0                # Default vertical placement (% of height) on full-frame 9:16 cuts
+SINGLE_Y = 65.0                # Default vertical placement (% of height) on full-frame 9:16 cuts
 SEAM_Y = 50.0                  # Default vertical placement (% of height) on the split_v center seam
-FACE_DROP_Y = 79.0             # Safe lower-zone drop (% of height) when a foreground face occupies y=55..72%
-FACE_LOWER_MID_Y0 = 0.55       # Lower-mid face zone top threshold (normalized canvas height)
-FACE_LOWER_MID_Y1 = 0.72       # Lower-mid face zone bottom threshold (normalized canvas height)
+FACE_DROP_Y = 79.0             # Safe lower-zone drop (% of height) when a foreground face occupies y=63..70%
+FACE_LOWER_MID_Y0 = 0.63       # Lower-mid face zone top threshold (normalized canvas height)
+FACE_LOWER_MID_Y1 = 0.70       # Lower-mid face zone bottom threshold (normalized canvas height)
 
 
 def caption_font_size(width: int = 1080, spec: Optional[Dict[str, Any]] = None) -> int:
@@ -597,7 +597,7 @@ def _normalize_word_list(raw: Any) -> List[Dict[str, Any]]:
     for w in items:
         if not isinstance(w, dict):
             continue
-        txt = str(w.get("word") or w.get("w") or w.get("text") or "").strip()
+        txt = re.sub(r"\s+", " ", str(w.get("word") or w.get("w") or w.get("text") or "")).strip()
         if not txt:
             continue
         try:
@@ -609,8 +609,8 @@ def _normalize_word_list(raw: Any) -> List[Dict[str, Any]]:
             continue
         norm = dict(w)
         norm["text"] = txt
-        norm.setdefault("word", txt)
-        norm.setdefault("w", txt)
+        norm["word"] = txt
+        norm["w"] = txt
         norm["start"] = ws
         norm["end"] = we if we > ws else ws + 0.04
         out.append(norm)
@@ -664,6 +664,25 @@ def _speech_spans(src: Any, work_dir: Optional[Path] = None) -> List[Tuple[float
                     return out
             except Exception:
                 continue
+    return []
+
+
+def _rms_envelope_of_clip(src: Any, work_dir: Optional[Path] = None) -> List[Tuple[float, float]]:
+    """Load 10ms RMS audio envelope `(time_sec, dbFS)` for `src` from clip cache."""
+    try:
+        from prepare import compute_10ms_rms_envelope
+    except Exception:
+        return []
+    for inc_vo in (False, True):
+        for d in _resolve_clip_cache_dirs(src, work_dir=work_dir, include_vo_siblings=inc_vo):
+            wav = d / "audio16k.wav"
+            if wav.is_file() and _richest_words_in_dir(d):
+                return compute_10ms_rms_envelope(wav)
+    for inc_vo in (False, True):
+        for d in _resolve_clip_cache_dirs(src, work_dir=work_dir, include_vo_siblings=inc_vo):
+            wav = d / "audio16k.wav"
+            if wav.is_file():
+                return compute_10ms_rms_envelope(wav)
     return []
 
 
@@ -922,8 +941,8 @@ def _synthesize_words_over_spans(
 # ---------------------------------------------------------------------------
 def _visual_units(text: str) -> float:
     """Estimate horizontal rendered width of `text` in normalized character units (~40px at 54px font size).
-    Accounts for wider Tamil/Malayalam glyphs (+30%), Bengali/Kannada/Telugu glyphs (+15%),
-    narrow lowercase Latin (-20%), and non-spacing/spacing Indic vowel signs."""
+    Accounts for wider Tamil/Malayalam glyphs (+30%), Devanagari/Bengali/Gurmukhi/Gujarati/Odia/Telugu/Kannada
+    glyphs (+15%), narrow lowercase Latin (-20%), and non-spacing/spacing Indic vowel signs."""
     units = 0.0
     for ch in text:
         cat = unicodedata.category(ch)
@@ -932,7 +951,15 @@ def _visual_units(text: str) -> float:
         cp = ord(ch)
         if 0x0B80 <= cp <= 0x0BFF or 0x0D00 <= cp <= 0x0D7F:      # Tamil, Malayalam
             w = 1.30
-        elif 0x0980 <= cp <= 0x09FF or 0x0C00 <= cp <= 0x0C7F or 0x0C80 <= cp <= 0x0CFF:  # Bengali, Telugu, Kannada
+        elif (
+            0x0900 <= cp <= 0x097F                                 # Devanagari
+            or 0x0980 <= cp <= 0x09FF                              # Bengali
+            or 0x0A00 <= cp <= 0x0A7F                              # Gurmukhi
+            or 0x0A80 <= cp <= 0x0AFF                              # Gujarati
+            or 0x0B00 <= cp <= 0x0B7F                              # Odia
+            or 0x0C00 <= cp <= 0x0C7F                              # Telugu
+            or 0x0C80 <= cp <= 0x0CFF                              # Kannada
+        ):
             w = 1.15
         elif cp < 0x0250:                                           # Latin
             w = 1.0 if (ch.isupper() or ch.isdigit()) else (0.45 if ch in "il.,'!|:;" else 0.80)
@@ -1086,14 +1113,18 @@ def _cue(words: List[Dict[str, Any]], max_end: Optional[float] = None) -> Dict[s
         raw_end = min(raw_end, max_end)
     end_t = max(start_t + 0.04, raw_end)
     cue_words = []
+    clean_texts = []
     for w in words:
         ws = max(start_t, w["start"])
         we = min(end_t, max(ws + 0.02, w["end"]))
-        cue_words.append({"text": w["text"], "startTime": round(ws, 3), "endTime": round(we, 3)})
+        w_txt = re.sub(r"\s+", " ", str(w.get("text") or w.get("word") or w.get("w") or "")).strip()
+        cue_words.append({"text": w_txt, "startTime": round(ws, 3), "endTime": round(we, 3)})
+        if w_txt:
+            clean_texts.append(w_txt)
     return {
         "startTime": round(start_t, 3),
         "endTime": round(end_t, 3),
-        "text": " ".join(w["text"] for w in words),
+        "text": " ".join(clean_texts),
         "words": cue_words,
     }
 
@@ -1313,6 +1344,21 @@ def _segment_tl_speech_spans(
     return tl_spans, sp_dur
 
 
+def _cut_is_silent_in_env(
+    st: float,
+    en: float,
+    spoken: List[Tuple[float, float]],
+    env: List[Tuple[float, float]],
+    floor_db: float = -55.0,
+) -> bool:
+    """Return True when a measured RMS envelope shows pure silence (`< floor_db`) and no VAD speech overlaps `[st, en]`."""
+    if not env:
+        return False
+    if spoken and any(min(en, b) - max(st, a) >= 0.04 for a, b in spoken):
+        return False
+    return max((db for t, db in env if st <= t <= en), default=-140.0) < floor_db
+
+
 def build_cues(
     segs: List[Dict[str, Any]],
     starts: List[float],
@@ -1341,6 +1387,7 @@ def build_cues(
     seg_words_list: List[List[Dict[str, Any]]] = [[] for _ in range(n_segs)]
     seg_spoken_list: List[List[Tuple[float, float]]] = [[] for _ in range(n_segs)]
     seg_tl_bounds: List[Tuple[float, float]] = []
+    clip_env_cache: Dict[str, List[Tuple[float, float]]] = {}
 
     # Track straddling boundary words emitted at the tail of a cut so adjacent cuts of the same clip never duplicate them
     prev_clip_src: Optional[str] = None
@@ -1385,9 +1432,25 @@ def build_cues(
             if next_st < en + 0.15 and next_st >= st:
                 next_same_clip = True
 
+        clip_words = _call_clip_loader(_words_of_clip, src, work_dir)
+        env = clip_env_cache.get(src_key)
+        if env is None:
+            env = _call_clip_loader(_rms_envelope_of_clip, src, work_dir) if src else []
+            clip_env_cache[src_key] = env
+        silent_word_ids: Set[int] = set()
+        if clip_words and env:
+            try:
+                from prepare import words_in_silence
+
+                silent_word_ids = {id(sw) for sw in words_in_silence(clip_words, env)}
+            except Exception:
+                silent_word_ids = set()
+
         candidates: List[Dict[str, Any]] = []
-        for w in _call_clip_loader(_words_of_clip, src, work_dir):
-            text = str(w.get("w") or w.get("word") or w.get("text") or "").strip()
+        for w in clip_words:
+            if w.get("no_sound") or id(w) in silent_word_ids:
+                continue
+            text = re.sub(r"\s+", " ", str(w.get("w") or w.get("word") or w.get("text") or "")).strip()
             if not text:
                 continue
             ws_raw, we_raw = float(w.get("start", 0.0)), float(w.get("end", 0.0))
@@ -1503,6 +1566,8 @@ def build_cues(
             processed_backfill.add(idx)
             if _segment_subs_off(s, plan_cards_off=plan_cards_off, with_cards=eff_with_cards):
                 continue
+            if _cut_is_silent_in_env(float(s["start"]), float(s["end"]), seg_spoken_list[idx], clip_env_cache.get(str(s.get("src") or ""), [])):
+                continue
             if len(seg_words_list[idx]) == 0:
                 inline_words = _seg_inline_words(s)
                 if inline_words:
@@ -1540,6 +1605,8 @@ def build_cues(
             for k in run_indices:
                 sk = segs[k]
                 if _segment_subs_off(sk, plan_cards_off=plan_cards_off, with_cards=eff_with_cards):
+                    continue
+                if _cut_is_silent_in_env(float(sk["start"]), float(sk["end"]), seg_spoken_list[k], clip_env_cache.get(str(sk.get("src") or ""), [])):
                     continue
                 if len(seg_words_list[k]) == 0:
                     inline_words = _seg_inline_words(sk)
@@ -1584,6 +1651,8 @@ def build_cues(
         for k in run_indices:
             sk = segs[k]
             if _segment_subs_off(sk, plan_cards_off=plan_cards_off, with_cards=eff_with_cards):
+                continue
+            if _cut_is_silent_in_env(float(sk["start"]), float(sk["end"]), seg_spoken_list[k], clip_env_cache.get(str(sk.get("src") or ""), [])):
                 continue
             seg_spans = seg_spans_map[k]
             seg_sp_dur = seg_sp_dur_map[k]
@@ -1644,11 +1713,11 @@ def build_cues(
 
 
 # ---------------------------------------------------------------------------
-# Layout-Aware Vertical Placement (`y=68` full-frame, `y=50` split_v seam)
+# Layout-Aware Vertical Placement (`y=65` full-frame, `y=50` split_v seam)
 # ---------------------------------------------------------------------------
 def _is_split_v_segment(seg: Dict[str, Any]) -> bool:
     lay = str(seg.get("layout") or "single").split(":")[0].strip().lower()
-    if lay in ("split_v", "gmeet_grid", "top_bottom"):
+    if lay in ("split_v", "gmeet_grid", "top_bottom", "vstack", "vertical_split", "split"):
         return True
     active = str(seg.get("active") or seg.get("slot") or "").strip().lower()
     if lay == "single" and active in ("top", "bottom"):
@@ -1702,10 +1771,21 @@ def _segment_face_boxes(
     raw_faces_field = vis.get("faces")
     faces: List[Any] = []
     if isinstance(raw_faces_field, list):
+        max_conf = max(
+            (
+                float(f.get("confidence") or 0.0)
+                for f in raw_faces_field
+                if isinstance(f, dict) and "confidence" in f
+            ),
+            default=0.0,
+        )
         for f in raw_faces_field:
             if isinstance(f, dict) and isinstance(f.get("bbox_norm"), (list, tuple)) and len(f["bbox_norm"]) >= 4:
-                if not ("confidence" in f and float(f.get("confidence") or 0.0) <= 0.0):
-                    faces.append(f["bbox_norm"])
+                if "confidence" in f:
+                    conf_v = float(f.get("confidence") or 0.0)
+                    if conf_v <= 0.0 or (max_conf >= 0.85 and conf_v < 0.70):
+                        continue
+                faces.append(f["bbox_norm"])
             elif isinstance(f, (list, tuple)) and len(f) >= 4:
                 faces.append(f)
     bb = vis.get("bbox_norm")
@@ -1752,9 +1832,9 @@ def _segment_face_boxes(
 
 
 def _has_lower_mid_face(face_boxes: List[Tuple[float, float, float, float]]) -> bool:
-    """Return True if any foreground face overlaps the lower-mid caption band (`y in [0.55, 0.72]`)."""
+    """Return True if any foreground face (`>= 12%` tall) overlaps the lower-mid caption band (`y in [0.61, 0.70]`)."""
     for fx0, fy0, fx1, fy1 in face_boxes:
-        if fx1 > 0.10 and fx0 < 0.90 and fy1 > FACE_LOWER_MID_Y0 and fy0 < FACE_LOWER_MID_Y1:
+        if fx1 > 0.10 and fx0 < 0.90 and (fy1 - fy0) >= 0.12 and fy1 > FACE_LOWER_MID_Y0 and fy0 < FACE_LOWER_MID_Y1:
             return True
     return False
 
@@ -1991,7 +2071,7 @@ def _pick_non_overlapping_y(
     for fy0, fy1 in face_intervals:
         raw_cands.append(fy1 + cap_half_pct + 1.55)
         raw_cands.append(fy0 - cap_half_pct - 1.55)
-    raw_cands.extend([68.0, 79.0, 50.0, 83.0, 38.0, 86.0, 56.0, 24.0])
+    raw_cands.extend([65.0, 79.0, 50.0, 83.0, 38.0, 86.0, 56.0, 24.0])
     if is_square:
         raw_cands.append(82.0)
 
@@ -2030,9 +2110,9 @@ def resolve_safe_y_percent(
     plan: Optional[Dict[str, Any]] = None,
     report_dir: Optional[Path] = None,
 ) -> float:
-    """Compute default `y_percent` (`68.0` on `9:16`, `82.0` on `1:1` square, `50.0` on `split_v` seam)
+    """Compute default `y_percent` (`65.0` on `9:16`, `82.0` on `1:1` square, `50.0` on `split_v` seam)
     and attach per-cue `style.positionY` overrides when cuts alternate between `split_v` and `single`,
-    show banners or active flashcards, or contain a lower-mid foreground face overlapping the default `~68%` band."""
+    show banners or active flashcards, or contain a lower-mid foreground face overlapping the default `~65%` band."""
     raw_y = spec.get("y")
     explicit_y = raw_y is not None and str(raw_y).strip().lower() not in ("", "auto", "none")
     is_square = abs(width - height) <= width * 0.15
@@ -2147,8 +2227,8 @@ def resolve_safe_y_percent(
             )
             overlay_dodged = True
 
-        # V1-approved smart face-avoidance drop: shift single-frame ~68% captions down to 79.0%
-        # when a foreground face occupies the lower-mid zone [0.55, 0.72] and no banner/flashcard sits at 79.0%.
+        # V1-approved smart face-avoidance drop: shift single-frame ~65% captions down to 79.0%
+        # when a foreground face (>=12% tall) occupies the lower-mid zone [0.61, 0.70] and no banner/flashcard sits at 79.0%.
         if (
             not overlay_dodged
             and not is_square
@@ -2192,7 +2272,7 @@ def render_frames(
     width: int,
     height: int,
     out_dir: Path,
-    y_percent: float = 68.0,
+    y_percent: float = 65.0,
     fps: int = 25,
     return_meta: bool = False,
     font_size: Optional[int] = None,
@@ -2210,6 +2290,8 @@ def render_frames(
         "outDir": str(out_dir),
         "positionY": y_percent,
         "fontSize": int(font_size or caption_font_size(width)),
+        "singleLine": True,
+        "maxLines": 1,
         "cues": clean_cues,
     }
     if font_family and str(font_family).strip():
@@ -2519,9 +2601,25 @@ def build_overlay(
         script_lines = []
 
     cache_hint = Path(report_dir) if (report_dir is not None and (Path(report_dir) / "clip_caches.json").is_file()) else Path(work_dir)
+    eff_font_size = caption_font_size(width, spec)
+    size_scale = 54.0 / max(54.0, float(eff_font_size))
+    hl_mode = str(style.get("highlightMode") or "").strip().lower()
+    bg_col = str(style.get("bgColor") or style.get("bg") or "").strip().lower()
+    has_bg = bool(bg_col and bg_col not in ("transparent", "none"))
+    if hl_mode == "sticker" or style.get("id") == 12:
+        pad_scale = 0.80
+    elif (
+        hl_mode in ("docu-bar", "frosted-lyric", "wireframe-glass", "word-box")
+        or style.get("id") in (3, 4, 17, 25, 28)
+        or bool(style.get("isGlossy"))
+        or has_bg
+    ):
+        pad_scale = 0.86
+    else:
+        pad_scale = 1.0
     global MAX_VISUAL_UNITS
     _units_before = MAX_VISUAL_UNITS
-    MAX_VISUAL_UNITS = _units_before * (0.80 if str(style.get("highlightMode")) == "sticker" else 1.0)
+    MAX_VISUAL_UNITS = _units_before * size_scale * pad_scale
     eff_with_cards = _flag_truthy(spec.get("with_cards"))
     try:
         cues = build_cues(
@@ -2604,7 +2702,7 @@ def build_overlay(
         y_pct,
         fps=eff_fps,
         return_meta=True,
-        font_size=caption_font_size(width, spec),
+        font_size=eff_font_size,
         font_family=custom_font,
     )
     frames = manifest["frames"]

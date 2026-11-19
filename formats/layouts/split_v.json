@@ -9,12 +9,13 @@
     "bottom screen",
     "one above the other"
   ],
-  "description": "Two panels stacked top and bottom across a stationary horizontal divider. Both panels remain still (z=1, fixed framing) while the active speaker talks, the partner listens silently, and captions sit on the y=50 seam.",
-  "when": "an AI teacher and learner in a stacked top-and-bottom lesson (0.06-0.15s joins, 0.35-0.42s mark tails, captions at y=50)",
+  "description": "Two panels stacked top and bottom across a stationary horizontal divider. Both panels remain still (z=1, fixed framing) while the active speaker talks, the partner listens silently with live motion, and single-line captions sit on the y=50 seam.",
+  "when": "an AI teacher and learner in a stacked top-and-bottom lesson (0.06-0.15s joins, live non-frozen video visuals during post-word marks/SFX without dialogue overlap, strict single-line captions at y=50)",
   "geometry": {
     "canvas": "1080x1920",
     "panel": "1080x960",
     "subs_y": 50,
+    "subs_single_line": true,
     "headroom_pct": 14.0,
     "zoom": "none: every split segment is z=1"
   },

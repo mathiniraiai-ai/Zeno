@@ -13,7 +13,8 @@
   "geometry": {
     "canvas": "1080x1920",
     "bar": "frosted glass prompt bar with label text",
-    "subs_y": 68
+    "subs_y": 65,
+    "subs_single_line": true
   },
   "confidence": "defined",
   "source": "Zeno Pro layout specification (chat_bar)"

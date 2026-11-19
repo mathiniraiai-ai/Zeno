@@ -20,7 +20,8 @@
     "x": 165,
     "y": 20,
     "radius": 36,
-    "subs_y": 68,
+    "subs_y": 65,
+    "subs_single_line": true,
     "zoom": "none: top_pip keeps z=1"
   },
   "confidence": "defined",

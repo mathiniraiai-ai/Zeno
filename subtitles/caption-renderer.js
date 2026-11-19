@@ -276,20 +276,22 @@ const CaptionRenderer = (() => {
     const frameHeight = (typeof fullHeight === 'number' && fullHeight > 0) ? fullHeight : height;
     const offsetY = (typeof bandY0 === 'number' && bandY0 > 0) ? bandY0 : 0;
 
-    const text = String(cue.text || '');
+    const sanitizeWord = (w) => (typeof w === 'string' ? w : String(w?.text ?? w?.word ?? ''))
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const text = String(cue.text || '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
     let highlightIdx = cue.highlightIndex ?? 0;
 
     const rawWords = (cue.words && cue.words.length > 0)
-      ? cue.words.map(w => typeof w === 'string' ? w : String(w.text ?? w.word ?? '')).filter(w => w.trim().length > 0)
-      : String(cue.text || '').split(/\s+/).filter(Boolean);
+      ? cue.words.map(sanitizeWord).filter(Boolean)
+      : text.split(/\s+/).filter(Boolean);
 
     // Adjust highlightIdx if cue.words had empty/cleared words before cue.highlightIndex
     if (cue.words && cue.words.length > 0 && highlightIdx >= 0 && rawWords.length !== cue.words.length) {
       let mappedIdx = 0;
       for (let idx = 0; idx < cue.words.length && idx < highlightIdx; idx++) {
-        const w = cue.words[idx];
-        const s = typeof w === 'string' ? w : String(w?.text ?? w?.word ?? '');
-        if (s.trim().length > 0) mappedIdx++;
+        if (sanitizeWord(cue.words[idx]).length > 0) mappedIdx++;
       }
       highlightIdx = Math.min(mappedIdx, Math.max(0, rawWords.length - 1));
     }
@@ -386,7 +388,8 @@ const CaptionRenderer = (() => {
 
     let spaceW = ctx.measureText(' ').width * 0.75;
     const highlightMode = style.highlightMode || 'color-swap';
-    const isSpecialTierLayout = (
+    const forceSingleLine = style.singleLine !== false && style.maxLines !== 2;
+    const isSpecialTierLayout = !forceSingleLine && (
       highlightMode === 'spotlight' || style.id === 6 || style.name === 'Spotlight' ||
       highlightMode === 'gadzhi-split' || style.id === 23 || style.name === 'Gadzhi Split'
     );
@@ -397,28 +400,28 @@ const CaptionRenderer = (() => {
       let leftBleed = strokeBleed;
       let rightBleed = strokeBleed;
 
-      if (highlightMode === 'spotlight' || style.id === 6 || style.name === 'Spotlight') {
+      if (!forceSingleLine && (highlightMode === 'spotlight' || style.id === 6 || style.name === 'Spotlight')) {
         return { leftBleed: 0, rightBleed: 0, extraPadW: 0 };
       }
-      if (highlightMode === 'gadzhi-split' || style.id === 23 || style.name === 'Gadzhi Split') {
+      if (!forceSingleLine && (highlightMode === 'gadzhi-split' || style.id === 23 || style.name === 'Gadzhi Split')) {
         const gPad = Math.max(strokeBleed, effSize * 0.08);
         return { leftBleed: gPad, rightBleed: gPad, extraPadW: gPad * 2 };
       }
       if (highlightMode === 'wireframe-glass' || style.id === 17 || style.name === 'Neon Wireframe Glass') {
-        const padX = style.paddingX !== undefined ? style.paddingX * resScale : effSize * 0.55;
+        const padX = style.paddingX !== undefined ? style.paddingX * unitSc : effSize * 0.55;
         return { leftBleed: padX, rightBleed: padX, extraPadW: padX * 2 };
       }
       if (highlightMode === 'frosted-lyric' || style.id === 25 || style.name === 'Frosted Lyric') {
-        const padX = (style.paddingX !== undefined ? style.paddingX : 24) * resScale;
+        const padX = (style.paddingX !== undefined ? style.paddingX : 24) * unitSc;
         return { leftBleed: padX, rightBleed: padX, extraPadW: padX * 2 };
       }
       if (highlightMode === 'docu-bar' || style.id === 28 || style.name === 'Docu Split-Bar') {
-        const padX = (style.paddingX !== undefined ? style.paddingX : 20) * resScale;
+        const padX = (style.paddingX !== undefined ? style.paddingX : 20) * unitSc;
         const barW = Math.max(4, effSize * 0.12);
         return { leftBleed: padX + barW, rightBleed: padX, extraPadW: padX * 2 + barW };
       }
       if (highlightMode !== 'word-box' && (style.isGlossy || style.id === 3 || style.name === 'Glass Grey' || (style.bgColor && style.bgColor !== 'transparent'))) {
-        const padX = (style.paddingX !== undefined ? style.paddingX : 18) * resScale;
+        const padX = (style.paddingX !== undefined ? style.paddingX : 18) * unitSc;
         return { leftBleed: padX, rightBleed: padX, extraPadW: padX * 2 };
       }
 
@@ -463,7 +466,7 @@ const CaptionRenderer = (() => {
       let maxDescent = effSize * (hasRegional ? 0.28 : 0.18);
       let lineW = 0;
 
-      if (style.highlightMode === 'spotlight' || style.id === 6 || style.name === 'Spotlight') {
+      if (!forceSingleLine && (style.highlightMode === 'spotlight' || style.id === 6 || style.name === 'Spotlight')) {
         const heroIdx = getSpotlightHeroIndex(wordsList);
         const prefixWords = wordsList.slice(0, heroIdx).map(formatSpotlightWord);
         const heroWord = formatWordCase(
@@ -486,7 +489,7 @@ const CaptionRenderer = (() => {
 
         ctx.font = currentFontStr;
         lineW = Math.max(heroW * 1.15, prefixW * 1.15, suffixW * 1.15);
-      } else if (style.highlightMode === 'gadzhi-split' || style.id === 23 || style.name === 'Gadzhi Split') {
+      } else if (!forceSingleLine && (style.highlightMode === 'gadzhi-split' || style.id === 23 || style.name === 'Gadzhi Split')) {
         if (wordsList.length === 1) {
           const botFontSize = Math.round(effSize * 1.08);
           ctx.font = `italic 700 ${botFontSize}px "Playfair Display", ${scriptFallbacks}, serif`;
@@ -561,7 +564,7 @@ const CaptionRenderer = (() => {
       const bleed = getHorizontalBleed(effSize);
       const single = measureLineMetrics(words, fStr, effSize, words, 0);
       // Zeno: captions are always ONE row. A caption that is too wide is made slightly smaller, never wrapped to two rows.
-      if (style.singleLine || isSpecialTierLayout || words.length < 2 || (single.width + bleed.extraPadW) <= maxAllowedWidth) {
+      if (forceSingleLine || isSpecialTierLayout || words.length < 2 || (single.width + bleed.extraPadW) <= maxAllowedWidth) {
         return {
           fontStr: fStr,
           bleed,
@@ -598,12 +601,13 @@ const CaptionRenderer = (() => {
       };
     }
 
-    const minFontSize = Math.max(24, Math.round(fontSize * 0.72));
+    const minFontSize = Math.max(16, Math.round(fontSize * 0.42));
     let layoutState = buildWrappedLines(effectiveFontSize);
     let iterations = 0;
-    while ((layoutState.maxLineW + layoutState.bleed.extraPadW) > maxAllowedWidth && effectiveFontSize > minFontSize && iterations < 6) {
+    while ((layoutState.maxLineW + layoutState.bleed.extraPadW) > maxAllowedWidth && effectiveFontSize > minFontSize && iterations < 12) {
       const shrinkRatio = maxAllowedWidth / (layoutState.maxLineW + layoutState.bleed.extraPadW);
-      effectiveFontSize = Math.max(minFontSize, Math.floor(effectiveFontSize * shrinkRatio * 0.96));
+      const nextFontSize = Math.max(minFontSize, Math.floor(effectiveFontSize * shrinkRatio * 0.96));
+      effectiveFontSize = nextFontSize < effectiveFontSize ? nextFontSize : Math.max(minFontSize, effectiveFontSize - 1);
       layoutState = buildWrappedLines(effectiveFontSize);
       iterations++;
     }
@@ -617,7 +621,7 @@ const CaptionRenderer = (() => {
 
     // ── Positioning (supports cropped band via frameHeight - offsetY) ──
     const posX = (style.positionX !== undefined ? style.positionX : 50) / 100;
-    const posY = (style.positionY !== undefined ? style.positionY : 72) / 100;
+    const posY = (style.positionY !== undefined ? style.positionY : 65) / 100;
     const textY = posY * frameHeight - offsetY;
     ctx.textBaseline = 'alphabetic';
 
@@ -650,7 +654,7 @@ const CaptionRenderer = (() => {
     const startX = computeLineStartX(totalW);
 
     // ── Spotlight Hero Layout ─────────────────────────────────────────
-    if (highlightMode === 'spotlight' || style.id === 6 || style.name === 'Spotlight') {
+    if (!forceSingleLine && (highlightMode === 'spotlight' || style.id === 6 || style.name === 'Spotlight')) {
       const heroIdx = getSpotlightHeroIndex(words);
       const prefixWords = words.slice(0, heroIdx);
       const heroWord = words[heroIdx] || words[0];
@@ -807,7 +811,7 @@ const CaptionRenderer = (() => {
     }
 
     // ── Style 23: Gadzhi Split (2-Tier Stacked Lockup) ────────────────
-    if (highlightMode === 'gadzhi-split' || style.id === 23 || style.name === 'Gadzhi Split') {
+    if (!forceSingleLine && (highlightMode === 'gadzhi-split' || style.id === 23 || style.name === 'Gadzhi Split')) {
       const fontScaleRatio = effectiveFontSize / 40;
       const strokeW = (style.strokeWidth ?? 0) * fontScaleRatio;
       const dropShadow = (style.dropShadow ?? 10) * fontScaleRatio;
@@ -956,9 +960,10 @@ const CaptionRenderer = (() => {
     }
 
     // ── Background Container ─────────────────────────────────────────
+    const unitSc = resScale * (effectiveFontSize / fontSize);
     if (highlightMode === 'wireframe-glass' || style.id === 17 || style.name === 'Neon Wireframe Glass') {
-      const padX = style.paddingX !== undefined ? style.paddingX * resScale : effectiveFontSize * 0.55;
-      const padY = style.paddingY !== undefined ? style.paddingY * resScale : effectiveFontSize * 0.25;
+      const padX = style.paddingX !== undefined ? style.paddingX * unitSc : effectiveFontSize * 0.55;
+      const padY = style.paddingY !== undefined ? style.paddingY * unitSc : effectiveFontSize * 0.25;
       const boxW = totalW + padX * 2;
       const boxH = contentH + padY * 2;
       const boxX = startX - padX;
@@ -984,8 +989,8 @@ const CaptionRenderer = (() => {
       ctx.stroke();
       ctx.restore();
     } else if (highlightMode === 'frosted-lyric' || style.id === 25 || style.name === 'Frosted Lyric') {
-      const padX = (style.paddingX !== undefined ? style.paddingX : 24) * resScale;
-      const padY = (style.paddingY !== undefined ? style.paddingY : 12) * resScale;
+      const padX = (style.paddingX !== undefined ? style.paddingX : 24) * unitSc;
+      const padY = (style.paddingY !== undefined ? style.paddingY : 12) * unitSc;
       const boxW = totalW + padX * 2;
       const boxH = contentH + padY * 2;
       const boxX = startX - padX;
@@ -1016,8 +1021,8 @@ const CaptionRenderer = (() => {
       ctx.stroke();
       ctx.restore();
     } else if (highlightMode === 'docu-bar' || style.id === 28 || style.name === 'Docu Split-Bar') {
-      const padX = (style.paddingX !== undefined ? style.paddingX : 20) * resScale;
-      const padY = (style.paddingY !== undefined ? style.paddingY : 10) * resScale;
+      const padX = (style.paddingX !== undefined ? style.paddingX : 20) * unitSc;
+      const padY = (style.paddingY !== undefined ? style.paddingY : 10) * unitSc;
       const barW = Math.max(4, effectiveFontSize * 0.12);
       const boxW = totalW + padX * 2 + barW;
       const boxH = contentH + padY * 2;
@@ -1050,8 +1055,8 @@ const CaptionRenderer = (() => {
       ctx.restore();
       ctx.restore();
     } else if (highlightMode !== 'word-box' && (style.isGlossy || style.id === 3 || style.name === 'Glass Grey' || (style.bgColor && style.bgColor !== 'transparent'))) {
-      const padX = (style.paddingX !== undefined ? style.paddingX : 18) * resScale;
-      const padY = (style.paddingY !== undefined ? style.paddingY : 8) * resScale;
+      const padX = (style.paddingX !== undefined ? style.paddingX : 18) * unitSc;
+      const padY = (style.paddingY !== undefined ? style.paddingY : 8) * unitSc;
       const boxW = totalW + padX * 2;
       const boxH = contentH + padY * 2;
       const boxX = startX - padX;
@@ -2666,7 +2671,7 @@ const CaptionRenderer = (() => {
       const rawWordList = Array.isArray(cue.words) && cue.words.length > 0 ? cue.words : [];
       const wordList = rawWordList.filter(w => {
         const wText = typeof w === 'string' ? w : String(w?.text ?? w?.word ?? '');
-        return wText.trim().length > 0;
+        return wText.replace(/[\r\n]+/g, ' ').trim().length > 0;
       });
       const totalWords = wordList.length;
 

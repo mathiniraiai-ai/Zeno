@@ -22,7 +22,7 @@
         "top_pip"
       ],
       "layouts": ["single", "split_h", "split_v", "top_pip"],
-      "default_subs": "#subs auto y=68",
+      "default_subs": "#subs auto y=65",
       "max_transitions": null,
       "kinds": ["whip_left", "whip_right", "slide_up", "slide_down", "split_reveal", "dip_to_black", "dissolve", "fade", "zoom_burst", "zoom_in", "zoom_out", "zoom_blur", "warm_flash_punch"]
     },
@@ -43,7 +43,7 @@
         "human right"
       ],
       "layouts": ["single", "split_h", "split_v"],
-      "default_subs": "#subs auto y=68",
+      "default_subs": "#subs auto y=65",
       "max_transitions": 4,
       "kinds": ["split_reveal", "whip_left", "whip_right", "slide_up", "slide_down", "zoom_in", "zoom_out", "zoom_blur", "dip_to_black", "warm_flash_punch"]
     },
@@ -65,7 +65,7 @@
         "let me show you"
       ],
       "layouts": ["single", "split_h", "split_v"],
-      "default_subs": "#subs auto y=68",
+      "default_subs": "#subs auto y=65",
       "max_transitions": 4,
       "kinds": ["split_reveal", "whip_left", "whip_right", "slide_up", "slide_down", "zoom_in", "zoom_out", "zoom_blur", "dip_to_black"]
     },
@@ -86,7 +86,7 @@
         "red x"
       ],
       "layouts": ["single", "split_h", "split_v"],
-      "default_subs": "#subs auto y=68",
+      "default_subs": "#subs auto y=65",
       "max_transitions": 5,
       "kinds": ["split_reveal", "whip_left", "whip_right", "slide_up", "slide_down", "zoom_in", "zoom_out", "zoom_blur", "dip_to_black", "warm_flash_punch"]
     },
@@ -107,7 +107,7 @@
         "live grammar correction"
       ],
       "layouts": ["single", "video_call"],
-      "default_subs": "#subs auto y=68",
+      "default_subs": "#subs auto y=65",
       "max_transitions": null,
       "kinds": ["whip_left", "whip_right", "slide_up", "slide_down", "dip_to_black", "dissolve", "fade", "zoom_burst", "zoom_in", "zoom_out", "zoom_blur", "warm_flash_punch"]
     },
@@ -126,7 +126,7 @@
         "split screen throughout"
       ],
       "layouts": ["split_h", "split_v", "video_call", "chat_bar"],
-      "default_subs": "#subs auto y=68",
+      "default_subs": "#subs auto y=65",
       "max_transitions": 4,
       "kinds": ["split_reveal", "whip_left", "whip_right", "slide_up", "slide_down", "zoom_in", "zoom_out", "zoom_blur", "dip_to_black"]
     },
@@ -177,7 +177,7 @@
         "say it with me"
       ],
       "layouts": ["single", "split_h", "split_v", "chat_bar"],
-      "default_subs": "#subs auto y=68",
+      "default_subs": "#subs auto y=65",
       "max_transitions": 3,
       "kinds": ["split_reveal", "whip_left", "whip_right", "slide_up", "slide_down", "zoom_in", "zoom_out", "dip_to_black"]
     },
@@ -196,7 +196,7 @@
         "continuous kitchen shot"
       ],
       "layouts": ["single"],
-      "default_subs": "#subs auto y=68",
+      "default_subs": "#subs auto y=65",
       "max_transitions": null,
       "kinds": ["dissolve", "fade", "dip_to_black", "whip_left", "whip_right", "slide_up", "slide_down", "zoom_in", "zoom_out", "zoom_blur", "warm_flash_punch"]
     },
@@ -214,7 +214,7 @@
         "3d remake"
       ],
       "layouts": ["single", "split_h", "split_v"],
-      "default_subs": "#subs auto y=68",
+      "default_subs": "#subs auto y=65",
       "max_transitions": null,
       "kinds": ["whip_left", "whip_right", "slide_up", "slide_down", "split_reveal", "dip_to_black", "dissolve", "fade", "zoom_burst", "zoom_in", "zoom_out", "zoom_blur", "warm_flash_punch"]
     },
@@ -232,7 +232,7 @@
         "2d remake"
       ],
       "layouts": ["single", "split_h", "split_v"],
-      "default_subs": "#subs auto y=68",
+      "default_subs": "#subs auto y=65",
       "max_transitions": null,
       "kinds": []
     }

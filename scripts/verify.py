@@ -85,11 +85,13 @@ try:
         getattr(_prepare_mod, "word_similarity", lambda a, b: 1.0 if _clean_token(a) == _clean_token(b) else 0.0),
     )
     compute_10ms_rms_envelope = getattr(_prepare_mod, "compute_10ms_rms_envelope", None)
+    _words_in_silence = getattr(_prepare_mod, "words_in_silence", None)
     parse_script_file = getattr(_prepare_mod, "parse_script_file", None)
 except Exception:
     _clean_token = lambda w: re.sub(r"[^\w\u0900-\u0D7F']", "", str(w or "").lower()).strip()  # noqa: E731
     _word_similarity = lambda a, b: 1.0 if _clean_token(a) == _clean_token(b) else 0.0  # noqa: E731
     compute_10ms_rms_envelope = None
+    _words_in_silence = None
     parse_script_file = None
 
 
@@ -753,6 +755,7 @@ def check_script_coverage(
     seg_word_slices: List[List[str]] = []
     seg_word_keys: List[List[Tuple[str, float]]] = []
 
+    _env_cache: Dict[str, List[Tuple[float, float]]] = {}
     for s in segs:
         if _segment_is_muted(s) or _segment_is_beat(s):
             seg_word_slices.append([])
@@ -761,6 +764,25 @@ def check_script_coverage(
         stem = Path(str(s.get("src", ""))).stem
         wdir = _resolve_clip_cache_dir(s.get("src", ""), plan)
         st, en = float(s["start"]), float(s["end"])
+        en_eff = en
+        if s.get("audio_end") is not None:
+            try:
+                ae_f = float(s["audio_end"])
+                if ae_f > 0:
+                    en_eff = min(en, st + ae_f * _segment_speed(s))
+            except Exception:
+                pass
+        wdir_key = str(wdir)
+        if wdir_key not in _env_cache:
+            wav_p = wdir / "audio16k.wav"
+            env_val: List[Tuple[float, float]] = []
+            if compute_10ms_rms_envelope is not None and wav_p.is_file():
+                try:
+                    env_val = list(compute_10ms_rms_envelope(wav_p) or [])
+                except Exception:
+                    env_val = []
+            _env_cache[wdir_key] = env_val
+        env = _env_cache[wdir_key]
         words: List[Dict[str, Any]] = []
         for fname in ("hq_words.json", "words.json"):
             fpath = wdir / fname
@@ -769,7 +791,7 @@ def check_script_coverage(
                     wlist = read_json(fpath)
                     sliced = [
                         w for w in wlist
-                        if float(w.get("end", 0.0)) > st + 0.08 and float(w.get("start", 0.0)) < en - 0.08
+                        if float(w.get("end", 0.0)) > st + 0.08 and float(w.get("start", 0.0)) < en_eff - 0.08
                     ]
                     if sliced:
                         words.extend(sliced)
@@ -779,10 +801,32 @@ def check_script_coverage(
         if not words and isinstance(s.get("words"), list):
             for idx_w, w_item in enumerate(s["words"]):
                 if isinstance(w_item, dict):
-                    words.append(w_item)
+                    if not w_item.get("no_sound"):
+                        words.append(w_item)
                 elif isinstance(w_item, str):
                     words.append({"w": w_item, "start": st + idx_w * 0.1, "end": st + (idx_w + 1) * 0.1})
-        kept = [w for w in words if _clean_token(w.get("w") or w.get("word", ""))]
+        bad_ids = set()
+        if _words_in_silence is not None and env and words:
+            try:
+                bad_ids = {id(w) for w in _words_in_silence(words, env)}
+            except Exception:
+                bad_ids = set()
+        kept: List[Dict[str, Any]] = []
+        for w in words:
+            if not _clean_token(w.get("w") or w.get("word", "")):
+                continue
+            if w.get("no_sound") or id(w) in bad_ids:
+                continue
+            if env:
+                ws0 = float(w.get("start", st))
+                ws1 = float(w.get("end", en_eff))
+                a0 = max(st, ws0)
+                a1 = min(en_eff, ws1)
+                if a1 > a0:
+                    seg_db = [db for t_s, db in env if a0 - 0.01 <= t_s <= a1 + 0.01]
+                    if seg_db and max(seg_db) < -55.0:
+                        continue
+            kept.append(w)
         toks = [_clean_token(w.get("w") or w.get("word", "")) for w in kept]
         seg_word_slices.append(toks)
         seg_word_keys.append([(stem, round(float(w.get("start", 0.0)), 3)) for w in kept])

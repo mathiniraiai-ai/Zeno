@@ -120,7 +120,7 @@
   },
   "audio": {
     "music_bed": "none",
-    "sfx": "post-loudnorm calibrated surgical SFX (-4 to 0 dB beat accents; +1.0 dB sn_wrong.wav; +0.5 dB correct_ding.wav + sn_correct.wav; sn_riser_1.wav tension risers)",
+    "sfx": "post-loudnorm calibrated surgical SFX (-4 to 0 dB beat accents; +1.0 dB sn_wrong.wav; +0.5 dB correct_ding.wav + sn_correct.wav; sn_riser_1.wav tension risers) over live non-frozen visuals during post-word beats without dialogue overlap",
     "room_tone_db": "-52 to -44",
     "speech_median_db": -22.9,
     "reference_loudness_lufs": -19.3,
@@ -130,8 +130,8 @@
     "note": "W47 dry/diegetic dialogue (zero continuous BGM by default) mastered to -10.5 LUFS (-1.5 dBTP target, alimiter_limit=0.80) before mixing surgical peak-calibrated SFX"
   },
   "on_screen_text": {
-    "non_subtitle": "scripted stacked banners only (e.g. Stop Saying strikethrough stack or flashcard drills)",
-    "subtitles": "enabled by default via #subs auto y=68 (single row, 54px at 1080w; auto-locks to y=50 seam on split_v; #subs off only on explicit request)"
+    "non_subtitle": "scripted stacked banners only (e.g. Stop Saying strikethrough stack or flashcard drills); post-word marks/SFX keep live non-frozen video visuals without dialogue overlap",
+    "subtitles": "enabled by default via #subs auto y=65 (strict single-line only, 54px at 1080w; auto-locks to y=50 seam on split_v; #subs off only on explicit request)"
   },
   "unknowns": [],
   "engine": {
@@ -190,7 +190,9 @@
     "focus_pan_deadband": 0.04,
     "static_camera_motion_max": 2.8,
     "mark_duration_sec": 0.48,
-    "mark_tail_hold_sec": 0.38,
+    "mark_tail_hold_sec": 0.0,
+    "mark_live_visuals": true,
+    "mark_no_dialogue_overlap": true,
     "mark_alpha": 0.5,
     "wrong_sfx_primary": "sn_wrong.wav",
     "wrong_sfx_layer": "none",
@@ -205,8 +207,9 @@
     "w47_zoom_defaults": ["zoom_in", "zoom_out", "sudden_in", "sudden_out", "bell"],
     "w47_transition_defaults": ["zoom_in", "zoom_out", "zoom_blur", "dip_to_black", "whip_left", "whip_right", "slide_up", "slide_down", "warm_flash_punch"],
     "default_subs_style": "auto",
-    "default_subs_y": 68,
+    "default_subs_y": 65,
     "split_v_subs_y": 50,
+    "strict_single_line_subs": true,
     "use_hw_accel": true,
     "edge_fade_sec": 0.012,
     "audio_crossfade_sec": 0.045,

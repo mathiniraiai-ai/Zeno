@@ -141,7 +141,7 @@ class EditorSheetFixesTests(unittest.TestCase):
                 "fps": 25,
                 "styleId": 5,  # White Box (exercises box padding + Kannada glyph rendering)
                 "outDir": str(out_dir),
-                "positionY": 68,
+                "positionY": 65,
                 "fontSize": subtitles.caption_font_size(width),
                 "cues": [cue],
             }
@@ -970,6 +970,324 @@ class EditorSheetFixesTests(unittest.TestCase):
             self.assertAlmostEqual(reg_ok["tx"], -10.0, delta=2.5)
             self.assertAlmostEqual(reg_ok["ty"], 6.0, delta=2.5)
             self.assertIsNone(reg_bad, "Unrelated studio background must be rejected")
+
+    # ------------------------------------------------------------------
+    # 8. v2.0.4: Subtitle y=65 / split_v=50, W47 L7 Face Filter & Ghost Immunity
+    # ------------------------------------------------------------------
+    def test_08_subtitle_y65_vs_split_v_y50_w47_l7_face_and_ghost_words(self) -> None:
+        """`resolve_safe_y_percent` defaults to `65.0` on `single` (including multi-face
+        live conversations and W47 L7's chin@0.56 + tiny <12% background shelf photo face),
+        `split_h`, and `top_pip`, uses `50.0` on `split_v`/`top_bottom`/`vstack`, and
+        `subtitles.build_cues` strips `no_sound` and silent-tail ghost words.
+        """
+        def _mk_cue(t0: float, t1: float, seg_idx: int = 0) -> dict:
+            return {
+                "text": "Test cue",
+                "startTime": t0,
+                "endTime": t1,
+                "segIndex": seg_idx,
+                "words": [
+                    {"text": "Test", "startTime": t0, "endTime": (t0 + t1) / 2.0},
+                    {"text": "cue", "startTime": (t0 + t1) / 2.0, "endTime": t1},
+                ],
+            }
+
+        spec_auto = {"style": "white_pill"}
+        # 1. single, multi-face live conversation, split_h, and top_pip all return 65.0
+        for label, seg in (
+            (
+                "single",
+                {
+                    "id": "L1",
+                    "layout": "single",
+                    "start": 0.0,
+                    "end": 2.0,
+                    "faces": [{"bbox_norm": [0.30, 0.18, 0.70, 0.52], "confidence": 0.96}],
+                },
+            ),
+            (
+                "single_multiface_live_conv",
+                {
+                    "id": "L2",
+                    "layout": "single",
+                    "start": 0.0,
+                    "end": 2.0,
+                    "faces": [
+                        {"bbox_norm": [0.12, 0.18, 0.44, 0.52], "confidence": 0.95},
+                        {"bbox_norm": [0.56, 0.20, 0.88, 0.54], "confidence": 0.94},
+                    ],
+                },
+            ),
+            (
+                "split_h",
+                {
+                    "id": "L3",
+                    "layout": "split_h",
+                    "start": 0.0,
+                    "end": 2.0,
+                    "faces": [{"bbox_norm": [0.25, 0.44, 0.65, 0.68], "confidence": 0.95}],
+                },
+            ),
+            (
+                "top_pip",
+                {
+                    "id": "L4",
+                    "layout": "top_pip",
+                    "start": 0.0,
+                    "end": 2.0,
+                    "faces": [{"bbox_norm": [0.25, 0.44, 0.65, 0.68], "confidence": 0.95}],
+                },
+            ),
+        ):
+            cues = [_mk_cue(0.1, 1.8, 0)]
+            y_res = subtitles.resolve_safe_y_percent(
+                spec_auto, [seg], [0.0], 2.0, 1080, 1920, cues=cues
+            )
+            self.assertEqual(y_res, 65.0, f"{label} expected 65.0, got {y_res}")
+            self.assertNotIn("positionY", cues[0].get("style") or {}, f"{label} unexpectedly shifted cue: {cues[0]}")
+
+        # 2. W47 L7 regression: chin at y1=0.56 + tiny background shelf photo face (height < 0.12)
+        self.assertFalse(subtitles._has_lower_mid_face([(0.25, 0.18, 0.65, 0.56), (0.72, 0.48, 0.80, 0.59)]))
+        self.assertFalse(subtitles._has_lower_mid_face([(0.25, 0.18, 0.65, 0.56), (0.72, 0.54, 0.80, 0.64)]))
+        self.assertTrue(subtitles._has_lower_mid_face([(0.25, 0.44, 0.65, 0.66)]))
+
+        for shelf_box, bg_conf, z_to in (
+            ([0.72, 0.48, 0.80, 0.59], 0.72, 1.0),
+            ([0.72, 0.50, 0.80, 0.60], 0.72, 1.0),
+            ([0.72, 0.54, 0.80, 0.64], 0.72, 1.0),
+            ([0.7357, 0.474, 0.9359, 0.6078], 0.64, 1.06),
+        ):
+            l7_seg = {
+                "id": "L7",
+                "layout": "single",
+                "start": 0.0,
+                "end": 2.0,
+                "zoom": 1.0,
+                "zoom_to": z_to,
+                "focus": [0.4972, 0.3242],
+                "faces": [
+                    {"bbox_norm": [0.3593, 0.3078, 0.6335, 0.5289], "confidence": 0.955},
+                    {"bbox_norm": shelf_box, "confidence": bg_conf},
+                ],
+            }
+            cues_l7 = [_mk_cue(0.1, 1.8, 0)]
+            y_l7 = subtitles.resolve_safe_y_percent(
+                spec_auto, [l7_seg], [0.0], 2.0, 1080, 1920, cues=cues_l7
+            )
+            self.assertEqual(y_l7, 65.0)
+            self.assertNotIn(
+                "positionY",
+                cues_l7[0].get("style") or {},
+                f"Background shelf face {shelf_box} must NOT drop caption to 79%: {cues_l7[0]}",
+            )
+
+        # Contrast: genuine >=12% tall foreground lower-mid face drops single caption to 79.0
+        fg_low_seg = {
+            "id": "L8",
+            "layout": "single",
+            "start": 0.0,
+            "end": 2.0,
+            "faces": [{"bbox_norm": [0.25, 0.44, 0.65, 0.66], "confidence": 0.96}],
+        }
+        cues_fg = [_mk_cue(0.1, 1.8, 0)]
+        y_fg = subtitles.resolve_safe_y_percent(spec_auto, [fg_low_seg], [0.0], 2.0, 1080, 1920, cues=cues_fg)
+        self.assertEqual(y_fg, 65.0)
+        self.assertEqual(cues_fg[0].get("style", {}).get("positionY"), 79.0)
+
+        # 3. split_v and aliases (top_bottom, vstack) return 50.0; mixed timeline overrides per-cue
+        for alias in ("split_v", "top_bottom", "vstack"):
+            sv_seg = {"id": "L1", "layout": alias, "start": 0.0, "end": 2.0}
+            cues_sv = [_mk_cue(0.1, 1.8, 0)]
+            y_sv = subtitles.resolve_safe_y_percent(spec_auto, [sv_seg], [0.0], 2.0, 1080, 1920, cues=cues_sv)
+            self.assertEqual(y_sv, 50.0, f"{alias} expected 50.0, got {y_sv}")
+            self.assertNotIn("positionY", cues_sv[0].get("style") or {})
+
+        mixed_segs = [
+            {"id": "L1", "layout": "single", "start": 0.0, "end": 2.0, "faces": [{"bbox_norm": [0.3, 0.18, 0.7, 0.5], "confidence": 0.95}]},
+            {"id": "L2", "layout": "split_v", "start": 0.0, "end": 1.2},
+        ]
+        mixed_cues = [_mk_cue(0.1, 1.8, 0), _mk_cue(2.1, 3.0, 1)]
+        y_mix = subtitles.resolve_safe_y_percent(spec_auto, mixed_segs, [0.0, 2.0], 3.2, 1080, 1920, cues=mixed_cues)
+        self.assertEqual(y_mix, 65.0)
+        self.assertNotIn("positionY", mixed_cues[0].get("style") or {})
+        self.assertEqual(mixed_cues[1].get("style", {}).get("positionY"), 50.0)
+
+        # 4. Ghost word filtering in build_cues + _visual_units check
+        self.assertGreater(subtitles._visual_units("ಕನ್ನಡ"), subtitles._visual_units("ii"))
+        self.assertGreater(subtitles._visual_units("हिन्दी"), subtitles._visual_units("ii"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            clip_cache = tmp_dir / "clip_cache"
+            clip_cache.mkdir()
+            hq_words = [
+                {"w": "Never", "start": 0.10, "end": 0.40},
+                {"w": "say", "start": 0.42, "end": 0.72},
+                {"w": "this", "start": 0.74, "end": 1.05},
+                {"w": "uh", "start": 1.15, "end": 1.35, "no_sound": True},
+                {"w": "ghost", "start": 1.45, "end": 2.10},
+            ]
+            (clip_cache / "hq_words.json").write_text(json.dumps(hq_words), encoding="utf-8")
+            (clip_cache / "silences.json").write_text("[]", encoding="utf-8")
+            (clip_cache / "speech_spans.json").write_text(json.dumps({"spans": [[0.08, 1.08]]}), encoding="utf-8")
+            _write_pcm_wav(clip_cache / "audio16k.wav", 2.3, tone_windows=[(0.08, 1.08, -18.0)])
+
+            script_lines = [{"id": "L1", "text": "Never say this"}]
+            segs = [{"id": "L1", "src": "clip.mp4", "start": 0.0, "end": 2.2}]
+            with mock.patch("common.clip_work_dir", return_value=clip_cache):
+                built = subtitles.build_cues(segs, [0.0], script_lines=script_lines, work_dir=tmp_dir)
+            self.assertTrue(built, "Expected spoken cues from build_cues")
+            all_words = [w["text"].lower() for c in built for w in c.get("words", [])]
+            self.assertEqual(all_words, ["never", "say", "this"])
+            self.assertNotIn("uh", all_words)
+            self.assertNotIn("ghost", all_words)
+
+    # ------------------------------------------------------------------
+    # 9. v2.0.4: Strict Single-Line Enforcement (Long Multilingual + Newlines)
+    # ------------------------------------------------------------------
+    def test_09_strict_single_line_enforcement_node_render_cues(self) -> None:
+        """Long English/Kannada/Devanagari cues and cues with embedded `\\n`/`\\r` render
+        strictly on ONE row across styles (including White Box #5 and Docu Split-Bar #28),
+        never jumping to ~2x 2-line height and flattening newlines cleanly.
+        """
+        styles_path = ROOT / "subtitles" / "styles.json"
+        styles_by_id = {int(s["id"]): s for s in json.loads(styles_path.read_text(encoding="utf-8"))}
+        target_styles = [styles_by_id[5], styles_by_id[28], styles_by_id[4]]  # White Box, Docu Split-Bar, Blue Highlight
+
+        def _ink_height(png_path: Path) -> int:
+            with Image.open(png_path) as im:
+                arr = np.asarray(im.convert("RGBA"))
+            ys = np.where(arr[:, :, 3] > 20)[0]
+            self.assertGreater(len(ys), 0, f"Blank PNG rendered: {png_path}")
+            return int(ys.max() - ys.min() + 1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            for st in target_styles:
+                sid = int(st["id"])
+                sname = str(st["name"])
+                cues = [
+                    {
+                        "startTime": 0.0,
+                        "endTime": 0.5,
+                        "text": "Hello",
+                        "words": [{"text": "Hello", "startTime": 0.0, "endTime": 0.5}],
+                    },
+                    {
+                        "startTime": 0.6,
+                        "endTime": 1.1,
+                        "text": "ಕನ್ನಡ",
+                        "words": [{"text": "ಕನ್ನಡ", "startTime": 0.6, "endTime": 1.1}],
+                    },
+                    {
+                        "startTime": 1.2,
+                        "endTime": 1.7,
+                        "text": "नमस्ते",
+                        "words": [{"text": "नमस्ते", "startTime": 1.2, "endTime": 1.7}],
+                    },
+                    {
+                        "startTime": 1.8,
+                        "endTime": 2.4,
+                        "text": "Never say this overly long restaurant ordering phrase when talking to the waiter",
+                        "words": [
+                            {"text": w, "startTime": 1.8 + i * 0.04, "endTime": 1.84 + i * 0.04}
+                            for i, w in enumerate(
+                                "Never say this overly long restaurant ordering phrase when talking to the waiter".split()
+                            )
+                        ],
+                    },
+                    {
+                        "startTime": 2.5,
+                        "endTime": 3.1,
+                        "text": "ಕನ್ನಡದಲ್ಲಿ ತುಂಬಾ ಉದ್ದವಾದ ವಾಕ್ಯವನ್ನು ಒಂದೇ ಸಾಲಿನಲ್ಲಿ ತೋರಿಸಬೇಕು",
+                        "words": [
+                            {"text": w, "startTime": 2.5 + i * 0.08, "endTime": 2.58 + i * 0.08}
+                            for i, w in enumerate(
+                                "ಕನ್ನಡದಲ್ಲಿ ತುಂಬಾ ಉದ್ದವಾದ ವಾಕ್ಯವನ್ನು ಒಂದೇ ಸಾಲಿನಲ್ಲಿ ತೋರಿಸಬೇಕು".split()
+                            )
+                        ],
+                    },
+                    {
+                        "startTime": 3.2,
+                        "endTime": 3.8,
+                        "text": "आज हम बहुत लंबा वाक्य बिना किसी रुकावट के एक ही लाइन में बोलेंगे",
+                        "words": [
+                            {"text": w, "startTime": 3.2 + i * 0.04, "endTime": 3.24 + i * 0.04}
+                            for i, w in enumerate(
+                                "आज हम बहुत लंबा वाक्य बिना किसी रुकावट के एक ही लाइन में बोलेंगे".split()
+                            )
+                        ],
+                    },
+                    {
+                        "startTime": 3.9,
+                        "endTime": 4.4,
+                        "text": "Never\nsay\r\nthis phrase",
+                        "words": [
+                            {"text": "Never\nsay", "startTime": 3.9, "endTime": 4.15},
+                            {"text": "this\r\nphrase", "startTime": 4.15, "endTime": 4.4},
+                        ],
+                    },
+                    {
+                        "startTime": 4.5,
+                        "endTime": 5.0,
+                        "text": "Never say this phrase",
+                        "words": [
+                            {"text": "Never", "startTime": 4.5, "endTime": 4.62},
+                            {"text": "say", "startTime": 4.62, "endTime": 4.74},
+                            {"text": "this", "startTime": 4.74, "endTime": 4.86},
+                            {"text": "phrase", "startTime": 4.86, "endTime": 5.0},
+                        ],
+                    },
+                ]
+                manifest = subtitles.render_frames(
+                    cues,
+                    st,
+                    1080,
+                    1920,
+                    tmp_dir / f"s_{sid}",
+                    y_percent=65.0,
+                    fps=25,
+                    return_meta=True,
+                    font_size=54,
+                )
+                frames = manifest.get("frames") or []
+                self.assertTrue(frames, f"No frames rendered for style {sid} ({sname})")
+                by_cap: dict[int, list[int]] = {}
+                for fr in frames:
+                    ci = int(fr["captionIndex"])
+                    by_cap.setdefault(ci, []).append(_ink_height(Path(fr["path"])))
+                for ci in range(len(cues)):
+                    self.assertIn(ci, by_cap, f"Missing rendered frames for cue {ci} in {sname}")
+
+                base_en = max(by_cap[0])
+                base_kn = max(by_cap[1])
+                base_hi = max(by_cap[2])
+                long_en = max(by_cap[3])
+                long_kn = max(by_cap[4])
+                long_hi = max(by_cap[5])
+                nl_en = max(by_cap[6])
+                sp_en = max(by_cap[7])
+
+                self.assertLessEqual(
+                    long_en,
+                    int(base_en * 1.25),
+                    f"{sname}: long English cue wrapped/ballooned ({long_en}px vs 1-word {base_en}px)",
+                )
+                self.assertLessEqual(
+                    long_kn,
+                    int(base_kn * 1.25),
+                    f"{sname}: long Kannada cue wrapped/ballooned ({long_kn}px vs 1-word {base_kn}px)",
+                )
+                self.assertLessEqual(
+                    long_hi,
+                    int(base_hi * 1.25),
+                    f"{sname}: long Devanagari cue wrapped/ballooned ({long_hi}px vs 1-word {base_hi}px)",
+                )
+                self.assertLessEqual(
+                    abs(nl_en - sp_en),
+                    2,
+                    f"{sname}: embedded \\n/\\r\\n caused line-break height jump ({nl_en}px vs {sp_en}px)",
+                )
 
 
 if __name__ == "__main__":

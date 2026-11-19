@@ -116,7 +116,7 @@ class GoogleFontsPackTests(unittest.TestCase):
         """`#subs ... font="..."` and `#page scroll ... font="..."` roundtrip losslessly."""
         edl_text = (
             '#output "out.mp4"\n'
-            '#subs "White Karaoke Pill" y=68 font="Open Sans" with_cards=on\n'
+            '#subs "White Karaoke Pill" y=65 font="Open Sans" with_cards=on\n'
             '#page scroll size=44 font="Hind"\n'
             "L1 clip.mp4 0.00-2.50\n"
         )
@@ -152,7 +152,7 @@ class GoogleFontsPackTests(unittest.TestCase):
                 "styleId": 5,
                 "fontFamily": "Roboto",
                 "outDir": str(td_path / "cues"),
-                "positionY": 68,
+                "positionY": 65,
                 "fontSize": 54,
                 "cues": [
                     {

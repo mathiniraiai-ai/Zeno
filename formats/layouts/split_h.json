@@ -19,7 +19,8 @@
     "right_w": 540,
     "divider_colour": "#E1DBE1",
     "headroom_pct": 14.0,
-    "subs_y": 68,
+    "subs_y": 65,
+    "subs_single_line": true,
     "zoom": "none: every split segment is z=1"
   },
   "confidence": "measured",
