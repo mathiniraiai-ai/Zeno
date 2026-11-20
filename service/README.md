@@ -40,7 +40,16 @@ ZENO_CLOUD_TOKEN=zeno_...their personal key...
 *(Or sign in once via `python3 scripts/setup.py --login` or the Zeno Desktop App, which stores `.zeno_session.json` and syncs `.env` automatically.)* Leave `GEMINI_API_KEY` empty — Zeno uses Zeno Cloud whenever no local Gemini key is set.
 
 ## Other settings (Railway variables, all optional)
-`ZENO_RATE_PER_MIN`, `ZENO_MAX_UPLOAD_MB`, `GEMINI_RPM`, `GEMINI_MODELS` (model order, default lite first), `GEMINI_API_KEY_1..4` (extra keys).
+- **Gemini Free Tier pacing (default):** tuned to Google's official per-`(key, model)` sliding 60s windows so concurrent editors queue smoothly without tripping `429` bursts:
+  - `GEMINI_TIER=free` (default; set `paid` for Paid Tier limits)
+  - `GEMINI_CONCURRENCY` (default on Free Tier: `1` on a single key so editors serialize cleanly in the fair round-robin queue, or `min(keys, 2)` with multiple keys; Paid Tier: `3` on 1 key, up to `8` on multiple keys; clamp `1..16`)
+  - `GEMINI_MIN_GAP_SEC=3.0` (minimum buffer in seconds between any two Gemini calls on the same key, even when rotating models; `0.5` on Paid Tier)
+  - `GEMINI_FLASH_RPM=5` (per-`(key, model)` 61s sliding-window RPM cap and `12.5s` smooth spacing for Full Flash models; `150` on Paid Tier)
+  - `GEMINI_LITE_RPM=15` (per-`(key, model)` 61s sliding-window RPM cap and `4.2s` smooth spacing for Flash-Lite fallback models; `600` on Paid Tier)
+  - `GEMINI_TPM=240000` (per-`(key, model)` 61s sliding-window token buffer; `1000000` on Paid Tier)
+  - `GEMINI_QUEUE_TIMEOUT=180` (seconds a queued transcription waits for a slot before returning `503`)
+  - `GEMINI_RPM` (optional total per-key 61s RPM cap across all models; on Free Tier, also caps Flash/Lite RPM when lower unless `GEMINI_FLASH_RPM`/`GEMINI_LITE_RPM` or `GEMINI_TIER=paid` is explicitly set)
+- **Other limits & keys:** `ZENO_RATE_PER_MIN` (default `20`), `ZENO_MAX_UPLOAD_MB` (default `25`), `GEMINI_MODELS` (model order, default `gemini-3.5-flash` full Flash first), `GEMINI_API_KEY_1..4` (extra project keys).
 
 ## Keep the prompt in sync
 `service/prompt.py` is a copy of the prompt in `scripts/align_engine/gemini_transcriber.py` (Railway only sees this folder). After changing either, run `python service/check_prompt_sync.py`.

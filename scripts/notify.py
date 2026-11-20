@@ -311,7 +311,7 @@ def show_desktop_popup(
                 folder=Path(folder),
                 video_path=video_path,
                 files=files or (),
-                badge="VIDEO READY",
+                badge="Video ready",
                 duration_sec=duration_sec,
                 wait=wait,
             ):

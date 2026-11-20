@@ -36,6 +36,7 @@ TOP_FILES = (
     "CLAUDE.md",
     "AGENTS.md",
     "VERSION",
+    "RELEASE_NOTES.txt",
     "requirements.txt",
     "install.command",
     "install.bat",
@@ -105,6 +106,17 @@ SKIP_SUFFIXES = (".pyc", ".pyo", ".pyd", ".so", ".dylib", ".db", ".db-wal", ".db
 def read_version() -> str:
     vf = ROOT / "VERSION"
     return vf.read_text(encoding="utf-8").strip() if vf.is_file() else "1.0.0"
+
+
+def read_release_notes() -> str:
+    nf = ROOT / "RELEASE_NOTES.txt"
+    return nf.read_text(encoding="utf-8", errors="replace").strip() if nf.is_file() else ""
+
+
+def write_release_notes(notes: str) -> None:
+    clean = (notes or "").strip()
+    if clean:
+        (ROOT / "RELEASE_NOTES.txt").write_text(f"{clean}\n", encoding="utf-8")
 
 
 def bump_semver(ver: str, part: str = "patch") -> str:
@@ -191,6 +203,7 @@ OBSOLETE_PATHS: Tuple[str, ...] = (
     # Deleted 1.x scripts
     "scripts/ai_director.py",
     "scripts/zeno_mcp.py",
+    "scripts/compact_run.py",
     "scripts/direct_mode.py",
     "scripts/sol_direct.py",
     "scripts/request_budget.py",
@@ -413,8 +426,16 @@ def main() -> int:
     else:
         target_ver = bump_semver(cur_ver, args.bump)
 
+    notes_file = ROOT / "RELEASE_NOTES.txt"
+    prev_notes_bytes = notes_file.read_bytes() if notes_file.is_file() else None
+    provided_notes = args.notes.strip()
+    wrote_notes = False
+
     if target_ver != cur_ver and not args.dry_run:
         write_version(target_ver)
+    if provided_notes and not args.dry_run:
+        write_release_notes(provided_notes)
+        wrote_notes = True
 
     blob, file_count, sha256 = build_bundle_bytes(version=target_ver, clear_work_projects=args.clear_work)
     short_sha = git_short_sha() or sha256[:7]
@@ -430,7 +451,7 @@ def main() -> int:
         print(f"  [Release] Dry-run saved to: {out_zip}")
         return 0
 
-    notes = args.notes.strip() or f"Zeno v{target_ver} cloud update"
+    notes = provided_notes or read_release_notes() or f"Zeno v{target_ver} cloud update"
     try:
         res = publish_to_cloud(
             version=target_ver,
@@ -445,6 +466,11 @@ def main() -> int:
     except Exception:
         if target_ver != cur_ver:
             write_version(cur_ver)
+        if wrote_notes:
+            if prev_notes_bytes is not None:
+                notes_file.write_bytes(prev_notes_bytes)
+            elif notes_file.is_file():
+                notes_file.unlink()
         raise
     rel = res.get("release") or {}
     print(f"  [Release] ✓ Published Zeno v{rel.get('version')} to Zeno Cloud! All client apps will receive it automatically.")

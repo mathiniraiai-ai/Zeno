@@ -223,18 +223,53 @@ def _ensure_16k_wav(audio_path: str | Path, work_dir: Optional[str | Path] = Non
 
 
 def _parse_script_path_to_lines(script_path: str | Path) -> List[str]:
-    """Read a script file and strip line IDs, speaker prefixes, and stage directions."""
+    """Read a script file into clean spoken-only reference lines (preserving speaker prefixes, stripping URLs/bios/stage notes)."""
     sp = Path(script_path)
     if not sp.is_file():
         return parse_target_script(str(script_path))
+    try:
+        import sys as _sys
+
+        _scripts_dir = str(Path(__file__).resolve().parent.parent)
+        if _scripts_dir not in _sys.path:
+            _sys.path.insert(0, _scripts_dir)
+        from prepare import parse_script_file as _prep_parse_script
+
+        _, parsed = _prep_parse_script(sp)
+        if parsed:
+            has_speakers = any(str(ln.get("speaker") or "").strip() for ln in parsed if not ln.get("beat"))
+            out: List[str] = []
+            seen: set[str] = set()
+            for ln in parsed:
+                if ln.get("beat"):
+                    continue
+                txt = str(ln.get("text") or "").strip()
+                if not txt or re.match(r"^(?:https?://|//)", txt, re.I):
+                    continue
+                spk = str(ln.get("speaker") or "").split("--")[0].strip()
+                if has_speakers and not spk:
+                    continue
+                entry = f"{spk}: {txt}" if spk else txt
+                k = entry.lower()
+                if k not in seen:
+                    seen.add(k)
+                    out.append(entry)
+            if out:
+                return out
+    except Exception:
+        pass
+
     raw_text = sp.read_text(encoding="utf-8", errors="ignore")
     clean_lines: List[str] = []
+    seen_fb: set[str] = set()
     for raw_line in raw_text.splitlines():
         s = raw_line.strip()
-        if not s or s.startswith(("#", "//", "---", "--")):
+        if not s or s.startswith(("#", "//", "---", "--", "*")):
+            continue
+        if re.match(r"^https?://", s, re.I):
             continue
         if re.match(
-            r"^(?:Concept|Visual)\s+(?:Reference|Brief)|^Characters?\s*:?$|^Scene\s+\d+|^\[?\s*Visual\s*:",
+            r"^(?:Reference|First\s+Frames|Concept|Visual|Scenes?\s+Breakdown)\b|^Characters?\s*:?$|^Scene\s+\d+|^\[?\s*Visual\s*:",
             s,
             re.I,
         ):
@@ -244,11 +279,10 @@ def _parse_script_path_to_lines(script_path: str | Path) -> List[str]:
         s = re.sub(r"^L?\d+[\.\)]?\s*(?::\s*)?", "", s).strip()
         if re.match(r"^(?:(?:beat|action)\s*:\s*.+|\(.+\)|\[.+\]|\*.+\*)$", s, re.I):
             continue
-        s = re.sub(r"^[A-Za-z0-9_ ]{1,22}\s+says:\s*", "", s, flags=re.I)
-        s = re.sub(r"^[A-Za-z][A-Za-z0-9_ ]{0,22}?(?:\s*\([^)]*\))?\s*:\s*", "", s)
         s = re.sub(r"\s*\[(WRONG|RIGHT)\]\s*$", "", s, flags=re.I)
         s = re.sub(r"\s*\[[^\]]*\]\s*", " ", s).strip()
-        if s:
+        if s and s.lower() not in seen_fb:
+            seen_fb.add(s.lower())
             clean_lines.append(s)
     return clean_lines
 

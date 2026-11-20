@@ -111,15 +111,25 @@ def _packet_path(proj_dir: Path) -> Path:
     return editing
 
 
-def _maybe_auto_update() -> None:
-    if os.environ.get("ZENO_NO_AUTO_UPDATE", "").strip() == "1":
-        return
+def _prune_pending_ota_cleanup() -> None:
+    """Finish post-update cleanup if an older app shell extracted an OTA manifest or left 1.x bloat behind."""
     try:
-        import auto_updater
+        import clean
 
-        auto_updater.ensure_latest_update(min_interval_hours=12.0, quiet=True)
+        clean.prune_pending_ota_cleanup(root=ROOT)
     except Exception:
         pass
+
+
+def _maybe_auto_update() -> None:
+    if os.environ.get("ZENO_NO_AUTO_UPDATE", "").strip() != "1":
+        try:
+            import auto_updater
+
+            auto_updater.ensure_latest_update(min_interval_hours=12.0, quiet=True)
+        except Exception:
+            pass
+    _prune_pending_ota_cleanup()
 
 
 def _archive_call(fn_name: str, *args: Any, **kwargs: Any) -> Any:

@@ -20,8 +20,9 @@ import sys
 import threading
 import time
 import wave
+from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .guardian import guardian_engine
 
@@ -177,14 +178,29 @@ def build_transcribe_prompt(
     target_script_lines: Optional[List[str]] = None,
     language_hint: str = "auto",
 ) -> str:
-    """Build the verbatim multilingual transcription prompt with bilingual code-switching rules."""
+    """Build the verbatim multilingual transcription prompt with bilingual code-switching and anti-echo rules."""
     script_context = ""
     if target_script_lines:
-        clean_lines = [str(x).strip() for x in target_script_lines if str(x).strip()][:40]
+        clean_lines: List[str] = []
+        seen_lines: set[str] = set()
+        for raw_x in target_script_lines:
+            s_line = str(raw_x).strip()
+            if not s_line:
+                continue
+            key_l = s_line.lower()
+            if key_l in seen_lines:
+                continue
+            seen_lines.add(key_l)
+            clean_lines.append(s_line)
+            if len(clean_lines) >= 40:
+                break
         if clean_lines:
             joined_script = "\n".join(f"- {line}" for line in clean_lines)
             script_context = (
-                "\n## Target Script Reference (Speaker may have retakes, repeated words, false starts, or variations):\n"
+                "\n## Optional Spelling & Vocabulary Reference (FULL MULTI-SPEAKER SCRIPT — NOT THIS SINGLE CLIP):\n"
+                "WARNING: The list below is the full multi-character video script. THIS audio clip usually contains ONLY ONE "
+                "speaker or ONE scene — many lines below belong to OTHER speakers in OTHER video clips and are NOT in this audio. "
+                "Use this list ONLY for spelling proper nouns, brand names, and words you genuinely hear spoken aloud.\n"
                 f"{joined_script}\n"
             )
 
@@ -226,29 +242,28 @@ def build_transcribe_prompt(
             "Never mix two Indic scripts in one clip.\n"
         )
     return f"""You are a precision multilingual speech-to-text transcription engine for video editing.
-Transcribe ONLY the intelligible words actually spoken aloud in this audio clip 100% verbatim.
+Transcribe ONLY the intelligible words actually spoken aloud in THIS audio clip, 100% verbatim.
 {lang_note}{script_context}
 Rules:
-1. Include ALL spoken words verbatim in exact chronological order, including retakes, repeated words, stutters, false starts, and restarted phrases (e.g. "Almost... Almost", "I want... I want to go", "ನಾನು ನಾನು"). NEVER deduplicate, clean up, or collapse repeated words, stutters, false starts, or restarted phrases even when Target Script Reference shows the phrase only once — output EVERY spoken attempt verbatim in chronological order (if a word or phrase is spoken twice, it MUST appear twice in `words`).
-2. NEVER auto-complete a sentence or copy lines from the Target Script Reference if the speaker stops mid-sentence or does not speak it in this clip! Target Script Reference is ONLY a spelling/vocabulary reference for words actually heard in the audio.
-3. ZERO-SPEECH GUARD: If the audio contains zero intelligible human speech (only silence, room tone, SFX, background noise, or music), return `"full_transcript": ""`, `"words": []`, and `"cues": []` — NEVER hallucinate or copy Target Script Reference lines onto silent or non-speech audio!
-4. If the clip ends with unintelligible AI gibberish/babble after the real sentence concludes, DO NOT transcribe the unintelligible gibberish.
+1. TRUE VERBATIM CHRONOLOGICAL ORDER: Include EVERY word actually spoken aloud in this audio, including genuine audible retakes, repeated words, stutters, false starts, and restarted phrases (e.g. "Almost... Almost", "I want... I want to go", "ನಾನು ನಾನು"). NEVER collapse or clean up a genuine audible repeat/stutter just because the reference shows it once — if the speaker audibly says a word or phrase twice in THIS audio, output it twice.
+2. STRICT ANTI-ECHO & SINGLE-CLIP GUARD: NEVER copy, auto-complete, or borrow unspoken lines from the reference script! Especially in teaching / mock-interview / call-and-response scripts where Character A says `Say: "<sentence>"` and Character B repeats `<sentence>` on the next line, those turns are recorded in SEPARATE clips. If THIS audio only speaks a sentence ONCE, transcribe it ONLY ONCE — never emit a second copy from another speaker's script line, and never fabricate neighboring lines or unspoken turns.
+3. ZERO-SPEECH GUARD: If the audio contains zero intelligible human speech (only silence, room tone, SFX, background noise, or music), return `"full_transcript": ""` and `"cues": []` — NEVER hallucinate or copy reference script lines onto silent or non-speech audio!
+4. AI GIBBERISH GUARD: If the clip ends with unintelligible AI gibberish/babble after the real sentence concludes, DO NOT transcribe the unintelligible gibberish.
 5. STRICT BILINGUAL CODE-SWITCHING LAW: Decide language word by word. A spoken English word stays English, in the Latin alphabet (A-Z), even inside a native sentence. A native word stays native, in its own script. Never transliterate English into native script or native words into Latin.
-6. Attach punctuation (.,?!) to the end of the spoken word.
-7. Return ONLY valid JSON with this exact structure:
+6. PUNCTUATION & VALID JSON: Attach sentence punctuation (.,?!) to the end of the spoken word. Avoid unescaped quotation marks inside JSON string values (prefer omitting decorative quotes around quoted speech).
+7. Return ONLY valid JSON with this exact compact structure (do NOT duplicate word arrays inside cues):
 {{
   "detected_language_code": "kn",
   "detected_language_name": "Kannada",
   "full_transcript": "Complete verbatim transcript...",
-  "words": ["word1", "word2", "word3"],
   "cues": [
-    {{"text": "sentence or clause text", "start": 0.0, "end": 2.4, "words": ["word1", "word2"]}}
+    {{"start": 0.0, "end": 2.4, "text": "sentence or clause text"}}
   ]
 }}"""
 
 
 class GeminiRateLimiter:
-    """Thread-safe RPM rate limiter for direct Gemini API requests."""
+    """Thread-safe Free/Paid-tier rate limiter for direct Gemini API requests and Zeno Cloud clip pacing."""
 
     _instance: Optional["GeminiRateLimiter"] = None
     _lock = threading.Lock()
@@ -260,24 +275,172 @@ class GeminiRateLimiter:
                 cls._instance = cls(rpm=rpm)
             return cls._instance
 
-    def __init__(self, rpm: Optional[int] = None):
-        if rpm is None:
-            try:
-                rpm = int(os.getenv("GEMINI_RPM", "30"))
-            except ValueError:
-                rpm = 30
-        self.rpm = max(1, rpm)
-        self.interval = 60.0 / float(self.rpm)
-        self._call_lock = threading.Lock()
-        self._last_call = 0.0
+    @staticmethod
+    def _get_tier() -> str:
+        raw = (os.getenv("GEMINI_TIER") or "free").strip().lower()
+        return "paid" if raw == "paid" else "free"
 
-    def acquire(self) -> None:
+    @staticmethod
+    def _is_lite_model(model: str) -> bool:
+        return "lite" in (model or "").lower()
+
+    @classmethod
+    def _flash_rpm(cls) -> int:
+        default_rpm = 150 if cls._get_tier() == "paid" else 5
+        raw = (os.getenv("GEMINI_FLASH_RPM") or "").strip()
+        if raw:
+            try:
+                return max(1, int(raw))
+            except ValueError:
+                pass
+        return default_rpm
+
+    @classmethod
+    def _lite_rpm(cls) -> int:
+        default_rpm = 600 if cls._get_tier() == "paid" else 15
+        raw = (os.getenv("GEMINI_LITE_RPM") or "").strip()
+        if raw:
+            try:
+                return max(1, int(raw))
+            except ValueError:
+                pass
+        return default_rpm
+
+    @classmethod
+    def _min_gap_sec(cls) -> float:
+        default_gap = 0.5 if cls._get_tier() == "paid" else 3.0
+        raw = (os.getenv("GEMINI_MIN_GAP_SEC") or "").strip()
+        if raw:
+            try:
+                return max(0.0, float(raw))
+            except ValueError:
+                pass
+        return default_gap
+
+    @classmethod
+    def _cloud_clip_gap_sec(cls) -> float:
+        default_gap = 0.25 if cls._get_tier() == "paid" else 3.0
+        raw = (os.getenv("ZENO_CLOUD_CLIP_GAP_SEC") or "").strip()
+        if raw:
+            try:
+                return max(0.0, float(raw))
+            except ValueError:
+                pass
+        return default_gap
+
+    @classmethod
+    def _tpm_cap(cls) -> int:
+        default_tpm = 1000000 if cls._get_tier() == "paid" else 240000
+        raw = (os.getenv("GEMINI_TPM") or "").strip()
+        if raw:
+            try:
+                return max(0, int(raw))
+            except ValueError:
+                pass
+        return default_tpm
+
+    def __init__(self, rpm: Optional[int] = None):
+        self._explicit_rpm: Optional[int] = max(1, int(rpm)) if rpm is not None else None
+        self.rpm: int = self._explicit_rpm if self._explicit_rpm is not None else self._flash_rpm()
+        self.interval: float = 60.0 / float(self.rpm)
+        self._call_lock = threading.Lock()
+        self._last_call: float = 0.0
+        self._last_cloud_call: float = 0.0
+        self._last_model_call: Dict[str, float] = {}
+        self._model_windows: Dict[str, deque] = {}
+        self._tpm_windows: Dict[str, deque] = {}
+
+    def rpm_for_model(self, model: str = "") -> int:
+        """Return effective RPM limit for `model` (explicit override, else Lite or Full Flash tier default)."""
+        if self._explicit_rpm is not None:
+            return self._explicit_rpm
+        return self._lite_rpm() if self._is_lite_model(model) else self._flash_rpm()
+
+    def spacing_for_model(self, model: str = "") -> float:
+        """Return smooth inter-request spacing in seconds (`12.5s` for 5 RPM Flash, `4.2s` for 15 RPM Lite)."""
+        rpm_limit = self.rpm_for_model(model)
+        if self._explicit_rpm is not None:
+            return 60.0 / float(rpm_limit)
+        if rpm_limit <= 5:
+            return max(62.5 / float(rpm_limit), 60.0 / float(rpm_limit) + 0.5)
+        if rpm_limit <= 15:
+            return max(63.0 / float(rpm_limit), 60.0 / float(rpm_limit) + 0.2)
+        return 60.0 / float(rpm_limit)
+
+    def acquire(
+        self,
+        model: str = "",
+        is_cloud: bool = False,
+        estimated_tokens: int = 0,
+    ) -> float:
+        """Pace direct Gemini calls (per-model 60s RPM/TPM window + global gap) or Zeno Cloud clip uploads."""
         with self._call_lock:
             now = time.time()
-            wait = self.interval - (now - self._last_call)
-            if wait > 0:
+            if is_cloud:
+                gap = self._cloud_clip_gap_sec()
+                wait = 0.0
+                if gap > 0.0 and self._last_cloud_call > 0.0:
+                    wait = gap - (now - self._last_cloud_call)
+                    if wait > 0.0:
+                        if wait >= 1.0:
+                            print(
+                                f"[buffer] spacing next clip by {wait:.1f}s (Gemini Free Tier queue buffer)",
+                                file=sys.stderr,
+                            )
+                        time.sleep(wait)
+                self._last_cloud_call = time.time()
+                return max(0.0, wait)
+
+            model_key = (model or "default").strip().lower()
+            rpm_limit = self.rpm_for_model(model)
+            smooth_interval = self.spacing_for_model(model)
+            global_gap = 0.0 if self._explicit_rpm is not None else self._min_gap_sec()
+            tpm_cap = self._tpm_cap()
+
+            win = self._model_windows.setdefault(model_key, deque())
+            while win and now - win[0] >= 60.0:
+                win.popleft()
+
+            tpm_win = self._tpm_windows.setdefault(model_key, deque())
+            while tpm_win and now - tpm_win[0][0] >= 60.0:
+                tpm_win.popleft()
+
+            wait = 0.0
+            if global_gap > 0.0 and self._last_call > 0.0:
+                wait = max(wait, global_gap - (now - self._last_call))
+
+            last_m = self._last_model_call.get(model_key, 0.0)
+            if last_m > 0.0:
+                wait = max(wait, smooth_interval - (now - last_m))
+
+            if len(win) >= rpm_limit and win:
+                wait = max(wait, 60.0 - (now - win[0]) + 0.5)
+
+            if tpm_cap > 0 and estimated_tokens > 0 and tpm_win:
+                used_tokens = sum(tok for _, tok in tpm_win)
+                if used_tokens + estimated_tokens > tpm_cap:
+                    wait = max(wait, 60.0 - (now - tpm_win[0][0]) + 0.5)
+
+            if wait > 0.0:
+                if wait >= 1.0:
+                    print(
+                        f"[rate-limit] pacing {model or 'gemini'} by {wait:.1f}s "
+                        f"({rpm_limit} RPM, tier={self._get_tier()})",
+                        file=sys.stderr,
+                    )
                 time.sleep(wait)
-            self._last_call = time.time()
+
+            ts = time.time()
+            while win and ts - win[0] >= 60.0:
+                win.popleft()
+            win.append(ts)
+            if tpm_cap > 0 and estimated_tokens > 0:
+                while tpm_win and ts - tpm_win[0][0] >= 60.0:
+                    tpm_win.popleft()
+                tpm_win.append((ts, int(estimated_tokens)))
+            self._last_call = ts
+            self._last_model_call[model_key] = ts
+            return max(0.0, wait)
 
 
 class GeminiTranscriber:
@@ -287,15 +450,16 @@ class GeminiTranscriber:
         _load_env_files()
         self._explicit_keys = api_keys is not None
         self.api_keys = list(api_keys) if api_keys is not None else get_gemini_api_keys()
-        primary = os.getenv("GEMINI_FORCE_MODEL", "").strip() or "gemini-3.1-flash-lite"
+        primary = os.getenv("GEMINI_FORCE_MODEL", "").strip() or "gemini-3.5-flash"
         default_models = [
-            "gemini-3.1-flash-lite",
-            "gemini-3.5-flash-lite",
-            "gemini-3.1-flash-lite-preview",
-            "gemini-3-flash-preview",
             "gemini-3.5-flash",
-            "gemini-flash-lite-latest",
+            "gemini-3.6-flash",
+            "gemini-3-flash-preview",
+            "gemini-2.5-flash",
+            "gemini-3.8-flash",
             "gemini-flash-latest",
+            "gemini-3.1-flash-lite",
+            "gemini-flash-lite-latest",
         ]
         self.models = [primary] + [m for m in default_models if m != primary]
         self.cloud_url = (
@@ -311,6 +475,95 @@ class GeminiTranscriber:
         self._model_idx = 0
         self._client = None
         self._client_key: Optional[str] = None
+        self._cooldowns: Dict[Tuple[int, str], float] = {}
+        self._cooldown_lock = threading.Lock()
+
+    @staticmethod
+    def _parse_retry_after(exc: Any) -> Optional[float]:
+        """Extract server-requested retry delay (in seconds) from Gemini error text or headers."""
+        msg = str(exc or "")
+        m = re.search(r"retry\s+in\s+(?:(\d+)h)?(?:(\d+)m)?([\d.]+)s", msg, re.I)
+        if m:
+            hrs = int(m.group(1) or 0)
+            mins = int(m.group(2) or 0)
+            secs = float(m.group(3) or 0)
+            return max(1.0, hrs * 3600.0 + mins * 60.0 + secs)
+        m2 = re.search(r"retryDelay['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)s", msg, re.I)
+        if m2:
+            return max(1.0, float(m2.group(1)))
+        m3 = re.search(r"retry-after['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)", msg, re.I)
+        if m3:
+            return max(1.0, float(m3.group(1)))
+        return None
+
+    @staticmethod
+    def _is_quota_error(exc: Any) -> bool:
+        """Return True when an exception/message indicates HTTP 429 or Gemini quota exhaustion."""
+        low = (
+            f"{type(exc).__name__} {exc}".lower()
+            if isinstance(exc, BaseException)
+            else str(exc or "").lower()
+        )
+        return (
+            "429" in low
+            or "resource_exhausted" in low
+            or "quota" in low
+            or "rate limit" in low
+            or "too many requests" in low
+        )
+
+    @staticmethod
+    def _is_daily_quota(exc: Any) -> bool:
+        """Return True ONLY for explicit daily (RPD) quota exhaustion — never per-minute FreeTier RPM 429s."""
+        low = (
+            f"{type(exc).__name__} {exc}".lower()
+            if isinstance(exc, BaseException)
+            else str(exc or "").lower()
+        )
+        if not ("429" in low or "resource_exhausted" in low or "quota" in low):
+            return False
+        return (
+            "per day" in low
+            or "perday" in low
+            or "requestsperday" in low
+            or "daily" in low
+            or bool(re.search(r"(?<![a-z])rpd(?![a-z])", low))
+        )
+
+    def _cooldown_until(self, key_idx: int, model: str) -> float:
+        with self._cooldown_lock:
+            return float(self._cooldowns.get((key_idx, model), 0.0))
+
+    def _mark_ok(self, key_idx: int, model: str) -> None:
+        with self._cooldown_lock:
+            self._cooldowns.pop((key_idx, model), None)
+
+    def _mark_failure(self, key_idx: int, model: str, exc: BaseException) -> float:
+        """Record cooldown for a failed `(key_idx, model)` pair without over-banning per-minute RPM 429s."""
+        msg = f"{type(exc).__name__} {exc}"
+        low = msg.lower()
+        parsed_delay = self._parse_retry_after(exc)
+        if "404" in msg or "not_found" in low or "no longer available" in low or "403" in msg or "401" in msg:
+            ttl = 3600.0
+        elif self._is_daily_quota(exc):
+            ttl = max(300.0, min(1800.0, parsed_delay or 600.0))
+        elif "429" in msg or "resource_exhausted" in low or "quota" in low:
+            ttl = max(12.0, min(65.0, (parsed_delay + 1.0) if parsed_delay else 20.0))
+        elif (
+            "503" in msg
+            or "unavailable" in low
+            or "504" in msg
+            or "deadline" in low
+            or "timeout" in low
+            or "timed out" in low
+        ):
+            ttl = max(10.0, min(30.0, parsed_delay or 15.0))
+        else:
+            ttl = 15.0
+        until = time.time() + ttl
+        with self._cooldown_lock:
+            self._cooldowns[(key_idx, model)] = until
+        return ttl
 
     def _refresh_credentials_if_empty(self) -> None:
         if self.api_keys or (self.cloud_url and self.cloud_token):
@@ -448,6 +701,9 @@ class GeminiTranscriber:
     ) -> Dict[str, Any]:
         import httpx
 
+        # Calm inter-clip buffer before posting uncached WAVs (local cache hits return before here)
+        self.rate_limiter.acquire(is_cloud=True)
+
         url = self.cloud_url.rstrip("/") + "/v1/transcribe"
         headers = {"Authorization": f"Bearer {self.cloud_token}"} if self.cloud_token else {}
         headers.update(zeno_client_headers())
@@ -457,16 +713,43 @@ class GeminiTranscriber:
         }
         audio_bytes = _pad_short_wav(Path(wav_path).read_bytes())
         resp = None
+        last_net_exc: Optional[BaseException] = None
+        transient_net_errors = (
+            httpx.TimeoutException,
+            httpx.ConnectError,
+            httpx.RemoteProtocolError,
+        )
         max_attempts = 8
+        retry_cap = 65.0
         with httpx.Client(timeout=240.0) as http:
             for attempt in range(max_attempts):
-                resp = http.post(
-                    url,
-                    headers=headers,
-                    data=form_data,
-                    files={"file": (os.path.basename(wav_path), audio_bytes, "audio/wav")},
-                )
-                if resp.status_code not in (429, 502, 503):
+                try:
+                    resp = http.post(
+                        url,
+                        headers=headers,
+                        data=form_data,
+                        files={"file": (os.path.basename(wav_path), audio_bytes, "audio/wav")},
+                    )
+                    last_net_exc = None
+                except transient_net_errors as net_exc:
+                    resp = None
+                    last_net_exc = net_exc
+                    if attempt >= max_attempts - 1:
+                        break
+                    base_wait = min(retry_cap, 4.0 * (2.0 ** attempt))
+                    wait = min(retry_cap, max(1.0, random.uniform(max(1.0, base_wait * 0.5), base_wait)))
+                    print(
+                        f"[transcribe] transient network error ({type(net_exc).__name__}); "
+                        f"waiting {wait:.1f}s (attempt {attempt + 1}/{max_attempts})",
+                        file=sys.stderr,
+                    )
+                    time.sleep(wait)
+                    continue
+
+                if resp.status_code not in (429, 502, 503, 504):
+                    break
+                resp_text = resp.text if isinstance(getattr(resp, "text", None), str) else ""
+                if resp.status_code == 429 and self._is_daily_quota(resp_text):
                     break
                 if attempt >= max_attempts - 1:
                     break
@@ -475,15 +758,21 @@ class GeminiTranscriber:
                     hdr_wait = float(retry_hdr) if retry_hdr else 0.0
                 except Exception:
                     hdr_wait = 0.0
-                base_wait = (5.0 if resp.status_code == 502 else 8.0) * (1.6 ** attempt)
-                jitter_wait = random.uniform(1.0, min(45.0, base_wait))
-                wait = min(45.0, max(1.0, hdr_wait, jitter_wait))
+                if hdr_wait <= 0.0 and resp.status_code == 429 and resp_text:
+                    parsed_body_wait = self._parse_retry_after(resp_text)
+                    if parsed_body_wait:
+                        hdr_wait = parsed_body_wait
+                base_wait = (5.0 if resp.status_code in (502, 504) else 8.0) * (1.6 ** attempt)
+                jitter_wait = random.uniform(1.0, min(retry_cap, base_wait))
+                wait = min(retry_cap, max(1.0, hdr_wait, jitter_wait))
                 print(
                     f"[transcribe] server busy ({resp.status_code}); waiting {wait:.1f}s (attempt {attempt + 1}/{max_attempts})",
                     file=sys.stderr,
                 )
                 time.sleep(wait)
         if resp is None:
+            if last_net_exc is not None:
+                raise last_net_exc
             raise RuntimeError("No HTTP response from transcription service")
         if int(getattr(resp, "status_code", 0) or 0) >= 400:
             detail = ""
@@ -495,9 +784,8 @@ class GeminiTranscriber:
             try:
                 resp.raise_for_status()
             except Exception as exc:
-                if detail:
-                    raise RuntimeError(f"HTTP {resp.status_code}: {detail}") from exc
-                raise
+                msg = f"HTTP {resp.status_code}: {detail}" if detail else f"HTTP {resp.status_code}: {exc}"
+                raise RuntimeError(msg) from exc
         data = resp.json()
         if data.get("warning"):
             print(f"[transcribe] WARNING from service: {data['warning']}", file=sys.stderr)
@@ -561,13 +849,14 @@ class GeminiTranscriber:
                 last_error = f"{type(exc).__name__}: {exc}"
                 logger.warning("Cloud transcription failed: %s", exc)
                 if not self.api_keys:
+                    fail_status = "quota_exceeded" if self._is_quota_error(exc) else "cloud_failed"
                     print(
                         f"[transcribe] ERROR: transcription service failed ({last_error}); "
                         "refusing to fabricate forced-aligned cuts. Check Zeno Cloud session or quota.",
                         file=sys.stderr,
                     )
                     return {
-                        "status": "cloud_failed",
+                        "status": fail_status,
                         "model_used": "cloud_error",
                         "error": last_error,
                         "language": language_hint,
@@ -582,8 +871,9 @@ class GeminiTranscriber:
                 )
 
         if not self.api_keys:
+            fail_status = "quota_exceeded" if self._is_quota_error(last_error) else "cloud_failed"
             return {
-                "status": "cloud_failed",
+                "status": fail_status,
                 "model_used": "cloud_error",
                 "error": last_error or "No Gemini API keys configured",
                 "language": language_hint,
@@ -594,52 +884,132 @@ class GeminiTranscriber:
 
         audio_bytes = wav_p.read_bytes()
         prompt = build_transcribe_prompt(target_script_lines, language_hint=language_hint)
+        est_tokens = int(max(0.0, float(dur_sec or 0.0)) * 32) + max(400, len(prompt) // 3)
 
-        max_attempts = max(4, len(self.api_keys) * len(self.models))
-        last_empty_res: Optional[Dict[str, Any]] = None
-        for attempt in range(max_attempts):
-            try:
-                from google.genai import types
+        n_keys = len(self.api_keys)
+        saw_quota = self._is_quota_error(last_error) if last_error else False
+        waited_for_cooldown = False
 
-                self.rate_limiter.acquire()
-                client = self._get_client()
-                model_name = self.models[self._model_idx % len(self.models)]
-                audio_part = types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")
-                resp = client.models.generate_content(
-                    model=model_name,
-                    contents=[audio_part, prompt],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        temperature=0.1,
-                        thinking_config=types.ThinkingConfig(thinking_budget=0),
-                    ),
-                )
-                data = self._parse_json_lenient(resp.text or "{}")
-                res = self._heal_result(data, language_hint, model_used=model_name, clip_duration_sec=dur_sec)
-                if res.get("words"):
-                    self._save_cache(cache_file, wav_p, res)
-                    return res
-                last_empty_res = res
-                self._rotate()
-            except Exception as exc:
-                err_str = str(exc)
-                last_error = f"{type(exc).__name__}: {err_str[:250]}"
-                self._rotate()
-                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "503" in err_str or "UNAVAILABLE" in err_str:
-                    backoff = min(30.0, (2.0 ** min(attempt, 4)) + random.uniform(0.5, 2.5))
-                    time.sleep(backoff)
+        while True:
+            now = time.time()
+            ready_pairs: List[Tuple[int, str]] = []
+            soonest_expiry: Optional[float] = None
+            soonest_pair: Optional[Tuple[int, str]] = None
+
+            start_k = self._key_idx % n_keys
+            for model_name in self.models:
+                for k_off in range(n_keys):
+                    k_idx = (start_k + k_off) % n_keys
+                    cd_until = self._cooldown_until(k_idx, model_name)
+                    if cd_until <= now:
+                        ready_pairs.append((k_idx, model_name))
+                    elif soonest_expiry is None or cd_until < soonest_expiry:
+                        soonest_expiry = cd_until
+                        soonest_pair = (k_idx, model_name)
+
+            if not ready_pairs:
+                wait_sec = max(0.0, (soonest_expiry or now) - now)
+                if not waited_for_cooldown and soonest_pair is not None and wait_sec <= 20.0:
+                    waited_for_cooldown = True
+                    if wait_sec > 0.0:
+                        print(
+                            f"[transcribe] all Gemini key/model pairs on cooldown; "
+                            f"waiting {wait_sec:.1f}s for {soonest_pair[1]}...",
+                            file=sys.stderr,
+                        )
+                        time.sleep(wait_sec + 0.1)
+                    now2 = time.time()
+                    for model_name in self.models:
+                        for k_off in range(n_keys):
+                            k_idx = (start_k + k_off) % n_keys
+                            if self._cooldown_until(k_idx, model_name) <= now2:
+                                ready_pairs.append((k_idx, model_name))
+                    if soonest_pair not in ready_pairs:
+                        ready_pairs.insert(0, soonest_pair)
                 else:
-                    time.sleep(0.2)
+                    msg = (
+                        last_error
+                        or f"All Gemini key/model pairs on cooldown (soonest ready in {wait_sec:.0f}s)"
+                    )
+                    print(
+                        f"[transcribe] QUOTA COOLDOWN: all Gemini key/model pairs busy "
+                        f"(soonest expiry in {wait_sec:.0f}s > 20s); stopping without hammering.",
+                        file=sys.stderr,
+                    )
+                    return {
+                        "status": "quota_exceeded",
+                        "model_used": "quota_cooldown",
+                        "error": msg,
+                        "language": language_hint,
+                        "full_transcript": "",
+                        "words": [],
+                        "cues": [],
+                    }
 
-        if last_empty_res is not None and not last_error:
-            return last_empty_res
+            attempted_any = False
+            for k_idx, model_name in ready_pairs:
+                if not waited_for_cooldown and self._cooldown_until(k_idx, model_name) > time.time():
+                    continue
+                attempted_any = True
+                try:
+                    from google.genai import types
+
+                    self._key_idx = k_idx
+                    self.rate_limiter.acquire(model=model_name, estimated_tokens=est_tokens)
+                    client = self._get_client()
+                    audio_part = types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")
+                    try:
+                        resp = client.models.generate_content(
+                            model=model_name,
+                            contents=[audio_part, prompt],
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                temperature=0.0,
+                                thinking_config=types.ThinkingConfig(thinking_budget=0),
+                            ),
+                        )
+                    except Exception as tb_exc:
+                        if "400" in str(tb_exc) or "INVALID_ARGUMENT" in str(tb_exc):
+                            self.rate_limiter.acquire(model=model_name, estimated_tokens=est_tokens)
+                            resp = client.models.generate_content(
+                                model=model_name,
+                                contents=[audio_part, prompt],
+                                config=types.GenerateContentConfig(
+                                    response_mime_type="application/json",
+                                    temperature=0.0,
+                                ),
+                            )
+                        else:
+                            raise
+                    raw_text = (resp.text or "").strip()
+                    if not raw_text:
+                        raise ValueError("Empty response text from Gemini")
+                    data = self._parse_json_lenient(raw_text)
+                    self._mark_ok(k_idx, model_name)
+                    self._key_idx = (k_idx + 1) % n_keys
+                    res = self._heal_result(data, language_hint, model_used=model_name, clip_duration_sec=dur_sec)
+                    if res.get("words"):
+                        self._save_cache(cache_file, wav_p, res)
+                    return res
+                except Exception as exc:
+                    err_str = str(exc)
+                    last_error = f"{type(exc).__name__}: {err_str[:250]}"
+                    if self._is_quota_error(exc):
+                        saw_quota = True
+                    self._mark_failure(k_idx, model_name, exc)
+                    self._key_idx = (k_idx + 1) % n_keys
+
+            if waited_for_cooldown or not attempted_any:
+                break
+
+        fail_status = "quota_exceeded" if saw_quota else "cloud_failed"
         print(
             f"[transcribe] ERROR: Gemini failed on every attempt ({last_error}); "
             "refusing to fabricate forced-aligned cuts.",
             file=sys.stderr,
         )
         return {
-            "status": "cloud_failed",
+            "status": fail_status,
             "model_used": "cloud_error",
             "error": last_error or "Gemini transcription failed on every attempt",
             "language": language_hint,

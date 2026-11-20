@@ -34,7 +34,7 @@ TEMPLATE_HTML = UI_DIR / "zeno_toast.html"
 ICON_PNG = UI_DIR / "zeno_icon.png"
 
 TOAST_WIDTH = 424
-TOAST_HEIGHT = 244
+TOAST_HEIGHT = 156
 
 
 def _default_output_root() -> Path:
@@ -54,63 +54,61 @@ def _pretty_path(p: Path) -> str:
         return str(p)
 
 
-def _derive_chips(files: Sequence[str], video_path: Optional[Path]) -> List[tuple[str, bool]]:
+def _deliverable_summary(files: Sequence[str], video_path: Optional[Path]) -> str:
     names = [str(f).lower() for f in (files or [])]
     if video_path is not None:
         names.append(video_path.name.lower())
-    chips: List[tuple[str, bool]] = []
+    parts: List[str] = []
     if any(n.startswith("reel_") and n.endswith(".mp4") for n in names):
-        chips.append(("9:16 REEL", True))
+        parts.append("9:16 reel")
     elif any(n.endswith(".mp4") for n in names):
-        chips.append(("MP4", True))
+        parts.append("MP4")
     if any(n.startswith("sq_") and n.endswith(".mp4") for n in names):
-        chips.append(("1:1 SQUARE", True))
+        parts.append("1:1 square")
     if any(n.endswith(".prproj") for n in names):
-        chips.append(("PREMIERE .PRPROJ", False))
+        parts.append("Premiere project")
     if any(n == "review_sheet.jpg" for n in names):
-        chips.append(("QC SHEET", False))
-    if not chips:
-        chips.append(("DELIVERED", True))
-    return chips[:4]
+        parts.append("review sheet")
+    return " · ".join(parts)
 
 
 def build_toast_html(
     *,
     title: str,
-    folder: Path,
+    folder: Optional[Path] = None,
     video_path: Optional[Path] = None,
     files: Sequence[str] = (),
-    badge: str = "VIDEO READY",
-    duration_sec: float = 9.0,
+    badge: str = "Video ready",
+    duration_sec: float = 8.0,
+    notes: str = "",
 ) -> str:
-    """Render `assets/ui/zeno_toast.html` with escaped job details and deliverable chips."""
+    """Render `assets/ui/zeno_toast.html`. Delivery toasts show where the files are saved
+    (no buttons); update toasts (`notes` set, no folder) show the release summary instead.
+    """
     tpl = TEMPLATE_HTML.read_text(encoding="utf-8")
-    raw_folder = str(folder or "").strip() if folder is not None else ""
-    dest = Path(raw_folder).expanduser() if raw_folder else _default_output_root()
-    pretty = _pretty_path(dest)
-    chips = _derive_chips(files, video_path)
-    chips_html = "".join(
-        f'<span class="chip{" accent" if is_accent else ""}">{html.escape(label)}</span>'
-        for label, is_accent in chips
-    )
-    play_btn = (
-        '<button class="btn btn-secondary" id="btnPlay">Play Reel</button>'
-        if (video_path is not None and video_path.is_file())
-        else ""
-    )
+    details = ""
+    display_title = str(title or "").strip() or "Zeno"
+    if notes:
+        details = f'<div class="row note">{html.escape(str(notes).strip())}</div>'
+    else:
+        raw_folder = str(folder or "").strip() if folder is not None else ""
+        dest = Path(raw_folder).expanduser() if raw_folder else _default_output_root()
+        display_title = str(title or "").strip() or dest.name or "Zeno"
+        details = (
+            f'<div class="row path" title="{html.escape(str(dest))}"><span class="label">Saved in </span>'
+            f"{html.escape(_pretty_path(dest))}</div>"
+        )
+        summary = _deliverable_summary(files, video_path)
+        if summary:
+            details += f'<div class="row">{html.escape(summary)}</div>'
     dur_ms = max(2500, int(round(float(duration_sec) * 1000)))
-    display_title = str(title or "").strip() or dest.name or "Zeno"
-    replacements = {
-        "__BADGE__": html.escape(str(badge or "VIDEO READY").strip()),
-        "__TITLE__": html.escape(display_title),
-        "__PATH__": html.escape(pretty),
-        "__PATH_RAW__": html.escape(str(dest)),
-        "__CHIPS__": chips_html,
-        "__PLAY_BUTTON__": play_btn,
-        "__DURATION_MS__": str(dur_ms),
-    }
     out = tpl
-    for k, v in replacements.items():
+    for k, v in {
+        "__BADGE__": html.escape(str(badge or "Video ready").strip()),
+        "__TITLE__": html.escape(display_title),
+        "__DETAILS__": details,
+        "__DURATION_MS__": str(dur_ms),
+    }.items():
         out = out.replace(k, v)
     return out
 
@@ -133,8 +131,8 @@ function run(argv) {
   const H = Number(cfg.height) || 228;
   const screen = $.NSScreen.mainScreen;
   const vf = screen.visibleFrame;
-  const x = vf.origin.x + vf.size.width - W - 14;
-  const y = vf.origin.y + vf.size.height - H - 14;
+  const x = vf.origin.x + vf.size.width - W - 4;
+  const y = vf.origin.y + vf.size.height - H - 8;
 
   const styleMask = (1 << 0) * 0 | (1 << 7); // NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
   const panel = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(
@@ -187,12 +185,6 @@ function run(argv) {
       'userContentController:didReceiveScriptMessage:': {
         types: ['void', ['id', 'id']],
         implementation: function (ucc, msg) {
-          const act = ObjC.unwrap(msg.body);
-          if (act === 'open-folder') {
-            openTarget(cfg.folder);
-          } else if (act === 'play-video') {
-            openTarget(cfg.video || cfg.folder);
-          }
           finishAndQuit();
         }
       },
@@ -257,85 +249,70 @@ function run(argv) {
 
 _WIN_PS_WPF_TEMPLATE = r"""
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
-$folder = '__FOLDER__'
-$video = '__VIDEO__'
 $title = '__TITLE__'
-$pathText = '__PATH__'
+$line1 = '__LINE1__'
+$line2 = '__LINE2__'
 $badge = '__BADGE__'
-$chipsText = '__CHIPS__'
 $durSec = __DUR_SEC__
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Width="410" SizeToContent="Height" WindowStyle="None" AllowsTransparency="True"
+        Width="390" SizeToContent="Height" WindowStyle="None" AllowsTransparency="True"
         Background="Transparent" Topmost="True" ShowInTaskbar="False" ShowActivated="False">
-  <Border Margin="10" CornerRadius="15" Background="#F510110F" BorderBrush="#61BACF65" BorderThickness="1">
-    <Border.Effect>
-      <DropShadowEffect Color="Black" BlurRadius="26" ShadowDepth="8" Opacity="0.72"/>
-    </Border.Effect>
-    <StackPanel Margin="16,14,16,14">
-      <DockPanel Margin="0,0,0,10">
-        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-          <Border Width="26" Height="26" CornerRadius="7" Background="#080907" BorderBrush="#4DBACF65" BorderThickness="1" Margin="0,0,8,0">
-            <Border Width="11" Height="11" CornerRadius="3" Background="#BACF65" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-          </Border>
-          <TextBlock Text="Zeno" Foreground="#F1F5F9" FontSize="13.5" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,8,0"/>
-          <Border CornerRadius="10" Background="#21BACF65" BorderBrush="#61BACF65" BorderThickness="1" Padding="8,2">
-            <TextBlock Name="BadgeTxt" Foreground="#BACF65" FontFamily="Consolas" FontSize="9.5" FontWeight="SemiBold"/>
-          </Border>
-        </StackPanel>
-        <Button Name="CloseBtn" Content="✕" DockPanel.Dock="Right" HorizontalAlignment="Right" Width="24" Height="24"
-                Background="Transparent" BorderThickness="0" Foreground="#64748B" FontSize="12" Cursor="Hand"/>
-      </DockPanel>
-      <TextBlock Name="TitleTxt" Foreground="#F1F5F9" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,4"/>
-      <TextBlock Name="PathTxt" Foreground="#94A3B8" FontFamily="Consolas" FontSize="11" TextTrimming="CharacterEllipsis" Margin="0,0,0,8"/>
-      <TextBlock Name="ChipsTxt" Foreground="#BACF65" FontFamily="Consolas" FontSize="10" Margin="0,0,0,12"/>
-      <Grid>
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="*"/>
-          <ColumnDefinition Width="8"/>
-          <ColumnDefinition Width="Auto"/>
-        </Grid.ColumnDefinitions>
-        <Button Name="OpenBtn" Grid.Column="0" Content="Open Folder" Height="32" Background="#BACF65" Foreground="#0A0A0A"
-                FontWeight="SemiBold" FontSize="12" BorderThickness="0" Cursor="Hand"/>
-        <Button Name="PlayBtn" Grid.Column="2" Content="Play Reel" Height="32" Padding="14,0" Background="#111111" Foreground="#F1F5F9"
-                FontWeight="SemiBold" FontSize="12" BorderBrush="#262626" BorderThickness="1" Cursor="Hand"/>
-      </Grid>
-    </StackPanel>
+  <Border Name="Card" Margin="8" CornerRadius="12" Background="#0A0A0A" BorderBrush="#1F1F1F" BorderThickness="1" Padding="14">
+    <Border.RenderTransform><TranslateTransform x:Name="Slide" X="420"/></Border.RenderTransform>
+    <DockPanel>
+      <Border DockPanel.Dock="Left" Width="32" Height="32" CornerRadius="8" Background="#000000" BorderBrush="#1F1F1F" BorderThickness="1" VerticalAlignment="Top" Margin="0,0,12,0">
+        <Border Width="12" Height="12" CornerRadius="3" Background="#BACF65" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+      </Border>
+      <StackPanel>
+        <TextBlock Name="BadgeTxt" Foreground="#BACF65" FontFamily="Consolas" FontSize="10.5" FontWeight="SemiBold" Margin="0,0,0,3"/>
+        <TextBlock Name="TitleTxt" Foreground="#F1F5F9" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,6"/>
+        <TextBlock Name="Line1Txt" Foreground="#94A3B8" FontSize="11.5" TextWrapping="Wrap" Margin="0,0,0,3"/>
+        <TextBlock Name="Line2Txt" Foreground="#94A3B8" FontSize="11.5" TextWrapping="Wrap"/>
+      </StackPanel>
+    </DockPanel>
   </Border>
 </Window>
 "@
 
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $win = [Windows.Markup.XamlReader]::Load($reader)
-$win.FindName('BadgeTxt').Text = $badge
+$win.FindName('BadgeTxt').Text = $badge.ToUpper()
 $win.FindName('TitleTxt').Text = $title
-$win.FindName('PathTxt').Text = $pathText
-$win.FindName('ChipsTxt').Text = $chipsText
-if (-not $video -or -not (Test-Path $video)) { $win.FindName('PlayBtn').Visibility = 'Collapsed' }
+$win.FindName('Line1Txt').Text = $line1
+if ($line2) { $win.FindName('Line2Txt').Text = $line2 } else { $win.FindName('Line2Txt').Visibility = 'Collapsed' }
 
 $wa = [System.Windows.SystemParameters]::WorkArea
-$win.Left = $wa.Right - $win.Width - 12
-$win.Top = $wa.Top + 14
+$win.Left = $wa.Right - $win.Width - 4
+$win.Top = $wa.Top + 8
 
-$win.FindName('CloseBtn').Add_Click({ $win.Close() })
-$win.FindName('OpenBtn').Add_Click({
-  if (Test-Path $folder) { Start-Process explorer.exe -ArgumentList ('"' + $folder + '"') }
-  $win.Close()
-})
-$win.FindName('PlayBtn').Add_Click({
-  if ($video -and (Test-Path $video)) { Start-Process $video }
-  $win.Close()
-})
+$slide = $win.FindName('Slide')
+function Swipe($from, $to, $ms) {
+  $anim = New-Object System.Windows.Media.Animation.DoubleAnimation($from, $to, [TimeSpan]::FromMilliseconds($ms))
+  $slide.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $anim)
+}
+$win.Add_Loaded({ Swipe 420 0 420 })
+$win.Add_MouseLeftButtonUp({ $script:timer.Stop(); Swipe 0 420 330; Start-Sleep -Milliseconds 340; $win.Close() })
 
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromSeconds($durSec)
-$timer.Add_Tick({ $timer.Stop(); $win.Close() })
+$timer.Add_Tick({ $timer.Stop(); Swipe 0 420 330; Start-Sleep -Milliseconds 340; $win.Close() })
 $timer.Start()
 
 $win.ShowDialog() | Out-Null
 """
+
+
+def _play_chime() -> None:
+    """Play the bundled Zeno notification chime (same sound as delivery notifications)."""
+    try:
+        import notify
+
+        notify.play_notification_sound()
+    except Exception:
+        pass
 
 
 def show_themed_popup(
@@ -344,11 +321,12 @@ def show_themed_popup(
     folder: Path,
     video_path: Optional[Path] = None,
     files: Sequence[str] = (),
-    badge: str = "VIDEO READY",
-    duration_sec: float = 9.0,
+    badge: str = "Video ready",
+    duration_sec: float = 8.0,
     wait: bool = False,
     capture_path: Optional[Path] = None,
     capture_only: bool = False,
+    notes: str = "",
 ) -> bool:
     """Launch the Zeno-themed floating desktop toast on macOS or Windows."""
     raw_folder = str(folder or "").strip() if folder is not None else ""
@@ -373,6 +351,7 @@ def show_themed_popup(
             files=files,
             badge=badge,
             duration_sec=duration_sec,
+            notes=notes,
         )
         html_file.write_text(html_content, encoding="utf-8")
         jxa_file.write_text(_MAC_JXA_SCRIPT, encoding="utf-8")
@@ -419,16 +398,19 @@ def show_themed_popup(
         if not ps:
             return False
         esc_ps = lambda s: str(s or "").replace("'", "''").replace('"', '`"')
-        chips_str = "  ·  ".join(lbl for lbl, _ in _derive_chips(files, vid))
-        display_title = str(title or "").strip() or dest.name or "Zeno"
+        if notes:
+            line1, line2 = str(notes).strip(), ""
+            display_title = str(title or "").strip() or "Zeno"
+        else:
+            display_title = str(title or "").strip() or dest.name or "Zeno"
+            line1 = "Saved in " + _pretty_path(dest)
+            line2 = _deliverable_summary(files, vid)
         ps_body = (
             _WIN_PS_WPF_TEMPLATE
-            .replace("__FOLDER__", esc_ps(str(dest)))
-            .replace("__VIDEO__", esc_ps(str(vid) if (vid is not None and vid.is_file()) else ""))
             .replace("__TITLE__", esc_ps(display_title))
-            .replace("__PATH__", esc_ps(_pretty_path(dest)))
-            .replace("__BADGE__", esc_ps(badge or "VIDEO READY"))
-            .replace("__CHIPS__", esc_ps(chips_str))
+            .replace("__LINE1__", esc_ps(line1))
+            .replace("__LINE2__", esc_ps(line2))
+            .replace("__BADGE__", esc_ps(badge or "Video ready"))
             .replace("__DUR_SEC__", str(max(3, int(round(duration_sec)))))
         )
         tmp_ps = Path(tempfile.gettempdir()) / f"zeno_toast_{os.getpid()}_{os.urandom(3).hex()}.ps1"
@@ -459,11 +441,12 @@ def main() -> int:
     ap.add_argument("--folder", default="", help="Delivered folder path")
     ap.add_argument("--video", default="", help="Delivered primary .mp4 path")
     ap.add_argument("--files", nargs="*", default=[], help="List of delivered filenames for chips")
-    ap.add_argument("--badge", default="VIDEO READY", help="Status pill badge text")
-    ap.add_argument("--duration", type=float, default=9.0, help="Auto-dismiss duration in seconds")
+    ap.add_argument("--badge", default="Video ready", help="Status pill badge text")
+    ap.add_argument("--duration", type=float, default=8.0, help="Auto-dismiss duration in seconds")
     ap.add_argument("--wait", action="store_true", help="Wait for toast to close")
     ap.add_argument("--capture", default="", help="Optional PNG screenshot capture path (macOS)")
     ap.add_argument("--capture-only", action="store_true", help="Capture PNG and exit immediately")
+    ap.add_argument("--notes", default="", help="Release summary; shows an update toast instead of a delivery toast")
     ap.add_argument("--test", action="store_true", help="Launch a live sample Zeno toast on screen")
     args = ap.parse_args()
 
@@ -481,6 +464,15 @@ def main() -> int:
             capture_only=args.capture_only,
         )
         print(f"[POPUP] shown={ok}")
+        return 0 if ok else 1
+
+    if args.notes:
+        _play_chime()
+        ok = show_themed_popup(
+            title=args.title or "Zeno updated", folder=Path(args.folder or "."), badge=args.badge if args.badge != "Video ready" else "Updated",
+            notes=args.notes, duration_sec=args.duration, wait=args.wait,
+            capture_path=Path(args.capture) if args.capture else None, capture_only=args.capture_only,
+        )
         return 0 if ok else 1
 
     if not args.folder:

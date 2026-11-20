@@ -184,7 +184,7 @@ SIGNUP_PAGE = f"""<!doctype html><html lang="en"><head>
 <div class="login-card" id="form-card">
   <h1>Log in to Zeno</h1>
   <p class="desc">
-    AI-powered script-led video editor for Supernova. Sign in with Google to connect your workspace and automatically save your session to <code>.env</code>.
+    AI-powered script-led video editor for Supernova AI. Sign in with Google to connect your workspace and automatically save your session to <code>.env</code>.
   </p>
 
   <div class="g-btn-wrap" id="g-signin-wrap">
@@ -213,7 +213,7 @@ SIGNUP_PAGE = f"""<!doctype html><html lang="en"><head>
   </p>
 </div>
 
-<div class="footer-note">Zeno Video AI · Supernova</div>
+<div class="footer-note">Zeno Video AI · A product by Supernova AI</div>
 
 <script>
 const params = new URLSearchParams(window.location.search);

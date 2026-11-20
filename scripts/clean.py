@@ -316,6 +316,36 @@ OTA_WORK_PRESERVE = {
     "auto_update.log",
 }
 LEGACY_CLAUDE_HOOK_MARKERS = ("call_cap.py", "chat_guard.py", "zeno_mcp", "session_check")
+LEGACY_1X_BLOAT_REL = (
+    OTA_MANIFEST_NAME,
+    "agent",
+    "styles",
+    "CONCEPT.md",
+    "LOW_COST_WORKFLOW.md",
+    "scripts/zeno_mcp.py",
+    "scripts/ai_director.py",
+    "scripts/compact_run.py",
+)
+
+
+def has_pending_ota_cleanup(root: Path = ROOT) -> bool:
+    """Return True when an extracted OTA manifest or legacy 1.x bloat remains on a non-dev root."""
+    root_path = Path(root)
+    if (root_path / ".zeno-dev").exists() and os.environ.get("ZENO_ALLOW_DEV_OTA_PRUNE", "").strip() != "1":
+        return False
+    return any((root_path / rel).exists() for rel in LEGACY_1X_BLOAT_REL)
+
+
+def prune_pending_ota_cleanup(root: Path = ROOT) -> Optional[Dict[str, Any]]:
+    """Run cleanup_after_update() if has_pending_ota_cleanup() detects unpruned OTA or 1.x files."""
+    if os.environ.get("ZENO_AUTO_CLEAN", "1") == "0" or os.environ.get("ZENO_CLEAR_ON_UPDATE", "1") == "0":
+        return None
+    root_path = Path(root)
+    if not has_pending_ota_cleanup(root_path):
+        return None
+    ver_file = root_path / "VERSION"
+    ver = ver_file.read_text(encoding="utf-8").strip() if ver_file.is_file() else ""
+    return cleanup_after_update(root=root_path, version=ver)
 
 
 def _major_ver(ver: str) -> int:
@@ -671,6 +701,10 @@ def cleanup_after_update(
     root_path = Path(root)
     work = root_path / "work"
     resolved_prev = (prev_version or _read_prev_version_for_cleanup(work)).strip()
+    dev_guard = (root_path / ".zeno-dev").exists() and os.environ.get("ZENO_ALLOW_DEV_OTA_PRUNE", "").strip() != "1"
+    had_legacy_1x_dirs = (not dev_guard) and any(
+        (root_path / d).is_dir() for d in ("agent", "styles")
+    )
     try:
         # 0. Prune obsolete files/empty dirs left behind in managed folders when upgrading via OTA
         m_freed, pruned_files, pruned_dirs, m_clear_work = _prune_from_manifest(
@@ -678,7 +712,7 @@ def cleanup_after_update(
         )
         freed += m_freed
         files += pruned_files + pruned_dirs
-        clear_work_projects = bool(clear_work) or m_clear_work
+        clear_work_projects = bool(clear_work) or m_clear_work or had_legacy_1x_dirs
         if not clear_work_projects and (work / ".last_ota_manifest.json").is_file():
             try:
                 last_man = json.loads((work / ".last_ota_manifest.json").read_text(encoding="utf-8"))

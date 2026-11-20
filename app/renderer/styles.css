@@ -50,6 +50,7 @@ body {
   justify-content: center;
   text-align: center;
   gap: 14px;
+  transform: translateY(-36px);
 }
 
 .logo-wrap {
@@ -109,6 +110,45 @@ body {
 }
 
 .brand-ver:empty { display: none; }
+
+.release-footer {
+  position: fixed;
+  left: 50%;
+  bottom: 72px;
+  transform: translateX(-50%);
+  width: min(560px, calc(100vw - 48px));
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 16px;
+  text-align: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(10, 10, 10, .62);
+  backdrop-filter: blur(6px);
+}
+.release-footer[hidden] { display: none; }
+
+.release-kicker {
+  font: 600 10px/1.2 var(--mono);
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--green);
+}
+
+.release-notes {
+  max-width: 100%;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 button { font: inherit; color: inherit; cursor: pointer; }
 .primary {

@@ -6,328 +6,87 @@
 <title>Zeno Notification</title>
 <style>
 :root {
-  --bg: #000000;
   --panel: #0A0A0A;
-  --panel2: #111111;
-  --line: #1a1a1a;
-  --line2: #262626;
+  --line: #1f1f1f;
   --text: #F1F5F9;
   --muted: #94A3B8;
   --faint: #64748B;
   --green: #bacf65;
-  --greenHover: #cddb85;
-  --greenDim: rgba(186, 207, 101, 0.13);
-  --greenLine: rgba(186, 207, 101, 0.38);
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
-
 * { box-sizing: border-box; }
 html, body {
-  margin: 0;
-  padding: 0;
-  width: 100%;
-  height: 100%;
-  background: transparent;
-  overflow: hidden;
+  margin: 0; padding: 0; width: 100%; height: 100%;
+  background: transparent; overflow: hidden;
   font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  color: var(--text);
-  -webkit-font-smoothing: antialiased;
-  user-select: none;
+  color: var(--text); -webkit-font-smoothing: antialiased; user-select: none;
 }
-
-.stage {
-  width: 100%;
-  height: 100%;
-  padding: 12px 14px 16px 14px;
-  display: flex;
-  align-items: flex-start;
-  justify-content: flex-end;
-}
-
+.stage { width: 100%; height: 100%; padding: 10px; display: flex; align-items: flex-start; overflow: hidden; }
 .toast {
-  position: relative;
   width: 100%;
-  background:
-    radial-gradient(circle at 14% 0%, #19200e 0%, #111210 42%, #0a0a0a 100%);
-  border: 1px solid var(--greenLine);
-  border-radius: 15px;
-  padding: 15px 16px 15px 15px;
-  box-shadow:
-    0 18px 42px rgba(0, 0, 0, 0.72),
-    0 0 0 1px rgba(186, 207, 101, 0.12),
-    inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  overflow: hidden;
-  animation: slideIn .26s cubic-bezier(.16, 1, .3, 1) forwards;
+  display: flex; gap: 12px; align-items: flex-start;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 14px 14px 14px;
+  cursor: default;
+  animation: swipeIn .42s cubic-bezier(.22, 1, .36, 1) forwards;
 }
+.toast.closing { animation: swipeOut .34s cubic-bezier(.5, 0, .75, 0) forwards; }
+@keyframes swipeIn  { from { transform: translateX(115%); } to { transform: translateX(0); } }
+@keyframes swipeOut { from { transform: translateX(0); } to { transform: translateX(115%); } }
 
-.toast.closing {
-  animation: slideOut .20s ease-in forwards;
+.mark {
+  width: 32px; height: 32px; flex: none; border-radius: 8px;
+  background: #000; border: 1px solid var(--line);
+  display: grid; place-items: center;
 }
-
-@keyframes slideIn {
-  from { opacity: 0; transform: translateX(22px) scale(0.97); }
-  to   { opacity: 1; transform: translateX(0) scale(1); }
-}
-
-@keyframes slideOut {
-  from { opacity: 1; transform: translateX(0) scale(1); }
-  to   { opacity: 0; transform: translateX(18px) scale(0.98); }
-}
-
-.top-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
-.brand-group {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-width: 0;
-}
-
-.zeno-mark {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: #080907;
-  border: 1px solid rgba(186, 207, 101, 0.30);
-  display: grid;
-  place-items: center;
-  flex: none;
-  box-shadow: 0 4px 14px rgba(186, 207, 101, 0.14);
-}
-
-.zeno-mark .core {
-  width: 12px;
-  height: 12px;
-  border-radius: 3.5px;
-  background: var(--green);
-  box-shadow: 0 0 12px rgba(186, 207, 101, 0.72);
-}
-
-.brand-label {
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: -0.015em;
-  color: var(--text);
-}
-
-.status-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font: 600 9.5px var(--mono);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--green);
-  background: var(--greenDim);
-  border: 1px solid var(--greenLine);
-  border-radius: 999px;
-  padding: 2.5px 8.5px;
-  white-space: nowrap;
-}
-
-.status-pill .dot {
-  width: 5.5px;
-  height: 5.5px;
-  border-radius: 50%;
-  background: var(--green);
-  box-shadow: 0 0 8px var(--green);
-}
-
-.close-btn {
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--faint);
-  font-size: 15px;
-  line-height: 1;
-  display: grid;
-  place-items: center;
-  cursor: pointer;
-  flex: none;
-  transition: background .12s, color .12s, border-color .12s;
-}
-
-.close-btn:hover {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: var(--line2);
-  color: var(--text);
-}
-
+.mark i { width: 12px; height: 12px; border-radius: 3.5px; background: var(--green); display: block; }
+.body { flex: 1; min-width: 0; }
+.head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 3px; }
+.kicker { font: 600 10.5px var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--green); }
+.close { background: none; border: 0; color: var(--faint); font-size: 16px; line-height: 1; padding: 0 2px; cursor: pointer; }
+.close:hover { color: var(--text); }
 .title {
-  margin: 0 0 4px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
-  letter-spacing: -0.01em;
-  line-height: 1.32;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  word-break: break-word;
+  margin: 0 0 6px; font-size: 14px; font-weight: 600; letter-spacing: -.01em; line-height: 1.3;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word;
 }
-
-.path-line {
-  font: 500 11px var(--mono);
-  color: var(--muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-bottom: 10px;
-}
-
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  margin-bottom: 12px;
-}
-
-.chip {
-  font: 600 10px var(--mono);
-  letter-spacing: 0.03em;
-  color: var(--muted);
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--line2);
-  border-radius: 6px;
-  padding: 2px 7px;
-}
-
-.chip.accent {
-  color: var(--green);
-  border-color: rgba(186, 207, 101, 0.30);
-  background: rgba(186, 207, 101, 0.08);
-}
-
-.actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.btn {
-  appearance: none;
-  font: 600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  border-radius: 8px;
-  padding: 7px 13px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  transition: background .12s, border-color .12s, color .12s, transform .08s;
-}
-
-.btn:active { transform: scale(0.98); }
-
-.btn-primary {
-  flex: 1;
-  background: var(--green);
-  color: #0A0A0A;
-  border: 1px solid var(--green);
-}
-
-.btn-primary:hover {
-  background: var(--greenHover);
-  border-color: var(--greenHover);
-}
-
-.btn-secondary {
-  background: var(--panel2);
-  color: var(--text);
-  border: 1px solid var(--line2);
-}
-
-.btn-secondary:hover {
-  border-color: var(--greenLine);
-  color: var(--green);
-}
-
-.progress-track {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 2.5px;
-  background: rgba(255, 255, 255, 0.05);
-}
-
-.progress-fill {
-  height: 100%;
-  width: 100%;
-  background: linear-gradient(90deg, rgba(186, 207, 101, 0.55) 0%, #bacf65 100%);
-  transform-origin: left center;
-  animation: shrink linear forwards;
-  animation-duration: __DURATION_MS__ms;
-}
-
-.toast:hover .progress-fill {
-  animation-play-state: paused;
-}
-
-@keyframes shrink {
-  from { transform: scaleX(1); }
-  to   { transform: scaleX(0); }
-}
+.row { font-size: 12px; color: var(--muted); line-height: 1.45; }
+.row .label { color: var(--faint); }
+.row.path { font: 500 11px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 3px; }
+.row.note { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 </style>
 </head>
 <body>
 <div class="stage">
   <div class="toast" id="toast">
-    <div class="top-row">
-      <div class="brand-group">
-        <div class="zeno-mark" aria-hidden="true"><span class="core"></span></div>
-        <span class="brand-label">Zeno</span>
-        <span class="status-pill"><span class="dot"></span>__BADGE__</span>
+    <div class="mark" aria-hidden="true"><i></i></div>
+    <div class="body">
+      <div class="head">
+        <span class="kicker">__BADGE__</span>
+        <button class="close" id="btnClose" aria-label="Dismiss">&times;</button>
       </div>
-      <button class="close-btn" id="btnClose" title="Dismiss" aria-label="Dismiss">&times;</button>
+      <h3 class="title">__TITLE__</h3>
+      __DETAILS__
     </div>
-    <h3 class="title">__TITLE__</h3>
-    <div class="path-line" title="__PATH_RAW__">__PATH__</div>
-    <div class="chips">__CHIPS__</div>
-    <div class="actions">
-      <button class="btn btn-primary" id="btnOpen">Open Folder</button>
-      __PLAY_BUTTON__
-    </div>
-    <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
   </div>
 </div>
 <script>
 (function () {
   const toast = document.getElementById('toast');
-  const fill = document.getElementById('progressFill');
   let closed = false;
-
   function emit(action) {
     if (closed) return;
     closed = true;
     toast.classList.add('closing');
     setTimeout(() => {
-      try {
-        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.zenoAction) {
-          window.webkit.messageHandlers.zenoAction.postMessage(action);
-        } else {
-          window.location.href = 'zeno-action://' + action;
-        }
-      } catch (e) {
-        window.location.href = 'zeno-action://' + action;
-      }
-    }, 150);
+      try { window.webkit.messageHandlers.zenoAction.postMessage(action); }
+      catch (e) { window.location.href = 'zeno-action://' + action; }
+    }, 360);
   }
-
-  document.getElementById('btnOpen').addEventListener('click', () => emit('open-folder'));
-  const playBtn = document.getElementById('btnPlay');
-  if (playBtn) playBtn.addEventListener('click', () => emit('play-video'));
   document.getElementById('btnClose').addEventListener('click', () => emit('close'));
-  fill.addEventListener('animationend', () => emit('timeout'));
+  toast.addEventListener('click', (e) => { if (e.target.id !== 'btnClose') emit('close'); });
+  setTimeout(() => emit('timeout'), __DURATION_MS__);
 })();
 </script>
 </body>

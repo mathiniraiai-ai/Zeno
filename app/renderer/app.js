@@ -23,6 +23,33 @@ function renderVersion() {
   el.textContent = v ? `v${v.replace(/^v/i, '')}` : '';
 }
 
+function renderReleaseNotes() {
+  const footer = $('#releaseFooter');
+  const kicker = $('#releaseKicker');
+  const body = $('#releaseNotes');
+  if (!footer || !kicker || !body) return;
+  const info = state.info || {};
+  const upd = info.update || {};
+  const baseVer = String(info.version || '').trim().replace(/^v/i, '');
+  let ver = String(info.release_notes_version || info.version || '').trim().replace(/^v/i, '');
+  let notes = String(info.release_notes || '').replace(/\s+/g, ' ').trim();
+  if (!notes && upd.notes && !upd.available) {
+    notes = String(upd.notes || '').replace(/\s+/g, ' ').trim();
+    ver = String(upd.latest_version || info.version || '').trim().replace(/^v/i, '');
+  }
+  if (!baseVer || !ver || !notes) {
+    kicker.textContent = '';
+    body.textContent = '';
+    body.removeAttribute('title');
+    footer.hidden = true;
+    return;
+  }
+  kicker.textContent = `WHAT'S NEW IN v${ver}`;
+  body.textContent = notes;
+  body.title = notes;
+  footer.hidden = false;
+}
+
 function maybeAutoStartEngineSetup() {
   if (!state.info || !state.info.signed_in || !state.info.root || state.info.engine_ready) return;
   const key = `zenoAutoSetup:${state.info.root}`;
@@ -139,6 +166,7 @@ async function loadInfo(check) {
   if (i && !i.error) {
     state.info = i;
     renderVersion();
+    renderReleaseNotes();
     paintSignIn();
     maybeAutoStartEngineSetup();
     const u = i.update;

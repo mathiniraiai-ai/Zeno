@@ -1114,6 +1114,18 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
     return meta, lines
 
 
+def _is_quota_error_text(text: str) -> bool:
+    """Return True when an error string indicates HTTP 429 or Gemini quota exhaustion."""
+    low = str(text or "").lower()
+    return (
+        "quota_exceeded" in low
+        or "resource_exhausted" in low
+        or "429" in low
+        or "quota" in low
+        or "too many requests" in low
+    )
+
+
 def ensure_clip_transcribed(
     clip_stem: str,
     clip_src: str,
@@ -1121,6 +1133,8 @@ def ensure_clip_transcribed(
     lang: str,
     script_path: Optional[Path],
     clean_raw_json: bool = True,
+    skip_remote_transcription: bool = False,
+    skip_reason: str = "",
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Ensure `info.json`, `audio16k.wav`, and `hq_words.json` / `words.json` exist for a clip."""
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -1148,13 +1162,9 @@ def ensure_clip_transcribed(
             "fps": 24.0,
             "has_audio": True,
         }
-
-    if not wav_path.is_file() and resolved_src.is_file() and info.get("has_audio", True):
-        ffmpeg("-i", resolved_src, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav_path)
-
-    # Measure VAD speech spans up front so an empty cached transcript on a clip with real speech (>= 0.8s) is never trusted
-    spoken_spans = _speech_spans_of({"work_dir": work_dir}) if wav_path.is_file() else []
-    active_speech_sec = sum(max(0.0, float(b) - float(a)) for a, b in spoken_spans)
+    if isinstance(info, dict):
+        info.pop("_transcript_error", None)
+        info.pop("_transcript_status", None)
 
     hq_words: List[Dict[str, Any]] = []
     base_words: List[Dict[str, Any]] = []
@@ -1174,6 +1184,24 @@ def ensure_clip_transcribed(
             base_words = read_json(words_path)
         except Exception:
             pass
+
+    if skip_remote_transcription and not hq_words and not base_words:
+        if not info.get("has_audio", True):
+            return info, [], []
+        if wav_path.is_file() and clip_has_no_sound(wav_path):
+            print(f"  [{clip_stem}] no sound in this clip: skipping transcription")
+            return info, [], []
+        info["_transcript_status"] = "quota_skipped"
+        info["_transcript_error"] = skip_reason or "skipped by quota circuit-breaker (Gemini quota exceeded)"
+        print(f"  [{clip_stem}] skipped remote transcription (quota circuit-breaker active)")
+        return info, [], []
+
+    if not wav_path.is_file() and resolved_src.is_file() and info.get("has_audio", True):
+        ffmpeg("-i", resolved_src, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav_path)
+
+    # Measure VAD speech spans up front so an empty cached transcript on a clip with real speech (>= 0.8s) is never trusted
+    spoken_spans = _speech_spans_of({"work_dir": work_dir}) if wav_path.is_file() else []
+    active_speech_sec = sum(max(0.0, float(b) - float(a)) for a, b in spoken_spans)
 
     gem_cache_path = work_dir / "gemini_transcript.json"
     if not hq_words and not base_words and active_speech_sec >= 0.8:
@@ -1196,6 +1224,8 @@ def ensure_clip_transcribed(
         print(f"  [{clip_stem}] no sound in this clip: skipping transcription")
 
     transcript_err = ""
+    transcript_status = ""
+    confirmed_no_speech = False
     if not hq_words and not base_words and wav_path.is_file() and not no_sound:
         max_tries = 2 if active_speech_sec >= 0.8 else 1
         for attempt in range(max_tries):
@@ -1217,25 +1247,42 @@ def ensure_clip_transcribed(
                     elif isinstance(res, dict):
                         res_status = str(res.get("status") or "").strip().lower()
                         if "words" in res:
-                            hq_words = res["words"]
+                            hq_words = res["words"] or []
                         if res_status in ("cloud_failed", "quota_exceeded"):
                             transcript_err = str(res.get("error") or res_status)
+                            transcript_status = (
+                                "quota_exceeded"
+                                if (res_status == "quota_exceeded" or _is_quota_error_text(transcript_err))
+                                else "cloud_failed"
+                            )
+                            break
+                        if res_status == "success" and not hq_words:
+                            # Gemini genuinely listened and obeyed Rule 3 ZERO-SPEECH GUARD (e.g. music/laughter/noise):
+                            # do not delete cache, retry a 2nd time, or spawn scripts/transcribe.py for a 3rd redundant call.
+                            confirmed_no_speech = True
+                            transcript_status = "success"
+                            print(f"  [{clip_stem}] confirmed non-speech / zero spoken words (skipping redundant retries)")
                             break
                     if hq_words:
                         transcript_err = ""
+                        transcript_status = "success"
                         write_json(hq_path, hq_words)
                         write_json(words_path, hq_words)
                         break
                 except Exception as exc:
                     transcript_err = f"{type(exc).__name__}: {exc}"
+                    if _is_quota_error_text(transcript_err):
+                        transcript_status = "quota_exceeded"
+                        print(f"  [WARN] align_engine quota failure on {clip_stem}: {exc}")
+                        break
                     print(f"  [WARN] align_engine fallback on {clip_stem}: {exc}")
 
-            if attempt == 0 and active_speech_sec >= 0.8 and not hq_words:
+            if attempt == 0 and active_speech_sec >= 0.8 and not hq_words and not confirmed_no_speech:
                 print(
                     f"  [WARN] {clip_stem}: empty words returned despite {active_speech_sec:.2f}s of active speech; retrying transcription..."
                 )
 
-        if not hq_words and not base_words and not transcript_err:
+        if not hq_words and not base_words and not transcript_err and not confirmed_no_speech:
             transcribe_script = ROOT / "scripts" / "transcribe.py"
             if transcribe_script.is_file():
                 venv_py = find_venv_python()
@@ -1248,10 +1295,12 @@ def ensure_clip_transcribed(
                         base_words = read_json(words_path)
                     elif proc.returncode != 0:
                         transcript_err = (proc.stderr or proc.stdout or f"transcribe.py exit {proc.returncode}").strip()[:250]
+                        transcript_status = "quota_exceeded" if _is_quota_error_text(transcript_err) else "cloud_failed"
                 except Exception as exc:
                     transcript_err = f"{type(exc).__name__}: {exc}"
+                    transcript_status = "quota_exceeded" if _is_quota_error_text(transcript_err) else "cloud_failed"
 
-        if not hq_words and not base_words and (active_speech_sec >= 0.8 or transcript_err):
+        if not hq_words and not base_words and not confirmed_no_speech and (active_speech_sec >= 0.8 or transcript_err):
             print(
                 f"  [WARN] {clip_stem}: 0 words transcribed"
                 + (f" ({transcript_err[:120]})" if transcript_err else f" despite {active_speech_sec:.2f}s of active speech")
@@ -1272,7 +1321,12 @@ def ensure_clip_transcribed(
                 ev["transcript"] = "incomplete"
                 write_json(marker, ev)
         if not hq_words and not base_words and transcript_err:
+            if not transcript_status:
+                transcript_status = "quota_exceeded" if _is_quota_error_text(transcript_err) else "cloud_failed"
+            info["_transcript_status"] = transcript_status
             info["_transcript_error"] = transcript_err
+        elif confirmed_no_speech:
+            info["_transcript_status"] = "success"
 
     if not hq_words:
         hq_words = base_words
@@ -2068,12 +2122,39 @@ def main() -> None:
         raise SystemExit("No input clips or cached work/S* directories found.")
 
     clips_data: List[Dict[str, Any]] = []
+    quota_breaker_tripped = False
+    quota_breaker_clip = ""
+    quota_breaker_reason = ""
     for stem, src_str, wdir in clip_entries:
         transcript_path = wdir / "gemini_transcript.json"
         before = transcript_path.stat().st_mtime_ns if transcript_path.exists() else None
         info, hq_words, base_words = ensure_clip_transcribed(
-            stem, src_str, wdir, lang=lang, script_path=script_path, clean_raw_json=args.clean_raw_json
+            stem,
+            src_str,
+            wdir,
+            lang=lang,
+            script_path=script_path,
+            clean_raw_json=args.clean_raw_json,
+            skip_remote_transcription=quota_breaker_tripped,
+            skip_reason=(
+                f"skipped by quota circuit-breaker after {quota_breaker_clip}"
+                + (f" ({quota_breaker_reason[:120]})" if quota_breaker_reason else "")
+            )
+            if quota_breaker_tripped
+            else "",
         )
+        if not quota_breaker_tripped and not hq_words:
+            t_status = str((info or {}).get("_transcript_status") or "").strip().lower()
+            t_err = str((info or {}).get("_transcript_error") or "").strip()
+            if t_status in ("quota_exceeded", "cloud_failed") or _is_quota_error_text(t_err):
+                quota_breaker_tripped = True
+                quota_breaker_clip = stem
+                quota_breaker_reason = t_err or t_status or "quota_exceeded"
+                print(
+                    f"  [circuit-breaker] stopping further uncached Gemini uploads after {stem} "
+                    f"({t_status or 'quota_exceeded'}); already-cached clips will still be loaded.",
+                    file=sys.stderr,
+                )
         wav_path = wdir / "audio16k.wav"
         rms_env = compute_10ms_rms_envelope(wav_path)
         macro_sil, micro_dips = detect_two_tier_silences(wav_path, rms_env, cached_silences_path=wdir / "silences.json")
@@ -2105,6 +2186,7 @@ def main() -> None:
                 base_had_speech = bool(base_c.get("hq_words")) and not clip_is_silent(base_c)
                 if isinstance(base_c.get("info"), dict):
                     base_c["info"].pop("_transcript_error", None)
+                    base_c["info"].pop("_transcript_status", None)
                 base_c["hq_words"] = c["hq_words"]
                 base_c["base_words"] = c["base_words"]
                 base_c["rms_env"] = c["rms_env"]
@@ -2135,12 +2217,38 @@ def main() -> None:
         if not c.get("hq_words") and (c.get("info") or {}).get("_transcript_error")
     ]
     if failed_transcripts:
+        direct_failures = [
+            (c["stem"], str((c.get("info") or {}).get("_transcript_error") or "transcription failed"))
+            for c in clips_data
+            if not c.get("hq_words")
+            and (c.get("info") or {}).get("_transcript_error")
+            and str((c.get("info") or {}).get("_transcript_status") or "") != "quota_skipped"
+        ]
+        skipped_clips = [
+            c["stem"]
+            for c in clips_data
+            if not c.get("hq_words")
+            and str((c.get("info") or {}).get("_transcript_status") or "") == "quota_skipped"
+        ]
+        cached_ok = sum(
+            1
+            for c in clips_data
+            if not (c.get("info") or {}).get("_transcript_error")
+        )
         print("\n[BLOCKED] Safe transcription guard stopped before cutting/planning:", file=sys.stderr)
-        for fst, ferr in failed_transcripts:
+        for fst, ferr in direct_failures:
             print(f"  - {fst}: {ferr}", file=sys.stderr)
+        if skipped_clips:
+            print(
+                f"  - Skipped {len(skipped_clips)} remaining uncached clip(s) via quota circuit-breaker "
+                f"({', '.join(skipped_clips)}) to avoid burning retries.",
+                file=sys.stderr,
+            )
         print(
-            "  All clips that already succeeded remain cached on disk. "
-            "Wait 1-2 minutes for Gemini quota recovery (or check Zeno Cloud) and re-run --inspect.",
+            f"  Progress saved: {cached_ok}/{len(clips_data)} clip(s) already cached on disk "
+            f"({len(failed_transcripts)} remaining). "
+            "Wait 1-2 minutes for the Gemini Free Tier quota window to reset (or check Zeno Cloud) "
+            "and re-run --inspect.",
             file=sys.stderr,
         )
         raise SystemExit(2)

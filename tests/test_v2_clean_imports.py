@@ -6,10 +6,14 @@ import ast
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import time
+import types
 import unittest
+import wave
 from pathlib import Path
 from unittest import mock
 
@@ -134,6 +138,319 @@ class V2CleanImportsTests(unittest.TestCase):
         self.assertNotIn("--auto-plan", help_out)
         for flag in ("--queue", "--inspect-only", "--execute", "--compact", "--square"):
             self.assertIn(flag, help_out, f"Missing expected v2.0.0 CLI flag {flag} in zeno.py --help")
+
+    def test_gemini_transcribe_model_order_prompt_sync_and_speaker_script_lines(self) -> None:
+        """Full Flash models lead transcription order, prompt stays synced with anti-echo guard,
+        `_prompt_version` hashes `MODELS`, and `_parse_script_path_to_lines` emits clean speaker-prefixed dialogue.
+        """
+        import tempfile
+        from unittest import mock
+
+        if str(SCRIPTS_DIR) not in sys.path:
+            sys.path.insert(0, str(SCRIPTS_DIR))
+        service_dir = str(ROOT / "service")
+        if service_dir not in sys.path:
+            sys.path.insert(0, service_dir)
+
+        from align_engine import _parse_script_path_to_lines
+        from align_engine.gemini_transcriber import GeminiTranscriber, build_transcribe_prompt
+        import prompt as service_prompt_mod
+        import app as service_app_mod
+
+        expected_top3 = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3-flash-preview"]
+        with mock.patch.dict(os.environ, {"GEMINI_FORCE_MODEL": ""}, clear=False):
+            gt = GeminiTranscriber(api_keys=[])
+        self.assertEqual(gt.models[:3], expected_top3)
+        self.assertNotIn("gemini-3.5-flash-lite", gt.models)
+        self.assertEqual(service_app_mod.MODELS[:3], expected_top3)
+        self.assertNotIn("gemini-3.5-flash-lite", service_app_mod.MODELS)
+
+        sample_lines = [
+            'Female Robot: No! Say: "I\'m Rahul."',
+            "Rahul: I'm Rahul.",
+            "Rahul: I'm Rahul.",
+        ]
+        p_repo = build_transcribe_prompt(sample_lines, language_hint="te")
+        p_svc = service_prompt_mod.build_transcribe_prompt(sample_lines, language_hint="te")
+        self.assertEqual(p_repo, p_svc)
+        self.assertIn("STRICT ANTI-ECHO & SINGLE-CLIP GUARD", p_repo)
+        self.assertIn("FULL MULTI-SPEAKER SCRIPT", p_repo)
+        self.assertEqual(p_repo.count("Rahul: I'm Rahul."), 1)
+        self.assertNotIn('"words": ["word1"', p_repo)
+
+        v1 = service_app_mod._prompt_version()
+        orig_models = list(service_app_mod.MODELS)
+        try:
+            service_app_mod.MODELS = ["gemini-3.6-flash", "gemini-3.5-flash"]
+            v2 = service_app_mod._prompt_version()
+        finally:
+            service_app_mod.MODELS = orig_models
+        self.assertNotEqual(v1, v2)
+
+        raw_script = "\n".join([
+            "Reference: https://drive.google.com/drive/folders/abc",
+            "First Frames: 4 verified images",
+            "https://drive.google.com/drive/folders/xyz",
+            "Characters",
+            "* Rahul -- Man, late 20s",
+            "* Female Robot",
+            "Scenes Breakdown",
+            "Scene 1",
+            "Flashback. Rahul sits in an interview.",
+            'Female Robot: No! Say: "I\'m Rahul."',
+            "Rahul: I'm Rahul.",
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            sp = Path(td) / "script.txt"
+            sp.write_text(raw_script, encoding="utf-8")
+            parsed_lines = _parse_script_path_to_lines(sp)
+        self.assertTrue(all("drive.google.com" not in ln for ln in parsed_lines), parsed_lines)
+        self.assertTrue(all("Scenes Breakdown" not in ln for ln in parsed_lines), parsed_lines)
+        self.assertTrue(any(ln.startswith("Female Robot:") for ln in parsed_lines), parsed_lines)
+        self.assertTrue(any(ln.startswith("Rahul:") for ln in parsed_lines), parsed_lines)
+
+    def test_frontend_supernova_ai_branding_and_release_notes_footer(self) -> None:
+        """Desktop renderer, Electron main, OTA packager, and web login page carry Supernova AI branding and release-notes footer."""
+        import release
+
+        index_html = (ROOT / "app" / "renderer" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("A product by Supernova AI", index_html)
+        self.assertNotIn(">A product by Supernova<", index_html)
+        for el_id in ('id="releaseFooter"', 'id="releaseKicker"', 'id="releaseNotes"'):
+            self.assertIn(el_id, index_html, f"Missing {el_id} in app/renderer/index.html")
+
+        styles_css = (ROOT / "app" / "renderer" / "styles.css").read_text(encoding="utf-8")
+        footer_block = re.search(r"\.release-footer\s*\{([^}]*)\}", styles_css)
+        self.assertIsNotNone(footer_block, "Missing .release-footer rule in app/renderer/styles.css")
+        self.assertIn("bottom:", footer_block.group(1))
+        self.assertIn("-webkit-line-clamp: 2", styles_css)
+
+        app_js = (ROOT / "app" / "renderer" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("function renderReleaseNotes()", app_js)
+        self.assertIn("renderReleaseNotes();", app_js)
+
+        main_js = (ROOT / "app" / "main.js").read_text(encoding="utf-8")
+        self.assertIn("release_notes:", main_js)
+        self.assertIn("RELEASE_NOTES.txt", main_js)
+
+        preload_js = (ROOT / "app" / "preload.js").read_text(encoding="utf-8")
+        self.assertIn("enrichInfo", preload_js)
+        self.assertIn("triggerPendingCleanup", preload_js)
+        self.assertIn("--after-update", preload_js)
+        self.assertIn("release_notes:", preload_js)
+        self.assertIn("RELEASE_NOTES.txt", preload_js)
+
+        notes_path = ROOT / "RELEASE_NOTES.txt"
+        self.assertTrue(notes_path.is_file(), "RELEASE_NOTES.txt must exist at repo root")
+        self.assertTrue(notes_path.read_text(encoding="utf-8").strip(), "RELEASE_NOTES.txt must be non-empty")
+        self.assertIn("RELEASE_NOTES.txt", release.TOP_FILES)
+
+        ui_py = (ROOT / "service" / "ui.py").read_text(encoding="utf-8")
+        self.assertIn("A product by Supernova AI", ui_py)
+        self.assertIn("<!-- Generate Zeno Session -->", ui_py)
+
+    def test_server_gemini_free_tier_queue_buffer_and_cooldown_guards(self) -> None:
+        """Server defaults to Gemini Free Tier limits, distinguishes RPM vs RPD 429s, rotates ready Flash ahead of Lite, and fails fast when all models are cooled >20s."""
+        service_dir = str(ROOT / "service")
+        if service_dir not in sys.path:
+            sys.path.insert(0, service_dir)
+        import app as service_app_mod
+        from google import genai
+
+        clean_env = {
+            "GEMINI_TIER": "",
+            "GEMINI_CONCURRENCY": "",
+            "GEMINI_MIN_GAP_SEC": "",
+            "GEMINI_FLASH_RPM": "",
+            "GEMINI_LITE_RPM": "",
+            "GEMINI_TPM": "",
+            "GEMINI_RPM": "",
+            "GEMINI_API_KEY": "test-free-tier-key",
+            "GEMINI_API_KEY_1": "",
+            "GEMINI_API_KEY_2": "",
+            "GEMINI_API_KEY_3": "",
+            "GEMINI_API_KEY_4": "",
+        }
+        with mock.patch.dict(os.environ, clean_env, clear=False):
+            self.assertEqual(service_app_mod._gemini_tier(), "free")
+            self.assertEqual(service_app_mod._min_global_gap_sec(), 3.0)
+
+            flash_rpm, flash_tpm, flash_spacing = service_app_mod._model_limits("gemini-3.5-flash")
+            self.assertEqual((flash_rpm, flash_tpm), (5, 240000))
+            self.assertGreaterEqual(flash_spacing, 12.5)
+
+            lite_rpm, lite_tpm, lite_spacing = service_app_mod._model_limits("gemini-3.1-flash-lite")
+            self.assertEqual((lite_rpm, lite_tpm), (15, 240000))
+            self.assertGreaterEqual(lite_spacing, 4.2)
+
+            gem = service_app_mod._Gemini()
+            self.assertEqual(gem._concurrency_limit(), 1)
+
+            rpm_429 = RuntimeError(
+                "429 RESOURCE_EXHAUSTED GenerateRequestsPerMinutePerProjectPerModel-FreeTier You exceeded your current quota"
+            )
+            rpd_429 = RuntimeError(
+                "429 RESOURCE_EXHAUSTED RequestsPerDayPerProjectPerModel-FreeTier per day"
+            )
+            self.assertFalse(gem._is_daily_quota(rpm_429))
+            self.assertTrue(gem._is_daily_quota(rpd_429))
+
+            # Just-used gemini-3.5-flash rotates cleanly to immediately-ready gemini-3.6-flash while Lite stays behind ready Full Flash models.
+            with gem.lock:
+                gem._record_call_locked(time.time() - 3.5, 0, "gemini-3.5-flash")
+            self.assertEqual(gem.model_wait_seconds(0, "gemini-3.6-flash"), 0.0)
+            self.assertGreater(gem.model_wait_seconds(0, "gemini-3.5-flash"), 5.0)
+            self.assertEqual(
+                gem.candidate_models(["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite"]),
+                ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite"],
+            )
+
+            gem.record_call(0, "gemini-3.5-flash")
+            ordered_full = gem.candidate_models()
+            self.assertEqual(ordered_full[0], "gemini-3.6-flash")
+            self.assertLess(ordered_full.index("gemini-3.5-flash"), ordered_full.index("gemini-3.1-flash-lite"))
+
+            # All-cooled soonest > 20s raises HTTPException(429) immediately without calling upstream Gemini.
+            now = time.time()
+            with gem.lock:
+                for model_name in service_app_mod.MODELS:
+                    gem.cooldowns[(0, model_name)] = now + 45.0
+            with mock.patch.object(
+                genai, "Client", side_effect=AssertionError("Upstream Gemini must not be called")
+            ) as m_client:
+                t0 = time.monotonic()
+                with self.assertRaises(service_app_mod.HTTPException) as exc_ctx:
+                    gem.transcribe(b"RIFFfakewav", "prompt", 2.0, owner="tester")
+                elapsed = time.monotonic() - t0
+            self.assertEqual(exc_ctx.exception.status_code, 429)
+            self.assertGreaterEqual(int((exc_ctx.exception.headers or {}).get("Retry-After", "0")), 20)
+            self.assertLess(elapsed, 0.5)
+            m_client.assert_not_called()
+            self.assertEqual(gem._active_slots, 0)
+
+    def test_client_gemini_free_tier_limiter_and_prepare_rule3_no_retry(self) -> None:
+        """Client GeminiRateLimiter enforces Free Tier defaults, parses RPM/RPD/retry-after, and prepare.ensure_clip_transcribed honors Rule 3 no-retry and quota circuit-breaker."""
+        from align_engine.gemini_transcriber import GeminiRateLimiter, GeminiTranscriber
+        import prepare
+
+        clean_env = {
+            "GEMINI_TIER": "",
+            "GEMINI_FLASH_RPM": "",
+            "GEMINI_LITE_RPM": "",
+            "GEMINI_MIN_GAP_SEC": "",
+            "ZENO_CLOUD_CLIP_GAP_SEC": "",
+            "GEMINI_TPM": "",
+            "ZENO_EVENTS": "off",
+        }
+        with mock.patch.dict(os.environ, clean_env, clear=False):
+            self.assertEqual(GeminiRateLimiter._get_tier(), "free")
+            self.assertEqual(GeminiRateLimiter._flash_rpm(), 5)
+            self.assertEqual(GeminiRateLimiter._lite_rpm(), 15)
+            self.assertGreaterEqual(GeminiRateLimiter._min_gap_sec(), 3.0)
+            self.assertGreaterEqual(GeminiRateLimiter._cloud_clip_gap_sec(), 3.0)
+
+            lim = GeminiRateLimiter()
+            self.assertEqual(lim.rpm_for_model("gemini-3.5-flash"), 5)
+            self.assertEqual(lim.rpm_for_model("gemini-3.1-flash-lite"), 15)
+            self.assertGreaterEqual(lim.spacing_for_model("gemini-3.5-flash"), 12.5)
+            self.assertGreaterEqual(lim.spacing_for_model("gemini-3.1-flash-lite"), 4.2)
+
+            rpm_429 = RuntimeError(
+                "429 RESOURCE_EXHAUSTED GenerateRequestsPerMinutePerProjectPerModel-FreeTier You exceeded your current quota"
+            )
+            rpd_429 = RuntimeError(
+                "429 RESOURCE_EXHAUSTED RequestsPerDayPerProjectPerModel-FreeTier per day"
+            )
+            self.assertFalse(GeminiTranscriber._is_daily_quota(rpm_429))
+            self.assertTrue(GeminiTranscriber._is_daily_quota(rpd_429))
+            self.assertEqual(GeminiTranscriber._parse_retry_after("Please retry in 24.5s."), 24.5)
+            self.assertEqual(GeminiTranscriber._parse_retry_after("Please retry in 1m15s"), 75.0)
+            self.assertEqual(GeminiTranscriber._parse_retry_after("{'retryDelay': '42s'}"), 42.0)
+            self.assertEqual(GeminiTranscriber._parse_retry_after("Retry-After: 18"), 18.0)
+            self.assertIsNone(GeminiTranscriber._parse_retry_after("unrelated failure"))
+
+            with tempfile.TemporaryDirectory(prefix="zeno_prep_rule3_") as td:
+                td_path = Path(td)
+
+                def _make_clip_work(name: str) -> Path:
+                    wdir = td_path / name
+                    wdir.mkdir(parents=True, exist_ok=True)
+                    (wdir / "info.json").write_text(
+                        json.dumps({
+                            "path": f"{name}.mp4",
+                            "duration": 2.0,
+                            "width": 720,
+                            "height": 1280,
+                            "fps": 24.0,
+                            "has_audio": True,
+                        }),
+                        encoding="utf-8",
+                    )
+                    # Non-silent 0.5s 16 kHz mono PCM WAV so clip_has_no_sound() returns False
+                    with wave.open(str(wdir / "audio16k.wav"), "wb") as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(16000)
+                        wf.writeframes(b"\xa0\x0f" * 8000)
+                    return wdir
+
+                # Rule 3 non-speech: {"status": "success", "words": []} -> 1 call only, no retry, no transcribe.py spawn
+                wdir_rule3 = _make_clip_work("music_clip")
+                mock_transcribe = mock.Mock(return_value={"status": "success", "words": []})
+                fake_align = types.SimpleNamespace(transcribe_and_align_clip=mock_transcribe)
+                with (
+                    mock.patch.object(prepare, "align_engine", fake_align),
+                    mock.patch.object(prepare, "_speech_spans_of", return_value=[(0.1, 1.6)]),
+                    mock.patch.object(
+                        prepare.subprocess,
+                        "run",
+                        side_effect=AssertionError("transcribe.py must not be spawned"),
+                    ) as m_run,
+                ):
+                    info_r3, hq_r3, base_r3 = prepare.ensure_clip_transcribed(
+                        "music_clip",
+                        str(td_path / "missing_src.mp4"),
+                        wdir_rule3,
+                        "en",
+                        None,
+                    )
+                self.assertEqual(mock_transcribe.call_count, 1)
+                m_run.assert_not_called()
+                self.assertEqual(info_r3.get("_transcript_status"), "success")
+                self.assertEqual(hq_r3, [])
+                self.assertEqual(base_r3, [])
+                ev_r3 = json.loads((wdir_rule3 / "engine_version.json").read_text(encoding="utf-8"))
+                self.assertNotEqual(ev_r3.get("transcript"), "incomplete")
+
+                # Circuit-breaker: skip_remote_transcription=True -> quota_skipped without calling align_engine
+                wdir_skip = _make_clip_work("queued_clip")
+                mock_transcribe_skip = mock.Mock(
+                    side_effect=AssertionError("align_engine must not be called when circuit-breaker active")
+                )
+                fake_align_skip = types.SimpleNamespace(transcribe_and_align_clip=mock_transcribe_skip)
+                with (
+                    mock.patch.object(prepare, "align_engine", fake_align_skip),
+                    mock.patch.object(
+                        prepare.subprocess,
+                        "run",
+                        side_effect=AssertionError("transcribe.py must not be spawned"),
+                    ) as m_run_skip,
+                ):
+                    info_sk, hq_sk, base_sk = prepare.ensure_clip_transcribed(
+                        "queued_clip",
+                        str(td_path / "missing_src2.mp4"),
+                        wdir_skip,
+                        "en",
+                        None,
+                        skip_remote_transcription=True,
+                        skip_reason="daily quota exhausted",
+                    )
+                mock_transcribe_skip.assert_not_called()
+                m_run_skip.assert_not_called()
+                self.assertEqual(info_sk.get("_transcript_status"), "quota_skipped")
+                self.assertIn("daily quota exhausted", info_sk.get("_transcript_error", ""))
+                self.assertEqual(hq_sk, [])
+                self.assertEqual(base_sk, [])
 
 
 if __name__ == "__main__":

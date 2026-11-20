@@ -113,6 +113,52 @@ function writeUpdateState(root, patch) {
     fs.renameSync(tmp, sf);
   } catch (e) { /* ignore */ }
 }
+function cleanVer(v) {
+  return String(v || '').trim().replace(/^v/i, '');
+}
+function normalizeReleaseNotes(raw) {
+  return String(raw || '').replace(/\s+/g, ' ').trim();
+}
+function localReleaseNotes(root, version) {
+  const ver = cleanVer(version);
+  // 1. Persisted OTA notes in work/_update_state.json
+  try {
+    const st = readUpdateState(root);
+    const stNotes = normalizeReleaseNotes(st.notes);
+    const stVer = cleanVer(st.notes_version);
+    if (stNotes && (!stVer || !ver || stVer === ver)) return stNotes;
+  } catch (e) { /* ignore */ }
+
+  // 2. Bundled/shipped RELEASE_NOTES.txt in workspace root or app fallbacks
+  const notePaths = [...new Set([
+    root ? path.join(root, 'RELEASE_NOTES.txt') : null,
+    path.join(__dirname, '..', 'RELEASE_NOTES.txt'),
+    process.resourcesPath ? path.join(process.resourcesPath, 'RELEASE_NOTES.txt') : null,
+  ].filter(Boolean))];
+  for (const np of notePaths) {
+    try {
+      if (fs.existsSync(np)) {
+        const txt = normalizeReleaseNotes(fs.readFileSync(np, 'utf8'));
+        if (txt) return txt;
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  // 3. Cached CLI/auto-updater check payload in work/_update_check.json
+  if (root) {
+    try {
+      const cf = path.join(root, 'work', '_update_check.json');
+      if (fs.existsSync(cf)) {
+        const chk = JSON.parse(fs.readFileSync(cf, 'utf8')) || {};
+        const chkNotes = normalizeReleaseNotes(chk.notes);
+        const chkVer = cleanVer(chk.latest_version);
+        if (chkNotes && ver && chkVer === ver) return chkNotes;
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  return '';
+}
 
 function rendererEntry(root) {
   try {
@@ -513,11 +559,18 @@ async function checkCloudUpdateNative(auth, root, force = false) {
     if (!d || !d.has_release) return base;
     const latestVer = String(d.version || curVer).trim();
     const remoteSha = String(d.bundle_sha256 || '').trim();
+    const remoteNotes = String(d.notes || '').trim();
+    if (root && remoteNotes) {
+      writeUpdateState(root, {
+        notes: remoteNotes,
+        notes_version: latestVer,
+      });
+    }
     const info = {
       available: computeUpdateAvailable(curVer, root, { latest_version: latestVer, bundle_sha256: remoteSha }),
       current_version: curVer,
       latest_version: latestVer,
-      notes: String(d.notes || '').trim(),
+      notes: remoteNotes,
       size_mb: Math.round((Number(d.size_bytes || 0) / 1048576) * 10) / 10,
       mandatory: !!d.mandatory,
       dmg_url: String(d.dmg_url || '').trim(),
@@ -574,12 +627,34 @@ async function applyCloudUpdateNative(auth, targetRoot) {
   pruneFromManifest(dest, installedVer, prevVer);
   stripLegacyZenoHooks(dest);
   stripLegacyUserMcp();
-  writeUpdateState(dest, {
+  let appliedNotes = '';
+  let appliedNotesVer = installedVer;
+  if (cachedCloudInfo && cachedCloudInfo.notes && (!cachedCloudInfo.latest_version || cleanVer(cachedCloudInfo.latest_version) === cleanVer(installedVer))) {
+    appliedNotes = String(cachedCloudInfo.notes).trim();
+    appliedNotesVer = String(cachedCloudInfo.latest_version || installedVer).trim();
+  } else {
+    try {
+      const vResp = await fetch(`${cloudUrl}/v1/version`, { headers: { Authorization: `Bearer ${auth.token}` } });
+      if (vResp.ok) {
+        const vd = await vResp.json();
+        if (vd && vd.has_release && vd.notes) {
+          appliedNotes = String(vd.notes).trim();
+          appliedNotesVer = String(vd.version || installedVer).trim();
+        }
+      }
+    } catch (e) { /* ignore */ }
+  }
+  const statePatch = {
     installed_version: installedVer,
     last_bundle_sha256: actualSha,
     last_checked_at: Date.now() / 1000,
     updated_at: Date.now() / 1000,
-  });
+  };
+  if (appliedNotes) {
+    statePatch.notes = appliedNotes;
+    statePatch.notes_version = appliedNotesVer || installedVer;
+  }
+  writeUpdateState(dest, statePatch);
   syncAuthToRoot(dest, auth);
   saveRoot(dest);
   cachedCloudInfo = null;
@@ -681,11 +756,23 @@ app.whenReady().then(() => {
         }
       } catch (e) { /* ignore notification errors */ }
     }
+    const liveNotes = update && update.notes ? normalizeReleaseNotes(update.notes) : '';
+    const sameVer = !!(update && update.latest_version && cleanVer(update.latest_version) === cleanVer(ver));
+    const liveMatchesOrAhead = !!(update && (!update.latest_version || cmpVer(update.latest_version, ver) >= 0));
+    const useLiveNotes = !!(liveNotes && ((!update.available && liveMatchesOrAhead) || sameVer));
+    const localNotes = localReleaseNotes(ROOT, ver);
+    const releaseNotes = useLiveNotes ? liveNotes : (localNotes || ((!update.available && liveNotes) ? liveNotes : ''));
+    const releaseNotesVersion = useLiveNotes
+      ? String((update && update.latest_version) || ver).trim()
+      : (localNotes ? ver : String((update && update.latest_version) || ver).trim());
+
     return {
       version: ver,
       sha: (st.last_bundle_sha256 || '').slice(0, 7),
       behind: update && update.available ? 1 : 0,
       update,
+      release_notes: releaseNotes,
+      release_notes_version: releaseNotesVersion,
       root: ROOT,
       engine_ready: !!(ROOT && hasVenv(ROOT)),
       signed_in: signedIn,

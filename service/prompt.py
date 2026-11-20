@@ -7,11 +7,26 @@ from typing import List, Optional
 def build_transcribe_prompt(target_script_lines: Optional[List[str]] = None, language_hint: str = "auto") -> str:
     script_context = ""
     if target_script_lines:
-        clean_lines = [str(x).strip() for x in target_script_lines if str(x).strip()][:40]
+        clean_lines: List[str] = []
+        seen_lines: set[str] = set()
+        for raw_x in target_script_lines:
+            s_line = str(raw_x).strip()
+            if not s_line:
+                continue
+            key_l = s_line.lower()
+            if key_l in seen_lines:
+                continue
+            seen_lines.add(key_l)
+            clean_lines.append(s_line)
+            if len(clean_lines) >= 40:
+                break
         if clean_lines:
             joined_script = "\n".join(f"- {line}" for line in clean_lines)
             script_context = (
-                "\n## Target Script Reference (Speaker may have retakes, repeated words, false starts, or variations):\n"
+                "\n## Optional Spelling & Vocabulary Reference (FULL MULTI-SPEAKER SCRIPT — NOT THIS SINGLE CLIP):\n"
+                "WARNING: The list below is the full multi-character video script. THIS audio clip usually contains ONLY ONE "
+                "speaker or ONE scene — many lines below belong to OTHER speakers in OTHER video clips and are NOT in this audio. "
+                "Use this list ONLY for spelling proper nouns, brand names, and words you genuinely hear spoken aloud.\n"
                 f"{joined_script}\n"
             )
 
@@ -48,22 +63,21 @@ def build_transcribe_prompt(target_script_lines: Optional[List[str]] = None, lan
             "Never mix two Indic scripts in one clip.\n"
         )
     return f"""You are a precision multilingual speech-to-text transcription engine for video editing.
-Transcribe ONLY the intelligible words actually spoken aloud in this audio clip 100% verbatim.
+Transcribe ONLY the intelligible words actually spoken aloud in THIS audio clip, 100% verbatim.
 {lang_note}{script_context}
 Rules:
-1. Include ALL spoken words verbatim in exact chronological order, including retakes, repeated words, stutters, false starts, and restarted phrases (e.g. "Almost... Almost", "I want... I want to go", "ನಾನು ನಾನು"). NEVER deduplicate, clean up, or collapse repeated words, stutters, false starts, or restarted phrases even when Target Script Reference shows the phrase only once — output EVERY spoken attempt verbatim in chronological order (if a word or phrase is spoken twice, it MUST appear twice in `words`).
-2. NEVER auto-complete a sentence or copy lines from the Target Script Reference if the speaker stops mid-sentence or does not speak it in this clip! Target Script Reference is ONLY a spelling/vocabulary reference for words actually heard in the audio.
-3. ZERO-SPEECH GUARD: If the audio contains zero intelligible human speech (only silence, room tone, SFX, background noise, or music), return `"full_transcript": ""`, `"words": []`, and `"cues": []` — NEVER hallucinate or copy Target Script Reference lines onto silent or non-speech audio!
-4. If the clip ends with unintelligible AI gibberish/babble after the real sentence concludes, DO NOT transcribe the unintelligible gibberish.
+1. TRUE VERBATIM CHRONOLOGICAL ORDER: Include EVERY word actually spoken aloud in this audio, including genuine audible retakes, repeated words, stutters, false starts, and restarted phrases (e.g. "Almost... Almost", "I want... I want to go", "ನಾನು ನಾನು"). NEVER collapse or clean up a genuine audible repeat/stutter just because the reference shows it once — if the speaker audibly says a word or phrase twice in THIS audio, output it twice.
+2. STRICT ANTI-ECHO & SINGLE-CLIP GUARD: NEVER copy, auto-complete, or borrow unspoken lines from the reference script! Especially in teaching / mock-interview / call-and-response scripts where Character A says `Say: "<sentence>"` and Character B repeats `<sentence>` on the next line, those turns are recorded in SEPARATE clips. If THIS audio only speaks a sentence ONCE, transcribe it ONLY ONCE — never emit a second copy from another speaker's script line, and never fabricate neighboring lines or unspoken turns.
+3. ZERO-SPEECH GUARD: If the audio contains zero intelligible human speech (only silence, room tone, SFX, background noise, or music), return `"full_transcript": ""` and `"cues": []` — NEVER hallucinate or copy reference script lines onto silent or non-speech audio!
+4. AI GIBBERISH GUARD: If the clip ends with unintelligible AI gibberish/babble after the real sentence concludes, DO NOT transcribe the unintelligible gibberish.
 5. STRICT BILINGUAL CODE-SWITCHING LAW: Decide language word by word. A spoken English word stays English, in the Latin alphabet (A-Z), even inside a native sentence. A native word stays native, in its own script. Never transliterate English into native script or native words into Latin.
-6. Attach punctuation (.,?!) to the end of the spoken word.
-7. Return ONLY valid JSON with this exact structure:
+6. PUNCTUATION & VALID JSON: Attach sentence punctuation (.,?!) to the end of the spoken word. Avoid unescaped quotation marks inside JSON string values (prefer omitting decorative quotes around quoted speech).
+7. Return ONLY valid JSON with this exact compact structure (do NOT duplicate word arrays inside cues):
 {{
   "detected_language_code": "kn",
   "detected_language_name": "Kannada",
   "full_transcript": "Complete verbatim transcript...",
-  "words": ["word1", "word2", "word3"],
   "cues": [
-    {{"text": "sentence or clause text", "start": 0.0, "end": 2.4, "words": ["word1", "word2"]}}
+    {{"start": 0.0, "end": 2.4, "text": "sentence or clause text"}}
   ]
 }}"""

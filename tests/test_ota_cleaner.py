@@ -373,6 +373,50 @@ class OtaManifestCleanerTests(unittest.TestCase):
                 self.assertTrue(p.is_file(), f"Protected path missing after upgrade: {rel}")
                 self.assertEqual(p.read_text(encoding="utf-8"), expected_body, f"Protected path modified: {rel}")
 
+    def test_zeno_cli_prunes_leftover_manifest_and_legacy_1x_after_old_app_extract(self):
+        """Simulate old v1.0.2 app.asar extracting a 2.0.5 bundle + _zeno_manifest.json without pruning;
+        zeno._prune_pending_ota_cleanup() and preload.js trigger clean.py and wipe legacy 1.x bloat safely.
+        """
+        import release
+        import zeno
+
+        with tempfile.TemporaryDirectory(prefix="zeno_old_asar_") as tmp:
+            root = Path(tmp) / "Zeno"
+            for rel in (
+                "VERSION",
+                "agent/EDIT_RULES.md",
+                "styles/micronarrative/SKILL.md",
+                "CONCEPT.md",
+                "scripts/zeno_mcp.py",
+                "scripts/compact_run.py",
+                "work/old_1x_proj/plan.edl",
+                "work/_clips/C1/hq_words.json",
+            ):
+                p = root / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("2.0.5\n" if rel == "VERSION" else "data\n", encoding="utf-8")
+
+            blob, _count, _sha = release.build_bundle_bytes(version="2.0.5", clear_work_projects=False)
+            with zipfile.ZipFile(io.BytesIO(blob), "r") as zf:
+                man = zf.read("_zeno_manifest.json").decode("utf-8")
+            (root / "_zeno_manifest.json").write_text(man, encoding="utf-8")
+            (root / "work" / "_update_state.json").write_text(
+                json.dumps({"installed_version": "2.0.5"}) + "\n", encoding="utf-8"
+            )
+
+            with patch.object(Path, "home", return_value=root.parent / "home"), \
+                 patch.object(zeno, "ROOT", root):
+                zeno._prune_pending_ota_cleanup()
+
+            self.assertFalse((root / "_zeno_manifest.json").exists())
+            self.assertFalse((root / "agent").exists())
+            self.assertFalse((root / "styles").exists())
+            self.assertFalse((root / "CONCEPT.md").exists())
+            self.assertFalse((root / "scripts" / "zeno_mcp.py").exists())
+            self.assertFalse((root / "scripts" / "compact_run.py").exists())
+            self.assertFalse((root / "work" / "old_1x_proj").exists())
+            self.assertTrue((root / "work" / "_clips" / "C1" / "hq_words.json").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

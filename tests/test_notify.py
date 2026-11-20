@@ -190,13 +190,14 @@ class DeliveryNotificationTests(unittest.TestCase):
                 duration_sec=8.0,
             )
             self.assertIn("#bacf65", rendered)
-            self.assertIn("VIDEO READY", rendered)
+            self.assertIn("Video ready", rendered)
             self.assertIn("Reel &lt;Test&gt; &amp; &quot;Demo&quot;", rendered)
-            self.assertIn("9:16 REEL", rendered)
-            self.assertIn("1:1 SQUARE", rendered)
-            self.assertIn("PREMIERE .PRPROJ", rendered)
-            self.assertIn("QC SHEET", rendered)
-            self.assertIn("Play Reel", rendered)
+            self.assertIn("9:16 reel", rendered)
+            self.assertIn("1:1 square", rendered)
+            self.assertIn("Premiere project", rendered)
+            self.assertIn("Saved in", rendered)
+            self.assertNotIn("Open Folder", rendered)
+            self.assertNotIn("Play Reel", rendered)
 
             with mock.patch.object(notify_popup, "show_themed_popup", return_value=True) as m_pop:
                 ok = notify.show_desktop_popup(

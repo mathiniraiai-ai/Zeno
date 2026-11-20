@@ -16,8 +16,15 @@ Environment:
     ZENO_API_TOKENS      optional extra keys "name:sha256hex,name2:sha256hex" (make them with make_token.py)
     ZENO_RATE_PER_MIN    requests per person per minute (default 20)
     ZENO_MAX_UPLOAD_MB   largest audio upload (default 25)
-    GEMINI_RPM           Gemini calls per minute across everyone (default 30)
-    GEMINI_MODELS        model order, comma-separated (default: gemini-3.5-flash-lite,gemini-2.5-flash,gemini-flash-lite-latest)
+    GEMINI_TIER          "free" (default, Google official Free Tier pacing) or "paid"
+    GEMINI_CONCURRENCY   max simultaneous upstream Gemini calls (default free: 1 on 1 key / min(keys, 2); paid: 3..8)
+    GEMINI_MIN_GAP_SEC   min seconds between any two Gemini calls on the same key (default 3.0 free, 0.5 paid)
+    GEMINI_FLASH_RPM     per-(key, model) RPM for full Flash models (default 5 free, 150 paid)
+    GEMINI_LITE_RPM      per-(key, model) RPM for Flash-Lite models (default 15 free, 600 paid)
+    GEMINI_TPM           per-(key, model) 60s token budget (default 240000 free, 1000000 paid)
+    GEMINI_RPM           optional total per-key RPM cap across all models (on free tier also caps Flash/Lite RPM if lower unless GEMINI_FLASH_RPM/GEMINI_LITE_RPM is set)
+    GEMINI_QUEUE_TIMEOUT seconds a queued transcription waits for a slot (default 180)
+    GEMINI_MODELS        model order, comma-separated (default: gemini-3.5-flash,gemini-3.6-flash,gemini-3-flash-preview,gemini-2.5-flash,gemini-3.8-flash,gemini-flash-latest,gemini-3.1-flash-lite,gemini-flash-lite-latest)
 Audio is processed in memory and never written to disk.
 """
 import base64
@@ -52,18 +59,18 @@ log = logging.getLogger("zeno.service")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-# Fast, audio-capable models with separate quota pools first (gemini-2.5-flash returns 404 NOT_FOUND on new keys).
+# Full Flash audio-capable models first for verbatim multi-speaker accuracy (lite models only as last-resort fallback).
 MODELS = [
     m.strip()
     for m in os.getenv(
         "GEMINI_MODELS",
-        "gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-3.1-flash-lite-preview,gemini-3-flash-preview,gemini-3.5-flash,gemini-flash-lite-latest,gemini-flash-latest",
+        "gemini-3.5-flash,gemini-3.6-flash,gemini-3-flash-preview,gemini-2.5-flash,gemini-3.8-flash,gemini-flash-latest,gemini-3.1-flash-lite,gemini-flash-lite-latest",
     ).split(",")
     if m.strip()
 ]
 def _prompt_version() -> str:
     """Changes whenever the transcription prompt or the model order does, so a cached transcript is never reused after either."""
-    h = hashlib.sha1("gemini-3.5-flash-lite,gemini-2.5-flash,gemini-flash-lite-latest".encode())
+    h = hashlib.sha1(",".join(MODELS).encode("utf-8"))
     try:
         for line in (Path(__file__).parent / "prompt.py").read_text(encoding="utf-8").splitlines():
             t = line.strip()
@@ -92,6 +99,76 @@ def _tokens() -> Dict[str, str]:
 def _gemini_keys() -> List[str]:
     keys = [os.getenv("GEMINI_API_KEY", "").strip()] + [os.getenv(f"GEMINI_API_KEY_{i}", "").strip() for i in range(1, 5)]
     return [k for k in keys if k]
+
+
+def _env_int(name: str) -> Optional[int]:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _gemini_tier() -> str:
+    """'paid' or 'free' (default 'free', paced to Google's official Gemini API Free Tier limits)."""
+    tier = (os.getenv("GEMINI_TIER") or "free").strip().lower()
+    return "paid" if tier == "paid" else "free"
+
+
+def _min_global_gap_sec() -> float:
+    """Minimum seconds between any two Gemini calls on the same key, even across distinct models."""
+    raw = (os.getenv("GEMINI_MIN_GAP_SEC") or "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return 0.5 if _gemini_tier() == "paid" else 3.0
+
+
+def _model_limits(model: str) -> Tuple[int, int, float]:
+    """Return (rpm, tpm, min_spacing_sec) for a Gemini model under GEMINI_TIER (default 'free').
+
+    On free tier, explicit GEMINI_RPM still caps total per-key RPM and also caps Flash/Lite RPM if lower
+    (unless GEMINI_FLASH_RPM / GEMINI_LITE_RPM or GEMINI_TIER=paid is set).
+    """
+    tier = _gemini_tier()
+    is_lite = "lite" in (model or "").lower()
+    global_rpm = _env_int("GEMINI_RPM")
+    tpm_env = _env_int("GEMINI_TPM")
+    if is_lite:
+        lite_rpm = _env_int("GEMINI_LITE_RPM")
+        if tier == "paid":
+            rpm = max(1, lite_rpm if lite_rpm is not None else (global_rpm if global_rpm is not None else 600))
+            tpm = max(0, tpm_env) if tpm_env is not None else 1000000
+            min_spacing = 60.0 / max(1, rpm)
+        else:
+            if lite_rpm is not None:
+                rpm = max(1, lite_rpm)
+            elif global_rpm is not None:
+                rpm = max(1, min(15, global_rpm))
+            else:
+                rpm = 15
+            tpm = max(0, tpm_env) if tpm_env is not None else 240000
+            min_spacing = max(4.2, 61.0 / max(1, rpm))
+    else:
+        flash_rpm = _env_int("GEMINI_FLASH_RPM")
+        if tier == "paid":
+            rpm = max(1, flash_rpm if flash_rpm is not None else (global_rpm if global_rpm is not None else 150))
+            tpm = max(0, tpm_env) if tpm_env is not None else 1000000
+            min_spacing = 60.0 / max(1, rpm)
+        else:
+            if flash_rpm is not None:
+                rpm = max(1, flash_rpm)
+            elif global_rpm is not None:
+                rpm = max(1, min(5, global_rpm))
+            else:
+                rpm = 5
+            tpm = max(0, tpm_env) if tpm_env is not None else 240000
+            min_spacing = max(12.5, 61.0 / max(1, rpm))
+    return rpm, tpm, min_spacing
 
 
 _store: Optional[KeyStore] = None
@@ -143,7 +220,10 @@ def check_rate(name: str) -> None:
 
 
 class _Gemini:
-    """Key and model rotation, fair per-editor queue, cooldown circuit-breakers, and official Gemini backoff."""
+    """Key and model rotation, fair per-editor queue, per-model sliding windows, cooldown circuit-breakers, and official Gemini backoff."""
+
+    _min_global_gap_sec = staticmethod(_min_global_gap_sec)
+    _model_limits = staticmethod(_model_limits)
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -152,6 +232,11 @@ class _Gemini:
         self.model_idx = 0
         self.cooldowns: Dict[Tuple[int, str], float] = {}
         self._tpm_window: deque = deque()
+        self._model_rpm_windows: Dict[Tuple[int, str], deque] = defaultdict(deque)
+        self._model_tpm_windows: Dict[Tuple[int, str], deque] = defaultdict(deque)
+        self._model_last_call: Dict[Tuple[int, str], float] = {}
+        self._key_last_call: Dict[int, float] = {}
+        self._key_rpm_windows: Dict[int, deque] = defaultdict(deque)
         self._q_cond = threading.Condition()
         self._q_users: deque = deque()
         self._q_waiters: Dict[str, deque] = defaultdict(deque)
@@ -165,15 +250,17 @@ class _Gemini:
             except ValueError:
                 pass
         keys = _gemini_keys()
-        return max(3, min(8, len(keys) * 2)) if len(keys) > 1 else 3
+        if _gemini_tier() == "paid":
+            return max(3, min(8, len(keys) * 2)) if len(keys) > 1 else 3
+        return min(len(keys), 2) if len(keys) > 1 else 1
 
     def acquire_slot(self, owner: str = "anon", timeout: Optional[float] = None) -> bool:
         """Bound simultaneous upstream Gemini calls across editors using fair round-robin + per-editor FIFO."""
         if timeout is None:
             try:
-                timeout = max(5.0, float(os.getenv("GEMINI_QUEUE_TIMEOUT", "75")))
+                timeout = max(5.0, float(os.getenv("GEMINI_QUEUE_TIMEOUT", "180")))
             except ValueError:
-                timeout = 75.0
+                timeout = 180.0
         who = (owner or "anon").strip().lower() or "anon"
         ticket = object()
         with self._q_cond:
@@ -232,33 +319,95 @@ class _Gemini:
             self._active_slots = max(0, self._active_slots - 1)
             self._q_cond.notify_all()
 
-    def _wait(self, estimated_tokens: int = 0):
-        interval = 60.0 / max(1, int(os.getenv("GEMINI_RPM", "30")))
-        tpm_env = (os.getenv("GEMINI_TPM") or "").strip()
-        try:
-            tpm_cap = int(tpm_env) if tpm_env else 0
-        except ValueError:
-            tpm_cap = 0
+    def _compute_wait_locked(self, now: float, key_idx: int, model: str, estimated_tokens: int = 0) -> float:
+        """Compute exact wait needed right now for (key_idx, model). Caller MUST hold self.lock."""
+        window_sec = 61.0
+        sleep_for = 0.0
+
+        # 1. Per-key minimum buffer gap + optional explicit GEMINI_RPM per-key sliding window
+        min_gap = _min_global_gap_sec()
+        last_key = self._key_last_call.get(key_idx, 0.0)
+        if min_gap > 0 and last_key > 0:
+            gap = min_gap - (now - last_key)
+            if gap > 0:
+                sleep_for = max(sleep_for, gap)
+
+        key_rpm_q = self._key_rpm_windows.get(key_idx)
+        if key_rpm_q:
+            while key_rpm_q and now - key_rpm_q[0] >= window_sec:
+                key_rpm_q.popleft()
+            global_rpm = _env_int("GEMINI_RPM")
+            if global_rpm is not None and len(key_rpm_q) >= max(1, global_rpm):
+                sleep_for = max(sleep_for, max(0.05, window_sec - (now - key_rpm_q[0]) + 0.05))
+
+        # 2. Per-(key_idx, model) smooth spacing + 61s sliding RPM cap
+        rpm, tpm, min_spacing = _model_limits(model)
+        mkey = (key_idx, model)
+        last_model = self._model_last_call.get(mkey, 0.0)
+        if min_spacing > 0 and last_model > 0:
+            gap_m = min_spacing - (now - last_model)
+            if gap_m > 0:
+                sleep_for = max(sleep_for, gap_m)
+
+        rpm_q = self._model_rpm_windows.get(mkey)
+        if rpm_q:
+            while rpm_q and now - rpm_q[0] >= window_sec:
+                rpm_q.popleft()
+            if len(rpm_q) >= rpm:
+                sleep_for = max(sleep_for, max(0.05, window_sec - (now - rpm_q[0]) + 0.05))
+
+        # 3. Per-(key_idx, model) 61s sliding TPM cap
+        tpm_q = self._model_tpm_windows.get(mkey)
+        if tpm_q:
+            while tpm_q and now - tpm_q[0][0] >= window_sec:
+                tpm_q.popleft()
+            if tpm > 0 and estimated_tokens > 0 and tpm_q:
+                used = sum(tok for _, tok in tpm_q)
+                if used + estimated_tokens > tpm:
+                    needed = used + estimated_tokens - tpm
+                    freed = 0
+                    target_ts = tpm_q[-1][0]
+                    for ts, tok in tpm_q:
+                        freed += tok
+                        target_ts = ts
+                        if freed >= needed:
+                            break
+                    sleep_for = max(sleep_for, max(0.05, window_sec - (now - target_ts) + 0.05))
+
+        return sleep_for
+
+    def model_wait_seconds(self, key_idx: int, model: str, estimated_tokens: int = 0) -> float:
+        """Compute exact wait needed right now for (key_idx, model) without sleeping."""
+        with self.lock:
+            return self._compute_wait_locked(time.time(), key_idx, model, estimated_tokens)
+
+    def _record_call_locked(self, now: float, key_idx: int, model: str, estimated_tokens: int = 0) -> None:
+        """Record a dispatched Gemini call into per-key and per-(key_idx, model) windows. Caller holds self.lock."""
+        self.last_call = now
+        self._key_last_call[key_idx] = now
+        self._key_rpm_windows[key_idx].append(now)
+        mkey = (key_idx, model)
+        self._model_last_call[mkey] = now
+        self._model_rpm_windows[mkey].append(now)
+        if estimated_tokens > 0:
+            self._model_tpm_windows[mkey].append((now, estimated_tokens))
+            self._tpm_window.append((now, estimated_tokens))
+            while self._tpm_window and now - self._tpm_window[0][0] >= 61.0:
+                self._tpm_window.popleft()
+
+    def record_call(self, key_idx: int, model: str, estimated_tokens: int = 0) -> None:
+        with self.lock:
+            self._record_call_locked(time.time(), key_idx, model, estimated_tokens)
+
+    def _wait(self, key_idx: int = 0, model: str = "", estimated_tokens: int = 0) -> None:
         while True:
-            sleep_for = 0.0
             with self.lock:
                 now = time.time()
-                gap = interval - (now - self.last_call)
-                if gap > 0:
-                    sleep_for = max(sleep_for, gap)
-                if tpm_cap > 0 and estimated_tokens > 0:
-                    while self._tpm_window and now - self._tpm_window[0][0] >= 60.0:
-                        self._tpm_window.popleft()
-                    used = sum(tok for _, tok in self._tpm_window)
-                    if used + estimated_tokens > tpm_cap and self._tpm_window:
-                        oldest_t = self._tpm_window[0][0]
-                        sleep_for = max(sleep_for, max(0.2, 60.0 - (now - oldest_t) + 0.1))
+                sleep_for = self._compute_wait_locked(now, key_idx, model, estimated_tokens)
                 if sleep_for <= 0:
-                    self.last_call = now
-                    if tpm_cap > 0 and estimated_tokens > 0:
-                        self._tpm_window.append((now, estimated_tokens))
+                    self._record_call_locked(now, key_idx, model, estimated_tokens)
                     return
-            time.sleep(min(sleep_for, 5.0))
+            time.sleep(min(sleep_for, 2.0))
 
     @staticmethod
     def _parse_retry_after(exc: BaseException) -> Optional[float]:
@@ -274,13 +423,18 @@ class _Gemini:
             return max(1.0, float(m2.group(1)))
         return None
 
-    @staticmethod
-    def _is_daily_quota(exc: BaseException) -> bool:
+    @classmethod
+    def _is_daily_quota(cls, exc: BaseException) -> bool:
         low = f"{type(exc).__name__} {exc}".lower()
-        return (
-            ("429" in low or "resource_exhausted" in low)
-            and ("free_tier" in low or "per day" in low or "perday" in low or "exceeded your current quota" in low)
-        )
+        if not ("429" in low or "resource_exhausted" in low):
+            return False
+        has_daily = any(tok in low for tok in ("perday", "per day", "requestsperday", "daily", "rpd"))
+        if any(tok in low for tok in ("perminute", "per minute", "rpm", "tokensperminute", "tpm")) and not has_daily:
+            return False
+        if has_daily:
+            return True
+        parsed_delay = cls._parse_retry_after(exc)
+        return parsed_delay is not None and parsed_delay >= 300.0
 
     @staticmethod
     def _is_rate_or_overload(exc: BaseException) -> Tuple[bool, bool]:
@@ -316,25 +470,39 @@ class _Gemini:
         return ttl
 
     def candidate_models(self, models: Optional[List[str]] = None) -> List[str]:
-        """Return models with active cooldown-free ones ordered first."""
+        """Return ready Full Flash models first (shortest wait first), then ready Lite, then cooled by earliest expiry."""
         pool = list(models or MODELS)
-        keys = _gemini_keys()
-        if not keys or len(pool) <= 1:
+        if len(pool) <= 1:
             return pool
         now = time.time()
-        n_keys = len(keys)
+        n_keys = max(1, len(_gemini_keys()))
         with self.lock:
-            ready = [m for m in pool if any(self.cooldowns.get(k, 0.0) <= now for k in ((ki, m) for ki in range(n_keys)))]
-            cooled = [m for m in pool if m not in ready]
-            cooled.sort(key=lambda m: min(self.cooldowns.get((ki, m), 0.0) for ki in range(n_keys)))
-        return ready + cooled
+            flash_ready: List[Tuple[bool, float, int, str]] = []
+            lite_ready: List[Tuple[bool, float, int, str]] = []
+            cooled: List[Tuple[float, int, str]] = []
+            for priority_idx, m in enumerate(pool):
+                ready_keys = [ki for ki in range(n_keys) if self.cooldowns.get((ki, m), 0.0) <= now]
+                if ready_keys:
+                    wait_sec = min(self._compute_wait_locked(now, ki, m) for ki in ready_keys)
+                    item = (wait_sec > 0.25, round(wait_sec, 1), priority_idx, m)
+                    if "lite" in m.lower():
+                        lite_ready.append(item)
+                    else:
+                        flash_ready.append(item)
+                else:
+                    earliest = min(self.cooldowns.get((ki, m), 0.0) for ki in range(n_keys))
+                    cooled.append((earliest, priority_idx, m))
+            flash_ready.sort()
+            lite_ready.sort()
+            cooled.sort()
+        return [m for *_, m in flash_ready] + [m for *_, m in lite_ready] + [m for *_, m in cooled]
 
     @staticmethod
-    def _gen_config(types_mod: Any, json_mode: bool = True) -> Any:
-        kw: Dict[str, Any] = {"temperature": 0.1 if json_mode else 0.0}
+    def _gen_config(types_mod: Any, json_mode: bool = True, use_thinking_budget: bool = True) -> Any:
+        kw: Dict[str, Any] = {"temperature": 0.0}
         if json_mode:
             kw["response_mime_type"] = "application/json"
-        if hasattr(types_mod, "ThinkingConfig"):
+        if use_thinking_budget and hasattr(types_mod, "ThinkingConfig"):
             try:
                 kw["thinking_config"] = types_mod.ThinkingConfig(thinking_budget=0)
             except Exception:
@@ -354,7 +522,7 @@ class _Gemini:
         return res if isinstance(res, dict) else {"words": res if isinstance(res, list) else []}
 
     def transcribe(self, audio: bytes, prompt: str, duration: float, trace: Optional[List[str]] = None, language: str = "auto", owner: str = "anon") -> Dict[str, Any]:
-        """Try active healthy models first (bounded fair queue + cooldown skip + official exponential backoff)."""
+        """Try active healthy models first (bounded fair queue + per-model sliding windows + cooldown skip + jittered backoff)."""
         from google import genai
         from google.genai import types
 
@@ -373,33 +541,89 @@ class _Gemini:
             count = lambda d: len(d.get("words") or str(d.get("full_transcript", "")).split())
             now = time.time()
             ordered_models = self.candidate_models()
-            all_ready_empty = all(
+            all_ready_empty = bool(ordered_models) and all(
                 all(self.cooldown_until(ki, m) > now for ki in range(len(keys)))
                 for m in ordered_models
             )
-            cfg = self._gen_config(types, json_mode=True)
+            if all_ready_empty:
+                soonest = min(
+                    self.cooldown_until(ki, m) - now
+                    for m in ordered_models
+                    for ki in range(len(keys))
+                )
+                if soonest > 20.0:
+                    wait_hdr = str(int(max(5, min(60, soonest))))
+                    raise HTTPException(
+                        429,
+                        "All Gemini models are temporarily in cooldown; retry shortly",
+                        headers={"Retry-After": wait_hdr},
+                    )
+                if soonest > 0.0:
+                    time.sleep(soonest + 0.25)
+                ordered_models = self.candidate_models()
+
+            cfg = self._gen_config(types, json_mode=True, use_thinking_budget=True)
+            cfg_no_tb = self._gen_config(types, json_mode=True, use_thinking_budget=False)
             est_tokens = int(max(0.0, float(duration)) * 32) + max(400, len(prompt) // 3)
             saw_quota = False
             saw_transient = False
+            skipped_cooled = False
+            soonest_skip: Optional[float] = None
             min_retry_after: Optional[float] = None
+            transient_streak = 0
             for model in ordered_models:
-                max_tries = len(keys) if len(keys) > 1 else 2
-                for attempt in range(max_tries):
-                    k_idx = self.key_idx % len(keys)
-                    if not all_ready_empty and self.cooldown_until(k_idx, model) > time.time():
-                        self.key_idx += 1
+                max_tries = len(keys) if len(keys) > 1 else 1
+                if max_tries == 1:
+                    key_order = [0]
+                else:
+                    now_k = time.time()
+                    with self.lock:
+                        start_k = self.key_idx % len(keys)
+                        key_order = sorted(
+                            range(len(keys)),
+                            key=lambda ki: (
+                                self.cooldowns.get((ki, model), 0.0) > now_k,
+                                round(self._compute_wait_locked(now_k, ki, model, est_tokens), 1),
+                                (ki - start_k) % len(keys),
+                            ),
+                        )[:max_tries]
+                for k_idx in key_order:
+                    cd = self.cooldown_until(k_idx, model)
+                    now_try = time.time()
+                    if cd > now_try:
+                        skipped_cooled = True
+                        rem_cd = cd - now_try
+                        soonest_skip = rem_cd if soonest_skip is None else min(soonest_skip, rem_cd)
+                        with self.lock:
+                            self.key_idx = (k_idx + 1) % len(keys)
                         continue
                     try:
-                        self._wait(estimated_tokens=est_tokens)
+                        self._wait(k_idx, model, est_tokens)
                         client = genai.Client(api_key=keys[k_idx], http_options=types.HttpOptions(timeout=60000))
-                        resp = client.models.generate_content(
-                            model=model,
-                            contents=[types.Part.from_bytes(data=audio, mime_type="audio/wav"), prompt],
-                            config=cfg,
-                        )
+                        try:
+                            resp = client.models.generate_content(
+                                model=model,
+                                contents=[types.Part.from_bytes(data=audio, mime_type="audio/wav"), prompt],
+                                config=cfg,
+                            )
+                        except Exception as tb_exc:
+                            if "400" in str(tb_exc) or "INVALID_ARGUMENT" in str(tb_exc):
+                                self._wait(k_idx, model, est_tokens)
+                                resp = client.models.generate_content(
+                                    model=model,
+                                    contents=[types.Part.from_bytes(data=audio, mime_type="audio/wav"), prompt],
+                                    config=cfg_no_tb,
+                                )
+                            else:
+                                raise
                         self.mark_ok(k_idx, model)
+                        with self.lock:
+                            self.key_idx = (k_idx + 1) % len(keys)
+                        transient_streak = 0
                         _ping_cache.update(at=time.time(), result={"ok": True, "detail": f"{model} active (live transcription)"})
                         data = self._parse(resp.text or "{}")
+                        if not data.get("words") and data.get("full_transcript"):
+                            data["words"] = str(data["full_transcript"]).split()
                         data["model_used"] = model
                         um = getattr(resp, "usage_metadata", None)
                         if um is not None:
@@ -423,7 +647,8 @@ class _Gemini:
                         break   # a different model may do better
                     except Exception as exc:
                         self.mark_failure(k_idx, model, exc)
-                        self.key_idx += 1
+                        with self.lock:
+                            self.key_idx = (k_idx + 1) % len(keys)
                         if trace is not None:
                             trace.append(f"{model}: {_why(exc)}")
                         is_q, is_t = self._is_rate_or_overload(exc)
@@ -436,10 +661,13 @@ class _Gemini:
                         permanent_or_daily = ("404" in msg or "NOT_FOUND" in msg or self._is_daily_quota(exc))
                         if permanent_or_daily and len(keys) == 1:
                             break   # do not hit the same exhausted/retired single-key model twice
-                        if ra is not None and ra > 12.0 and len(keys) == 1:
-                            break   # fail fast over to next healthy model when Retry-After > 12s
-                        if is_t:
-                            base = min(12.0, max(ra or 0.0, 1.5 * (2 ** attempt)))
+                        if is_q:
+                            # Per-model quota hit: cooled above; brief jitter before failing over to next healthy model
+                            time.sleep(random.uniform(0.25, 0.75))
+                        elif is_t:
+                            # Upstream 503/504/timeout: exponential backoff with jitter across consecutive failures
+                            transient_streak += 1
+                            base = min(6.0, 1.0 * (1.5 ** min(transient_streak - 1, 4)))
                             time.sleep(random.uniform(0.55 * base, base))
                         else:
                             time.sleep(0.3)
@@ -461,6 +689,13 @@ class _Gemini:
                     503,
                     "Gemini transcription temporarily busy upstream; retry shortly",
                     headers={"Retry-After": "10"},
+                )
+            if skipped_cooled:
+                wait_sec = str(int(max(5, min(60, soonest_skip or 15))))
+                raise HTTPException(
+                    429,
+                    "All Gemini models are temporarily in cooldown; retry shortly",
+                    headers={"Retry-After": wait_sec},
                 )
             raise HTTPException(502, "Transcription failed upstream")
         finally:
@@ -602,7 +837,7 @@ _ping_cache: Dict[str, Any] = {"at": 0.0, "result": None}
 
 
 def _gemini_ping() -> Dict[str, Any]:
-    """One tiny text request across healthy non-cooled models (cached 60s on ok, 15s on failure to protect free-tier quota)."""
+    """One tiny text request across at most 2 healthy non-cooled models (cached 60s on ok, 15s on failure to protect free-tier quota)."""
     now = time.time()
     cached = _ping_cache["result"]
     if cached is not None:
@@ -622,40 +857,53 @@ def _gemini_ping() -> Dict[str, Any]:
             answered = False
             cfg = _gemini._gen_config(types, json_mode=False)
             pool = _gemini.candidate_models()
-            all_cooled = all(
-                all(_gemini.cooldown_until(ki, m) > now for ki in range(len(keys)))
-                for m in pool
-            )
-            for model in pool:
-                t0 = time.time()
-                model_ok = False
-                for offset in range(len(keys)):
-                    k_idx = (_gemini.key_idx + offset) % len(keys)
-                    if not all_cooled and _gemini.cooldown_until(k_idx, model) > time.time():
-                        continue
-                    try:
-                        client = genai.Client(api_key=keys[k_idx], http_options=types.HttpOptions(timeout=15000))
-                        reply = client.models.generate_content(model=model, contents="Reply with the single word: ok", config=cfg)
-                        if (reply.text or "").strip():
-                            _gemini.mark_ok(k_idx, model)
-                            _gemini.key_idx = k_idx
-                            note = f" ({', '.join(failed)} did not answer)" if failed else ""
-                            res = {"ok": True, "detail": f"{model} answered in {time.time() - t0:.1f}s{note}"}
-                            model_ok = True
-                            answered = True
-                            break
-                    except Exception as exc:
-                        _gemini.mark_failure(k_idx, model, exc)
-                        continue
-                if answered:
-                    break
-                if not model_ok:
-                    failed.append(model)
-            if not answered:
-                res = {"ok": False, "detail": f"Gemini call failed on every model ({', '.join(failed)})"}
+            non_cooled = [
+                m for m in pool
+                if any(_gemini.cooldown_until(ki, m) <= now for ki in range(len(keys)))
+            ]
+            if not non_cooled:
+                soonest = min(
+                    _gemini.cooldown_until(ki, m) - now
+                    for m in pool
+                    for ki in range(len(keys))
+                ) if pool else 15.0
+                res = {"ok": False, "detail": f"Gemini models temporarily in cooldown (~{int(max(1, soonest))}s)"}
+            else:
+                for model in non_cooled[:2]:
+                    t0 = time.time()
+                    model_ok = False
+                    with _gemini.lock:
+                        start_k = _gemini.key_idx % len(keys)
+                    for offset in range(len(keys)):
+                        k_idx = (start_k + offset) % len(keys)
+                        if _gemini.cooldown_until(k_idx, model) > time.time():
+                            continue
+                        try:
+                            _gemini.record_call(k_idx, model)
+                            client = genai.Client(api_key=keys[k_idx], http_options=types.HttpOptions(timeout=15000))
+                            reply = client.models.generate_content(model=model, contents="Reply with the single word: ok", config=cfg)
+                            if (reply.text or "").strip():
+                                _gemini.mark_ok(k_idx, model)
+                                with _gemini.lock:
+                                    _gemini.key_idx = k_idx
+                                note = f" ({', '.join(failed)} did not answer)" if failed else ""
+                                res = {"ok": True, "detail": f"{model} answered in {time.time() - t0:.1f}s{note}"}
+                                model_ok = True
+                                answered = True
+                                break
+                        except Exception as exc:
+                            _gemini.mark_failure(k_idx, model, exc)
+                            time.sleep(1.0)
+                            continue
+                    if answered:
+                        break
+                    if not model_ok:
+                        failed.append(model)
+                if not answered:
+                    res = {"ok": False, "detail": f"Gemini call failed on probed models ({', '.join(failed)})"}
         except Exception as exc:
             res = {"ok": False, "detail": f"Gemini call failed ({type(exc).__name__})"}
-    _ping_cache.update(at=now, result=res)
+    _ping_cache.update(at=time.time(), result=res)
     return res
 
 
@@ -701,11 +949,16 @@ def _transcribe_singleflight(cache_key: str, audio: bytes, lines: List[str], lan
             entry = {"event": threading.Event(), "result": None, "error": None}
             _inflight[cache_key] = entry
     if not is_leader:
-        entry["event"].wait(timeout=120.0)
+        entry["event"].wait(timeout=180.0)
         if entry["error"] is not None:
             raise entry["error"]
         if entry["result"] is not None:
             return {**entry["result"], "cached": True, "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}}
+        raise HTTPException(
+            503,
+            "Same audio is still transcribing in queue; retry shortly",
+            headers={"Retry-After": "15"},
+        )
     try:
         prompt = build_transcribe_prompt(lines, language_hint=language_hint or "auto")
         # Keep positional-arg compatibility with tests that patch `_gemini.transcribe(audio, prompt, duration, trace, language)`
