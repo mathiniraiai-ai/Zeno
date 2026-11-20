@@ -554,6 +554,59 @@ def _cleanup_legacy_claude_hooks(root: Path) -> int:
     return removed
 
 
+def _ensure_codex_project_trust(root: Path, home_dir: Optional[Path] = None) -> bool:
+    """Ensure `root` is marked `trust_level = "trusted"` inside existing `~/.codex/config.toml`
+    so `.codex/config.toml` (`sandbox_mode` + `network_access = true` + `AGENTS.md`) takes effect in Codex App/CLI.
+    Never modifies `~/.codex/` unless it already exists; validates TOML before saving.
+    """
+    home = Path(home_dir) if home_dir is not None else Path.home()
+    codex_dir = home / ".codex"
+    if not codex_dir.is_dir():
+        return False
+    cfg_path = codex_dir / "config.toml"
+    existing = ""
+    if cfg_path.is_file():
+        try:
+            existing = cfg_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+
+    try:
+        import tomllib
+    except ImportError:
+        return False
+
+    root_str = str(Path(root).resolve()) if Path(root).exists() else str(Path(root))
+    escaped_key = root_str.replace("\\", "\\\\").replace('"', '\\"')
+    try:
+        parsed = tomllib.loads(existing) if existing.strip() else {}
+    except Exception:
+        return False
+
+    projects = parsed.get("projects") if isinstance(parsed, dict) else None
+    if isinstance(projects, dict):
+        # Accept either exact raw path or Windows-slash-normalized match
+        norm_target = root_str.replace("\\", "/").rstrip("/").lower()
+        for existing_k, existing_v in projects.items():
+            if str(existing_k).replace("\\", "/").rstrip("/").lower() == norm_target:
+                if isinstance(existing_v, dict) and existing_v.get("trust_level") == "trusted":
+                    return False
+
+    addition = f'\n[projects."{escaped_key}"]\ntrust_level = "trusted"\n'
+    new_text = (existing.rstrip() + "\n" + addition) if existing.strip() else addition.lstrip()
+    try:
+        tomllib.loads(new_text)
+    except Exception:
+        return False
+    try:
+        tmp = cfg_path.with_suffix(".toml.tmp")
+        tmp.write_text(new_text, encoding="utf-8")
+        os.replace(tmp, cfg_path)
+        return True
+    except OSError:
+        return False
+
+
 def _prune_from_manifest(root: Path, version: str = "", prev_version: str = "") -> Tuple[int, int, int, bool]:
     """Remove obsolete files/empty dirs left inside managed dirs when upgrading via OTA (strictly preserving user data)."""
     man_path = root / OTA_MANIFEST_NAME
@@ -730,6 +783,7 @@ def cleanup_after_update(
         # 0b. Safely strip legacy Zeno v1.x hooks & global zeno_mcp.py server entries without touching user tools
         legacy_hooks_removed = _cleanup_legacy_claude_hooks(root_path)
         legacy_mcp_removed = _cleanup_legacy_claude_mcp(home_dir=home_dir)
+        _ensure_codex_project_trust(root_path, home_dir=home_dir)
 
         # 1. Clear stale Python bytecode caches inside scripts/, service/, and tests/ so updated .py files take effect immediately
         for code_sub in ("scripts", "service", "tests"):

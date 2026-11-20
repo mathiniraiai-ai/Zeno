@@ -210,16 +210,52 @@ def _spawn_detached(cmd: Sequence[str], *, wait: bool = False, timeout: float = 
             "stderr": subprocess.DEVNULL,
         }
         if sys.platform.startswith("win"):
-            kwargs["creationflags"] = (
-                getattr(subprocess, "DETACHED_PROCESS", 0)
-                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            )
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         else:
             kwargs["start_new_session"] = True
         subprocess.Popen(list(cmd), **kwargs)
         return True
     except Exception:
         return False
+
+
+def _play_wav_windows(wav: Path, *, wait: bool = False) -> bool:
+    """Play a WAV chime reliably on Windows 10/11 without PowerShell/pwsh assembly failures."""
+    if not wav.is_file():
+        return False
+    wav_str = str(wav)
+    if wait:
+        try:
+            import winsound  # type: ignore[import-not-found]
+
+            winsound.PlaySound(wav_str, winsound.SND_FILENAME | winsound.SND_NODEFAULT)
+            return True
+        except Exception:
+            pass
+    else:
+        # Spawn a tiny CREATE_NO_WINDOW Python helper so SND_FILENAME audio completes cleanly
+        # even if the caller (e.g. notify_popup.py or auto_updater.py) exits milliseconds later.
+        py_exe = sys.executable or shutil.which("python") or shutil.which("python3")
+        if py_exe:
+            py_code = (
+                "import sys, winsound; "
+                "winsound.PlaySound(sys.argv[1], winsound.SND_FILENAME | winsound.SND_NODEFAULT)"
+            )
+            if _spawn_detached([py_exe, "-c", py_code, wav_str], wait=False):
+                return True
+
+    ps = shutil.which("powershell") or shutil.which("pwsh")
+    if ps:
+        ps_path = wav_str.replace("'", "''")
+        ps_cmd = (
+            "Add-Type -AssemblyName System.Windows.Extensions -ErrorAction SilentlyContinue; "
+            f"$p = New-Object System.Media.SoundPlayer '{ps_path}'; $p.Load(); $p.PlaySync()"
+        )
+        return _spawn_detached(
+            [ps, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps_cmd],
+            wait=wait,
+        )
+    return False
 
 
 def play_notification_sound(sound_path: Optional[Path] = None, *, wait: bool = False) -> bool:
@@ -238,22 +274,7 @@ def play_notification_sound(sound_path: Optional[Path] = None, *, wait: bool = F
     if plat.startswith("win"):
         wav = snd if snd.suffix.lower() == ".wav" else (NOTIFICATION_WAV if NOTIFICATION_WAV.is_file() else snd)
         if wav.suffix.lower() == ".wav":
-            ps_path = str(wav).replace("'", "''")
-            ps_cmd = f"(New-Object Media.SoundPlayer '{ps_path}').PlaySync()"
-            ps = shutil.which("powershell") or shutil.which("pwsh")
-            if ps:
-                return _spawn_detached(
-                    [ps, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps_cmd],
-                    wait=wait,
-                )
-            try:
-                import winsound  # type: ignore[import-not-found]
-
-                flags = winsound.SND_FILENAME | (0 if wait else winsound.SND_ASYNC)
-                winsound.PlaySound(str(wav), flags)
-                return True
-            except Exception:
-                return False
+            return _play_wav_windows(wav, wait=wait)
         return False
 
     for player, args in (
@@ -296,28 +317,35 @@ def show_desktop_popup(
     folder: Optional[Path] = None,
     video_path: Optional[Path] = None,
     files: Optional[Sequence[str]] = None,
+    badge: str = "",
+    notes: str = "",
+    play_sound: bool = False,
     duration_sec: float = 9.0,
     wait: bool = False,
 ) -> bool:
     """Show the Zeno-themed floating desktop pop-up (`scripts/notify_popup.py`), falling back
-    to a silent native OS notification if the themed toast cannot be launched.
+    to a native OS notification only if the themed toast cannot be launched.
     """
-    if folder is not None:
-        try:
-            import notify_popup
+    try:
+        import notify_popup
 
-            if notify_popup.show_themed_popup(
-                title=str(subtitle or title or "").strip() or "Zeno",
-                folder=Path(folder),
-                video_path=video_path,
-                files=files or (),
-                badge="Video ready",
-                duration_sec=duration_sec,
-                wait=wait,
-            ):
-                return True
-        except Exception:
-            pass
+        popup_notes = str(notes or "").strip()
+        if folder is None and not popup_notes:
+            popup_notes = " — ".join(p for p in (subtitle, message) if str(p or "").strip())
+        if notify_popup.show_themed_popup(
+            title=(str(title or subtitle or "").strip() or "Zeno") if folder is None else (str(subtitle or title or "").strip() or "Zeno"),
+            folder=Path(folder) if folder is not None else ROOT,
+            video_path=video_path,
+            files=files or (),
+            badge=badge or ("Updated" if folder is None else "Video ready"),
+            duration_sec=duration_sec,
+            wait=wait,
+            notes=popup_notes,
+            play_sound=play_sound,
+        ):
+            return True
+    except Exception:
+        pass
 
     plat = sys.platform.lower()
     if plat == "darwin":
@@ -480,6 +508,7 @@ def notify_delivery(
                     folder=dest,
                     video_path=video,
                     files=file_list,
+                    play_sound=False,
                     wait=wait,
                 )
                 if show_popup
@@ -520,6 +549,7 @@ def main() -> int:
                 _format_saved_location(sample_dir) if args.folder else "Saved to Downloads/Zeno Outs",
                 folder=sample_dir,
                 files=["reel_sample.mp4", "SQ_sample.mp4", "sample.prproj", "review_sheet.jpg"],
+                play_sound=False,
                 wait=args.wait,
             )
             if not args.no_popup

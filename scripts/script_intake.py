@@ -144,6 +144,12 @@ def _export(doc_id: str, fmt: str, tab: Optional[str]) -> str:
             f"Google Docs returned HTTP {exc.code}. Verify the link and ensure sharing is set to 'Anyone with the link can view'."
         ) from exc
     except urllib.error.URLError as exc:
+        if os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1":
+            raise RuntimeError(
+                f"Could not reach Google Docs ({exc.reason}): blocked by Codex network sandbox "
+                '(CODEX_SANDBOX_NETWORK_DISABLED=1). Retry with sandbox_permissions="require_escalated" '
+                "or switch Codex permissions to Full access / launch via edit-codex."
+            ) from exc
         raise RuntimeError(f"Could not reach Google Docs: {exc.reason}") from exc
     if "accounts.google.com" in final_url:
         raise RuntimeError("The Google Doc is private. Share it as 'Anyone with the link can view'.")

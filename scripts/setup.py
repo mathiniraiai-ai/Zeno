@@ -326,6 +326,8 @@ def main():
         removed_mcp = _clean_mod._cleanup_legacy_claude_mcp()
         if removed_mcp > 0:
             print(f"\n[Clean] Removed {removed_mcp} legacy Zeno MCP server entry(s) from user Claude config.")
+        if _clean_mod._ensure_codex_project_trust(common.ROOT):
+            print("[Codex] Trusted this Zeno workspace in ~/.codex/config.toml (enables Zeno Cloud network access).")
     except Exception:
         pass
     smoke_ok = smoke_test() if args.smoke else True

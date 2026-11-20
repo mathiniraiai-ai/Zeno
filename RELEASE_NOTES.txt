@@ -1,1 +1,1 @@
-Cleaner subtitles, smoother transitions, redesigned right-side alerts with sound, and Gemini queue pacing.
+Fixed Windows notification chime and folderless update alerts, and enabled Codex network and Downloads access.

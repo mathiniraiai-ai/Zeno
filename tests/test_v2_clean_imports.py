@@ -452,6 +452,56 @@ class V2CleanImportsTests(unittest.TestCase):
                 self.assertEqual(hq_sk, [])
                 self.assertEqual(base_sk, [])
 
+    def test_codex_network_sandbox_config_trust_and_preflight_hint(self) -> None:
+        """`.codex/config.toml` and `edit-codex.*` allow Zeno Cloud + Google Docs network access,
+        `clean._ensure_codex_project_trust` safely trusts Zeno in `~/.codex/config.toml` (including Windows paths),
+        and `preflight.check_transcription_auth` surfaces `CODEX_SANDBOX_NETWORK_DISABLED=1` escalation guidance.
+        """
+        import tempfile
+        import tomllib
+        from unittest import mock
+
+        if str(SCRIPTS_DIR) not in sys.path:
+            sys.path.insert(0, str(SCRIPTS_DIR))
+        import auth_session
+        import clean
+        import preflight
+
+        cfg = tomllib.loads((ROOT / ".codex" / "config.toml").read_text(encoding="utf-8"))
+        self.assertEqual(cfg.get("sandbox_mode"), "danger-full-access")
+        self.assertTrue((cfg.get("sandbox_workspace_write") or {}).get("network_access"))
+        self.assertTrue((cfg.get("features") or {}).get("multi_agent"))
+
+        for launcher in ("edit-codex.bat", "edit-codex.command"):
+            body = (ROOT / launcher).read_text(encoding="utf-8")
+            self.assertIn("danger-full-access", body)
+            self.assertIn("sandbox_workspace_write.network_access=true", body)
+
+        with tempfile.TemporaryDirectory(prefix="zeno_codex_trust_") as td:
+            fake_home = Path(td) / "home"
+            (fake_home / ".codex").mkdir(parents=True)
+            win_root = Path(r"C:\Users\Admin\Documents\Zeno")
+            added = clean._ensure_codex_project_trust(win_root, home_dir=fake_home)
+            self.assertTrue(added)
+            parsed = tomllib.loads((fake_home / ".codex" / "config.toml").read_text(encoding="utf-8"))
+            self.assertEqual(parsed["projects"][str(win_root)]["trust_level"], "trusted")
+            # Idempotent re-run does not duplicate or rewrite
+            self.assertFalse(clean._ensure_codex_project_trust(win_root, home_dir=fake_home))
+
+        with (
+            mock.patch.dict(os.environ, {"CODEX_SANDBOX_NETWORK_DISABLED": "1", "ZENO_NO_LIVE": "0"}, clear=False),
+            mock.patch.object(auth_session, "get_session_info", return_value={"authenticated": True, "mode": "zeno_cloud", "source": ".zeno_session.json"}),
+            mock.patch.object(auth_session, "get_active_token", return_value="tok"),
+            mock.patch.object(auth_session, "get_cloud_url", return_value="https://zeno-production-bef7.up.railway.app"),
+            mock.patch.object(preflight, "_collect_local_gemini_keys", return_value=[]),
+            mock.patch("httpx.post", side_effect=OSError("DNS lookup failed")),
+        ):
+            checks = preflight.check_transcription_auth()
+            self.assertEqual(len(checks), 1)
+            self.assertFalse(checks[0][0])
+            self.assertIn("require_escalated", checks[0][2])
+            self.assertIn("Full access", checks[0][2])
+
 
 if __name__ == "__main__":
     unittest.main()

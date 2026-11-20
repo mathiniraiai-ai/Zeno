@@ -417,6 +417,36 @@ def apply_bundle_bytes(blob: bytes, expected_sha256: str = "", version: str = ""
     }
 
 
+def _notify_update_installed(before_ver: str, after_ver: str, notes: str = "") -> None:
+    """Show the Zeno-themed update popup with chime once per installed version (no-op in tests/quiet mode)."""
+    try:
+        scripts_dir = str(ROOT / "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import notify
+        import notify_popup
+
+        if notify._is_suppressed():
+            return
+        clean_after = str(after_ver or "").strip().lstrip("vV")
+        state_path = WORK / "_update_state.json"
+        cur_state = _read_json(state_path)
+        if clean_after and str(cur_state.get("toast_version") or "").strip().lstrip("vV") == clean_after:
+            return
+        if clean_after:
+            _write_json(state_path, {**cur_state, "toast_version": clean_after})
+        summary = " ".join(str(notes or "").split()) or f"Updated from v{before_ver} to v{clean_after or after_ver}."
+        notify_popup.show_themed_popup(
+            title=f"Zeno v{clean_after or after_ver} is ready",
+            folder=ROOT,
+            badge="Updated",
+            notes=summary,
+            play_sound=True,
+        )
+    except Exception:
+        pass
+
+
 def ensure_latest_update(
     force: bool = False,
     min_interval_hours: float = 0.0,
@@ -505,6 +535,7 @@ def ensure_latest_update(
     if not quiet:
         if updated:
             print(f"  [Auto-Update] ✓ Updated Zeno from Cloud (v{before_ver} -> v{after_ver})")
+            _notify_update_installed(before_ver, after_ver, str(chk.get("notes") or ""))
         elif update_ok:
             print(f"  [Auto-Update] ✓ Up to date (v{after_ver})")
         else:

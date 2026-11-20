@@ -28,7 +28,11 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-ROOT = Path(__file__).resolve().parent.parent
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+ROOT = SCRIPTS_DIR.parent
 UI_DIR = ROOT / "assets" / "ui"
 TEMPLATE_HTML = UI_DIR / "zeno_toast.html"
 ICON_PNG = UI_DIR / "zeno_icon.png"
@@ -289,36 +293,46 @@ $win.Left = $wa.Right - $win.Width - 4
 $win.Top = $wa.Top + 8
 
 $slide = $win.FindName('Slide')
-function Swipe($from, $to, $ms) {
+$closing = $false
+function Swipe($from, $to, $ms, $onDone) {
   $anim = New-Object System.Windows.Media.Animation.DoubleAnimation($from, $to, [TimeSpan]::FromMilliseconds($ms))
+  if ($onDone) { $anim.Add_Completed($onDone) }
   $slide.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $anim)
 }
-$win.Add_Loaded({ Swipe 420 0 420 })
-$win.Add_MouseLeftButtonUp({ $script:timer.Stop(); Swipe 0 420 330; Start-Sleep -Milliseconds 340; $win.Close() })
+function Close-Toast {
+  if ($script:closing) { return }
+  $script:closing = $true
+  $script:timer.Stop()
+  Swipe 0 420 330 { $win.Close() }
+}
+$win.Add_Loaded({ Swipe 420 0 420 $null })
+$win.Add_MouseLeftButtonUp({ Close-Toast })
 
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromSeconds($durSec)
-$timer.Add_Tick({ $timer.Stop(); Swipe 0 420 330; Start-Sleep -Milliseconds 340; $win.Close() })
+$timer.Add_Tick({ Close-Toast })
 $timer.Start()
 
 $win.ShowDialog() | Out-Null
 """
 
 
-def _play_chime() -> None:
+def _play_chime() -> bool:
     """Play the bundled Zeno notification chime (same sound as delivery notifications)."""
     try:
         import notify
 
-        notify.play_notification_sound()
+        if notify._is_suppressed():
+            return False
+        return bool(notify.play_notification_sound(wait=False))
     except Exception:
-        pass
+        return False
 
 
 def show_themed_popup(
     *,
     title: str,
-    folder: Path,
+    folder: Optional[Path] = None,
     video_path: Optional[Path] = None,
     files: Sequence[str] = (),
     badge: str = "Video ready",
@@ -327,12 +341,15 @@ def show_themed_popup(
     capture_path: Optional[Path] = None,
     capture_only: bool = False,
     notes: str = "",
+    play_sound: bool = True,
 ) -> bool:
     """Launch the Zeno-themed floating desktop toast on macOS or Windows."""
     raw_folder = str(folder or "").strip() if folder is not None else ""
     dest = (Path(raw_folder).expanduser() if raw_folder else _default_output_root()).resolve()
     vid = Path(video_path).expanduser().resolve() if video_path is not None else None
     plat = sys.platform.lower()
+    if play_sound and not capture_only:
+        _play_chime()
 
     if plat == "darwin":
         osa = shutil.which("osascript") or "/usr/bin/osascript"
@@ -397,7 +414,7 @@ def show_themed_popup(
         ps = shutil.which("powershell") or shutil.which("pwsh")
         if not ps:
             return False
-        esc_ps = lambda s: str(s or "").replace("'", "''").replace('"', '`"')
+        esc_ps = lambda s: str(s or "").replace("\r", " ").replace("\n", " ").replace("'", "''").replace('"', '`"')
         if notes:
             line1, line2 = str(notes).strip(), ""
             display_title = str(title or "").strip() or "Zeno"
@@ -425,7 +442,7 @@ def show_themed_popup(
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             return True
         except Exception:
@@ -447,8 +464,11 @@ def main() -> int:
     ap.add_argument("--capture", default="", help="Optional PNG screenshot capture path (macOS)")
     ap.add_argument("--capture-only", action="store_true", help="Capture PNG and exit immediately")
     ap.add_argument("--notes", default="", help="Release summary; shows an update toast instead of a delivery toast")
+    ap.add_argument("--no-sound", action="store_true", help="Suppress notification chime")
     ap.add_argument("--test", action="store_true", help="Launch a live sample Zeno toast on screen")
     args = ap.parse_args()
+
+    play_sound = not args.no_sound
 
     if args.test:
         sample_dir = Path(args.folder).expanduser() if args.folder else _default_output_root()
@@ -462,16 +482,22 @@ def main() -> int:
             wait=args.wait,
             capture_path=Path(args.capture) if args.capture else None,
             capture_only=args.capture_only,
+            play_sound=play_sound,
         )
         print(f"[POPUP] shown={ok}")
         return 0 if ok else 1
 
     if args.notes:
-        _play_chime()
         ok = show_themed_popup(
-            title=args.title or "Zeno updated", folder=Path(args.folder or "."), badge=args.badge if args.badge != "Video ready" else "Updated",
-            notes=args.notes, duration_sec=args.duration, wait=args.wait,
-            capture_path=Path(args.capture) if args.capture else None, capture_only=args.capture_only,
+            title=args.title or "Zeno updated",
+            folder=Path(args.folder or "."),
+            badge=args.badge if args.badge != "Video ready" else "Updated",
+            notes=args.notes,
+            duration_sec=args.duration,
+            wait=args.wait,
+            capture_path=Path(args.capture) if args.capture else None,
+            capture_only=args.capture_only,
+            play_sound=play_sound,
         )
         return 0 if ok else 1
 
@@ -490,6 +516,7 @@ def main() -> int:
         wait=args.wait,
         capture_path=Path(args.capture) if args.capture else None,
         capture_only=args.capture_only,
+        play_sound=play_sound,
     )
     return 0 if ok else 1
 

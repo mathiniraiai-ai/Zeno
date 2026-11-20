@@ -399,6 +399,14 @@ def check_transcription_auth() -> List[Check]:
         local_ping = _ping_local_gemini_keys()
         if local_ping is not None and local_ping[0]:
             return [(True, "Transcription auth (Gemini fallback)", local_ping[1])]
+        if os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1" or (
+            os.environ.get("CODEX_SANDBOX") and "ConnectError" in type(exc).__name__
+        ):
+            return [(
+                False,
+                "Zeno Cloud",
+                f"blocked by Codex network sandbox ({type(exc).__name__}). Retry with sandbox_permissions=\"require_escalated\", switch Codex Agent permissions to Full access, or launch via edit-codex.",
+            )]
         return [(False, "Zeno Cloud", f"cannot reach {base}: {type(exc).__name__}")]
 
 

@@ -2,6 +2,11 @@
 # Automatically applied whenever Zeno is opened directly in Codex.
 model_reasoning_effort = "low"
 model_instructions_file = "../AGENTS.md"
+# Allow Zeno Cloud + Google Docs network access and writing deliveries to ~/Downloads/Zeno Outs/
+sandbox_mode = "danger-full-access"
+
+[sandbox_workspace_write]
+network_access = true
 
 [features]
 web_search_request = false

@@ -247,6 +247,98 @@ class DeliveryNotificationTests(unittest.TestCase):
             self.assertTrue((expected_folder / "reel_Default Out.mp4").is_file())
             self.assertFalse((fake_home / "Downloads" / "Default Out").exists())
 
+    def test_08_windows_sound_uses_winsound_create_no_window_and_themed_popup_chimes(self) -> None:
+        """Windows chime uses stdlib winsound with CREATE_NO_WINDOW (not flaky DETACHED_PROCESS+PowerShell),
+        folderless `show_desktop_popup` routes to `notify_popup.show_themed_popup`, and `show_themed_popup`
+        plays the chime by default unless `play_sound=False` (preventing double chime from `notify_delivery`).
+        """
+        with mock.patch.object(sys, "platform", "win32"), \
+             mock.patch.object(notify.subprocess, "Popen") as m_popen, \
+             mock.patch.object(notify.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True), \
+             mock.patch.object(notify.subprocess, "DETACHED_PROCESS", 0x00000008, create=True):
+            ok = notify.play_notification_sound(wait=False)
+            self.assertTrue(ok)
+            m_popen.assert_called_once()
+            cmd = m_popen.call_args.args[0]
+            cflags = m_popen.call_args.kwargs.get("creationflags", 0)
+            self.assertIn("winsound", " ".join(cmd))
+            self.assertTrue(str(notify.NOTIFICATION_WAV) in cmd)
+            self.assertEqual(cflags, 0x08000000)
+
+        # Wait=True calls winsound.PlaySound directly in-process when available
+        fake_winsound = mock.MagicMock()
+        fake_winsound.SND_FILENAME = 0x20000
+        fake_winsound.SND_NODEFAULT = 0x2
+        with mock.patch.object(sys, "platform", "win32"), \
+             mock.patch.dict(sys.modules, {"winsound": fake_winsound}):
+            ok_wait = notify.play_notification_sound(wait=True)
+            self.assertTrue(ok_wait)
+            fake_winsound.PlaySound.assert_called_once()
+
+        # Folderless update notifications dispatch to notify_popup (not hidden Win11 NotifyIcon balloons)
+        with mock.patch.object(notify_popup, "show_themed_popup", return_value=True) as m_pop:
+            ok_upd = notify.show_desktop_popup(
+                "Zeno v2.0.6 is ready",
+                "Updated",
+                "Cleaner subtitles and chime fix.",
+                folder=None,
+                notes="Cleaner subtitles and chime fix.",
+                badge="Updated",
+                play_sound=True,
+            )
+            self.assertTrue(ok_upd)
+            m_pop.assert_called_once()
+            kw = m_pop.call_args.kwargs
+            self.assertEqual(kw["badge"], "Updated")
+            self.assertIn("Cleaner subtitles", kw["notes"])
+            self.assertTrue(kw["play_sound"])
+
+        # Direct call to show_themed_popup plays chime cleanly; play_sound=False suppresses it
+        with mock.patch.object(notify_popup, "_play_chime", return_value=True) as m_chime, \
+             mock.patch.object(sys, "platform", "win32"), \
+             mock.patch.object(notify_popup.shutil, "which", return_value="powershell.exe"), \
+             mock.patch.object(notify_popup.subprocess, "Popen") as m_wpf_popen:
+            shown = notify_popup.show_themed_popup(
+                title="Zeno updated to v2.0.6",
+                badge="Updated",
+                notes="Release summary",
+                play_sound=True,
+            )
+            self.assertTrue(shown)
+            m_chime.assert_called_once()
+            m_wpf_popen.assert_called_once()
+
+            notify_popup.show_themed_popup(
+                title="Silent card",
+                badge="Updated",
+                notes="No double sound",
+                play_sound=False,
+            )
+            self.assertEqual(m_chime.call_count, 1)
+
+    def test_09_auto_updater_notifies_with_chime_only_after_real_update(self) -> None:
+        """`auto_updater._notify_update_installed` pops the themed `Updated` card with chime once per version,
+        respecting suppression in tests and stamping `work/_update_state.json` to prevent duplicate desktop toasts.
+        """
+        import auto_updater
+
+        with tempfile.TemporaryDirectory(prefix="zeno_upd_notify_") as td:
+            work_dir = Path(td) / "work"
+            work_dir.mkdir(parents=True)
+            with mock.patch.object(auto_updater, "WORK", work_dir), \
+                 mock.patch.object(notify, "_is_suppressed", return_value=False), \
+                 mock.patch.object(notify_popup, "show_themed_popup", return_value=True) as m_pop:
+                auto_updater._notify_update_installed("2.0.4", "2.0.6", "Fixed Windows chime playback.")
+                m_pop.assert_called_once()
+                self.assertEqual(m_pop.call_args.kwargs["badge"], "Updated")
+                self.assertTrue(m_pop.call_args.kwargs["play_sound"])
+                st = json.loads((work_dir / "_update_state.json").read_text(encoding="utf-8"))
+                self.assertEqual(st["toast_version"], "2.0.6")
+
+                # Re-calling for same version does not double-notify
+                auto_updater._notify_update_installed("2.0.4", "2.0.6", "Fixed Windows chime playback.")
+                self.assertEqual(m_pop.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
