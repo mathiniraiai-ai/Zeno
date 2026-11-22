@@ -626,6 +626,7 @@ function EditsView({data, jobs, jobsMsg, rg, q, rate, day, setDay}) {
 }
 
 
+const GEMINI_IN_USE = ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'];  // keep in step with GEMINI_MODELS on the server
 const GPRICE_KEY = 'zeno_gemini_prices';  // USD per million tokens the admin types once per model; never guessed, kept in this browser only
 function loadGPrices() { try { return JSON.parse(localStorage.getItem(GPRICE_KEY) || '{}') || {}; } catch (e) { return {}; } }
 function gCost(b, prices) {  // USD of one bucket, or null when its model has no price yet
@@ -716,7 +717,9 @@ function GeminiUsage({data, cutoff, rate}) {
   };
   const g = data.gemini || {};
   const ag = geminiAgg(g, cutoff, prices);
-  const models = [...new Set(((g.buckets) || []).map(b => b.m || 'unknown'))].sort();
+  const seen = [...new Set(((g.buckets) || []).map(b => b.m || 'unknown'))].sort();
+  const models = GEMINI_IN_USE;  // only the models Zeno uses today get a price row
+  const older = seen.filter(m => !GEMINI_IN_USE.includes(m));
   const series = waveSeries(ag.bs, cutoff, data.now, metric, prices);
   const calls = ag.users.reduce((t, u) => t + u.calls, 0), bad = ag.users.reduce((t, u) => t + u.bad, 0);
   const tin = ag.users.reduce((t, u) => t + u.tin, 0), tout = ag.users.reduce((t, u) => t + u.tout, 0);
@@ -734,10 +737,11 @@ function GeminiUsage({data, cutoff, rate}) {
       h('p', {className: 'note'}, 'Type each model\\'s list price once. Spend is shown only for models with a price, and the prices stay in this browser.'),
       h('div', {className: 'scroll'}, h('table', null,
         h('thead', null, h('tr', null, h(Th, null, 'Model'), h(Th, {right: true}, 'Input $ / 1M'), h(Th, {right: true}, 'Output $ / 1M'))),
-        h('tbody', null, models.length ? models.map(m => h('tr', {key: m}, h('td', null, h('b', null, m)),
+        h('tbody', null, seen.length ? models.map(m => h('tr', {key: m}, h('td', null, h('b', null, m)),
           ['i', 'o'].map(k => h('td', {className: 'n', key: k}, h('input', {type: 'number', step: '0.01', className: 'dt', style: {width: 90},
             value: (prices[m] && prices[m][k] != null) ? prices[m][k] : '', onChange: e => setPrice(m, k, e.target.value)})))))
           : h('tr', null, h('td', {colSpan: 3}, 'No Gemini calls recorded yet'))))),
+      older.length ? h('p', {className: 'note'}, 'Older records also hold calls from models Zeno no longer uses (' + older.join(', ') + '). They are in the totals but have no price, so they are left out of the spend.') : null,
       h('h2', null, 'Ups and downs'),
       h('div', {className: 'bar'}, h(Btn, {id: 'calls', label: 'Calls'}), h(Btn, {id: 'tokens', label: 'Tokens'}), h(Btn, {id: 'spend', label: 'Spend (USD)'}),
         h('span', {className: 'muted'}, series.hourly ? 'per hour' : 'per day', metric === 'calls' ? ' · red = calls that failed' : '')),
