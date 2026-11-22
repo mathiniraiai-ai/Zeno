@@ -366,6 +366,23 @@ def _repeat_tokens(words: List[str]) -> List[str]:
     return out
 
 
+_CONTRACTION_EXPANSION = {
+    "i'm": ("i", "am"), "you're": ("you", "are"), "we're": ("we", "are"), "they're": ("they", "are"),
+    "he's": ("he", "is"), "she's": ("she", "is"), "it's": ("it", "is"), "that's": ("that", "is"),
+    "i've": ("i", "have"), "we've": ("we", "have"), "you've": ("you", "have"), "they've": ("they", "have"),
+    "i'll": ("i", "will"), "you'll": ("you", "will"), "we'll": ("we", "will"), "they'll": ("they", "will"),
+    "i'd": ("i", "would"), "let's": ("let", "us"),
+}
+
+
+def _expand_contractions(toks: List[str]) -> List[str]:
+    """Spell out contractions so a scripted "I'm" also covers a spoken "I am" (and vice versa for repeats)."""
+    out: List[str] = []
+    for t in toks:
+        out.extend(_CONTRACTION_EXPANSION.get(str(t).replace("\u2019", "'"), (t,)))
+    return out
+
+
 def find_unscripted_repeats(
     words: List[Dict[str, Any]],
     script_line_text: Union[str, List[str], None] = "",
@@ -386,6 +403,7 @@ def find_unscripted_repeats(
         ref_toks = _repeat_tokens([str(x) for x in script_line_text])
     else:
         ref_toks = _repeat_tokens(str(script_line_text or "").split())
+    ref_toks = _expand_contractions(ref_toks)
 
     toks = [t for t, _ in items]
     found: List[Dict[str, Any]] = []
@@ -3072,9 +3090,60 @@ def _filter_live_clip_words(c: Dict[str, Any]) -> List[Dict[str, Any]]:
     return kept
 
 
+def _incomplete_clip_names(clips: List[Dict[str, Any]]) -> List[str]:
+    """Return display names of clips with failed/incomplete transcripts or >=1.2s uncovered VAD speech."""
+    names: List[str] = []
+    try:
+        from common import read_json
+    except Exception:
+        read_json = None  # type: ignore[assignment]
+    try:
+        import edit_packet as _ep
+    except Exception:
+        _ep = None  # type: ignore[assignment]
+
+    for c in clips:
+        if not isinstance(c, dict):
+            continue
+        name = Path(str(c.get("src") or c.get("stem") or "")).name
+        if not name:
+            continue
+        info = c.get("info") if isinstance(c.get("info"), dict) else {}
+        t_status = str(info.get("_transcript_status") or "").strip().lower()
+        if t_status in ("incomplete", "quota_exceeded", "cloud_failed") or info.get("_transcript_error"):
+            names.append(name)
+            continue
+        wdir_raw = c.get("work_dir")
+        if not wdir_raw:
+            continue
+        wdir = Path(str(wdir_raw))
+        tmeta = read_json(wdir / "transcript_meta.json") if (read_json and (wdir / "transcript_meta.json").is_file()) else None
+        if isinstance(tmeta, dict):
+            m_status = str(tmeta.get("status") or "").strip().lower()
+            m_unc = tmeta.get("uncovered_spans")
+            if m_status in ("incomplete", "quota_exceeded", "cloud_failed"):
+                names.append(name)
+                continue
+            if isinstance(m_unc, list) and any(
+                isinstance(p, (list, tuple)) and len(p) >= 2 and float(p[1]) - float(p[0]) >= 1.2
+                for p in m_unc
+            ):
+                names.append(name)
+                continue
+        if read_json and (wdir / "speech_spans.json").is_file():
+            sdata = read_json(wdir / "speech_spans.json")
+            raw_spans = sdata.get("spans") if isinstance(sdata, dict) else sdata
+            ws = [w for w in (c.get("hq_words") or []) if isinstance(w, dict) and not w.get("no_sound")]
+            if isinstance(raw_spans, list) and raw_spans and _ep is not None:
+                if _ep.uncovered_speech_spans(raw_spans, ws, min_uncovered_sec=1.2):
+                    names.append(name)
+    return list(dict.fromkeys(names))
+
+
 def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], limit: int = 4, style: str = "") -> str:
     """Build `line_map.md` listing every script line in order and its ranked `CAND` source stretches."""
     _ = style  # Preserved for signature compatibility; style routing lives in edit_brief.py
+    incomplete_clips = _incomplete_clip_names(clips)
     prep = []
     for c in clips:
         ws = _filter_live_clip_words(c)
@@ -3169,13 +3238,26 @@ def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], lim
         if len(cands) > len(shown):
             out.append(f"  +{len(cands) - len(shown)} alternate candidates (use `edit_packet.py <project> --line {l['id']}`)")
         if not cands:
-            out.append("  NO CLIP says this line (inspect measured footage; report reshoot need or record `accept` if non-spoken)")
+            if incomplete_clips:
+                shown_inc = ", ".join(incomplete_clips[:4])
+                more_inc = f" (+{len(incomplete_clips) - 4} more)" if len(incomplete_clips) > 4 else ""
+                out.append(
+                    f"  NO CLIP says this line YET (incomplete transcript in {shown_inc}{more_inc}; "
+                    "run `edit_packet.py <project> --diagnose` and `zeno.py ... --retry-incomplete --compact` before deciding)"
+                )
+            else:
+                out.append("  NO CLIP says this line (inspect measured footage; report reshoot need or record `accept` if non-spoken)")
     spare = [(c, ws) for c, ws, _ in prep if id(c) not in named and ws and not c.get("is_listening")]
     if spare:
         out += ["", "## UNMATCHED SPEECH (slate, ad-lib, or noisy transcript)"]
         for c, ws in spare:
             out.append(f"{Path(str(c['src'])).name}: {' '.join(str(w.get('w', '')) for w in ws[:14])}")
     return "\n".join(out) + "\n"
+
+
+# A source file is one actor's recording: when most of its other cuts match the label, a short
+# disagreeing span (< this many seconds) is a classifier doubt, not a blocking mislabel.
+_VOICE_DOUBT_MAX_SEC = 4.0
 
 
 def voice_problems(plan: Dict[str, Any]) -> Tuple[List[str], str]:
@@ -3219,7 +3301,7 @@ def voice_problems(plan: Dict[str, Any]) -> Tuple[List[str], str]:
         for sp_item in (info.get("spans") or [])
         if by_id.get(n)
         and by_id[n]["words"][sp_item["first"] : sp_item["last"] + 1]
-        and (float(by_id[n]["words"][sp_item["last"]]["end"]) - float(by_id[n]["words"][sp_item["first"]]["start"])) >= 2.5
+        and (float(by_id[n]["words"][sp_item["last"]]["end"]) - float(by_id[n]["words"][sp_item["first"]]["start"])) >= _VOICE_DOUBT_MAX_SEC
     }
     out, doubts = [], []
     for n, info in res.get("clips", {}).items():
@@ -3230,7 +3312,7 @@ def voice_problems(plan: Dict[str, Any]) -> Tuple[List[str], str]:
             agreed_same = [m for m in same_file if m not in disagree and by_id[m]["expected"][0] == sp.get("expected")]
             msg = f"{ids.get(n, n)} is labelled {sp.get('expected')}, but the voice matches {sp.get('heard', 'another speaker')}"
             if (
-                span_sec < 2.5
+                span_sec < _VOICE_DOUBT_MAX_SEC
                 and agreed_same
                 and len(agreed_same) * 2 >= len(same_file)
                 and not any(m in long_disagree for m in same_file)
@@ -3256,7 +3338,7 @@ def voice_problems(plan: Dict[str, Any]) -> Tuple[List[str], str]:
 
 
 def cut_problems(plan: Dict[str, Any]) -> List[str]:
-    """Flag cut start/end boundaries that slice through active spoken words."""
+    """Flag cut start/end boundaries that slice through active spoken words or untranscribed VAD speech."""
     from prepare import words_in_silence
 
     out: List[str] = []
@@ -3264,28 +3346,73 @@ def cut_problems(plan: Dict[str, Any]) -> List[str]:
         if _segment_is_muted(s) or _segment_is_beat(s):
             continue
         ws = _words_of(s)
-        if not ws:
+        spoken = _speech_spans_for(s)
+        if not ws and not spoken:
             continue
         env = None
         ghost_ids: Optional[set] = None
-        spoken = _speech_spans_for(s)
-        for w in ws:
-            if w.get("no_sound"):
-                continue
-            a, b = float(w["start"]), float(w["end"])
+        flagged_bounds: set = set()
+        if ws:
+            for w in ws:
+                if w.get("no_sound"):
+                    continue
+                a, b = float(w["start"]), float(w["end"])
+                for name, t in (("start", float(s["start"])), ("end", float(s["end"]))):
+                    if a + 0.035 < t < b - 0.035:
+                        if spoken and not any(x0 - 0.03 <= t <= x1 + 0.03 for x0, x1 in spoken):
+                            continue
+                        if env is None:
+                            env = _env_of(s)
+                            ghost_ids = {id(gw) for gw in words_in_silence(ws, env)} if env else set()
+                        if ghost_ids and id(w) in ghost_ids:
+                            continue
+                        loud = max((db for tt, db in env if t - 0.03 <= tt <= t + 0.03), default=-140.0)
+                        if env and loud < -50.0:
+                            continue
+                        flagged_bounds.add((name, round(t, 4)))
+                        out.append(f"{s.get('id')} {name} {t:.2f} cuts inside '{w.get('w')}' ({a:.2f}-{b:.2f})")
+
+        if spoken:
+            if env is None:
+                env = _env_of(s)
+                if ws and ghost_ids is None:
+                    ghost_ids = {id(gw) for gw in words_in_silence(ws, env)} if env else set()
+            live_ws = sorted(
+                (
+                    w
+                    for w in ws
+                    if isinstance(w, dict)
+                    and not w.get("no_sound")
+                    and (not ghost_ids or id(w) not in ghost_ids)
+                ),
+                key=lambda w: (float(w.get("start", 0.0)), float(w.get("end", 0.0))),
+            )
             for name, t in (("start", float(s["start"])), ("end", float(s["end"]))):
-                if a + 0.035 < t < b - 0.035:
-                    if spoken and not any(x0 - 0.03 <= t <= x1 + 0.03 for x0, x1 in spoken):
-                        continue
-                    if env is None:
-                        env = _env_of(s)
-                        ghost_ids = {id(gw) for gw in words_in_silence(ws, env)} if env else set()
-                    if ghost_ids and id(w) in ghost_ids:
-                        continue
-                    loud = max((db for tt, db in env if t - 0.03 <= tt <= t + 0.03), default=-140.0)
-                    if env and loud < -50.0:
-                        continue
-                    out.append(f"{s.get('id')} {name} {t:.2f} cuts inside '{w.get('w')}' ({a:.2f}-{b:.2f})")
+                if (name, round(t, 4)) in flagged_bounds:
+                    continue
+                hit_span = next(((sp0, sp1) for sp0, sp1 in spoken if sp0 + 0.08 < t < sp1 - 0.08), None)
+                if hit_span is None:
+                    continue
+                loud = max((db for tt, db in env if t - 0.03 <= tt <= t + 0.03), default=-140.0) if env else 0.0
+                if env and loud < -50.0:
+                    continue
+                # Clean inter-word gap or immediate guard around a live transcribed word is safe
+                in_word_gap = any(
+                    float(live_ws[i]["end"]) - 0.02 <= t <= float(live_ws[i + 1]["start"]) + 0.02
+                    and (float(live_ws[i + 1]["start"]) - float(live_ws[i]["end"])) < 1.2
+                    for i in range(len(live_ws) - 1)
+                )
+                at_word_edge = any(
+                    (float(w["start"]) - 0.08 <= t <= float(w["start"]) + 0.02)
+                    or (float(w["end"]) - 0.02 <= t <= float(w["end"]) + 0.08)
+                    for w in live_ws
+                )
+                if in_word_gap or at_word_edge:
+                    continue
+                sp0, sp1 = hit_span
+                out.append(
+                    f"{s.get('id')} {name} {t:.2f} cuts inside active VAD speech ({sp0:.2f}-{sp1:.2f}; run --retry-incomplete if untranscribed)"
+                )
     return out
 
 

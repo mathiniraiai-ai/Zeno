@@ -108,15 +108,69 @@ const CURATED_STATIC_FONTS = [
 ];
 
 const INDIC_SCRIPT_BLOCKS = [
-  { re: /[\u0C80-\u0CFF]/, family: 'Noto Sans Kannada', key: 'kannada' },
-  { re: /[\u0C00-\u0C7F]/, family: 'Noto Sans Telugu', key: 'telugu' },
-  { re: /[\u0900-\u097F]/, family: 'Noto Sans Devanagari', key: 'devanagari' },
-  { re: /[\u0D00-\u0D7F]/, family: 'Noto Sans Malayalam', key: 'malayalam' },
-  { re: /[\u0B80-\u0BFF]/, family: 'Noto Sans Tamil', key: 'tamil' },
-  { re: /[\u0980-\u09FF]/, family: 'Noto Sans Bengali', key: 'bengali' },
-  { re: /[\u0A80-\u0AFF]/, family: 'Noto Sans Gujarati', key: 'gujarati' },
-  { re: /[\u0A00-\u0A7F]/, family: 'Noto Sans Gurmukhi', key: 'gurmukhi' },
-  { re: /[\u0B00-\u0B7F]/, family: 'Noto Sans Oriya', key: 'oriya' },
+  {
+    re: /[\u0C80-\u0CFF]/,
+    family: 'Noto Sans Kannada',
+    winFallback: 'Tunga',
+    key: 'kannada',
+    supported: new Set(['noto sans kannada', 'anek kannada', 'noto serif kannada', 'tiro kannada', 'baloo tamma 2', 'nirmala ui', 'nirmala text', 'tunga']),
+  },
+  {
+    re: /[\u0C00-\u0C7F]/,
+    family: 'Noto Sans Telugu',
+    winFallback: 'Gautami',
+    key: 'telugu',
+    supported: new Set(['noto sans telugu', 'hind guntur', 'anek telugu', 'noto serif telugu', 'baloo tamma 2', 'ramabhadra', 'gidugu', 'nirmala ui', 'nirmala text', 'gautami']),
+  },
+  {
+    re: /[\u0900-\u097F]/,
+    family: 'Noto Sans Devanagari',
+    winFallback: 'Mangal',
+    key: 'devanagari',
+    supported: new Set(['noto sans devanagari', 'hind', 'mukta', 'teko', 'anek devanagari', 'baloo 2', 'noto serif devanagari', 'kalam', 'modak', 'rozha one', 'nirmala ui', 'nirmala text', 'mangal']),
+  },
+  {
+    re: /[\u0D00-\u0D7F]/,
+    family: 'Noto Sans Malayalam',
+    winFallback: 'Kartika',
+    key: 'malayalam',
+    supported: new Set(['noto sans malayalam', 'manjari', 'anek malayalam', 'noto serif malayalam', 'baloo chettan 2', 'chilanka', 'nirmala ui', 'nirmala text', 'kartika']),
+  },
+  {
+    re: /[\u0B80-\u0BFF]/,
+    family: 'Noto Sans Tamil',
+    winFallback: 'Latha',
+    key: 'tamil',
+    supported: new Set(['noto sans tamil', 'hind madurai', 'mukta malar', 'anek tamil', 'baloo thambi 2', 'catamaran', 'coiny', 'kavivanar', 'nirmala ui', 'nirmala text', 'latha']),
+  },
+  {
+    re: /[\u0980-\u09FF]/,
+    family: 'Noto Sans Bengali',
+    winFallback: 'Vrinda',
+    key: 'bengali',
+    supported: new Set(['noto sans bengali', 'hind siliguri', 'anek bangla', 'baloo da 2', 'noto serif bengali', 'atma', 'galada', 'nirmala ui', 'nirmala text', 'vrinda']),
+  },
+  {
+    re: /[\u0A80-\u0AFF]/,
+    family: 'Noto Sans Gujarati',
+    winFallback: 'Shruti',
+    key: 'gujarati',
+    supported: new Set(['noto sans gujarati', 'hind vadodara', 'mukta vaani', 'anek gujarati', 'baloo bhai 2', 'mogra', 'nirmala ui', 'nirmala text', 'shruti']),
+  },
+  {
+    re: /[\u0A00-\u0A7F]/,
+    family: 'Noto Sans Gurmukhi',
+    winFallback: 'Raavi',
+    key: 'gurmukhi',
+    supported: new Set(['noto sans gurmukhi', 'mukta mahee', 'anek gurmukhi', 'baloo paaji 2', 'nirmala ui', 'nirmala text', 'raavi']),
+  },
+  {
+    re: /[\u0B00-\u0B7F]/,
+    family: 'Noto Sans Oriya',
+    winFallback: 'Kalinga',
+    key: 'oriya',
+    supported: new Set(['noto sans oriya', 'baloo bhaina 2', 'anek odia', 'noto serif oriya', 'nirmala ui', 'nirmala text', 'kalinga']),
+  },
 ];
 
 const GURMUKHI_RE = /[\u0A00-\u0A7F]/;
@@ -225,15 +279,23 @@ function snapFlashcardWeight(family, requestedWeight) {
   return best;
 }
 
-function detectIndicFamilies(text) {
-  const fams = [];
+function detectIndicInfo(text, customFamily = '') {
+  const indicFams = [];
+  const winFallbacks = [];
   const s = String(text || '');
+  const matched = [];
   for (const block of INDIC_SCRIPT_BLOCKS) {
     if (block.re.test(s)) {
-      fams.push(block.family);
+      matched.push(block);
+      if (!indicFams.includes(block.family)) indicFams.push(block.family);
+      if (block.winFallback && !winFallbacks.includes(block.winFallback)) {
+        winFallbacks.push(block.winFallback);
+      }
     }
   }
-  return fams;
+  const famLow = String(customFamily || '').trim().toLowerCase();
+  const customSupportsIndic = Boolean(famLow) && matched.length > 0 && matched.every((b) => b.supported.has(famLow));
+  return { indicFams, winFallbacks, customSupportsIndic };
 }
 
 function quoteFamily(name) {
@@ -241,42 +303,47 @@ function quoteFamily(name) {
 }
 
 function buildFontSpec(text, fontSize, isNativeLine, customFamily = '') {
-  const indicFams = detectIndicFamilies(text);
+  const customFam = resolveFlashcardFamily(customFamily);
+  const { indicFams, winFallbacks, customSupportsIndic } = detectIndicInfo(text, customFam);
   const hasIndic = indicFams.length > 0;
   const hasGurmukhi = GURMUKHI_RE.test(text);
   const needsSynthGurmukhi = hasGurmukhi && !_hasStaticGurmukhiBold;
-  const customFam = resolveFlashcardFamily(customFamily);
 
-  if (isNativeLine) {
+  if (hasIndic) {
     const targetWeight = needsSynthGurmukhi ? 400 : 700;
-    const weight = customFam ? snapFlashcardWeight(customFam, targetWeight) : targetWeight;
-    const stack = customFam
-      ? [customFam, ...indicFams, 'Montserrat', 'Noto Sans']
-      : ['Montserrat', ...indicFams, 'Noto Sans'];
+    let weight = (customFam && customSupportsIndic) ? snapFlashcardWeight(customFam, targetWeight) : targetWeight;
+    if (Number(weight) >= 700) weight = 700;
+
+    const indicOrdered = [...indicFams, 'Nirmala UI', 'Nirmala Text', ...winFallbacks];
+    const tail = isNativeLine
+      ? ['Montserrat', 'Noto Sans']
+      : ['Montserrat', 'Baloo Tamma 2', 'Inter', 'Noto Sans'];
+    const stack = (customFam && customSupportsIndic)
+      ? [customFam, ...indicOrdered, ...tail]
+      : (customFam ? [...indicOrdered, customFam, ...tail] : [...indicOrdered, ...tail]);
     const dedup = Array.from(new Set(stack));
     return {
       css: `${weight} ${fontSize}px ${dedup.map(quoteFamily).join(', ')}, sans-serif`,
-      hasIndic,
-      emboldenGurmukhi: needsSynthGurmukhi && !customFam,
+      hasIndic: true,
+      emboldenGurmukhi: needsSynthGurmukhi && !(customFam && customSupportsIndic),
+    };
+  }
+
+  if (isNativeLine) {
+    const weight = customFam ? snapFlashcardWeight(customFam, 700) : 700;
+    const stack = customFam
+      ? [customFam, 'Montserrat', 'Nirmala UI', 'Nirmala Text', 'Noto Sans']
+      : ['Montserrat', 'Nirmala UI', 'Nirmala Text', 'Noto Sans'];
+    const dedup = Array.from(new Set(stack));
+    return {
+      css: `${weight} ${fontSize}px ${dedup.map(quoteFamily).join(', ')}, sans-serif`,
+      hasIndic: false,
+      emboldenGurmukhi: false,
     };
   }
 
   // English / top line: bold rounded geometric sans modeled on the approved
   // reference video's stacked high-contrast look (or optional custom family).
-  if (hasIndic) {
-    const targetWeight = needsSynthGurmukhi ? 400 : 700;
-    const weight = customFam ? snapFlashcardWeight(customFam, targetWeight) : targetWeight;
-    const stack = customFam
-      ? [customFam, ...indicFams, 'Montserrat', 'Baloo Tamma 2', 'Inter', 'Noto Sans']
-      : ['Montserrat', ...indicFams, 'Baloo Tamma 2', 'Inter', 'Noto Sans'];
-    const dedup = Array.from(new Set(stack));
-    return {
-      css: `${weight} ${fontSize}px ${dedup.map(quoteFamily).join(', ')}, sans-serif`,
-      hasIndic: true,
-      emboldenGurmukhi: needsSynthGurmukhi && !customFam,
-    };
-  }
-
   if (customFam) {
     const weight = snapFlashcardWeight(customFam, 800);
     const dedup = Array.from(new Set([customFam, 'Baloo Tamma 2', 'Montserrat', 'Inter', 'Noto Sans']));

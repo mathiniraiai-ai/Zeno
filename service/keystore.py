@@ -9,10 +9,12 @@ in `zeno_runs` and `zeno_learned_rules`.
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -269,6 +271,36 @@ class KeyStore:
             created_at {real} NOT NULL,
             updated_at {real} NOT NULL,
             payload_json TEXT NOT NULL)""")
+        # One row per delivered video: its input (Notion name, footage path, script), its output (the delivery name), and the
+        # edit data (final plan, first plan, decisions, editor corrections). Text only, never audio or video. One row per job_uid,
+        # so a re-render updates its own row; the same output delivered from a different job is flagged, not dropped.
+        self._run(f"""CREATE TABLE IF NOT EXISTS zeno_edits (
+            id {rule_pk},
+            job_uid TEXT NOT NULL UNIQUE,
+            key_id INTEGER,
+            editor_name TEXT NOT NULL DEFAULT '',
+            user_email TEXT NOT NULL DEFAULT '',
+            notion_name TEXT NOT NULL DEFAULT '',
+            footage_path TEXT NOT NULL DEFAULT '',
+            script_url TEXT NOT NULL DEFAULT '',
+            project TEXT NOT NULL DEFAULT '',
+            output_name TEXT NOT NULL DEFAULT '',
+            output_key TEXT NOT NULL DEFAULT '',
+            video_seconds {real} NOT NULL DEFAULT 0,
+            revisions INTEGER NOT NULL DEFAULT 1,
+            flag_level TEXT NOT NULL DEFAULT '',
+            flag_code TEXT NOT NULL DEFAULT '',
+            flag_reason TEXT NOT NULL DEFAULT '',
+            duplicate_of INTEGER,
+            zeno_version TEXT NOT NULL DEFAULT '',
+            delivered_at {real} NOT NULL,
+            updated_at {real} NOT NULL,
+            edit_json TEXT NOT NULL DEFAULT '{{}}')""")
+        try:
+            self._run("CREATE INDEX IF NOT EXISTS zeno_edits_output ON zeno_edits (output_key)")
+            self._run("CREATE INDEX IF NOT EXISTS zeno_edits_delivered ON zeno_edits (delivered_at)")
+        except Exception:
+            pass
         # Which Zeno version each editor runs, learned from every request that says it and from every update download, plus
         # the history of each change (who moved to which version, when, and how we know).
         self._run(f"""CREATE TABLE IF NOT EXISTS zeno_version_events (
@@ -583,8 +615,221 @@ class KeyStore:
         )
         if payload.get("zeno_version"):
             self.note_version(key_id, str(payload["zeno_version"]), str(payload.get("platform") or ""), "job record", editor_name)
+        try:
+            if str(payload.get("kind") or "render") == "render":
+                self.record_edit(key_id, str(editor_name or ""), email, payload)
+        except Exception:
+            pass   # the edit log must never stop a job record from being stored
         row = self._run("SELECT id FROM zeno_job_archive WHERE job_uid = %s", (uid,), "one")
         return int(row[0]) if row else 0
+
+    # -- the edit log: one row per delivered video ------------------------------------------------
+    _IST = timezone(timedelta(hours=5, minutes=30))
+    EDIT_DATA_MAX = 600_000
+
+    @staticmethod
+    def _output_key(name: str) -> str:
+        """The identity of an output: its delivery name, case and spacing ignored."""
+        n = " ".join(str(name or "").replace("reel_", "", 1).replace("SQ_", "", 1).split()).lower()
+        return n[:300]
+
+    @staticmethod
+    def _plan_header(plan_text: str, tag: str) -> str:
+        m = re.search(r"^#" + tag + r'\s+"?([^"\n]+?)"?\s*$', plan_text or "", re.M)
+        return m.group(1).strip() if m else ""
+
+    def record_edit(self, key_id: Optional[int], editor_name: str, email: str, payload: Dict[str, Any]) -> int:
+        """Log one delivered video. A resend of the same job updates its row; the same output arriving from another job is flagged."""
+        uid = str(payload.get("job_uid") or "").strip()[:120]
+        if not uid:
+            return 0
+        plan_final = str(payload.get("plan_final") or "")
+        output_name = str(payload.get("video_name") or "").strip()
+        if not output_name:
+            return 0
+        footage = str(payload.get("footage_path") or "") or self._plan_header(plan_final, "src_dir")
+        script_url = str(payload.get("script_url") or payload.get("script_source") or "") or self._plan_header(plan_final, "script")
+        notion = str(payload.get("notion_name") or payload.get("task_name") or "").strip() or output_name
+        versions = payload.get("plan_versions") if isinstance(payload.get("plan_versions"), list) else []
+        first_plan = str((versions[0] or {}).get("text") or "") if versions and isinstance(versions[0], dict) else ""
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        data = {
+            "plan_final": plan_final, "plan_first": first_plan,
+            "plan_history": payload.get("plan_history") or [],
+            "decisions": payload.get("decisions") or "",
+            "script": payload.get("script") or "",
+            "script_analysis": payload.get("script_analysis") or "",
+            "feedback": payload.get("feedback") or [],
+            "summary": summary,
+        }
+        body = json.dumps(data, ensure_ascii=False)
+        if len(body) > self.EDIT_DATA_MAX:   # the plans and the script matter most: drop the bulky extras first
+            data["plan_history"], data["script_analysis"] = [], ""
+            body = json.dumps(data, ensure_ascii=False)
+        if len(body) > self.EDIT_DATA_MAX:
+            data["plan_first"] = ""
+            body = json.dumps(data, ensure_ascii=False)
+        now = time.time()
+        okey = self._output_key(output_name)
+        email = (email or "").lower()[:160]
+        old = self._run("SELECT id, delivered_at, revisions FROM zeno_edits WHERE job_uid = %s", (uid,), "one")
+        if old:
+            self._run(
+                """UPDATE zeno_edits SET key_id=%s, editor_name=%s, user_email=%s, notion_name=%s, footage_path=%s, script_url=%s,
+                       project=%s, output_name=%s, output_key=%s, video_seconds=%s, revisions=%s, zeno_version=%s, updated_at=%s,
+                       edit_json=%s WHERE job_uid=%s""",
+                (key_id, editor_name[:120], email, notion[:300], footage[:500], script_url[:500], str(payload.get("project") or "")[:200],
+                 output_name[:300], okey, float(summary.get("video_seconds") or 0.0), int(old[2] or 1) + 1,
+                 str(payload.get("zeno_version") or "")[:40], now, body, uid),
+            )
+            edit_id = int(old[0])
+        else:
+            self._run(
+                """INSERT INTO zeno_edits (job_uid, key_id, editor_name, user_email, notion_name, footage_path, script_url, project,
+                       output_name, output_key, video_seconds, zeno_version, delivered_at, updated_at, edit_json)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (uid, key_id, editor_name[:120], email, notion[:300], footage[:500], script_url[:500], str(payload.get("project") or "")[:200],
+                 output_name[:300], okey, float(summary.get("video_seconds") or 0.0), str(payload.get("zeno_version") or "")[:40], now, now, body),
+            )
+            row = self._run("SELECT id FROM zeno_edits WHERE job_uid = %s", (uid,), "one")
+            edit_id = int(row[0]) if row else 0
+        self._flag_edit(edit_id)
+        return edit_id
+
+    def _flag_edit(self, edit_id: int) -> None:
+        """Mark an edit when its output was already delivered by another job (error or warning, with the reason),
+        or when its script already produced a different output."""
+        me = self._run(
+            "SELECT id, job_uid, editor_name, user_email, footage_path, script_url, output_name, output_key, delivered_at FROM zeno_edits WHERE id = %s",
+            (edit_id,), "one")
+        if not me:
+            return
+        _id, uid, editor, email, footage, script, out_name, okey, delivered = me
+        first = self._run(
+            """SELECT id, editor_name, user_email, footage_path, script_url, delivered_at FROM zeno_edits
+               WHERE output_key = %s AND job_uid <> %s AND delivered_at <= %s ORDER BY delivered_at, id LIMIT 1""",
+            (okey, uid, delivered), "one")
+        level = code = reason = ""
+        dup_of: Optional[int] = None
+        if first:
+            f_id, f_editor, f_email, f_footage, f_script, f_at = first
+            when = datetime.fromtimestamp(float(f_at), self._IST).strftime("%d %b %H:%M IST")
+            n = int((self._run("SELECT COUNT(*) FROM zeno_edits WHERE output_key = %s", (okey,), "one") or [1])[0])
+            diffs = []
+            if (f_email or "") != (email or ""):
+                diffs.append(f"a different editor ({f_editor or f_email} vs {editor or email})")
+            if f_script and script and f_script != script:
+                diffs.append("a different script")
+            if f_footage and footage and f_footage != footage:
+                diffs.append("a different footage folder")
+            if diffs:
+                level, code = "error", "DUPLICATE_OUTPUT_DIFFERENT_INPUT"
+                reason = (f"Output '{out_name}' was already delivered (edit #{f_id}, {when}) from {' and '.join(diffs)}. "
+                          f"Two videos share one output name, so one delivery overwrites the other. This is delivery {n} of this name.")
+            else:
+                level, code = "warning", "DUPLICATE_OUTPUT_SAME_INPUT"
+                reason = (f"Output '{out_name}' was already delivered (edit #{f_id}, {when}) from the same input. "
+                          f"The video was delivered again from another project folder (delivery {n}); count it once.")
+            dup_of = int(f_id)
+        elif script and script.startswith("http"):
+            other = self._run(
+                "SELECT id, output_name FROM zeno_edits WHERE script_url = %s AND output_key <> %s AND job_uid <> %s ORDER BY delivered_at LIMIT 1",
+                (script, okey, uid), "one")
+            if other:
+                level, code = "warning", "SAME_SCRIPT_TWO_OUTPUTS"
+                reason = f"This script already produced a different output ('{other[1]}', edit #{other[0]}). One input should give one output."
+                dup_of = int(other[0])
+        self._run("UPDATE zeno_edits SET flag_level=%s, flag_code=%s, flag_reason=%s, duplicate_of=%s WHERE id=%s",
+                  (level, code, reason, dup_of, edit_id))
+
+    def list_edits(self, limit: int = 200, since: float = 0.0, editor: str = "", flagged_only: bool = False) -> List[Dict[str, Any]]:
+        """The edit log, newest first, without the edit data."""
+        where, params = ["delivered_at >= %s"], [float(since)]
+        if editor:
+            where.append("(LOWER(user_email) = %s OR LOWER(editor_name) = %s)")
+            params += [editor.lower(), editor.lower()]
+        if flagged_only:
+            where.append("flag_level <> ''")
+        rows = self._run(
+            "SELECT id, job_uid, editor_name, user_email, notion_name, footage_path, script_url, project, output_name, video_seconds, "
+            "revisions, flag_level, flag_code, flag_reason, duplicate_of, zeno_version, delivered_at, updated_at FROM zeno_edits "
+            f"WHERE {' AND '.join(where)} ORDER BY delivered_at DESC LIMIT %s", tuple(params + [int(limit)]), "all")
+        cols = ("id", "job_uid", "editor_name", "user_email", "notion_name", "footage_path", "script_url", "project", "output_name",
+                "video_seconds", "revisions", "flag_level", "flag_code", "flag_reason", "duplicate_of", "zeno_version", "delivered_at", "updated_at")
+        out = []
+        for r in rows or []:
+            d = dict(zip(cols, r))
+            d["delivered_ist"] = datetime.fromtimestamp(float(d["delivered_at"]), self._IST).strftime("%Y-%m-%d %H:%M")
+            out.append(d)
+        return out
+
+    def get_edit(self, edit_id: int) -> Optional[Dict[str, Any]]:
+        """One edit with its edit data (plans, decisions, script, editor corrections)."""
+        row = self._run("SELECT edit_json FROM zeno_edits WHERE id = %s", (int(edit_id),), "one")
+        if not row:
+            return None
+        head = [e for e in self.list_edits(limit=100000, since=0.0) if e["id"] == int(edit_id)]
+        try:
+            data = json.loads(row[0] or "{}")
+        except Exception:
+            data = {}
+        out = head[0] if head else {"id": int(edit_id)}
+        out["edit"] = data
+        return out
+
+    def edit_stats(self, days: int = 14) -> Dict[str, Any]:
+        """Per day (IST) and per editor: videos delivered (distinct outputs), deliveries, the times, and flags."""
+        since = time.time() - max(1, int(days)) * 86400
+        rows = self._run(
+            "SELECT editor_name, user_email, output_key, delivered_at, flag_level FROM zeno_edits WHERE delivered_at >= %s ORDER BY delivered_at",
+            (since,), "all") or []
+        by_day: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for editor, email, okey, at, level in rows:
+            ts = datetime.fromtimestamp(float(at), self._IST)
+            who = (email or editor or "unknown").lower()
+            e = by_day.setdefault(ts.strftime("%Y-%m-%d"), {}).setdefault(
+                who, {"editor": editor or who, "email": email or "", "outputs": set(), "deliveries": 0, "times": [], "warnings": 0, "errors": 0})
+            e["outputs"].add(okey)
+            e["deliveries"] += 1
+            e["times"].append(ts.strftime("%H:%M"))
+            if level == "warning":
+                e["warnings"] += 1
+            elif level == "error":
+                e["errors"] += 1
+        days_out = []
+        for day in sorted(by_day, reverse=True):
+            eds = []
+            for e in sorted(by_day[day].values(), key=lambda x: -len(x["outputs"])):
+                eds.append({"editor": e["editor"], "email": e["email"], "videos": len(e["outputs"]), "deliveries": e["deliveries"],
+                            "times": e["times"], "warnings": e["warnings"], "errors": e["errors"]})
+            weekday = datetime.strptime(day, "%Y-%m-%d").strftime("%a")
+            days_out.append({"date": day, "weekday": weekday, "editors": eds, "editors_count": len(eds),
+                             "videos": sum(x["videos"] for x in eds), "deliveries": sum(x["deliveries"] for x in eds)})
+        return {"days": days_out, "timezone": "IST"}
+
+    def backfill_edits(self, limit: int = 5000) -> int:
+        """Fill the edit log from delivered jobs already in the archive (the history before the log existed). Safe to run again."""
+        rows = self._run(
+            "SELECT job_uid, key_id, editor_name, user_email, payload_json, created_at FROM zeno_job_archive WHERE kind = 'render' "
+            "ORDER BY created_at LIMIT %s", (int(limit),), "all") or []
+        done = 0
+        for uid, key_id, editor, email, body, created in rows:
+            if self._run("SELECT 1 FROM zeno_edits WHERE job_uid = %s", (uid,), "one"):
+                continue
+            try:
+                payload = json.loads(body or "{}")
+            except Exception:
+                continue
+            payload["job_uid"] = uid
+            try:
+                eid = self.record_edit(key_id, editor or "", email or "", payload)
+                if eid:
+                    self._run("UPDATE zeno_edits SET delivered_at = %s WHERE id = %s", (float(created), eid))
+                    self._flag_edit(eid)
+                    done += 1
+            except Exception:
+                continue
+        return done
 
     def list_jobs(self, limit: int = 200, since: float = 0.0) -> List[Dict[str, Any]]:
         """The archive's index, newest first (no payloads)."""

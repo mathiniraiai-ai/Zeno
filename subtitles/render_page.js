@@ -97,16 +97,18 @@ function snapFontWeight(family, requestedWeight) {
 }
 
 const SCRIPT_FONTS = [
-  [/[ಀ-೿]/, '"Noto Sans Kannada"', new Set(['noto sans kannada', 'noto serif kannada', 'tiro kannada', 'anek kannada', 'baloo tamma 2'])],
-  [/[ഀ-ൿ]/, '"Noto Sans Malayalam"', new Set(['noto sans malayalam', 'noto serif malayalam', 'manjari', 'anek malayalam', 'baloo chettan 2', 'chilanka'])],
-  [/[஀-௿]/, '"Noto Sans Tamil"', new Set(['noto sans tamil', 'hind madurai', 'mukta malar', 'anek tamil', 'baloo thambi 2', 'catamaran', 'coiny', 'kavivanar'])],
-  [/[ఀ-౿]/, '"Noto Sans Telugu"', new Set(['noto sans telugu', 'hind guntur', 'noto serif telugu', 'anek telugu', 'ramabhadra', 'gidugu'])],
-  [/[ऀ-ॿ]/, '"Noto Sans Devanagari"', new Set(['noto sans devanagari', 'hind', 'mukta', 'teko', 'noto serif devanagari', 'anek devanagari', 'baloo 2', 'kalam', 'modak', 'rozha one'])],
-  [/[ঀ-৿]/, '"Noto Sans Bengali"', new Set(['noto sans bengali', 'hind siliguri', 'noto serif bengali', 'anek bangla', 'baloo da 2', 'atma', 'galada'])],
-  [/[઀-૿]/, '"Noto Sans Gujarati"', new Set(['noto sans gujarati', 'hind vadodara', 'mukta vaani', 'anek gujarati', 'baloo bhai 2', 'mogra'])],
-  [/[਀-੿]/, '"Noto Sans Gurmukhi"', new Set(['noto sans gurmukhi', 'mukta mahee', 'anek gurmukhi', 'baloo paaji 2'])],
-  [/[଀-୿]/, '"Noto Sans Oriya"', new Set(['noto sans oriya', 'baloo bhaina 2', 'noto serif oriya', 'anek odia'])],
+  [/[\u0C80-\u0CFF]/, 'Noto Sans Kannada', '"Noto Sans Kannada", "Nirmala UI", "Nirmala Text", "Tunga"', new Set(['noto sans kannada', 'noto serif kannada', 'tiro kannada', 'anek kannada', 'baloo tamma 2', 'nirmala ui', 'nirmala text', 'tunga'])],
+  [/[\u0D00-\u0D7F]/, 'Noto Sans Malayalam', '"Noto Sans Malayalam", "Nirmala UI", "Nirmala Text", "Kartika"', new Set(['noto sans malayalam', 'noto serif malayalam', 'manjari', 'anek malayalam', 'baloo chettan 2', 'chilanka', 'nirmala ui', 'nirmala text', 'kartika'])],
+  [/[\u0B80-\u0BFF]/, 'Noto Sans Tamil', '"Noto Sans Tamil", "Nirmala UI", "Nirmala Text", "Latha"', new Set(['noto sans tamil', 'hind madurai', 'mukta malar', 'anek tamil', 'baloo thambi 2', 'catamaran', 'coiny', 'kavivanar', 'nirmala ui', 'nirmala text', 'latha'])],
+  [/[\u0C00-\u0C7F]/, 'Noto Sans Telugu', '"Noto Sans Telugu", "Nirmala UI", "Nirmala Text", "Gautami"', new Set(['noto sans telugu', 'hind guntur', 'noto serif telugu', 'anek telugu', 'ramabhadra', 'gidugu', 'nirmala ui', 'nirmala text', 'gautami'])],
+  [/[\u0900-\u097F]/, 'Noto Sans Devanagari', '"Noto Sans Devanagari", "Nirmala UI", "Nirmala Text", "Mangal"', new Set(['noto sans devanagari', 'hind', 'mukta', 'teko', 'noto serif devanagari', 'anek devanagari', 'baloo 2', 'kalam', 'modak', 'rozha one', 'nirmala ui', 'nirmala text', 'mangal'])],
+  [/[\u0980-\u09FF]/, 'Noto Sans Bengali', '"Noto Sans Bengali", "Nirmala UI", "Nirmala Text", "Vrinda"', new Set(['noto sans bengali', 'hind siliguri', 'noto serif bengali', 'anek bangla', 'baloo da 2', 'atma', 'galada', 'nirmala ui', 'nirmala text', 'vrinda'])],
+  [/[\u0A80-\u0AFF]/, 'Noto Sans Gujarati', '"Noto Sans Gujarati", "Nirmala UI", "Nirmala Text", "Shruti"', new Set(['noto sans gujarati', 'hind vadodara', 'mukta vaani', 'anek gujarati', 'baloo bhai 2', 'mogra', 'nirmala ui', 'nirmala text', 'shruti'])],
+  [/[\u0A00-\u0A7F]/, 'Noto Sans Gurmukhi', '"Noto Sans Gurmukhi", "Nirmala UI", "Nirmala Text", "Raavi"', new Set(['noto sans gurmukhi', 'mukta mahee', 'anek gurmukhi', 'baloo paaji 2', 'nirmala ui', 'nirmala text', 'raavi'])],
+  [/[\u0B00-\u0B7F]/, 'Noto Sans Oriya', '"Noto Sans Oriya", "Nirmala UI", "Nirmala Text", "Kalinga"', new Set(['noto sans oriya', 'baloo bhaina 2', 'noto serif oriya', 'anek odia', 'nirmala ui', 'nirmala text', 'kalinga'])],
 ];
+
+const ALL_INDIC_FALLBACKS = '"Nirmala UI", "Nirmala Text", "Tunga", "Gautami", "Latha", "Kartika", "Mangal", "Vrinda", "Shruti", "Raavi", "Kalinga"';
 
 (async () => {
   const job = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
@@ -126,23 +128,26 @@ const SCRIPT_FONTS = [
   const maxX = W - padRight;
 
   const fontFor = (text, bold) => {
-    let fam = `"${family}"`;
-    let isIndic = false;
-    let familySupportsScript = false;
-    for (const [re, name, nativeSet] of SCRIPT_FONTS) {
-      if (re.test(text)) {
-        isIndic = true;
-        if (nativeSet.has(familyLower)) {
-          fam = `"${family}", ${name}`;
-          familySupportsScript = true;
-        } else {
-          fam = `${name}, "${family}"`;
-        }
-        break;
-      }
+    const matched = [];
+    for (const entry of SCRIPT_FONTS) {
+      if (entry[0].test(text)) matched.push(entry);
     }
     const baseW = bold ? boldWeight : weight;
-    const w = bold && isIndic && !familySupportsScript && Number(baseW) >= 700 ? 700 : baseW;
+    if (matched.length === 0) {
+      return `${baseW} ${size}px "${family}", ${ALL_INDIC_FALLBACKS}, "Noto Sans", sans-serif`;
+    }
+    const familySupportsScript = matched.every(([, , , nativeSet]) => nativeSet.has(familyLower));
+    const scriptStack = matched.map(([, , stack]) => stack).join(', ');
+    const fam = familySupportsScript
+      ? `"${family}", ${scriptStack}, ${ALL_INDIC_FALLBACKS}`
+      : `${scriptStack}, ${ALL_INDIC_FALLBACKS}, "${family}"`;
+    let w = Number(baseW) || 400;
+    if (w >= 700) {
+      w = 700;
+    } else if (!familySupportsScript) {
+      w = snapFontWeight(matched[0][1], w);
+      if (w >= 700) w = 700;
+    }
     return `${w} ${size}px ${fam}, "Noto Sans", sans-serif`;
   };
 

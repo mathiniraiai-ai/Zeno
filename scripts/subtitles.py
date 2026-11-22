@@ -266,8 +266,502 @@ def available() -> bool:
     return bool(node_path()) and (SUB_DIR / "node_modules" / "canvas").is_dir() and (SUB_DIR / "styles.json").is_file()
 
 
+_WIN_PRIORITY_FONT_PREFIXES = (
+    "NotoSans",
+    "BalooTamma2",
+    "Montserrat",
+    "Inter",
+    "Hind",
+    "Mukta",
+    "Tiro",
+    "Anek",
+)
+
+_PANGO_WARN_RE = re.compile(
+    r"(?:Pango[-:]?WARNING\b.*|couldn't load font\b.*|failed to load font\b.*)",
+    re.IGNORECASE,
+)
+
+
+def _sfnt_is_variable_and_full_name(ttf_path: Path) -> Tuple[bool, str]:
+    """Inspect SFNT tables of a TTF/OTF file to detect `fvar` and extract `nameID=4` full font name."""
+    import struct
+
+    try:
+        data = ttf_path.read_bytes()
+    except OSError:
+        return False, ""
+    if len(data) < 12:
+        return False, ""
+    num_tables = struct.unpack(">H", data[4:6])[0]
+    name_off = 0
+    name_len = 0
+    for i in range(num_tables):
+        rec_off = 12 + i * 16
+        if rec_off + 16 > len(data):
+            break
+        tag = data[rec_off : rec_off + 4]
+        if tag == b"fvar":
+            return True, ""
+        if tag == b"name":
+            name_off, name_len = struct.unpack(">II", data[rec_off + 8 : rec_off + 16])
+
+    if not name_off or name_off + 6 > len(data):
+        return False, ""
+    end_limit = min(len(data), name_off + name_len) if name_len else len(data)
+    _, count, str_rel = struct.unpack(">HHH", data[name_off : name_off + 6])
+    str_base = name_off + str_rel
+    best_pri = 99
+    best_name = ""
+    for i in range(count):
+        rec = name_off + 6 + i * 12
+        if rec + 12 > end_limit:
+            break
+        plat, enc, lang, nid, slen, soff = struct.unpack(">HHHHHH", data[rec : rec + 12])
+        if nid != 4 or slen <= 0:
+            continue
+        s_start = str_base + soff
+        s_end = s_start + slen
+        if s_end > end_limit:
+            continue
+        raw = data[s_start:s_end]
+        if plat == 3:
+            pri = 0 if lang == 0x0409 else 1
+            decoded = raw.decode("utf-16-be", errors="ignore")
+        elif plat == 0:
+            pri = 2
+            decoded = raw.decode("utf-16-be", errors="ignore")
+        elif plat == 1:
+            pri = 3
+            decoded = raw.decode("latin-1", errors="ignore")
+        else:
+            continue
+        cleaned = decoded.replace("\x00", "").strip()
+        if cleaned and pri < best_pri:
+            best_pri = pri
+            best_name = cleaned
+            if best_pri == 0:
+                break
+    return False, best_name
+
+
+def ensure_windows_user_fonts(quiet: bool = False) -> bool:
+    """Idempotently install bundled static TTFs into Windows per-user fonts (`%LOCALAPPDATA%\\Microsoft\\Windows\\Fonts`).
+
+    No-op returning True on macOS/Linux. Fixes PangoWin32 font resolution when `node-canvas`
+    `registerFont()` private GDI registration fails on Windows without requiring admin rights.
+    """
+    if sys.platform != "win32":
+        return True
+
+    fonts_dir = SUB_DIR / "fonts"
+    if not fonts_dir.is_dir():
+        return True
+
+    def _sort_key(p: Path) -> Tuple[int, str]:
+        for idx, pref in enumerate(_WIN_PRIORITY_FONT_PREFIXES):
+            if p.name.startswith(pref):
+                return (idx, p.name.lower())
+        return (len(_WIN_PRIORITY_FONT_PREFIXES), p.name.lower())
+
+    ttf_files = sorted((p for p in fonts_dir.glob("*.ttf") if p.is_file()), key=_sort_key)
+    if not ttf_files:
+        return True
+
+    try:
+        import ctypes
+        import winreg  # type: ignore[import-not-found]
+
+        local_app = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        user_fonts_dir = Path(local_app) / "Microsoft" / "Windows" / "Fonts"
+        user_fonts_dir.mkdir(parents=True, exist_ok=True)
+
+        reg_path = r"Software\Microsoft\Windows NT\CurrentVersion\Fonts"
+        changed = False
+        installed_count = 0
+        errors = 0
+        failed_fonts: List[str] = []
+
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_ALL_ACCESS) as key:
+            for src in ttf_files:
+                try:
+                    is_var, full_name = _sfnt_is_variable_and_full_name(src)
+                    if is_var:
+                        continue
+                    dest = user_fonts_dir / src.name
+                    if not dest.is_file() or dest.stat().st_size != src.stat().st_size:
+                        shutil.copy2(src, dest)
+                        changed = True
+                    reg_name = f"{full_name or src.stem} (TrueType)"
+                    dest_str = str(dest)
+                    existing_val = None
+                    try:
+                        existing_val, _ = winreg.QueryValueEx(key, reg_name)
+                    except OSError:
+                        existing_val = None
+                    if existing_val != dest_str:
+                        winreg.SetValueEx(key, reg_name, 0, winreg.REG_SZ, dest_str)
+                        changed = True
+                    installed_count += 1
+                except Exception:
+                    errors += 1
+                    failed_fonts.append(src.name)
+                    continue
+
+        if changed:
+            try:
+                WM_FONTCHANGE = 0x001D
+                HWND_BROADCAST = 0xFFFF
+                SMTO_ABORTIFHUNG = 0x0002
+                ctypes.windll.user32.SendMessageTimeoutW(
+                    HWND_BROADCAST, WM_FONTCHANGE, 0, 0, SMTO_ABORTIFHUNG, 1000, None
+                )
+            except Exception:
+                pass
+
+        if failed_fonts:
+            # Never silent: a font that is not installed is what turns Kannada/Malayalam/Telugu captions into hex boxes on Windows.
+            indic_failed = [n for n in failed_fonts if any(k in n for k in ("Kannada", "Malayalam", "Telugu", "Tamil", "Devanagari", "Bengali", "Gujarati", "Gurmukhi", "Oriya"))]
+            print(
+                f"  [FONTS WARN] {len(failed_fonts)} bundled font(s) could not be installed on this PC"
+                + (f" (Indic: {', '.join(indic_failed[:6])})" if indic_failed else "")
+                + "; captions fall back to Windows Nirmala UI. Check antivirus / folder permissions on "
+                + str(user_fonts_dir)
+            )
+        if not quiet:
+            state = "updated" if changed else "verified"
+            print(f"  [FONTS] Windows user fonts {state}: {installed_count} static TTF(s) in {user_fonts_dir}")
+        return installed_count > 0 and not failed_fonts
+    except Exception as exc:  # noqa: BLE001
+        if not quiet:
+            print(f"  [FONTS] Could not register Windows per-user fonts ({type(exc).__name__}: {exc})")
+        return False
+
+
+def check_pango_warnings(stderr_text: str) -> List[str]:
+    """Extract any `Pango-WARNING` / `couldn't load font` lines from Node renderer stderr."""
+    warnings: List[str] = []
+    seen: Set[str] = set()
+    for raw in (stderr_text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if _PANGO_WARN_RE.search(line) and line not in seen:
+            seen.add(line)
+            warnings.append(line)
+    return warnings
+
+
+def _connected_components_fallback(mask_u8: Any) -> Tuple[int, Any, List[Tuple[int, int, int, int, int]]]:
+    """Pure-Python + NumPy 8/4-connected component bounding-box fallback when OpenCV is absent."""
+    import numpy as np
+
+    h, w = mask_u8.shape
+    labels = np.zeros((h, w), dtype=np.int32)
+    stats: List[Tuple[int, int, int, int, int]] = [(0, 0, w, h, int((mask_u8 == 0).sum()))]
+    cur = 0
+    ys, xs = np.nonzero(mask_u8)
+    for sy, sx in zip(ys.tolist(), xs.tolist()):
+        if labels[sy, sx] != 0:
+            continue
+        cur += 1
+        stack = [(sy, sx)]
+        labels[sy, sx] = cur
+        minx = maxx = sx
+        miny = maxy = sy
+        area = 0
+        while stack:
+            cy, cx = stack.pop()
+            area += 1
+            if cx < minx:
+                minx = cx
+            if cx > maxx:
+                maxx = cx
+            if cy < miny:
+                miny = cy
+            if cy > maxy:
+                maxy = cy
+            for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                if 0 <= ny < h and 0 <= nx < w and mask_u8[ny, nx] and labels[ny, nx] == 0:
+                    labels[ny, nx] = cur
+                    stack.append((ny, nx))
+        stats.append((minx, miny, maxx - minx + 1, maxy - miny + 1, area))
+    return cur + 1, labels, stats
+
+
+def detect_tofu_boxes_in_png(png_path: Path | str) -> Dict[str, Any]:
+    """Inspect rendered PNG connected components for hollow `.notdef` tofu rectangles.
+
+    Detects strictly axis-aligned sharp rectangular outlines (`edge_density >= 0.80` on all 4
+    outer sides, sharp corners filled, hollow interior center `30%..70% <= 0.08`, aspect
+    `0.40..1.02`, height `>= 14px`) across transparent-glyph, light-ink, and light-bg dark-ink
+    layers without false-positives on rounded letters (`O`, `0`, `D`, Kannada/Indic curves) or
+    UI container borders.
+    """
+    p = Path(png_path)
+    empty_res: Dict[str, Any] = {
+        "ok": True,
+        "tofu_count": 0,
+        "boxes": [],
+        "line_clusters": 0,
+        "ink_pixels": 0,
+    }
+    if not p.is_file():
+        return {**empty_res, "error": "missing"}
+
+    try:
+        import numpy as np
+    except Exception:
+        return empty_res
+
+    arr = None
+    try:
+        import cv2  # type: ignore
+        arr = cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
+    except Exception:
+        cv2 = None  # type: ignore
+
+    if arr is None:
+        try:
+            from PIL import Image
+            with Image.open(p) as im:
+                rgba = np.array(im.convert("RGBA"))
+            arr = rgba[:, :, [2, 1, 0, 3]]  # BGRA layout matching cv2
+        except Exception:
+            return {**empty_res, "error": "unreadable"}
+
+    if arr.ndim == 2:
+        gray = arr.astype(np.float32)
+        alpha = np.full(arr.shape, 255, dtype=np.uint8)
+    elif arr.shape[2] == 3:
+        b, g, r = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
+        gray = 0.299 * r + 0.587 * g + 0.114 * b
+        alpha = np.full(arr.shape[:2], 255, dtype=np.uint8)
+    else:
+        b, g, r, alpha = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2], arr[:, :, 3]
+        gray = 0.299 * r + 0.587 * g + 0.114 * b
+
+    H, W = alpha.shape
+    has_transparency = bool((alpha < 32).any())
+    ink_pixels = int((alpha >= 64).sum()) if has_transparency else int(H * W)
+
+    layers: List[Tuple[str, Any]] = []
+    if has_transparency:
+        layers.append(("alpha", (alpha >= 64).astype(np.uint8)))
+    layers.append(("light", ((alpha >= 160) & (gray >= 165)).astype(np.uint8)))
+    layers.append(("dark", ((alpha >= 160) & (gray <= 165)).astype(np.uint8)))
+
+    max_h = max(140, int(round(H * 0.28)))
+    detected: List[Dict[str, Any]] = []
+
+    for layer_name, mask_u8 in layers:
+        if int(mask_u8.sum()) < 24:
+            continue
+        if "cv2" in locals() and cv2 is not None:
+            n_comp, labels, stats_arr, _ = cv2.connectedComponentsWithStats(mask_u8)
+            stats_list = [tuple(int(v) for v in stats_arr[i]) for i in range(n_comp)]
+        else:
+            n_comp, labels, stats_list = _connected_components_fallback(mask_u8)
+
+        for idx in range(1, n_comp):
+            x, y, w, h, _area = stats_list[idx]
+            if h < 14 or h > max_h or w < 8 or w > 140:
+                continue
+            ar = w / float(h)
+            if ar < 0.40 or ar > 1.02:
+                continue
+
+            comp = labels[y : y + h, x : x + w] == idx
+            fill = float(comp.mean())
+            if fill < 0.10 or fill > 0.65:
+                continue
+
+            # Dark-ink layer must sit inside a bright opaque surface (avoids false positives on
+            # dark stroke outlines around narrow white glyphs like 'I' on transparent backgrounds).
+            if layer_name == "dark":
+                hx0, hy0 = max(0, x - 2), max(0, y - 2)
+                hx1, hy1 = min(W, x + w + 2), min(H, y + h + 2)
+                ring_a = alpha[hy0:hy1, hx0:hx1]
+                ring_g = gray[hy0:hy1, hx0:hx1]
+                if float((ring_a >= 180).mean()) < 0.85:
+                    continue
+                if float(np.median(ring_g)) < 160.0:
+                    continue
+
+            # Hollow interior center 30%-70%
+            iy0 = max(1, int(round(h * 0.30)))
+            iy1 = min(h - 1, int(round(h * 0.70)))
+            ix0 = max(1, int(round(w * 0.30)))
+            ix1 = min(w - 1, int(round(w * 0.70)))
+            if iy1 <= iy0 or ix1 <= ix0:
+                continue
+            center_fill = float(comp[iy0:iy1, ix0:ix1].mean())
+            if center_fill > 0.08:
+                continue
+
+            # Axis-aligned outer 4-edge density (>= 0.80 across a 2px band)
+            band = min(2, max(1, min(w, h) // 6))
+            top_edge = float(comp[:band, :].max(axis=0).mean())
+            bot_edge = float(comp[-band:, :].max(axis=0).mean())
+            left_edge = float(comp[:, :band].max(axis=1).mean())
+            right_edge = float(comp[:, -band:].max(axis=1).mean())
+            if min(top_edge, bot_edge, left_edge, right_edge) < 0.80:
+                continue
+
+            # Sharp rectangular corners (rejects 'O', '0', 'D', Kannada curves, rounded boxes)
+            c_sz = max(2, min(4, min(w, h) // 6))
+            corners_ok = all(
+                float(patch.mean()) >= 0.25
+                for patch in (
+                    comp[:c_sz, :c_sz],
+                    comp[:c_sz, -c_sz:],
+                    comp[-c_sz:, :c_sz],
+                    comp[-c_sz:, -c_sz:],
+                )
+            )
+            if not corners_ok:
+                continue
+
+            # Deduplicate overlapping detections across layers
+            dup = any(
+                abs(d["x"] - x) <= 6 and abs(d["y"] - y) <= 6 and abs(d["w"] - w) <= 6 and abs(d["h"] - h) <= 6
+                for d in detected
+            )
+            if not dup:
+                detected.append({
+                    "x": x,
+                    "y": y,
+                    "w": w,
+                    "h": h,
+                    "layer": layer_name,
+                    "aspect": round(ar, 3),
+                    "fill": round(fill, 3),
+                    "center": round(center_fill, 3),
+                })
+
+    # Count horizontal baseline clusters with >=2 near-identical hollow boxes
+    line_clusters = 0
+    used_idx: Set[int] = set()
+    for i, bi in enumerate(detected):
+        if i in used_idx:
+            continue
+        group = [i]
+        for j in range(i + 1, len(detected)):
+            bj = detected[j]
+            if (
+                abs((bi["y"] + bi["h"]) - (bj["y"] + bj["h"])) <= max(4, int(bi["h"] * 0.25))
+                and abs(bi["h"] - bj["h"]) <= max(3, int(bi["h"] * 0.20))
+                and abs(bi["w"] - bj["w"]) <= max(3, int(bi["w"] * 0.25))
+            ):
+                group.append(j)
+        if len(group) >= 2:
+            line_clusters += 1
+            used_idx.update(group)
+
+    return {
+        "ok": len(detected) == 0,
+        "tofu_count": len(detected),
+        "boxes": detected,
+        "line_clusters": line_clusters,
+        "ink_pixels": ink_pixels,
+    }
+
+
+def probe_text_render(
+    text: str,
+    *,
+    style_id: int = 2,
+    font_family: Optional[str] = None,
+    timeout: float = 20.0,
+) -> Tuple[bool, str]:
+    """Render `text` via `render_cues.js` into a temp directory and assert 0 Pango warnings and 0 tofu boxes."""
+    import tempfile
+
+    if not available():
+        return False, "Node.js or node-canvas unavailable"
+    clean_text = re.sub(r"\s+", " ", str(text or "").strip())
+    if not clean_text:
+        return True, "empty probe text"
+
+    with tempfile.TemporaryDirectory(prefix="zeno_font_probe_") as td:
+        tmp_dir = Path(td)
+        job: Dict[str, Any] = {
+            "width": 1080,
+            "height": 240,
+            "fps": 25,
+            "styleId": int(style_id),
+            "outDir": str(tmp_dir),
+            "positionY": 50,
+            "fontSize": 54,
+            "singleLine": True,
+            "maxLines": 1,
+            "cropBand": False,
+            "cues": [
+                {
+                    "startTime": 0.0,
+                    "endTime": 1.0,
+                    "text": clean_text,
+                }
+            ],
+        }
+        if font_family and str(font_family).strip():
+            job["fontFamily"] = resolve_font(font_family) or str(font_family).strip()
+        jf = tmp_dir / "probe_job.json"
+        jf.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
+        try:
+            r = subprocess.run(
+                [node_path(), str(SUB_DIR / "render_cues.js"), str(jf)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, f"Indic probe execution failed: {type(exc).__name__}: {exc}"
+
+        if r.returncode != 0:
+            return False, f"render_cues.js failed ({r.returncode}): {(r.stderr or r.stdout).strip()[-240:]}"
+
+        warns = check_pango_warnings(r.stderr)
+        if warns:
+            return False, f"Pango font warning: {warns[0][:200]}"
+
+        json_lines = [ln for ln in (r.stdout or "").splitlines() if ln.startswith("{")]
+        if not json_lines:
+            return False, "render_cues.js returned no JSON manifest"
+        try:
+            manifest = json.loads(json_lines[-1])
+        except json.JSONDecodeError as exc:
+            return False, f"invalid render_cues.js JSON: {exc}"
+
+        frames = manifest.get("frames") or []
+        if not frames:
+            return False, "render_cues.js produced 0 frames"
+        png_p = Path(str(frames[0].get("path") or ""))
+        if not png_p.is_file():
+            return False, f"probe PNG missing: {png_p}"
+
+        qc = detect_tofu_boxes_in_png(png_p)
+        if qc.get("ink_pixels", 0) < 40:
+            return False, f"probe PNG has near-empty ink ({qc.get('ink_pixels', 0)} px)"
+        if qc.get("tofu_count", 0) > 0:
+            return False, f"detected {qc['tofu_count']} hollow tofu box(es) in rendered PNG"
+        return True, f"{qc['ink_pixels']} ink px, 0 Pango warnings, 0 tofu boxes"
+
+
+def verify_indic_render_probe() -> Tuple[bool, str]:
+    """Run a fast (<0.8s) 5-script Indic render probe verifying zero Pango warnings and zero tofu boxes."""
+    if not available():
+        return False, "Node.js or node-canvas unavailable"
+    sample = "ನನ್ನನ್ನು नमस्ते தமிழ் తెలుగు മലയാളം"
+    ok, detail = probe_text_render(sample, style_id=2)
+    return ok, (f"5-script Indic probe passed ({detail})" if ok else f"5-script Indic probe failed: {detail}")
+
+
 def ensure_ready() -> bool:
-    """Ensure Node.js and the `node-canvas` dependency in `subtitles/` are ready for rendering."""
+    """Ensure Node.js, `node-canvas`, and Windows per-user fonts are ready for rendering."""
+    ensure_windows_user_fonts(quiet=True)
     if available():
         return True
     if not node_path():
@@ -2303,12 +2797,27 @@ def render_frames(
         capture_output=True,
         text=True,
         encoding="utf-8",
+        errors="replace",
         timeout=900,
     )
     if r.returncode != 0:
         raise RuntimeError(f"subtitle renderer failed: {(r.stderr or r.stdout).strip()[-400:]}")
+    pango_warns = check_pango_warnings(r.stderr)
     line = [ln for ln in r.stdout.splitlines() if ln.startswith("{")][-1]
     manifest = json.loads(line)
+    if pango_warns:
+        print(f"  [SUBS WARN] Pango font warning(s): {pango_warns[0]}")
+        manifest["pango_warnings"] = pango_warns
+        sample_frames = manifest.get("frames") or []
+        if sample_frames:
+            first_png = Path(str(sample_frames[0].get("path") or ""))
+            if first_png.is_file():
+                qc = detect_tofu_boxes_in_png(first_png)
+                if qc.get("tofu_count", 0) > 0:
+                    raise RuntimeError(
+                        f"subtitle renderer hit font load failure ({pango_warns[0]}) "
+                        f"and produced {qc['tofu_count']} tofu box(es) in {first_png.name}"
+                    )
     return manifest if return_meta else manifest["frames"]
 
 
@@ -2776,6 +3285,7 @@ def build_overlay(
         "cues": meta_cues,
         "frames": meta_frames,
         "srt_path": str(srt_path) if srt_path else None,
+        **({"pango_warnings": manifest["pango_warnings"]} if manifest.get("pango_warnings") else {}),
     }
     (out_dir / "subs_meta.json").write_text(json.dumps(subs_meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -2804,8 +3314,12 @@ if __name__ == "__main__":
 
     if len(_sys.argv) > 1 and _sys.argv[1] == "--ensure":
         ok = ensure_ready()
-        print("  [SUBS] captions ready" if ok else "  [SUBS] captions NOT ready (see above)")
+        fonts_ok = ensure_windows_user_fonts(quiet=False)
+        print("  [SUBS] captions ready" if (ok and fonts_ok) else "  [SUBS] captions NOT ready (see above)")
         _sys.exit(0 if ok else 1)
+    if len(_sys.argv) > 1 and _sys.argv[1] == "--ensure-fonts":
+        fonts_ok = ensure_windows_user_fonts(quiet=False)
+        _sys.exit(0 if fonts_ok else 1)
     if len(_sys.argv) > 1 and _sys.argv[1] == "--list-fonts":
         script_arg = _sys.argv[2] if len(_sys.argv) > 2 else None
         items = list_fonts(script=script_arg)

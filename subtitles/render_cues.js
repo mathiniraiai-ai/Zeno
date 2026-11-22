@@ -109,6 +109,8 @@ const { CaptionRenderer } = require('./caption-renderer.js');
     style.fontFamily = resolvedFam;
     style.fontWeight = snapFontWeight(resolvedFam, job.fontWeight || style.fontWeight || 700);
   }
+  const hasIndicCueText = (c) => /[\u0900-\u0D7F]/.test(String((c && c.text) || '')) ||
+    (Array.isArray(c && c.words) && c.words.some(w => /[\u0900-\u0D7F]/.test(typeof w === 'string' ? w : String((w && (w.text || w.word)) || ''))));
   // One fixed caption size for every style (set by Zeno), so captions stay neat and never oversized.
   if (Number(job.fontSize) > 0) style.fontSize = Number(job.fontSize);
   style.maxLines = job.maxLines !== undefined ? Number(job.maxLines) : (base.maxLines !== undefined ? Number(base.maxLines) : 1);
@@ -159,6 +161,9 @@ const { CaptionRenderer } = require('./caption-renderer.js');
       const resolvedCueFam = resolveRegisteredFamily(cue.style.fontFamily);
       cueStyle.fontFamily = resolvedCueFam;
       cueStyle.fontWeight = snapFontWeight(resolvedCueFam, cueStyle.fontWeight || style.fontWeight || 700);
+    }
+    if (hasIndicCueText(cue) && Number(cueStyle.fontWeight || 700) >= 700) {
+      cueStyle.fontWeight = 700;
     }
     const res = await CaptionRenderer.renderAllCuesToPngs({
       cues: [cue],

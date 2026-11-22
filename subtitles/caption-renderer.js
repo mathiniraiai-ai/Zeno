@@ -83,8 +83,77 @@ const CaptionRenderer = (() => {
     throw new Error('Unable to convert canvas to PNG buffer');
   }
 
-  // Fallback font stack for Indic + international scripts
-  const FALLBACK_FONTS = '"Noto Sans Telugu", "Noto Sans Tamil", "Noto Sans Malayalam", "Noto Sans Kannada", "Noto Sans Devanagari", "Noto Sans Bengali", "Noto Sans Gujarati", "Noto Sans Gurmukhi", "Noto Sans Oriya", "Hind", "Mukta", "Hind Guntur", "Hind Madurai", "Manjari", "Hind Siliguri", "Hind Vadodara", "Mukta Mahee", "Baloo Bhaina 2", "Anek Odia", "Noto Sans", "Roboto", "Open Sans", "Arial", sans-serif';
+  // Fallback font stack for Indic + international scripts (bundled Noto + Windows Nirmala/OS fallbacks + Google Indic)
+  const FALLBACK_FONTS = '"Noto Sans Telugu", "Noto Sans Tamil", "Noto Sans Malayalam", "Noto Sans Kannada", "Noto Sans Devanagari", "Noto Sans Bengali", "Noto Sans Gujarati", "Noto Sans Gurmukhi", "Noto Sans Oriya", "Nirmala UI", "Nirmala Text", "Tunga", "Gautami", "Latha", "Kartika", "Mangal", "Vrinda", "Shruti", "Raavi", "Kalinga", "Hind", "Mukta", "Hind Guntur", "Hind Madurai", "Manjari", "Hind Siliguri", "Hind Vadodara", "Mukta Mahee", "Baloo Bhaina 2", "Anek Odia", "Noto Sans", "Roboto", "Open Sans", "Arial", sans-serif';
+
+  const INDIC_SCRIPT_FAMILIES = [
+    {
+      re: /[\u0C80-\u0CFF]/,
+      primary: 'Noto Sans Kannada',
+      winFallback: 'Tunga',
+      extras: ['Anek Kannada', 'Noto Serif Kannada', 'Tiro Kannada'],
+      displayFallback: 'Baloo Tamma 2',
+      supported: new Set(['noto sans kannada', 'anek kannada', 'noto serif kannada', 'tiro kannada', 'baloo tamma 2', 'nirmala ui', 'nirmala text', 'tunga']),
+    },
+    {
+      re: /[\u0B80-\u0BFF]/,
+      primary: 'Noto Sans Tamil',
+      winFallback: 'Latha',
+      extras: ['Hind Madurai', 'Mukta Malar', 'Anek Tamil', 'Baloo Thambi 2', 'Catamaran'],
+      supported: new Set(['noto sans tamil', 'hind madurai', 'mukta malar', 'anek tamil', 'baloo thambi 2', 'catamaran', 'coiny', 'kavivanar', 'nirmala ui', 'nirmala text', 'latha']),
+    },
+    {
+      re: /[\u0C00-\u0C7F]/,
+      primary: 'Noto Sans Telugu',
+      winFallback: 'Gautami',
+      extras: ['Hind Guntur', 'Anek Telugu', 'Noto Serif Telugu'],
+      displayFallback: 'Baloo Tamma 2',
+      retroFallback: 'Ramabhadra',
+      supported: new Set(['noto sans telugu', 'hind guntur', 'anek telugu', 'noto serif telugu', 'baloo tamma 2', 'ramabhadra', 'gidugu', 'nirmala ui', 'nirmala text', 'gautami']),
+    },
+    {
+      re: /[\u0D00-\u0D7F]/,
+      primary: 'Noto Sans Malayalam',
+      winFallback: 'Kartika',
+      extras: ['Manjari', 'Anek Malayalam', 'Noto Serif Malayalam', 'Baloo Chettan 2'],
+      supported: new Set(['noto sans malayalam', 'manjari', 'anek malayalam', 'noto serif malayalam', 'baloo chettan 2', 'chilanka', 'nirmala ui', 'nirmala text', 'kartika']),
+    },
+    {
+      re: /[\u0900-\u097F]/,
+      primary: 'Noto Sans Devanagari',
+      winFallback: 'Mangal',
+      extras: ['Hind', 'Mukta', 'Teko', 'Anek Devanagari', 'Baloo 2', 'Noto Serif Devanagari'],
+      supported: new Set(['noto sans devanagari', 'hind', 'mukta', 'teko', 'anek devanagari', 'baloo 2', 'noto serif devanagari', 'kalam', 'modak', 'rozha one', 'nirmala ui', 'nirmala text', 'mangal']),
+    },
+    {
+      re: /[\u0980-\u09FF]/,
+      primary: 'Noto Sans Bengali',
+      winFallback: 'Vrinda',
+      extras: ['Hind Siliguri', 'Anek Bangla', 'Baloo Da 2', 'Noto Serif Bengali'],
+      supported: new Set(['noto sans bengali', 'hind siliguri', 'anek bangla', 'baloo da 2', 'noto serif bengali', 'atma', 'galada', 'nirmala ui', 'nirmala text', 'vrinda']),
+    },
+    {
+      re: /[\u0A80-\u0AFF]/,
+      primary: 'Noto Sans Gujarati',
+      winFallback: 'Shruti',
+      extras: ['Hind Vadodara', 'Mukta Vaani', 'Anek Gujarati', 'Baloo Bhai 2'],
+      supported: new Set(['noto sans gujarati', 'hind vadodara', 'mukta vaani', 'anek gujarati', 'baloo bhai 2', 'mogra', 'nirmala ui', 'nirmala text', 'shruti']),
+    },
+    {
+      re: /[\u0A00-\u0A7F]/,
+      primary: 'Noto Sans Gurmukhi',
+      winFallback: 'Raavi',
+      extras: ['Mukta Mahee', 'Anek Gurmukhi', 'Baloo Paaji 2'],
+      supported: new Set(['noto sans gurmukhi', 'mukta mahee', 'anek gurmukhi', 'baloo paaji 2', 'nirmala ui', 'nirmala text', 'raavi']),
+    },
+    {
+      re: /[\u0B00-\u0B7F]/,
+      primary: 'Noto Sans Oriya',
+      winFallback: 'Kalinga',
+      extras: ['Baloo Bhaina 2', 'Anek Odia', 'Noto Serif Oriya'],
+      supported: new Set(['noto sans oriya', 'baloo bhaina 2', 'anek odia', 'noto serif oriya', 'nirmala ui', 'nirmala text', 'kalinga']),
+    },
+  ];
 
   const ANIMATION_PRESETS = [
     { id: 'bottom-to-top', name: 'Bottom-to-Top Keyframe Rise', description: 'Smooth keyframed rise from bottom to top as character speaks' },
@@ -320,67 +389,92 @@ const CaptionRenderer = (() => {
     const fw = style.fontWeight || 800;
     const fst = style.fontStyle || 'normal';
 
-    // Accumulate bundled Indic fonts for ALL scripts detected in mixed-language text (never returning early on first script)
-    function getIndicFallbackFonts(family = 'Noto Sans', sampleText = '') {
-      const isTamil = /[\u0B80-\u0BFF]/.test(sampleText);
-      const isTelugu = /[\u0C00-\u0C7F]/.test(sampleText);
-      const isMalayalam = /[\u0D00-\u0D7F]/.test(sampleText);
-      const isKannada = /[\u0C80-\u0CFF]/.test(sampleText);
-      const isDevanagari = /[\u0900-\u097F]/.test(sampleText);
-      const isBengali = /[\u0980-\u09FF]/.test(sampleText);
-      const isGujarati = /[\u0A80-\u0AFF]/.test(sampleText);
-      const isGurmukhi = /[\u0A00-\u0A7F]/.test(sampleText);
-      const isOdia = /[\u0B00-\u0B7F]/.test(sampleText);
-
-      const boldFonts = [
-        'Anton', 'Bebas Neue', 'Archivo Black', 'Montserrat', 'Plus Jakarta Sans', 'Outfit',
-        'Noto Sans', 'Poppins', 'Oswald', 'Impact', 'Acme Gothic Condensed Semibold', 'Acme',
-        'Roboto', 'Open Sans', 'Lato', 'Nunito', 'Rubik', 'DM Sans', 'Work Sans', 'Manrope',
-        'Barlow', 'Raleway', 'Hind', 'Mukta', 'Teko', 'Hind Guntur', 'Hind Madurai',
-        'Mukta Malar', 'Manjari', 'Hind Siliguri', 'Hind Vadodara', 'Mukta Vaani',
-        'Mukta Mahee', 'Baloo Bhaina 2',
-      ];
+    // Accumulate bundled Indic fonts + Windows Nirmala/native fallbacks for ALL scripts detected in mixed-language text
+    function buildIndicFontDetails(family = 'Noto Sans', sampleText = '') {
+      const txt = String(sampleText || '');
       const retroFonts = ['VCR OSD Mono', 'Cooper Black', 'Cooper Std Black', 'Bungee', 'Righteous', 'Chunk Five'];
       const displayFonts = ['Luckiest Guy', 'Fredoka', 'Bangers', 'Bagel Fat One'];
 
-      const isBold = boldFonts.includes(family) || Number(fw) >= 700;
       const isRetro = retroFonts.includes(family);
       const isDisplay = displayFonts.includes(family);
+
+      const matched = [];
+      for (const sc of INDIC_SCRIPT_FAMILIES) {
+        if (sc.re.test(txt)) matched.push(sc);
+      }
+      if (matched.length === 0) {
+        return { fallbackStr: FALLBACK_FONTS, stackStr: `"${family}", ${FALLBACK_FONTS}` };
+      }
+
+      const familyLow = String(family || '').trim().toLowerCase();
+      const familySupportsAll = Boolean(familyLow) && matched.every(sc => sc.supported.has(familyLow));
 
       const acc = [];
       const add = (...fams) => {
         for (const f of fams) {
-          if (f && !acc.includes(f)) acc.push(f);
+          if (!f) continue;
+          const quoted = f === 'sans-serif' || f === 'serif' ? f : `"${String(f).replace(/^"+|"+$/g, '')}"`;
+          if (!acc.includes(quoted)) acc.push(quoted);
         }
       };
 
-      // Noto Sans is the primary fallback for every Indian script (one consistent look, full glyph coverage),
-      // backed by bundled static Google Indic fonts (Hind, Mukta, Manjari, Noto Serif, Anek, Baloo 2).
-      if (isKannada) add('"Noto Sans Kannada"', '"Anek Kannada"', '"Noto Serif Kannada"', '"Tiro Kannada"', isDisplay ? '"Baloo Tamma 2"' : null);
-      if (isTamil) add('"Noto Sans Tamil"', '"Hind Madurai"', '"Mukta Malar"', '"Anek Tamil"', '"Baloo Thambi 2"', '"Catamaran"');
-      if (isTelugu) add('"Noto Sans Telugu"', '"Hind Guntur"', '"Anek Telugu"', '"Noto Serif Telugu"', isDisplay ? '"Baloo Tamma 2"' : null, isRetro ? '"Ramabhadra"' : null);
-      if (isMalayalam) add('"Noto Sans Malayalam"', '"Manjari"', '"Anek Malayalam"', '"Noto Serif Malayalam"', '"Baloo Chettan 2"');
-      if (isDevanagari) add('"Noto Sans Devanagari"', '"Hind"', '"Mukta"', '"Teko"', '"Anek Devanagari"', '"Baloo 2"', '"Noto Serif Devanagari"');
-      if (isBengali) add('"Noto Sans Bengali"', '"Hind Siliguri"', '"Anek Bangla"', '"Baloo Da 2"', '"Noto Serif Bengali"');
-      if (isGujarati) add('"Noto Sans Gujarati"', '"Hind Vadodara"', '"Mukta Vaani"', '"Anek Gujarati"', '"Baloo Bhai 2"');
-      if (isGurmukhi) add('"Noto Sans Gurmukhi"', '"Mukta Mahee"', '"Anek Gurmukhi"', '"Baloo Paaji 2"');
-      if (isOdia) add('"Noto Sans Oriya"', '"Baloo Bhaina 2"', '"Anek Odia"', '"Noto Serif Oriya"');
+      for (const sc of matched) {
+        add(sc.primary, 'Nirmala UI', 'Nirmala Text', sc.winFallback);
+        for (const ex of sc.extras) add(ex);
+        if (isDisplay && sc.displayFallback) add(sc.displayFallback);
+        if (isRetro && sc.retroFallback) add(sc.retroFallback);
+      }
 
-      if (acc.length === 0) return FALLBACK_FONTS;
-      add('"Noto Sans Devanagari"', '"Noto Sans Kannada"', '"Noto Sans Tamil"', '"Noto Sans Telugu"', '"Noto Sans Malayalam"', '"Noto Sans Bengali"', '"Noto Sans Gujarati"', '"Noto Sans Gurmukhi"', '"Noto Sans Oriya"', '"Noto Sans"', '"Roboto"', '"Arial"', 'sans-serif');
-      return acc.join(', ');
+      add(
+        'Noto Sans Devanagari', 'Noto Sans Kannada', 'Noto Sans Tamil', 'Noto Sans Telugu',
+        'Noto Sans Malayalam', 'Noto Sans Bengali', 'Noto Sans Gujarati', 'Noto Sans Gurmukhi',
+        'Noto Sans Oriya', 'Nirmala UI', 'Nirmala Text', 'Tunga', 'Gautami', 'Latha',
+        'Kartika', 'Mangal', 'Vrinda', 'Shruti', 'Raavi', 'Kalinga'
+      );
+
+      const fallbackTail = [...acc];
+      const addTail = (arr, ...fams) => {
+        for (const f of fams) {
+          if (!f) continue;
+          const quoted = f === 'sans-serif' || f === 'serif' ? f : `"${String(f).replace(/^"+|"+$/g, '')}"`;
+          if (!arr.includes(quoted)) arr.push(quoted);
+        }
+      };
+      addTail(fallbackTail, 'Noto Sans', 'Roboto', 'Arial', 'sans-serif');
+
+      const stackArr = [];
+      if (familySupportsAll) addTail(stackArr, family);
+      for (const q of acc) if (!stackArr.includes(q)) stackArr.push(q);
+      if (!familySupportsAll && family && familyLow !== 'playfair display') addTail(stackArr, family);
+      addTail(stackArr, 'Noto Sans', 'Roboto', 'Arial', 'sans-serif');
+
+      return {
+        fallbackStr: fallbackTail.join(', '),
+        stackStr: stackArr.join(', '),
+      };
+    }
+
+    function getIndicFallbackFonts(family = 'Noto Sans', sampleText = '') {
+      return buildIndicFontDetails(family, sampleText).fallbackStr;
     }
 
     const sampleStr = words.join(' ') || text;
     const hasRegional = /[\u0900-\u0D7F]/.test(sampleStr);
     const scriptFallbacks = getIndicFallbackFonts(fontFamily, sampleStr);
 
-    function makeFontStr(pxSize, isIndic = false) {
-      const sz = isIndic ? Math.max(12, Math.round(pxSize * 1.06)) : pxSize;
+    function makeFontStr(pxSize, isIndic = false, runText = '') {
+      const effectiveText = runText || sampleStr;
+      const treatAsIndic = Boolean(isIndic || (runText && isIndicWord(runText)));
+      const sz = treatAsIndic ? Math.max(12, Math.round(pxSize * 1.06)) : pxSize;
       // Bundled static Noto Sans <Script> bold TTFs are weight 700; locking Indic bold runs
-      // to 700 prevents Pango/CoreText from leaking to unbundled/system fonts at 800/900.
-      const runWeight = (isIndic && Number(fw) >= 700) ? 700 : fw;
-      return `${fst} ${runWeight} ${sz}px "${fontFamily}", ${scriptFallbacks}`;
+      // to 700 and normal style prevents PangoWin32/CoreText synthetic lookup failures.
+      const runWeight = (treatAsIndic && Number(fw) >= 700) ? 700 : fw;
+      const runStyle = treatAsIndic ? 'normal' : fst;
+      if (treatAsIndic) {
+        const { stackStr } = buildIndicFontDetails(fontFamily, effectiveText);
+        return `${runStyle} ${runWeight} ${sz}px ${stackStr}`;
+      }
+      return `${runStyle} ${runWeight} ${sz}px "${fontFamily}", ${scriptFallbacks}`;
     }
 
     let fontString = makeFontStr(effectiveFontSize, false);
@@ -458,10 +552,34 @@ const CaptionRenderer = (() => {
       return { leftBleed, rightBleed, extraPadW: leftBleed + rightBleed };
     }
 
+    function makeSpotlightFont(pxSize, wordText, weightOverride = null) {
+      const wStr = String(wordText ?? '');
+      const wordIndic = isIndicWord(wStr);
+      const rawW = Number(weightOverride ?? fw ?? 900) || 700;
+      const wWeight = (wordIndic && rawW >= 700) ? 700 : rawW;
+      const wStyle = wordIndic ? 'normal' : fst;
+      if (wordIndic) {
+        const { stackStr } = buildIndicFontDetails(fontFamily, wStr);
+        return `${wStyle} ${wWeight} ${pxSize}px ${stackStr}`;
+      }
+      return `${wStyle} ${wWeight} ${pxSize}px "${fontFamily}", ${scriptFallbacks}`;
+    }
+
+    function makeGadzhiFont(pxSize, wordText, isBottomTier = true) {
+      const wStr = String(wordText ?? '');
+      if (isIndicWord(wStr)) {
+        const { stackStr } = buildIndicFontDetails(fontFamily, wStr);
+        return `normal 700 ${pxSize}px ${stackStr}`;
+      }
+      if (isBottomTier) {
+        return `italic 700 ${pxSize}px "Playfair Display", "Montserrat", ${scriptFallbacks}, serif`;
+      }
+      return `normal 700 ${pxSize}px "Montserrat", ${scriptFallbacks}, sans-serif`;
+    }
+
     function measureLineMetrics(wordsList, currentFontStr, effSize, heroBaseWords = null, lineWordOffset = 0) {
       ctx.font = currentFontStr;
       const curSpaceW = ctx.measureText(' ').width * 0.75;
-      const indicFont = makeFontStr(effSize, true);
       let maxAscent = effSize * (hasRegional ? 0.78 : 0.74);
       let maxDescent = effSize * (hasRegional ? 0.28 : 0.18);
       let lineW = 0;
@@ -478,21 +596,26 @@ const CaptionRenderer = (() => {
         const heroFontSize = Math.round(effSize * 1.25);
         const subFontSize = Math.round(effSize * 0.52);
 
-        const heroWeight = (isIndicWord(heroWord) && Number(fw || 900) >= 700) ? 700 : (fw || 900);
-        ctx.font = `${fst} ${heroWeight} ${heroFontSize}px "${fontFamily}", ${scriptFallbacks}`;
+        ctx.font = makeSpotlightFont(heroFontSize, heroWord, fw || 900);
         const heroW = ctx.measureText(heroWord).width;
 
-        ctx.font = `${fst} 700 ${subFontSize}px "${fontFamily}", ${scriptFallbacks}`;
+        ctx.font = makeSpotlightFont(subFontSize, prefixWords.concat(suffixWords).join(' '), 700);
         const subSpaceW = ctx.measureText(' ').width * 0.75;
-        const prefixW = prefixWords.reduce((acc, w) => acc + ctx.measureText(w).width, 0) + subSpaceW * Math.max(0, prefixWords.length - 1);
-        const suffixW = suffixWords.reduce((acc, w) => acc + ctx.measureText(w).width, 0) + subSpaceW * Math.max(0, suffixWords.length - 1);
+        const prefixW = prefixWords.reduce((acc, w) => {
+          ctx.font = makeSpotlightFont(subFontSize, w, 700);
+          return acc + ctx.measureText(w).width;
+        }, 0) + subSpaceW * Math.max(0, prefixWords.length - 1);
+        const suffixW = suffixWords.reduce((acc, w) => {
+          ctx.font = makeSpotlightFont(subFontSize, w, 700);
+          return acc + ctx.measureText(w).width;
+        }, 0) + subSpaceW * Math.max(0, suffixWords.length - 1);
 
         ctx.font = currentFontStr;
         lineW = Math.max(heroW * 1.15, prefixW * 1.15, suffixW * 1.15);
       } else if (!forceSingleLine && (style.highlightMode === 'gadzhi-split' || style.id === 23 || style.name === 'Gadzhi Split')) {
         if (wordsList.length === 1) {
           const botFontSize = Math.round(effSize * 1.08);
-          ctx.font = `italic 700 ${botFontSize}px "Playfair Display", ${scriptFallbacks}, serif`;
+          ctx.font = makeGadzhiFont(botFontSize, wordsList[0], true);
           lineW = ctx.measureText(wordsList[0]).width;
           ctx.font = currentFontStr;
         } else {
@@ -503,30 +626,36 @@ const CaptionRenderer = (() => {
           const topFontSize = Math.round(effSize * 0.65);
           const botFontSize = Math.round(effSize * 1.08);
 
-          ctx.font = `normal 700 ${topFontSize}px "Montserrat", ${scriptFallbacks}, sans-serif`;
+          ctx.font = makeGadzhiFont(topFontSize, topWords.join(' '), false);
           const topSpW = ctx.measureText(' ').width * 0.75;
-          const topW = topWords.reduce((acc, w) => acc + ctx.measureText(w).width, 0) + topSpW * Math.max(0, topWords.length - 1);
+          const topW = topWords.reduce((acc, w) => {
+            ctx.font = makeGadzhiFont(topFontSize, w, false);
+            return acc + ctx.measureText(w).width;
+          }, 0) + topSpW * Math.max(0, topWords.length - 1);
 
-          ctx.font = `italic 700 ${botFontSize}px "Playfair Display", ${scriptFallbacks}, serif`;
+          ctx.font = makeGadzhiFont(botFontSize, botWords.join(' '), true);
           const botSpW = ctx.measureText(' ').width * 0.75;
-          const botW = botWords.reduce((acc, w) => acc + ctx.measureText(w).width, 0) + botSpW * Math.max(0, botWords.length - 1);
+          const botW = botWords.reduce((acc, w) => {
+            ctx.font = makeGadzhiFont(botFontSize, w, true);
+            return acc + ctx.measureText(w).width;
+          }, 0) + botSpW * Math.max(0, botWords.length - 1);
 
           ctx.font = currentFontStr;
           lineW = Math.max(topW, botW);
         }
       } else if (style.highlightMode === 'luxe-italic') {
         const heroIdx = getLuxeHeroIndex(heroBaseWords || wordsList);
-        const italicFont = `italic 700 ${Math.round(effSize * 1.10)}px "Playfair Display", ${scriptFallbacks}, serif`;
+        const luxeHeroSize = Math.round(effSize * 1.10);
         for (let idx = 0; idx < wordsList.length; idx++) {
           const w = wordsList[idx];
           if (lineWordOffset + idx === heroIdx) {
-            ctx.font = italicFont;
+            ctx.font = makeGadzhiFont(luxeHeroSize, w, true);
             const m = ctx.measureText(w);
             lineW += m.width + effSize * 0.14;
             if (m.actualBoundingBoxAscent > maxAscent) maxAscent = m.actualBoundingBoxAscent;
             if (m.actualBoundingBoxDescent > maxDescent) maxDescent = m.actualBoundingBoxDescent;
           } else {
-            ctx.font = isIndicWord(w) ? indicFont : currentFontStr;
+            ctx.font = isIndicWord(w) ? makeFontStr(effSize, true, w) : currentFontStr;
             const m = ctx.measureText(w);
             lineW += m.width;
             if (m.actualBoundingBoxAscent > maxAscent) maxAscent = m.actualBoundingBoxAscent;
@@ -539,7 +668,7 @@ const CaptionRenderer = (() => {
         let sumW = 0;
         for (let idx = 0; idx < wordsList.length; idx++) {
           const w = wordsList[idx];
-          ctx.font = isIndicWord(w) ? indicFont : currentFontStr;
+          ctx.font = isIndicWord(w) ? makeFontStr(effSize, true, w) : currentFontStr;
           const m = ctx.measureText(w);
           sumW += m.width;
           if (m.actualBoundingBoxAscent > maxAscent) maxAscent = m.actualBoundingBoxAscent;
@@ -663,9 +792,8 @@ const CaptionRenderer = (() => {
       const heroFontSize = Math.round(effectiveFontSize * 1.25);
       const subFontSize = Math.round(effectiveFontSize * 0.52);
 
-      const heroWeight = (isIndicWord(heroWord) && Number(fw || 900) >= 700) ? 700 : (fw || 900);
-      const heroFont = `${fst} ${heroWeight} ${heroFontSize}px "${fontFamily}", ${scriptFallbacks}`;
-      const subFont = `${fst} 700 ${subFontSize}px "${fontFamily}", ${scriptFallbacks}`;
+      const heroFont = makeSpotlightFont(heroFontSize, heroWord, fw || 900);
+      const subFont = makeSpotlightFont(subFontSize, prefixWords.concat(suffixWords).join(' '), 700);
 
       const heroCleaned = formatWordCase(
         formatSpotlightWord(heroWord),
@@ -680,11 +808,15 @@ const CaptionRenderer = (() => {
       ctx.font = subFont;
       const subSpaceW = ctx.measureText(' ').width * 0.75;
       const prefixFormatted = prefixWordsCleaned;
-      const prefixTotalW = prefixFormatted.reduce((acc, w) => acc + ctx.measureText(w).width, 0)
-                          + subSpaceW * Math.max(0, prefixFormatted.length - 1);
+      const prefixTotalW = prefixFormatted.reduce((acc, w) => {
+        ctx.font = makeSpotlightFont(subFontSize, w, 700);
+        return acc + ctx.measureText(w).width;
+      }, 0) + subSpaceW * Math.max(0, prefixFormatted.length - 1);
 
-      const suffixTotalW = suffixWordsCleaned.reduce((acc, w) => acc + ctx.measureText(w).width, 0)
-                          + subSpaceW * Math.max(0, suffixWordsCleaned.length - 1);
+      const suffixTotalW = suffixWordsCleaned.reduce((acc, w) => {
+        ctx.font = makeSpotlightFont(subFontSize, w, 700);
+        return acc + ctx.measureText(w).width;
+      }, 0) + subSpaceW * Math.max(0, suffixWordsCleaned.length - 1);
 
       // Block width accommodates left-aligned prefix, centered hero, and right-aligned suffix
       const maxBlockW = Math.max(heroW * 1.15, prefixTotalW * 1.15, suffixTotalW * 1.15);
@@ -764,11 +896,13 @@ const CaptionRenderer = (() => {
 
         for (let pi = 0; pi < prefixFormatted.length; pi++) {
           const pw = prefixFormatted[pi];
+          const pwFont = makeSpotlightFont(subFontSize, pw, 700);
+          ctx.font = pwFont;
           const pwW = ctx.measureText(pw).width;
           const isSpoken = highlightIdx >= pi;
           const wordOp = isSpoken ? topOp : (topOp * 0.35);
 
-          fillWithDepthShadow(pw, px, prefixY + entryOffset, subFont, wordOp);
+          fillWithDepthShadow(pw, px, prefixY + entryOffset, pwFont, wordOp);
           px += pwW + subSpaceW;
         }
       }
@@ -797,12 +931,14 @@ const CaptionRenderer = (() => {
 
         for (let si = 0; si < suffixWordsCleaned.length; si++) {
           const sw = suffixWordsCleaned[si];
+          const swFont = makeSpotlightFont(subFontSize, sw, 700);
+          ctx.font = swFont;
           const swW = ctx.measureText(sw).width;
           const overallIdx = heroIdx + 1 + si;
           const isSpoken = highlightIdx >= overallIdx;
           const wordOp = isSpoken ? btmOp : (btmOp * 0.35);
 
-          fillWithDepthShadow(sw, sx, suffixY + subFontSize * 0.25 + entryOffset, subFont, wordOp);
+          fillWithDepthShadow(sw, sx, suffixY + subFontSize * 0.25 + entryOffset, swFont, wordOp);
           sx += swW + subSpaceW;
         }
       }
@@ -827,11 +963,11 @@ const CaptionRenderer = (() => {
 
       if (words.length === 1) {
         const botFontSize = Math.round(effectiveFontSize * 1.08);
-        const botFont = `italic 700 ${botFontSize}px "Playfair Display", ${scriptFallbacks}, serif`;
+        const w = words[0];
+        const botFont = makeGadzhiFont(botFontSize, w, true);
         ctx.save();
         ctx.font = botFont;
         ctx.textBaseline = 'alphabetic';
-        const w = words[0];
         const wW = ctx.measureText(w).width;
         const wx = centerX - wW / 2;
         const isCurrent = highlightIdx === 0;
@@ -862,29 +998,33 @@ const CaptionRenderer = (() => {
       }
 
       const splitIdx = words.length === 2 ? 1 : Math.ceil(words.length / 2);
-      const topWords = words.slice(0, splitIdx).map(w => style.textTransform === 'lowercase' ? w.toLowerCase() : w.toUpperCase());
+      const topWords = words.slice(0, splitIdx).map(w => style.textTransform === 'lowercase' ? w.toLowerCase() : formatWordCase(w, 'uppercase'));
       const botWords = words.slice(splitIdx);
 
       const topFontSize = Math.round(effectiveFontSize * 0.65);
       const botFontSize = Math.round(effectiveFontSize * 1.08);
-      const topFont = `normal 700 ${topFontSize}px "Montserrat", ${scriptFallbacks}, sans-serif`;
-      const botFont = `italic 700 ${botFontSize}px "Playfair Display", ${scriptFallbacks}, serif`;
+      const topFont = makeGadzhiFont(topFontSize, topWords.join(' '), false);
+      const botFont = makeGadzhiFont(botFontSize, botWords.join(' '), true);
 
       const topCenterY = textY - effectiveFontSize * (hasRegional ? 0.52 : 0.44);
       const botCenterY = textY + effectiveFontSize * (hasRegional ? 0.48 : 0.40);
       const topBaselineY = topCenterY + topFontSize * 0.34;
       const botBaselineY = botCenterY + botFontSize * 0.32;
 
-      // Tier 1: Setup words (Montserrat 700 Uppercase)
+      // Tier 1: Setup words (Montserrat 700 Uppercase for Latin; Indic stack for Indic)
       ctx.save();
       ctx.font = topFont;
       ctx.textBaseline = 'alphabetic';
       const topSpW = ctx.measureText(' ').width * 0.75;
-      const topTotalW = topWords.reduce((acc, w) => acc + ctx.measureText(w).width, 0) + topSpW * Math.max(0, topWords.length - 1);
+      const topTotalW = topWords.reduce((acc, w) => {
+        ctx.font = makeGadzhiFont(topFontSize, w, false);
+        return acc + ctx.measureText(w).width;
+      }, 0) + topSpW * Math.max(0, topWords.length - 1);
       let tx = centerX - topTotalW / 2;
 
       for (let ti = 0; ti < topWords.length; ti++) {
         const tw = topWords[ti];
+        ctx.font = makeGadzhiFont(topFontSize, tw, false);
         const twW = ctx.measureText(tw).width;
         const isCurrent = highlightIdx === ti;
         const tCol = isCurrent ? '#FFFFFF' : inactiveTopCol;
@@ -913,16 +1053,20 @@ const CaptionRenderer = (() => {
       }
       ctx.restore();
 
-      // Tier 2: Punchline words (Playfair Display Bold Italic)
+      // Tier 2: Punchline words (Playfair Display Bold Italic for Latin; Indic stack for Indic)
       ctx.save();
       ctx.font = botFont;
       ctx.textBaseline = 'alphabetic';
       const botSpW = ctx.measureText(' ').width * 0.75;
-      const botTotalW = botWords.reduce((acc, w) => acc + ctx.measureText(w).width, 0) + botSpW * Math.max(0, botWords.length - 1);
+      const botTotalW = botWords.reduce((acc, w) => {
+        ctx.font = makeGadzhiFont(botFontSize, w, true);
+        return acc + ctx.measureText(w).width;
+      }, 0) + botSpW * Math.max(0, botWords.length - 1);
       let bx = centerX - botTotalW / 2;
 
       for (let bi = 0; bi < botWords.length; bi++) {
         const bw = botWords[bi];
+        ctx.font = makeGadzhiFont(botFontSize, bw, true);
         const bwW = ctx.measureText(bw).width;
         const overallIdx = splitIdx + bi;
         const isCurrent = highlightIdx === overallIdx;
@@ -1210,7 +1354,7 @@ const CaptionRenderer = (() => {
       const globalIdx = lineWordOffset + i;
       const word = words[i];
       const wordIsIndic = isIndicWord(word);
-      const wordFont = makeFontStr ? makeFontStr(fontSize, wordIsIndic) : font;
+      const wordFont = makeFontStr ? makeFontStr(fontSize, wordIsIndic, word) : font;
       ctx.font = wordFont;
       const wordW = ctx.measureText(word).width;
       const wStroke = wordIsIndic ? strokeW * 0.82 : strokeW;
@@ -2427,7 +2571,11 @@ const CaptionRenderer = (() => {
           if (isHero) {
             ctx.save();
             const italicFontSize = Math.round(fontSize * 1.10);
-            const heroItalicFont = `italic 700 ${italicFontSize}px "Playfair Display", ${scriptFallbacks}, serif`;
+            const heroItalicFont = wordIsIndic
+              ? (makeFontStr
+                  ? makeFontStr(Math.round((fontSize * 1.10) / 1.06), true, word)
+                  : `normal 700 ${italicFontSize}px ${scriptFallbacks}`)
+              : `italic 700 ${italicFontSize}px "Playfair Display", "Montserrat", ${scriptFallbacks}, serif`;
             ctx.font = heroItalicFont;
             ctx.textBaseline = 'alphabetic';
 

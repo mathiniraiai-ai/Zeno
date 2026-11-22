@@ -2099,6 +2099,161 @@ def _segment_subs_suppressed(
     return False
 
 
+_INDIC_TEXT_RE = re.compile(r"[\u0900-\u0D7F]")
+_INDIC_SCRIPT_RANGES = (
+    (0x0C80, 0x0CFF),  # Kannada
+    (0x0900, 0x097F),  # Devanagari
+    (0x0B80, 0x0BFF),  # Tamil
+    (0x0C00, 0x0C7F),  # Telugu
+    (0x0D00, 0x0D7F),  # Malayalam
+    (0x0980, 0x09FF),  # Bengali
+    (0x0A80, 0x0AFF),  # Gujarati
+    (0x0A00, 0x0A7F),  # Gurmukhi
+    (0x0B00, 0x0B7F),  # Odia
+)
+
+
+def _collect_indic_probe_text(texts: Sequence[str], max_words: int = 12) -> str:
+    """Collect up to `max_words` unique Indic words, prioritizing coverage of every script present."""
+    words_by_script: Dict[int, List[str]] = {}
+    seen_words: set[str] = set()
+    for chunk in texts:
+        for tok in re.split(r"\s+", str(chunk or "")):
+            w = tok.strip(".,!?\"'()[]{}:;—–-")
+            if not w or w in seen_words or not _INDIC_TEXT_RE.search(w):
+                continue
+            seen_words.add(w)
+            script_idx = -1
+            for ch in w:
+                cp = ord(ch)
+                for idx_s, (lo, hi) in enumerate(_INDIC_SCRIPT_RANGES):
+                    if lo <= cp <= hi:
+                        script_idx = idx_s
+                        break
+                if script_idx >= 0:
+                    break
+            words_by_script.setdefault(script_idx, []).append(w)
+    if not words_by_script:
+        return ""
+    picked: List[str] = []
+    # Round-robin across scripts first so every language in mixed videos is probed
+    buckets = [list(v) for v in words_by_script.values()]
+    while buckets and len(picked) < max_words:
+        next_buckets = []
+        for b in buckets:
+            if b and len(picked) < max_words:
+                picked.append(b.pop(0))
+            if b:
+                next_buckets.append(b)
+        buckets = next_buckets
+    return " ".join(picked)
+
+
+def _gather_work_pngs(
+    plan: Dict[str, Any],
+    mp4_path: Path,
+    subdirs: Sequence[str],
+    *,
+    include_banners: bool = False,
+) -> List[Path]:
+    """Locate saved render/cache PNGs under project workdir, output dir, or `WORK`."""
+    roots: List[Path] = []
+    if isinstance(plan, dict) and plan.get("_plan_dir"):
+        roots.append(Path(str(plan["_plan_dir"])))
+    roots.append(mp4_path.parent)
+    roots.append(WORK)
+
+    found: List[Path] = []
+    seen: set[Path] = set()
+    for r in roots:
+        for sub in subdirs:
+            d = r / sub
+            if not d.is_dir():
+                continue
+            for p in sorted(d.rglob("*.png")):
+                if p.name == "blank.png":
+                    continue
+                rp = p.resolve()
+                if rp not in seen and p.stat().st_size > 0:
+                    seen.add(rp)
+                    found.append(p)
+        if include_banners:
+            for bdir in (r, r / "overlays"):
+                if not bdir.is_dir():
+                    continue
+                for p in sorted(bdir.glob("*.png")):
+                    nm = p.name.lower()
+                    if ("banner" in nm or "stop_say" in nm) and p.stat().st_size > 0:
+                        rp = p.resolve()
+                        if rp not in seen:
+                            seen.add(rp)
+                            found.append(p)
+    return found
+
+
+def _scan_pngs_for_tofu(
+    png_paths: Sequence[Path],
+    *,
+    max_check: int = 24,
+) -> Optional[Tuple[Path, Dict[str, Any]]]:
+    """Scan up to `max_check` evenly-sampled PNGs for `.notdef` tofu rectangles."""
+    if not png_paths:
+        return None
+    try:
+        import subtitles as _subs
+    except Exception:
+        return None
+
+    paths = list(png_paths)
+    if len(paths) > max_check:
+        step = len(paths) / float(max_check)
+        paths = [paths[int(i * step)] for i in range(max_check)]
+
+    for p in paths:
+        qc = _subs.detect_tofu_boxes_in_png(p)
+        if qc.get("tofu_count", 0) > 0:
+            return p, qc
+    return None
+
+
+def _extract_srt_cue_texts(raw_srt: str) -> List[str]:
+    """Extract spoken caption lines from raw `.srt` text."""
+    lines: List[str] = []
+    for ln in (raw_srt or "").splitlines():
+        s = ln.strip()
+        if not s or s.isdigit() or "-->" in s:
+            continue
+        lines.append(s)
+    return lines
+
+
+def _extract_plan_banner_texts(plan: Dict[str, Any]) -> List[str]:
+    """Extract banner / overlay text strings from `plan` segments and top-level fields."""
+    texts: List[str] = []
+    if not isinstance(plan, dict):
+        return texts
+    for key in ("banners", "overlays"):
+        for item in plan.get(key) or []:
+            if isinstance(item, dict) and item.get("text"):
+                texts.append(str(item["text"]))
+    for seg in plan.get("segments") or []:
+        if not isinstance(seg, dict):
+            continue
+        for key in ("banner", "banners", "overlays"):
+            val = seg.get(key)
+            if isinstance(val, str):
+                texts.append(val)
+            elif isinstance(val, dict) and val.get("text"):
+                texts.append(str(val["text"]))
+            elif isinstance(val, list):
+                for item in val:
+                    if isinstance(item, str):
+                        texts.append(item)
+                    elif isinstance(item, dict) and item.get("text"):
+                        texts.append(str(item["text"]))
+    return texts
+
+
 def check_subtitles_srt(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, str]:
     """Verify expected `.srt` sidecar exists, contains monotonic non-overlapping cues,
     covers every eligible spoken segment (`>= 1.8s`), and respects canvas bounds.
@@ -2192,11 +2347,13 @@ def check_subtitles_srt(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, str
     meta_cands = [WORK / "_subs" / "subs_meta.json"]
     if plan.get("_plan_dir"):
         meta_cands.insert(0, Path(str(plan["_plan_dir"])) / "_subs" / "subs_meta.json")
+    subs_meta: Optional[Dict[str, Any]] = None
     for mc in meta_cands:
         if mc.is_file():
             try:
                 mdata = read_json(mc)
                 if isinstance(mdata, dict):
+                    subs_meta = mdata
                     by0 = mdata.get("band_y0") if mdata.get("band_y0") is not None else mdata.get("bandTop")
                     bh = mdata.get("band_h") if mdata.get("band_h") is not None else mdata.get("bandHeight", 0)
                     if by0 is not None:
@@ -2208,7 +2365,75 @@ def check_subtitles_srt(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, str
             except Exception:
                 pass
 
-    return True, f"{len(cue_matches)} monotonic non-overlapping cue(s) -> {srt_path.name}"
+    if subs_meta and subs_meta.get("pango_warnings"):
+        warns = subs_meta["pango_warnings"]
+        first_warn = warns[0] if isinstance(warns, list) and warns else str(warns)
+        return False, f"Pango font warning during subtitle render: {first_warn}"
+
+    # Tofu-box PNG scan on saved subtitle/page/banner PNGs (prioritizing Indic cues)
+    png_cands: List[Path] = []
+    if subs_meta and isinstance(subs_meta.get("frames"), list):
+        indic_frames: List[Path] = []
+        other_frames: List[Path] = []
+        seen_cues: set[int] = set()
+        for fr in subs_meta["frames"]:
+            if not isinstance(fr, dict) or not fr.get("file"):
+                continue
+            ci = int(fr.get("captionIndex", fr.get("cue", -1)))
+            if ci in seen_cues:
+                continue
+            fp = Path(str(fr["file"]))
+            if not fp.is_file():
+                continue
+            seen_cues.add(ci)
+            ftxt = str(fr.get("text") or "")
+            if _INDIC_TEXT_RE.search(ftxt):
+                indic_frames.append(fp)
+            else:
+                other_frames.append(fp)
+        # Every Indic caption is checked, not a sample: a font that fails on one script shows up in only some cues.
+        png_cands.extend(indic_frames[:400] + other_frames[:8])
+    png_cands.extend(
+        _gather_work_pngs(
+            plan,
+            mp4_path,
+            ("_subs", "_subs_cache", "_page", "_scroll_page"),
+            include_banners=True,
+        )
+    )
+    bad_png = _scan_pngs_for_tofu(png_cands, max_check=max(24, min(len(png_cands), 450)))
+    if bad_png is not None:
+        bad_p, qc = bad_png
+        return False, f"detected {qc['tofu_count']} hollow tofu box(es) in rendered PNG ({bad_p.name})"
+
+    # Live Indic render probe on actual Indic words present in SRT/plan (<0.4s)
+    probe_texts = _extract_srt_cue_texts(raw_srt) + _extract_plan_banner_texts(plan)
+    for seg in segs:
+        if isinstance(seg, dict) and seg.get("text"):
+            probe_texts.append(str(seg["text"]))
+    indic_probe = _collect_indic_probe_text(probe_texts, max_words=12)
+    indic_note = ""
+    if indic_probe:
+        try:
+            import subtitles as _subs
+
+            if _subs.available():
+                eff_style_id = int((subs_meta or {}).get("style_id") or 2)
+                eff_font = (subs_meta or {}).get("font_family") or (
+                    (plan.get("subs") or {}).get("font") if isinstance(plan.get("subs"), dict) else None
+                )
+                probe_ok, probe_detail = _subs.probe_text_render(
+                    indic_probe,
+                    style_id=eff_style_id,
+                    font_family=eff_font,
+                )
+                if not probe_ok:
+                    return False, f"Indic subtitle font check failed: {probe_detail}"
+                indic_note = ", Indic render verified"
+        except Exception as exc:  # noqa: BLE001
+            return False, f"Indic subtitle font check error: {exc}"
+
+    return True, f"{len(cue_matches)} monotonic non-overlapping cue(s) -> {srt_path.name}{indic_note}"
 
 
 def _plan_has_flashcards(plan: Dict[str, Any]) -> bool:
@@ -2596,7 +2821,12 @@ def check_flashcards(
 
         failures: List[str] = []
         tiers_used: List[str] = []
+        if isinstance(meta, dict) and meta.get("pango_warnings"):
+            warns = meta["pango_warnings"]
+            first_w = warns[0] if isinstance(warns, list) and warns else str(warns)
+            failures.append(f"Pango font warning during flashcard render: {first_w}")
 
+        card_texts: List[str] = []
         for idx_c, card in enumerate(cards, 1):
             if not isinstance(card, dict):
                 failures.append(f"card #{idx_c}: invalid metadata entry")
@@ -2606,6 +2836,7 @@ def check_flashcards(
                 or (f"{card.get('en', '')} | {card.get('native', '')}" if (card.get("en") or card.get("native")) else "")
                 or f"card#{idx_c}"
             ).strip()
+            card_texts.extend([str(card.get("en") or ""), str(card.get("native") or ""), str(card.get("text") or "")])
             t0 = float(card.get("start") if card.get("start") is not None else card.get("t0", 0.0))
             t1 = float(card.get("end") if card.get("end") is not None else card.get("t1", 0.0))
             x0 = float(card.get("x0", 0.0))
@@ -2632,10 +2863,22 @@ def check_flashcards(
                     f"card #{idx_c} ('{label}'): out of bounds ({x0:.0f},{y0:.0f},{x1:.0f},{y1:.0f}) on {W}x{H}"
                 )
 
-            # 2) PNG asset existence check
+            # 2) PNG asset existence + tofu-box check
             png_raw = card.get("png")
-            if _resolve_png(png_raw) is None:
+            resolved_png = _resolve_png(png_raw)
+            if resolved_png is None:
                 failures.append(f"card #{idx_c} ('{label}'): missing PNG ({png_raw})")
+            else:
+                try:
+                    import subtitles as _subs
+
+                    qc = _subs.detect_tofu_boxes_in_png(resolved_png)
+                    if qc.get("tofu_count", 0) > 0:
+                        failures.append(
+                            f"card #{idx_c} ('{label}'): detected {qc['tofu_count']} hollow tofu box(es) in {resolved_png.name}"
+                        )
+                except Exception:
+                    pass
 
             # 3) Timestamp sampling: every 0.25s + midpoint across [t0, t1]
             span = t1 - t0
@@ -2762,6 +3005,27 @@ def check_flashcards(
                             f"overlaps subtitle cue [{cs:.2f}-{ce:.2f}s] y=[{sy0:.0f},{sy1:.0f}] by {iy_sub:.0f}px"
                         )
                         break
+
+        # Also scan any cached flashcard PNGs & probe Indic words present in cards
+        bad_card_cache = _scan_pngs_for_tofu(
+            _gather_work_pngs(plan, mp4_path, ("_cards_cache", "overlays/flashcards"), include_banners=False),
+            max_check=24,
+        )
+        if bad_card_cache is not None:
+            bad_cp, qc_c = bad_card_cache
+            failures.append(f"detected {qc_c['tofu_count']} hollow tofu box(es) in cached card PNG ({bad_cp.name})")
+
+        card_indic_probe = _collect_indic_probe_text(card_texts, max_words=12)
+        if card_indic_probe:
+            try:
+                import subtitles as _subs
+
+                if _subs.available():
+                    probe_ok, probe_detail = _subs.probe_text_render(card_indic_probe, style_id=2)
+                    if not probe_ok:
+                        failures.append(f"Indic card font probe failed: {probe_detail}")
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"Indic card font probe error: {exc}")
 
         tier_counts: Dict[str, int] = {}
         for tr in tiers_used:
@@ -3073,6 +3337,45 @@ def run_verification(
     )
     split_hook_ok, split_hook_summary = check_split_and_hook_rules(plan)
     subs_ok, subs_summary = check_subtitles_srt(plan, out_mp4)
+    if subs_ok and not is_subs_enabled(plan):
+        # Scroll-page (`#page scroll`) and banner-only edits still render text PNGs that need tofu/Pango QC
+        page_meta_cands = [p_file.parent / "_page" / "page_meta.json", WORK / "_page" / "page_meta.json"]
+        for pmc in page_meta_cands:
+            if pmc.is_file():
+                try:
+                    pm = read_json(pmc)
+                    if isinstance(pm, dict) and pm.get("pango_warnings"):
+                        pw = pm["pango_warnings"]
+                        subs_ok = False
+                        subs_summary = f"Pango font warning during scroll page render: {pw[0] if isinstance(pw, list) else pw}"
+                        break
+                except Exception:
+                    pass
+        if subs_ok:
+            bad_page_png = _scan_pngs_for_tofu(
+                _gather_work_pngs(plan, out_mp4, ("_page", "_scroll_page"), include_banners=True),
+                max_check=16,
+            )
+            if bad_page_png is not None:
+                bp, bqc = bad_page_png
+                subs_ok = False
+                subs_summary = f"detected {bqc['tofu_count']} hollow tofu box(es) in {bp.name}"
+        if subs_ok and plan.get("page"):
+            page_texts = _extract_plan_banner_texts(plan) + [
+                str(s.get("text") or "") for s in (plan.get("segments") or []) if isinstance(s, dict)
+            ]
+            page_indic = _collect_indic_probe_text(page_texts, max_words=12)
+            if page_indic:
+                try:
+                    import subtitles as _subs
+                    if _subs.available():
+                        p_ok, p_det = _subs.probe_text_render(page_indic, style_id=2)
+                        if not p_ok:
+                            subs_ok = False
+                            subs_summary = f"Indic scroll-page font check failed: {p_det}"
+                except Exception as exc:  # noqa: BLE001
+                    subs_ok = False
+                    subs_summary = f"Indic scroll-page font check error: {exc}"
     cards_ok, cards_summary = check_flashcards(plan, out_mp4, is_square=False, plan_dir=p_file.parent)
     pic_ok, pic_bad, pic_n = check_picture_timeline(plan, out_mp4, plan_dir=p_file.parent)
     sq_mp4 = square_job_output(out_mp4)
