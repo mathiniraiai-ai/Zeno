@@ -1,1 +1,1 @@
-Fixed Windows notification chime and folderless update alerts, and enabled Codex network and Downloads access.
+Fixed Kannada, Malayalam and Telugu captions showing as boxes on Windows, fewer false stops during editing, and added a per-video edit log.
