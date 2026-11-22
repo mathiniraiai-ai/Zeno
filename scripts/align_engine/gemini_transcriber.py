@@ -450,16 +450,11 @@ class GeminiTranscriber:
         _load_env_files()
         self._explicit_keys = api_keys is not None
         self.api_keys = list(api_keys) if api_keys is not None else get_gemini_api_keys()
-        primary = os.getenv("GEMINI_FORCE_MODEL", "").strip() or "gemini-3.5-flash"
+        primary = os.getenv("GEMINI_FORCE_MODEL", "").strip() or "gemini-3.1-flash-lite"
         default_models = [
-            "gemini-3.5-flash",
-            "gemini-3.6-flash",
-            "gemini-3-flash-preview",
-            "gemini-2.5-flash",
-            "gemini-3.8-flash",
-            "gemini-flash-latest",
             "gemini-3.1-flash-lite",
-            "gemini-flash-lite-latest",
+            "gemini-3.5-flash-lite",
+            "gemini-2.5-flash",
         ]
         self.models = [primary] + [m for m in default_models if m != primary]
         self.cloud_url = (

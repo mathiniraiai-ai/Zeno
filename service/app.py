@@ -24,7 +24,7 @@ Environment:
     GEMINI_TPM           per-(key, model) 60s token budget (default 240000 free, 1000000 paid)
     GEMINI_RPM           optional total per-key RPM cap across all models (on free tier also caps Flash/Lite RPM if lower unless GEMINI_FLASH_RPM/GEMINI_LITE_RPM is set)
     GEMINI_QUEUE_TIMEOUT seconds a queued transcription waits for a slot (default 180)
-    GEMINI_MODELS        model order, comma-separated (default: gemini-3.5-flash,gemini-3.6-flash,gemini-3-flash-preview,gemini-2.5-flash,gemini-3.8-flash,gemini-flash-latest,gemini-3.1-flash-lite,gemini-flash-lite-latest)
+    GEMINI_MODELS        model order, comma-separated (default: gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-2.5-flash)
 Audio is processed in memory and never written to disk.
 """
 import base64
@@ -64,7 +64,7 @@ MODELS = [
     m.strip()
     for m in os.getenv(
         "GEMINI_MODELS",
-        "gemini-3.5-flash,gemini-3.6-flash,gemini-3-flash-preview,gemini-2.5-flash,gemini-3.8-flash,gemini-flash-latest,gemini-3.1-flash-lite,gemini-flash-lite-latest",
+        "gemini-3.1-flash-lite,gemini-3.5-flash-lite,gemini-2.5-flash",
     ).split(",")
     if m.strip()
 ]

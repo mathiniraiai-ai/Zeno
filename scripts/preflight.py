@@ -292,10 +292,8 @@ def _ping_local_gemini_keys() -> Optional[Tuple[bool, str]]:
 
         models = [
             "gemini-3.1-flash-lite",
-            "gemini-2.5-flash-lite",
+            "gemini-3.5-flash-lite",
             "gemini-2.5-flash",
-            "gemini-flash-lite-latest",
-            "gemini-flash-latest",
         ]
         for model in models:
             t0 = time.time()
