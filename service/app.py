@@ -1787,7 +1787,8 @@ def usage_log(authorization: Optional[str] = Header(None), x_admin_password: Opt
             "zeno_version", "version_seen_at")
     return JSONResponse(
         {"keys": [{k: row.get(k) for k in keep} for row in ks.list()], "runs": ks.usage_runs(), "now": time.time(),
-         "transcriptions": ks.transcription_events(since=time.time() - 30 * 86400)},
+         "transcriptions": ks.transcription_events(since=time.time() - 30 * 86400),
+         "gemini": ks.gemini_usage(since=time.time() - 30 * 86400)},
         headers=NO_STORE,
     )
 

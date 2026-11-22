@@ -1163,6 +1163,39 @@ class KeyStore:
             (float(since), int(limit)), "all")
         return [dict(zip(self._TX_COLS, r)) for r in rows]
 
+    def gemini_usage(self, since: float = 0.0, limit: int = 200000) -> Dict[str, Any]:
+        """Gemini transcription calls as numbers only: hourly buckets per editor and model (calls, failures, tokens, audio seconds)
+        and each editor's busiest minute. The admin dashboard turns these into the Gemini tab (list, spend and the wave chart)."""
+        rows = self._run(
+            "SELECT user_name, created_at, status, model, in_tokens, out_tokens, audio_seconds, seconds FROM zeno_transcriptions "
+            "WHERE created_at >= %s ORDER BY created_at LIMIT %s", (float(since), int(limit)), "all") or []
+        off = 19800   # buckets follow IST hours
+        buckets: Dict[Tuple[int, str, str], Dict[str, Any]] = {}
+        per_min: Dict[Tuple[str, int], int] = {}
+        users: Dict[str, Dict[str, Any]] = {}
+        for name, at, status, model, tin, tout, aud, sec in rows:
+            at = float(at or 0)
+            name = str(name or "unknown")
+            model = str(model or "")
+            hour = int((at + off) // 3600 * 3600 - off)
+            b = buckets.setdefault((hour, name, model), {"t": hour, "u": name, "m": model, "n": 0, "bad": 0, "in": 0, "out": 0, "aud": 0.0, "sec": 0.0})
+            b["n"] += 1
+            b["bad"] += 0 if status == "ok" else 1
+            b["in"] += int(tin or 0)
+            b["out"] += int(tout or 0)
+            b["aud"] += float(aud or 0)
+            b["sec"] += float(sec or 0)
+            k = (name, int(at // 60))
+            per_min[k] = per_min.get(k, 0) + 1
+            u = users.setdefault(name, {"name": name, "peak_rpm": 0, "last": 0.0})
+            u["last"] = max(u["last"], at)
+        for (name, _m), c in per_min.items():
+            users[name]["peak_rpm"] = max(users[name]["peak_rpm"], c)
+        out_b = sorted(buckets.values(), key=lambda b: b["t"])
+        for b in out_b:
+            b["aud"], b["sec"] = round(b["aud"], 1), round(b["sec"], 1)
+        return {"buckets": out_b, "users": sorted(users.values(), key=lambda u: -u["last"]), "tz_offset": off, "rows": len(rows)}
+
     def list_runs(self, limit: int = 100) -> List[Dict[str, Any]]:
         rows = self._run(
             """SELECT id, key_id, editor_name, user_email, project, language, agent_name, agent_model,

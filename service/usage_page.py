@@ -625,7 +625,144 @@ function EditsView({data, jobs, jobsMsg, rg, q, rate, day, setDay}) {
         : h('tr', null, h('td', {colSpan: 17}, 'No video edits in this range'))))));
 }
 
-const TABS = [['edits', 'Video edits'], ['daily', 'Daily'], ['videos', 'Renders'], ['editors', 'Editors'], ['problems', 'Problems'], ['health', 'Health'], ['notes', 'How it is recorded']];
+
+const GPRICE_KEY = 'zeno_gemini_prices';  // USD per million tokens the admin types once per model; never guessed, kept in this browser only
+function loadGPrices() { try { return JSON.parse(localStorage.getItem(GPRICE_KEY) || '{}') || {}; } catch (e) { return {}; } }
+function gCost(b, prices) {  // USD of one bucket, or null when its model has no price yet
+  const p = prices[b.m];
+  if (!p || (p.i === '' && p.o === '') || (p.i == null && p.o == null)) return null;
+  return (n(b.in) * n(p.i) + n(b.out) * n(p.o)) / 1e6;
+}
+function wavePath(pts, top, base) {  // a smooth curve through the points, so the ups and downs read as a wave
+  if (pts.length < 2) return '';
+  const clamp = y => Math.max(top, Math.min(base, y));
+  let d = 'M' + pts[0][0].toFixed(1) + ',' + pts[0][1].toFixed(1);
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || p2;
+    d += ' C' + (p1[0] + (p2[0] - p0[0]) / 6).toFixed(1) + ',' + clamp(p1[1] + (p2[1] - p0[1]) / 6).toFixed(1) + ' ' +
+      (p2[0] - (p3[0] - p1[0]) / 6).toFixed(1) + ',' + clamp(p2[1] - (p3[1] - p1[1]) / 6).toFixed(1) + ' ' + p2[0].toFixed(1) + ',' + p2[1].toFixed(1);
+  }
+  return d;
+}
+function geminiAgg(g, cutoff, prices) {
+  const bs = ((g && g.buckets) || []).filter(b => inPeriod({created_at: b.t}, cutoff));
+  const users = {};
+  ((g && g.users) || []).forEach(u => { users[u.name] = {name: u.name, calls: 0, bad: 0, tin: 0, tout: 0, usd: 0, unpriced: 0, models: {}, peak: n(u.peak_rpm), last: n(u.last)}; });
+  const days = {};
+  let usd = 0, unpriced = 0;
+  bs.forEach(b => {
+    const u = users[b.u] || (users[b.u] = {name: b.u, calls: 0, bad: 0, tin: 0, tout: 0, usd: 0, unpriced: 0, models: {}, peak: 0, last: 0});
+    u.calls += n(b.n); u.bad += n(b.bad); u.tin += n(b.in); u.tout += n(b.out);
+    const mk = b.m || 'unknown'; u.models[mk] = (u.models[mk] || 0) + n(b.n);
+    const c = gCost(b, prices);
+    const dk = dayKey(b.t);
+    const d = days[dk] || (days[dk] = {day: dk, calls: 0, bad: 0, tin: 0, tout: 0, usd: 0, unpriced: 0});
+    d.calls += n(b.n); d.bad += n(b.bad); d.tin += n(b.in); d.tout += n(b.out);
+    if (c == null) { u.unpriced += n(b.n); d.unpriced += n(b.n); unpriced += n(b.n); } else { u.usd += c; d.usd += c; usd += c; }
+  });
+  return {bs, users: Object.values(users).filter(u => u.calls > 0).sort((a, b) => b.calls - a.calls), days: Object.values(days).sort((a, b) => (a.day < b.day ? 1 : -1)), usd, unpriced};
+}
+function waveSeries(bs, cutoff, now, metric, prices) {  // one value per hour (short periods) or per day, zeros included so the wave dips
+  const first = bs.length ? n(bs[0].t) : now;
+  const from = n(cutoff.from) > 0 ? n(cutoff.from) : first;
+  const to = n(cutoff.to) > 0 ? n(cutoff.to) : now;
+  const hourly = (to - from) <= 2 * 86400;
+  const step = hourly ? 3600 : 86400;
+  const keyOf = t => hourly ? Math.floor(n(t) / 3600) : dayKey(t);
+  const vals = {}, bad = {};
+  bs.forEach(b => {
+    const k = keyOf(b.t);
+    const v = metric === 'calls' ? n(b.n) : metric === 'tokens' ? n(b.in) + n(b.out) : (gCost(b, prices) || 0);
+    vals[k] = (vals[k] || 0) + v; bad[k] = (bad[k] || 0) + n(b.bad);
+  });
+  const pts = [];
+  for (let t = Math.floor(from / step) * step; t <= to; t += step) {
+    const k = keyOf(t);
+    pts.push({t, v: vals[k] || 0, bad: bad[k] || 0});
+  }
+  return {pts: pts.slice(-96), hourly};
+}
+function WaveChart({series, metric}) {
+  const W = 900, H = 230, L = 46, R = 12, T = 14, B = 28;
+  const pts = series.pts;
+  const max = Math.max(1, ...pts.map(p => p.v));
+  const x = i => L + (pts.length < 2 ? 0 : i * (W - L - R) / (pts.length - 1));
+  const y = v => T + (1 - v / max) * (H - T - B);
+  const line = pts.map((p, i) => [x(i), y(p.v)]);
+  const path = wavePath(line, T, H - B);
+  const area = path ? path + ' L' + x(pts.length - 1).toFixed(1) + ',' + (H - B) + ' L' + x(0).toFixed(1) + ',' + (H - B) + ' Z' : '';
+  const badLine = metric === 'calls' ? wavePath(pts.map((p, i) => [x(i), y(p.bad)]), T, H - B) : '';
+  const every = Math.max(1, Math.ceil(pts.length / 8));
+  const lab = t => { const d = new Date(t * 1000); return series.hourly ? pad2(d.getHours()) + ':00' : dayLabel(dayKey(t), true); };
+  const fmtY = v => metric === 'spend' ? '$' + v.toFixed(2) : fmtNum(Math.round(v));
+  return h('svg', {viewBox: '0 0 ' + W + ' ' + H, style: {width: '100%', maxHeight: 280}},
+    h('defs', null, h('linearGradient', {id: 'wavefill', x1: 0, y1: 0, x2: 0, y2: 1},
+      h('stop', {offset: '0%', stopColor: '#7fb2ff', stopOpacity: 0.55}), h('stop', {offset: '100%', stopColor: '#7fb2ff', stopOpacity: 0.03}))),
+    [0, 0.5, 1].map(f => h('g', {key: f},
+      h('line', {x1: L, x2: W - R, y1: y(max * f), y2: y(max * f), stroke: '#2f2f2f'}),
+      h('text', {x: L - 6, y: y(max * f) + 4, fill: '#9b9b9b', fontSize: 11, textAnchor: 'end'}, fmtY(max * f)))),
+    area ? h('path', {d: area, fill: 'url(#wavefill)'}) : null,
+    path ? h('path', {d: path, fill: 'none', stroke: '#7fb2ff', strokeWidth: 2.5}) : null,
+    badLine ? h('path', {d: badLine, fill: 'none', stroke: '#d4574b', strokeWidth: 1.8}) : null,
+    pts.map((p, i) => i % every === 0 ? h('text', {key: 'x' + i, x: x(i), y: H - 8, fill: '#9b9b9b', fontSize: 11, textAnchor: 'middle'}, lab(p.t)) : null));
+}
+function GeminiUsage({data, cutoff, rate}) {
+  const [prices, setPrices] = React.useState(loadGPrices());
+  const [metric, setMetric] = React.useState('calls');
+  const setPrice = (m, k, v) => {
+    const next = Object.assign({}, prices, {[m]: Object.assign({}, prices[m] || {}, {[k]: v})});
+    setPrices(next);
+    try { localStorage.setItem(GPRICE_KEY, JSON.stringify(next)); } catch (e) {}
+  };
+  const g = data.gemini || {};
+  const ag = geminiAgg(g, cutoff, prices);
+  const models = [...new Set(((g.buckets) || []).map(b => b.m || 'unknown'))].sort();
+  const series = waveSeries(ag.bs, cutoff, data.now, metric, prices);
+  const calls = ag.users.reduce((t, u) => t + u.calls, 0), bad = ag.users.reduce((t, u) => t + u.bad, 0);
+  const tin = ag.users.reduce((t, u) => t + u.tin, 0), tout = ag.users.reduce((t, u) => t + u.tout, 0);
+  const peak = Math.max(0, ...ag.users.map(u => u.peak));
+  const spend = ag.unpriced && !ag.usd ? 'Set prices' : inr(ag.usd, rate) + (ag.unpriced ? ' *' : '');
+  const stat = (v, label) => h('div', {className: 'stat', key: label}, h('b', null, v), h('span', null, label));
+  const Btn = ({id, label}) => h('button', {className: 'chip' + (metric === id ? ' on' : ''), onClick: () => setMetric(id)}, label);
+  return h('div', null,
+    h('div', {className: 'card'},
+      h('h1', null, 'Gemini'),
+      h('p', {className: 'sub'}, 'Who is calling Gemini, which model answered, how busy each editor is and the estimated spend. Numbers only, never audio or text.'),
+      h('div', {className: 'stats'}, stat(fmtNum(calls), 'calls'), stat(calls ? Math.round(100 * (calls - bad) / calls) + '%' : '100%', 'answered fully'),
+        stat(fmtNum(tin), 'tokens in'), stat(fmtNum(tout), 'tokens out'), stat(peak + ' / min', 'busiest minute'), stat(spend, 'estimated spend')),
+      h('h2', null, 'Prices (USD per million tokens)'),
+      h('p', {className: 'note'}, 'Type each model\\'s list price once. Spend is shown only for models with a price, and the prices stay in this browser.'),
+      h('div', {className: 'scroll'}, h('table', null,
+        h('thead', null, h('tr', null, h(Th, null, 'Model'), h(Th, {right: true}, 'Input $ / 1M'), h(Th, {right: true}, 'Output $ / 1M'))),
+        h('tbody', null, models.length ? models.map(m => h('tr', {key: m}, h('td', null, h('b', null, m)),
+          ['i', 'o'].map(k => h('td', {className: 'n', key: k}, h('input', {type: 'number', step: '0.01', className: 'dt', style: {width: 90},
+            value: (prices[m] && prices[m][k] != null) ? prices[m][k] : '', onChange: e => setPrice(m, k, e.target.value)})))))
+          : h('tr', null, h('td', {colSpan: 3}, 'No Gemini calls recorded yet'))))),
+      h('h2', null, 'Ups and downs'),
+      h('div', {className: 'bar'}, h(Btn, {id: 'calls', label: 'Calls'}), h(Btn, {id: 'tokens', label: 'Tokens'}), h(Btn, {id: 'spend', label: 'Spend (USD)'}),
+        h('span', {className: 'muted'}, series.hourly ? 'per hour' : 'per day', metric === 'calls' ? ' · red = calls that failed' : '')),
+      h(WaveChart, {series, metric}),
+      h('h2', null, 'By editor'),
+      h('div', {className: 'scroll'}, h('table', null,
+        h('thead', null, h('tr', null, h(Th, null, 'Editor'), h(Th, {right: true}, 'Calls'), h(Th, null, 'Models used'), h(Th, {right: true}, 'Busiest minute'),
+          h(Th, {right: true}, 'Tokens in'), h(Th, {right: true}, 'Tokens out'), h(Th, {right: true}, 'Failed'), h(Th, {right: true}, 'Est. spend'), h(Th, null, 'Last call'))),
+        h('tbody', null, ag.users.length ? ag.users.map(u => h('tr', {key: u.name},
+          h('td', null, h('b', null, u.name)), h('td', {className: 'n'}, fmtNum(u.calls)),
+          h('td', null, Object.keys(u.models).map(m => m + ' ' + u.models[m]).join(' · ')),
+          h('td', {className: 'n'}, u.peak + ' / min'), h('td', {className: 'n'}, fmtNum(u.tin)), h('td', {className: 'n'}, fmtNum(u.tout)),
+          h('td', {className: 'n'}, u.bad ? h('b', null, fmtNum(u.bad)) : '0'),
+          h('td', {className: 'n'}, (!u.usd && u.unpriced) ? 'No price' : inr(u.usd, rate) + (u.unpriced ? ' *' : '')),
+          h('td', {className: 'muted'}, fmtDate(u.last))))
+          : h('tr', null, h('td', {colSpan: 9}, 'No Gemini calls in this period'))))),
+      h('h2', null, 'By day'),
+      h('div', {className: 'scroll'}, h('table', null,
+        h('thead', null, h('tr', null, h(Th, null, 'Day'), h(Th, {right: true}, 'Calls'), h(Th, {right: true}, 'Failed'), h(Th, {right: true}, 'Tokens in'), h(Th, {right: true}, 'Tokens out'), h(Th, {right: true}, 'Est. spend'))),
+        h('tbody', null, ag.days.map(d => h('tr', {key: d.day}, h('td', null, h('b', null, dayLabel(d.day))), h('td', {className: 'n'}, fmtNum(d.calls)),
+          h('td', {className: 'n'}, fmtNum(d.bad)), h('td', {className: 'n'}, fmtNum(d.tin)), h('td', {className: 'n'}, fmtNum(d.tout)),
+          h('td', {className: 'n'}, (!d.usd && d.unpriced) ? 'No price' : inr(d.usd, rate) + (d.unpriced ? ' *' : ''))))))),
+      ag.unpriced ? h('p', {className: 'foot'}, '* ' + fmtNum(ag.unpriced) + ' call(s) use a model with no price set, so they are not in the spend.') : null));
+}
+const TABS = [['edits', 'Video edits'], ['daily', 'Daily'], ['videos', 'Renders'], ['editors', 'Editors'], ['problems', 'Problems'], ['gemini', 'Gemini'], ['health', 'Health'], ['notes', 'How it is recorded']];
 function Dashboard({data, period, setPeriod, q, setQ, rate, setRate, showAll, setShowAll, tab, setTab, health, jobs, jobsMsg, cf, setCf, ct, setCt, day, setDay}) {
   const cutoff = periodCutoff(period, data.now, cf, ct);
   const runs = data.runs.filter(r => inPeriod(r, cutoff) && matches(r, q)).sort((a, b) => n(b.created_at) - n(a.created_at));
@@ -649,6 +786,7 @@ function Dashboard({data, period, setPeriod, q, setQ, rate, setRate, showAll, se
       : cur === 'videos' ? h(Videos, {runs, rate, showAll, setShowAll, jobs, data})
       : cur === 'editors' ? h(Editors, {runs, rate, vers})
       : cur === 'problems' ? h(Problems, {data, runs, cutoff})
+      : cur === 'gemini' ? h(GeminiUsage, {data, cutoff, rate})
       : cur === 'health' ? h(Health, {health, vers})
       : cur === 'notes' ? h(Notes, {runs, data})
       : h(EditsView, {data, jobs, jobsMsg, rg: cutoff, q, rate, day, setDay}),
