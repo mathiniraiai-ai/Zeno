@@ -41,4 +41,5 @@ jobs:
         with:
           name: zeno-${{ matrix.os }}
           path: ${{ matrix.artifact }}
+          retention-days: 5
           if-no-files-found: error
