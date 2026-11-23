@@ -15,6 +15,7 @@ import glob
 import json
 import os
 import re
+import shlex
 import time
 from datetime import datetime
 from pathlib import Path
@@ -40,8 +41,56 @@ _AGY_MODEL_RE = re.compile(
 )
 
 
-_CODE_DIR_RE = re.compile(r"/(scripts|tests|service|formats|subtitles)/")
-_BASH_CODE_DIR_RE = re.compile(r"(?:^|[\s/])(scripts|tests|service|formats|subtitles)/")
+_REPO_CODE_DIRS = ("scripts", "tests", "service", "formats", "subtitles", "app")
+_NON_CODE_DIRS = ("work", "input", "output")
+
+
+def _is_repo_code_path(raw_path: str, root: Optional[Path] = None) -> bool:
+    """Return True only when `raw_path` resolves inside `root` under a repo code directory (or non-data `.py` file)."""
+    s = str(raw_path or "").strip().strip('"').strip("'")
+    if not s:
+        return False
+    norm = s.replace("\\", "/")
+    if os.name != "nt" and re.match(r"^[A-Za-z]:/", norm):
+        return False
+    eff_root = ROOT if root is None else root
+    try:
+        p = Path(norm)
+        root_res = Path(eff_root).resolve()
+        cand = (p if p.is_absolute() else (root_res / p)).resolve()
+        rel = cand.relative_to(root_res)
+    except Exception:
+        return False
+    if not rel.parts:
+        return False
+    top = rel.parts[0].lower()
+    if top in _REPO_CODE_DIRS:
+        return True
+    return cand.suffix.lower() == ".py" and top not in _NON_CODE_DIRS
+
+
+def _bash_touches_repo_code(cmd: str, root: Optional[Path] = None) -> bool:
+    eff_root = ROOT if root is None else root
+    cleaned = str(cmd or "").replace("scripts/zeno.py", "").replace("scripts/edit_packet.py", "")
+    if not any(w in cleaned for w in ("git commit", "git push", "sed -i", ".write_text(", "unittest")):
+        return False
+    candidates: List[str] = []
+    candidates.extend(re.findall(r"'([^']+)'", cleaned))
+    candidates.extend(re.findall(r'"([^"]+)"', cleaned))
+    try:
+        candidates.extend(shlex.split(cleaned))
+    except ValueError:
+        candidates.extend(cleaned.split())
+    for tok in candidates:
+        if " " in tok:
+            if _is_repo_code_path(tok, eff_root):
+                return True
+            continue
+        for part in (tok, *re.findall(r"[A-Za-z0-9_./\\:-]+", tok)):
+            cleaned_tok = part.strip("()[]{},;\"'")
+            if cleaned_tok and _is_repo_code_path(cleaned_tok, eff_root):
+                return True
+    return False
 
 
 def _is_under_root(cwd: Any, root: Optional[Path]) -> bool:
@@ -93,22 +142,20 @@ def _tool_summary(name: str, args: Any) -> str:
     return _cut(json.dumps(args, ensure_ascii=False), MAX_TOOL_CHARS)
 
 
-def _is_code_touch(step: Dict[str, Any]) -> bool:
+def _is_code_touch(step: Dict[str, Any], root: Optional[Path] = None) -> bool:
     if step.get("kind") != "tool":
         return False
+    eff_root = ROOT if root is None else root
     tool = str(step.get("tool") or "")
     inp = str(step.get("input") or "")
-    if tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
-        return bool(_CODE_DIR_RE.search(inp) or inp.endswith(".py"))
-    if tool == "Bash":
-        cleaned = inp.replace("scripts/zeno.py", "").replace("scripts/edit_packet.py", "")
-        return any(w in cleaned for w in ("git commit", "git push", "sed -i", ".write_text(", "unittest")) and bool(
-            _BASH_CODE_DIR_RE.search(cleaned) or ".py" in cleaned
-        )
+    if tool in ("Edit", "Write", "MultiEdit", "NotebookEdit", "write_to_file", "replace_file_content", "multi_replace_file_content"):
+        return _is_repo_code_path(inp.split(" … [+")[0], eff_root)
+    if tool in ("Bash", "run_command"):
+        return _bash_touches_repo_code(inp, eff_root)
     return False
 
 
-def _counts(prompts: List[Dict[str, Any]], steps: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _counts(prompts: List[Dict[str, Any]], steps: List[Dict[str, Any]], root: Optional[Path] = None) -> Dict[str, Any]:
     by_tool: Dict[str, int] = {}
     checks = renders = errors = 0
     for s in steps:
@@ -121,7 +168,7 @@ def _counts(prompts: List[Dict[str, Any]], steps: List[Dict[str, Any]]) -> Dict[
             errors += 1
     return {"prompts": len(prompts), "tool_calls": sum(by_tool.values()), "by_tool": by_tool, "errors": errors,
             "check_plan_runs": checks, "render_runs": renders,
-            "touched_zeno_code": any(_is_code_touch(s) for s in steps)}
+            "touched_zeno_code": any(_is_code_touch(s, root=root) for s in steps)}
 
 
 # ---------------------------------------------------------------- Claude Code
@@ -235,13 +282,17 @@ def antigravity_window_usage(
     cutoff: float,
     ceiling: float,
     session_id: str = "unknown",
+    root: Optional[Path] = None,
 ) -> Optional[Dict[str, Any]]:
     """Parse Antigravity transcript lines inside [cutoff, ceiling] for token usage and planner turn count."""
     try:
+        eff_root = ROOT if root is None else root
         model_name = "unknown"
         window_count = 0
         in_chars = 0
         out_chars = 0
+        code_edits = 0
+        step_epochs: List[float] = []
         seen_turns = set()
         planner_usage: Dict[Any, List[int]] = {}
         planner_meta: Dict[Any, Dict[str, Any]] = {}
@@ -269,6 +320,8 @@ def antigravity_window_usage(
                 continue
 
             window_count += 1
+            if step_ts > 0:
+                step_epochs.append(step_ts)
             st = str(d.get("type") or "")
             if st in ("USER_INPUT", "GENERIC", "SYSTEM_MESSAGE", "TOOL_RESPONSE", "SYSTEM"):
                 in_chars += len(str(d.get("content") or ""))
@@ -281,6 +334,39 @@ def antigravity_window_usage(
                         len(str(d.get("content") or ""))
                         + len(json.dumps(d.get("tool_calls") or [], ensure_ascii=False))
                     )
+                for call in d.get("tool_calls") or []:
+                    if not isinstance(call, dict):
+                        continue
+                    tname = str(call.get("name") or call.get("tool") or "").strip()
+                    raw_args = call.get("args") if call.get("args") is not None else call.get("arguments")
+                    if isinstance(raw_args, str):
+                        try:
+                            raw_args = json.loads(raw_args)
+                        except Exception:
+                            raw_args = {}
+                    args = raw_args if isinstance(raw_args, dict) else {}
+                    if tname in (
+                        "edit_file",
+                        "write_file",
+                        "write_to_file",
+                        "replace_file_content",
+                        "multi_replace_file_content",
+                        "Edit",
+                        "Write",
+                        "MultiEdit",
+                        "NotebookEdit",
+                    ):
+                        target_path = ""
+                        for pk in ("Path", "TargetFile", "AbsolutePath", "file_path", "notebook_path"):
+                            if args.get(pk):
+                                target_path = str(args.get(pk))
+                                break
+                        if target_path and _is_repo_code_path(target_path, eff_root):
+                            code_edits += 1
+                    elif tname in ("run_command", "Bash"):
+                        cmd = str(args.get("CommandLine") or args.get("command") or "")
+                        if cmd and _bash_touches_repo_code(cmd, eff_root):
+                            code_edits += 1
                 in_tok = _safe_int(d.get("input_tokens"))
                 cache_tok = _safe_int(d.get("cache_read_tokens"))
                 out_tok = _safe_int(d.get("output_tokens"))
@@ -320,6 +406,8 @@ def antigravity_window_usage(
             first_ctx = 0
             last_ctx = 0
 
+        window_minutes = round((max(step_epochs) - min(step_epochs)) / 60.0, 1) if len(step_epochs) >= 2 else 0.0
+
         return {
             "agent_name": "Antigravity",
             "agent_model": model_name,
@@ -336,6 +424,9 @@ def antigravity_window_usage(
             "host_usage_unknown": bool(unknown_requests or not usage_rows),
             "unknown_request_count": unknown_requests,
             "requests": requests,
+            "code_edits": code_edits,
+            "window_minutes": window_minutes,
+            "mixed_with_development": code_edits > 0,
             "session_id": session_id,
         }
     except Exception:
@@ -461,7 +552,7 @@ def collect(since: float, until: Optional[float] = None, root: Path = ROOT) -> D
         prompts = prompts[:5] + prompts[5:][-(MAX_PROMPTS - 5):] if len(prompts) > MAX_PROMPTS else prompts
         steps = steps[:50] + steps[50:][-(MAX_STEPS - 50):] if len(steps) > MAX_STEPS else steps
         turns = best.get("turns")
-        counts = _counts(best["prompts"], best["steps"])
+        counts = _counts(best["prompts"], best["steps"], root=root)
         if turns is not None:
             counts["turns"] = turns
         return {"agent": best["agent"], "models": best["models"], "sessions": best["sessions"][:10],

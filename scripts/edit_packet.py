@@ -22,7 +22,7 @@ import sys
 import time
 import wave
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
@@ -244,16 +244,113 @@ def _compact_pauses_intervals(
     return kept
 
 
-def compact_facts(text: str) -> str:
+def _facts_header_clip_name_and_stem(header_line: str) -> Tuple[str, str]:
+    """Extract clip filename and stem from a `facts.md` `## <clip> (...)` section header."""
+    line = header_line.strip()
+    m = re.match(
+        r"^##\s+(.+?\.(?:mp4|mov|m4v|mkv|webm|avi|wav|mp3|m4a|aac|flac))(?:\s*\(.*|\s+.*|$)",
+        line,
+        re.I,
+    )
+    if not m:
+        m = re.match(r"^##\s+(.+?)\s*\([^()]*\)\s*$", line)
+    if not m:
+        m = re.match(r"^##\s+(\S+)", line)
+    if not m:
+        return "", ""
+    name = m.group(1).strip().strip('"').strip("'")
+    return name, Path(name).stem
+
+
+def _add_active_clip(active: Set[str], raw_src: str) -> None:
+    s = str(raw_src or "").strip().strip('"').strip("'")
+    if not s:
+        return
+    p = Path(s.replace("\\", "/"))
+    if p.name:
+        active.add(p.name)
+    if p.stem:
+        active.add(p.stem)
+    active.add(s)
+
+
+def _extract_active_clips(line_map_text: str, plan_text: str) -> Set[str]:
+    """Collect active clip names and stems referenced by `line_map.md` CANDs or `plan.edl` segments/peers."""
+    active: Set[str] = set()
+    for src in re.findall(r"(?m)^\s*CAND\s+(.+?)\s+\d+(?:\.\d+)?(?:-|\.\.)\d", line_map_text or ""):
+        _add_active_clip(active, src)
+
+    if not (plan_text or "").strip():
+        return active
+
+    try:
+        import edl_parser
+
+        edl_input = plan_text if "\n" in plan_text else (plan_text + "\n")
+        parsed = edl_parser.parse_edl(edl_input)
+        for seg in parsed.get("segments") or []:
+            if not isinstance(seg, dict):
+                continue
+            if seg.get("src"):
+                _add_active_clip(active, str(seg["src"]))
+            peer = seg.get("peer")
+            if isinstance(peer, dict) and peer.get("src"):
+                _add_active_clip(active, str(peer["src"]))
+            elif isinstance(peer, str) and peer.strip():
+                peer_head = peer.split("@", 1)[0].strip().strip('"').strip("'")
+                if ":" in peer_head and not re.match(r"^[A-Za-z]:[/\\]", peer_head):
+                    peer_head = peer_head.split(":", 1)[1]
+                _add_active_clip(active, peer_head)
+    except Exception:
+        pass
+
+    # Fallback regex pass in case `plan.edl` is partially drafted or has a malformed line.
+    for raw_ln in plan_text.splitlines():
+        ln = raw_ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        low = ln.lower()
+        if low.startswith(("sfx ", "mark ")):
+            continue
+        if "|" in ln:
+            cols = [c.strip() for c in ln.split("|")]
+            if len(cols) >= 3 and re.match(r"^\d+(?:\.\d+)?\s*(?:-|\.\.)\s*\d", cols[2]):
+                _add_active_clip(active, cols[1])
+        else:
+            m_seg = re.match(
+                r'^\S+\s+(?:"([^"]+)"|\'([^\']+)\'|(.+?))\s+\d+(?:\.\d+)?(?:-|\.\.)\d',
+                ln,
+            )
+            if m_seg:
+                _add_active_clip(active, m_seg.group(1) or m_seg.group(2) or m_seg.group(3) or "")
+        for m_peer in re.finditer(r'\bpeer=(?:"([^"]+)"|\'([^\']+)\'|([^\s|]+))', ln, re.I):
+            raw_peer = m_peer.group(1) or m_peer.group(2) or m_peer.group(3) or ""
+            peer_head = raw_peer.split("@", 1)[0].strip().strip('"').strip("'")
+            if ":" in peer_head and not re.match(r"^[A-Za-z]:[/\\]", peer_head):
+                peer_head = peer_head.split(":", 1)[1]
+            _add_active_clip(active, peer_head)
+    return active
+
+
+def compact_facts(
+    text: str,
+    active_clips: Optional[Set[str]] = None,
+    min_clips_for_diet: int = 30,
+) -> str:
     """Compact `facts.md` while preserving exact `focus=x,y` zoom values, safe two-shot spans, `pauses:`, beat times, and word timestamps.
 
     Strips redundant `# FACTS:` banners and duplicate VAD/voiced interval lists, while ALWAYS preserving compacted `pauses:`
     (`>=0.35s`, up to 20 intervals) on spoken clips so the Host AI sees genuine acoustic pauses vs continuous speech,
     and adding an explicit `untranscribed_speech:` warning whenever >=1.2s of active VAD speech lacks word timestamps.
+    On large shoots (`>= min_clips_for_diet` clip blocks) with non-empty `active_clips`, collapses raw word-timestamp
+    lines on zero-CAND unused spoken clips while keeping active, silent/ambient, uncovered-speech, and two-shot clips full.
     """
     if not text:
         return ""
     blocks = re.split(r"(?m)(?=^## )", text)
+    total_clip_blocks = sum(1 for b in blocks if b.startswith("## "))
+    active_set = {str(x).strip() for x in active_clips if str(x).strip()} if active_clips else set()
+    diet_enabled = bool(active_set) and total_clip_blocks >= min_clips_for_diet
     out_blocks: List[str] = []
     for block in blocks:
         raw_lines = block.splitlines()
@@ -343,6 +440,27 @@ def compact_facts(text: str) -> str:
                 sec_lines.append("  speech_gaps: " + " ".join(f"{a:.2f}-{b:.2f}({b - a:.2f}s)" for a, b in gaps))
         if has_uncovered and not saw_untranscribed:
             sec_lines.append(_format_untranscribed_line(uncovered))
+        if diet_enabled and sec_lines and has_word_lines:
+            clip_name, clip_stem = _facts_header_clip_name_and_stem(raw_lines[0])
+            block_lower = block.lower()
+            keep_full = (
+                (clip_name in active_set)
+                or (clip_stem in active_set)
+                or is_silent_block
+                or bool(re.search(r"\bSILENT\b", raw_lines[0]))
+                or has_uncovered
+                or saw_untranscribed
+                or ("two_shot" in block_lower)
+                or bool(re.search(r"\b(?:faces|face_count)=[2-9]\d*\b", block_lower))
+            )
+            if not keep_full:
+                pauses_lines = [ln for ln in sec_lines[1:] if ln.lstrip().startswith("pauses:")]
+                clip_label = clip_name or "clip"
+                sec_lines = [
+                    sec_lines[0],
+                    *pauses_lines,
+                    f'  (unused take — 0 CAND matches; run edit_packet.py <project> --clip "{clip_label}" for full words)',
+                ]
         if sec_lines:
             out_blocks.append("\n".join(sec_lines))
     return "\n\n".join(out_blocks).strip()
@@ -452,6 +570,81 @@ def line_detail(project: Path, line_id: str) -> str:
     if not details:
         return selected.strip()
     return selected.strip() + "\n\n" + "\n\n".join(details)
+
+
+def lines_detail(
+    project: Path,
+    line_ids: Sequence[str],
+    max_bytes: int = 0,
+    extra_sources: Sequence[str] = (),
+) -> str:
+    """Batch form of `line_detail`: candidates for several script lines, with each clip's measurements printed once."""
+    project = Path(project)
+    norm_ids: List[str] = []
+    for raw in line_ids:
+        m = re.fullmatch(r"(L\d+)[a-z]?", str(raw).strip(), re.I)
+        if m and m.group(1).upper() not in norm_ids:
+            norm_ids.append(m.group(1).upper())
+    if not norm_ids:
+        raise ValueError("Specify script line IDs such as L12,L22a,L28.")
+    mapping = read(project / "line_map.md")
+    sections = re.split(r"(?m)(?=^L\d+\b)", mapping)
+    picked: List[str] = []
+    clean_sources: List[str] = []
+    for norm_id in norm_ids:
+        selected = next((s for s in sections if re.match(rf"^{norm_id}\b", s)), "")
+        if not selected:
+            continue
+        selected = re.split(r"(?m)^## ", selected)[0]
+        picked.append(selected.strip())
+        for src in re.findall(r"(?m)^\s*CAND\s+(.+?)\s+\d+(?:\.\d+)?(?:-|\.\.)\d", selected):
+            src = src.strip().strip('"').strip("'")
+            if src not in clean_sources:
+                clean_sources.append(src)
+    extra_clean: List[str] = []
+    for s in extra_sources:
+        cs = str(s or "").strip().strip('"').strip("'")
+        if cs:
+            if "/" in cs or "\\" in cs:
+                cs = Path(cs.replace("\\", "/")).name
+            if cs and cs not in extra_clean:
+                extra_clean.append(cs)
+    # Clips the plan actually uses for these lines come first: a line with no candidate still gets its clip's words.
+    clean_sources = extra_clean + [s for s in clean_sources if s not in extra_clean]
+    if not picked:
+        raise ValueError(f"None of {', '.join(norm_ids)} found in {project / 'line_map.md'}")
+    facts = compact_facts(read(project / "facts.md"))
+    blocks: Dict[str, str] = {}
+    for s in re.split(r"(?m)(?=^## )", facts):
+        if not s.startswith("## "):
+            continue
+        hdr_name, _ = _facts_header_clip_name_and_stem(s.splitlines()[0])
+        hdr_base = Path(hdr_name.replace("\\", "/")).name if hdr_name else ""
+        for src in clean_sources:
+            src_base = Path(src.replace("\\", "/")).name
+            if hdr_name == src or (hdr_base and hdr_base == src_base) or s.startswith(f"## {src} ("):
+                blocks.setdefault(src, s.strip())
+    details: List[str] = []
+    seen_details: Set[str] = set()
+    for src in clean_sources:
+        blk = blocks.get(src)
+        if blk and blk not in seen_details:
+            seen_details.add(blk)
+            details.append(blk)
+    out = "\n\n".join(picked)
+    if max_bytes:
+        total_all = out + "".join("\n\n" + d for d in details)
+        if len(total_all.encode("utf-8")) <= max_bytes:
+            return total_all
+    notice = '\n\n(more clip measurements left out to keep this short; run edit_packet.py <project> --clip "<name>" for one clip)'
+    for d in details:
+        cand = out + "\n\n" + d
+        if max_bytes and len((cand + notice).encode("utf-8")) > max_bytes:
+            if len((out + notice).encode("utf-8")) <= max_bytes:
+                out += notice
+            break
+        out = cand
+    return out
 
 
 def _part_sort_key(path: Path) -> Tuple[int, str]:
@@ -1241,7 +1434,8 @@ def build(project: Path) -> Tuple[str, Dict[str, Any]]:
     sections.append("## Script Line Map (`line_map.md`)\n" + compact_line_map(texts["line_map.md"]))
 
     # (3) Measured Footage (`facts.md` with exact `focus=x,y` zoom values and word timestamps)
-    sections.append("## Measured Footage (`facts.md`)\n" + compact_facts(texts["facts.md"]))
+    active_clips = _extract_active_clips(texts["line_map.md"], texts["plan.edl"])
+    sections.append("## Measured Footage (`facts.md`)\n" + compact_facts(texts["facts.md"], active_clips=active_clips))
 
     # (4) Recorded exceptions (`decisions.txt`) only when non-empty
     if texts["decisions.txt"].strip():
@@ -1314,6 +1508,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build Director Packet or inspect script lines / clip speech diagnostics")
     parser.add_argument("project", type=Path, help="Path to work/<project> directory")
     parser.add_argument("--line", help="Lookup candidates and measured clip details for a single line ID (e.g. L12)")
+    parser.add_argument("--lines", help="Lookup several line IDs in one call, comma separated (e.g. L12,L22a,L28)")
     parser.add_argument("--diagnose", action="store_true", help="Print per-clip speech coverage, status, and uncovered speech spans")
     parser.add_argument("--clip", help="Inspect structured measurements, spans, pauses, cues, and words for one clip")
     args = parser.parse_args()
@@ -1324,7 +1519,9 @@ def main() -> None:
             print(clip_detail(args.project, args.clip))
         if args.line:
             print(line_detail(args.project, args.line))
-        if not (args.diagnose or args.clip or args.line):
+        if args.lines:
+            print(lines_detail(args.project, [x for x in re.split(r"[,\s]+", args.lines) if x]))
+        if not (args.diagnose or args.clip or args.line or args.lines):
             out_path = write(args.project)
             print(f"[PACKET] {out_path}")
             parts = packet_parts(args.project)

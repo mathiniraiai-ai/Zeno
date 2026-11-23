@@ -268,8 +268,11 @@ const Legend = ({series}) => series.length > 1 ? h("div", {className: "legend"},
 
 // ---------- the controls: dates, editor, rate ----------
 function presets() { const t = keyOf(new Date()); return [["Today", t, t], ["Yesterday", addDays(t, -1), addDays(t, -1)], ["7 days", addDays(t, -6), t], ["30 days", addDays(t, -29), t], ["All time", "", ""]]; }
-function Controls({period, setPeriod, editors, editor, setEditor, rate, setRate, onRefresh, busy}) {
+function Controls({period, setPeriod, editors, editor, setEditor, rate, setRate, onRefresh, busy, includeDev, setIncludeDev, devCount}) {
   const ps = presets();
+  const devLabel = includeDev
+    ? ("Showing: All (+dev" + (devCount ? " · " + devCount : "") + ")")
+    : ("Showing: Editor runs" + (devCount ? " (" + devCount + " dev hidden)" : ""));
   return h("div", {className: "controls"},
     h("div", {className: "bar"},
       ps.map(([label, a, b]) => h("button", {key: label, className: "chip" + (period.from === a && period.to === b ? " on" : ""), onClick: () => setPeriod({from: a, to: b})}, label)),
@@ -278,6 +281,7 @@ function Controls({period, setPeriod, editors, editor, setEditor, rate, setRate,
     h("div", {className: "bar"},
       h("label", null, "Editor", h("select", {className: "dt", value: editor, onChange: e => setEditor(e.target.value)}, h("option", {value: ""}, "All editors"), editors.map(e => h("option", {key: e.key, value: e.key}, e.name)))),
       h("label", null, "₹ per $", h("input", {type: "number", step: "0.1", value: rate, onChange: e => setRate(n(e.target.value))})),
+      setIncludeDev ? h("button", {className: "chip" + (includeDev ? " on" : ""), title: "Include or hide runs mixed with Zeno code development", onClick: () => setIncludeDev(!includeDev)}, devLabel) : null,
       h("button", {className: "chip", disabled: busy, onClick: onRefresh}, busy ? "Refreshing…" : "Refresh")));
 }
 
@@ -1065,18 +1069,31 @@ function Dashboard({data, jobs, jobsMsg, tab, setTab, period, setPeriod, editor,
   const [showAll, setShowAll] = useState(false);
   const [day, setDay] = useState("");
   const [q, setQ] = useState("");
+  const [includeDev, setIncludeDev] = useState(false);
   const m = useModel(data, jobs, period, editor, rate, prices);
   const cur = TABS.some(t => t[0] === tab) ? tab : "overview";
   const cutoff = {from: period.from ? new Date(period.from + "T00:00:00").getTime() / 1000 : 0, to: period.to ? new Date(period.to + "T23:59:59").getTime() / 1000 : 0};
   const runs = (data.runs || []).filter(r => inPeriod(r, cutoff) && (!editor || canon(r.editor_name) === editor || canon(String(r.user_email || "").split("@")[0]) === editor)).sort((a, b) => n(b.created_at) - n(a.created_at));
+  const isDevRun = r => !!(((r.job_report || {}).agent || {}).mixed_with_development);
+  const devCount = runs.filter(isDevRun).length;
+  const cleanRuns = useMemo(() => {
+    const base = includeDev ? runs : runs.filter(r => !isDevRun(r));
+    const byKey = new Map();
+    base.forEach(r => {
+      const k = who(r) + "|" + (r.project || r.id);
+      if (!byKey.has(k)) byKey.set(k, []);
+      byKey.get(k).push(r);
+    });
+    return [...byKey.values()].flatMap(clusterRuns).sort((a, b) => n(b.created_at) - n(a.created_at));
+  }, [runs, includeDev]);
   const rrRuns = runs.filter(r => matches(r, q));
   const vers = versionRows(data.keys || []);
   const download = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csvOf(runs)], {type: "text/csv"})); a.download = "zeno-usage.csv"; a.click(); };
   return h("div", null,
     h("div", {className: "tabs"}, TABS.map(([id, label]) => h("button", {key: id, className: "tab" + (cur === id ? " on" : ""), onClick: () => setTab(id)}, label))),
-    h(Controls, {period, setPeriod, editors: editorList(m), editor, setEditor, rate, setRate, onRefresh, busy}),
+    h(Controls, {period, setPeriod, editors: editorList(m), editor, setEditor, rate, setRate, onRefresh, busy, includeDev, setIncludeDev, devCount}),
     jobsMsg ? h("p", {className: "note"}, jobsMsg) : null,
-    cur === "overview" ? h(OverviewPage, {m, rate, setTab, jobs, setPeriod, runs})
+    cur === "overview" ? h(OverviewPage, {m, rate, setTab, jobs, setPeriod, runs: cleanRuns})
       : cur === "videos" ? h("div", null, h(VideosPage, {m, jobs, setPeriod}), jobs === null ? null : h("div", {style: {height: 14}}), jobs === null ? null : h(Wrap, null, h(EditsView, {data, jobs, jobsMsg, rg: cutoff, q: "", rate, day, setDay})))
       : cur === "renders" ? h("div", null,
           h("div", {className: "bar", style: {marginTop: 4}},
@@ -1084,7 +1101,7 @@ function Dashboard({data, jobs, jobsMsg, tab, setTab, period, setPeriod, editor,
             h("button", {className: "chip", onClick: download}, "Download CSV")),
           h(Videos, {runs: rrRuns, rate, showAll, setShowAll, jobs, data}))
       : cur === "gemini" ? h(GeminiPage, {m, rate, prices, setPrices, setPeriod})
-      : cur === "tokens" ? h(Wrap, null, h("div", {className: "bar"}, h("button", {className: "chip", onClick: download}, "Download CSV")), h(Editors, {runs, rate, vers}), h(Daily, {runs, rate}))
+      : cur === "tokens" ? h(Wrap, null, h("div", {className: "bar"}, h("button", {className: "chip", onClick: download}, "Download CSV")), h(Editors, {runs: cleanRuns, rate, vers}), h(Daily, {runs: cleanRuns, rate}))
       : cur === "editors" ? h(EditorsPage, {m})
       : h("div", null, h(Wrap, null, h(Health, {health, vers})), h("div", {style: {height: 14}}), h(Wrap, null, h(Problems, {data, runs, cutoff})), h("div", {style: {height: 14}}), h(Wrap, null, h(Notes, {runs, data}))),
     h("p", {className: "foot"}, "Local time. A video counts once per day however often it was re-rendered. * = some calls use a model with no price. Costs are estimates from list prices."));

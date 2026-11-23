@@ -38,6 +38,7 @@ from common import OUTPUT, ROOT, WORK, read_json, tc, write_json  # noqa: E402
 
 LEDGER_MD = WORK / "TOKEN_LEDGER.md"
 LOCAL_DB = WORK / "zeno_telemetry.db"
+MAX_EDIT_WINDOW_SEC = 4 * 3600
 
 
 def _iso_to_epoch(ts_str: str) -> float:
@@ -49,10 +50,19 @@ def _iso_to_epoch(ts_str: str) -> float:
         return 0.0
 
 
-CODE_PATH_HINTS = ("/scripts/", "/tests/", "/service/", "/formats/", "/subtitles/")
+def _is_repo_code_path(raw_path: str, root: Optional[Path] = None) -> bool:
+    """Return True only when `raw_path` resolves inside `root` under a repo code directory (or non-data `.py` file)."""
+    import agent_log
+
+    return agent_log._is_repo_code_path(raw_path, ROOT if root is None else root)
 
 
-def claude_window_usage(lines: List[str], cutoff: float, ceiling: float) -> Optional[Dict[str, Any]]:
+def claude_window_usage(
+    lines: List[str],
+    cutoff: float,
+    ceiling: float,
+    root: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
     """Exact token sums of the assistant turns of one Claude Code transcript that fall inside [cutoff, ceiling]: fresh input, cache writes, cache
     reads and output, each summed over every turn (the old report took the last turn's cache and the growth of the context). It also notes whether the
     window holds work on Zeno's own code, in which case the number is not the cost of one edit."""
@@ -106,14 +116,17 @@ def claude_window_usage(lines: List[str], cutoff: float, ceiling: float) -> Opti
                 cur[1][k] = max(cur[1][k], val)
             if turn_model != "unknown":
                 cur[2] = turn_model
+        eff_root = ROOT if root is None else root
         for blk in msg.get("content") or []:
             if isinstance(blk, dict) and blk.get("type") == "tool_use" and blk.get("name") in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
-                path = str((blk.get("input") or {}).get("file_path") or "").replace("\\", "/")
-                if any(h in path for h in CODE_PATH_HINTS) or path.endswith(".py"):
+                inp_dict = blk.get("input") or {}
+                raw_fp = str(inp_dict.get("file_path") or inp_dict.get("notebook_path") or "")
+                if _is_repo_code_path(raw_fp, eff_root):
                     code_edits += 1
             elif isinstance(blk, dict) and blk.get("type") == "tool_use" and blk.get("name") == "Bash":
-                cmd = str((blk.get("input") or {}).get("command") or "").replace("scripts/zeno.py", "")      # running Zeno is the edit; changing code through the shell (a commit, a push, an in-place edit, a script that writes files) is development
-                if any(w in cmd for w in ("git commit", "git push", "sed -i", ".write_text(", "unittest")) and (any(h in cmd for h in CODE_PATH_HINTS) or ".py" in cmd):
+                import agent_log
+                cmd = str((blk.get("input") or {}).get("command") or "")
+                if agent_log._bash_touches_repo_code(cmd, eff_root):
                     code_edits += 1
     turns = sorted((by_id[m] for m in order), key=lambda item: item[0])
     if not turns:
@@ -168,10 +181,126 @@ def claude_window_usage(lines: List[str], cutoff: float, ceiling: float) -> Opti
     }
 
 
+_DELEGATION_TOOL_NAMES = frozenset({
+    "invoke_subagent",
+    "send_message",
+    "manage_subagents",
+    "Agent",
+    "Task",
+    "SendMessage",
+    "Subagent",
+})
+
+
+def _transcript_hint_signals(
+    lines: List[str],
+    raw_full: str,
+    hint: str,
+    cutoff: float,
+    ceiling: float,
+    *,
+    kind: str,
+) -> Tuple[bool, bool, bool, bool, bool]:
+    """Return (in_tool_strict, in_window, in_tool_near, in_full, in_doc_tool) for `hint`."""
+    if not hint:
+        return (False, False, False, False, False)
+    alt_doc = ""
+    if hint.startswith("gdoc_"):
+        parts = hint.split("_")
+        if len(parts) >= 2 and len(parts[1]) >= 8:
+            alt_doc = parts[1]
+    has_hint = hint in raw_full
+    has_alt = bool(alt_doc and alt_doc in raw_full)
+    if not has_hint and not has_alt:
+        return (False, False, False, False, False)
+
+    in_tool_strict = False
+    in_window = False
+    in_tool_near = False
+    in_doc_tool = False
+    for line in lines:
+        line_has_hint = has_hint and hint in line
+        line_has_alt = has_alt and alt_doc in line
+        if not line_has_hint and not line_has_alt:
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        if kind == "antigravity":
+            import agent_log
+
+            ts = agent_log._epoch(d.get("created_at"))
+        else:
+            ts = _iso_to_epoch(str(d.get("timestamp") or ""))
+        in_win = cutoff <= ts <= ceiling
+        near_win = (cutoff - 60.0) <= ts <= ceiling
+        if line_has_hint and in_win:
+            in_window = True
+        if not near_win:
+            continue
+        if kind == "antigravity" and d.get("type") == "PLANNER_RESPONSE":
+            for call in d.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                tname = str(call.get("name") or call.get("tool") or "").strip()
+                if tname in _DELEGATION_TOOL_NAMES:
+                    continue
+                call_txt = json.dumps(call, ensure_ascii=False)
+                if line_has_hint and hint in call_txt:
+                    in_tool_near = True
+                    if in_win:
+                        in_tool_strict = True
+                elif line_has_alt and alt_doc in call_txt and in_win:
+                    in_doc_tool = True
+        elif kind == "claude" and d.get("type") == "assistant":
+            msg = d.get("message") or {}
+            for blk in (msg.get("content") if isinstance(msg, dict) else None) or []:
+                if not isinstance(blk, dict) or blk.get("type") != "tool_use":
+                    continue
+                tname = str(blk.get("name") or "").strip()
+                if tname in _DELEGATION_TOOL_NAMES:
+                    continue
+                blk_txt = json.dumps(blk, ensure_ascii=False)
+                if line_has_hint and hint in blk_txt:
+                    in_tool_near = True
+                    if in_win:
+                        in_tool_strict = True
+                elif line_has_alt and alt_doc in blk_txt and in_win:
+                    in_doc_tool = True
+    return (in_tool_strict, in_window, in_tool_near, has_hint, in_doc_tool)
+
+
+def _cand_rank(
+    in_tool_strict: bool,
+    in_window: bool,
+    in_tool_near: bool,
+    has_project_hint: bool,
+    in_doc_tool: bool,
+    is_matched_sid: bool,
+    got: Dict[str, Any],
+    mtime: float,
+) -> Tuple[bool, bool, bool, bool, bool, bool, bool, float]:
+    mixed = bool(got.get("mixed_with_development"))
+    return (
+        in_tool_strict,
+        in_window,
+        in_tool_near,
+        has_project_hint,
+        in_doc_tool,
+        is_matched_sid,
+        not mixed,
+        mtime,
+    )
+
+
 def detect_agent_usage(
     since_epoch: Optional[float] = None,
     until_epoch: Optional[float] = None,
     session_id: Optional[str] = None,
+    project_hint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Auto-detect which AI agent harness (Antigravity vs Claude Code) and model are active,
     and measure ONLY the input/output tokens spent during this specific video edit window.
@@ -179,12 +308,14 @@ def detect_agent_usage(
     now = time.time()
     cutoff = since_epoch if (since_epoch and since_epoch > 0) else (now - 900.0)
     ceiling = until_epoch if (until_epoch and until_epoch > 0) else (now + 60.0)
+    hint = str(project_hint or "").strip()
 
     import codex_usage
     codex_thread = os.getenv("CODEX_THREAD_ID", "").strip()
-    clean_sid = session_id if (session_id and session_id not in ("local", "unknown")) else None
-    use_codex = bool(clean_sid or not os.getenv("CLAUDECODE"))
-    codex = codex_usage.detect(cutoff, ceiling, ROOT, session_id=clean_sid) if use_codex else None
+    clean_sid = str(session_id).strip() if (session_id and str(session_id).strip() not in ("", "local", "unknown")) else None
+    codex_sid = clean_sid if not os.getenv("CLAUDECODE") else None
+    use_codex = not bool(os.getenv("CLAUDECODE"))
+    codex = codex_usage.detect(cutoff, ceiling, ROOT, session_id=codex_sid) if use_codex else None
     if codex is not None:
         return codex
     if codex_thread and not os.getenv("CLAUDECODE"):
@@ -192,58 +323,106 @@ def detect_agent_usage(
                 "steps_count": 0, "input_tokens": 0, "cached_tokens": 0, "output_tokens": 0,
                 "total_tokens": 0, "token_precision": "unavailable",
                 "host_usage_unknown": True,
-                "session_id": clean_sid or codex_thread}
+                "session_id": codex_sid or codex_thread}
 
-    candidates: List[Tuple[float, Dict[str, Any]]] = []
+    candidates: List[Tuple[Tuple[bool, bool, bool, bool, bool, bool, bool, float], Dict[str, Any]]] = []
 
     # 1. Check Antigravity transcripts (~/.gemini/antigravity/brain/*/.system_generated/logs/transcript.jsonl)
     agy_pattern = os.path.expanduser("~/.gemini/antigravity/brain/*/.system_generated/logs/transcript.jsonl")
     agy_files = [] if os.getenv("CLAUDECODE") else sorted(glob.glob(agy_pattern), key=os.path.getmtime, reverse=True)
-    fallback_agy: Optional[Tuple[float, Dict[str, Any]]] = None
-    for path_str in agy_files[:6]:
+    if clean_sid and agy_files:
+        matched_agy = [p for p in agy_files if len(Path(p).parts) >= 4 and Path(p).parts[-4] == clean_sid]
+        other_agy = [p for p in agy_files if not (len(Path(p).parts) >= 4 and Path(p).parts[-4] == clean_sid)]
+        ordered_agy = matched_agy + other_agy[:12]
+    else:
+        ordered_agy = agy_files[:12]
+    fallback_agy: Optional[Tuple[Tuple[bool, bool, bool, bool, bool, bool, bool, float], Dict[str, Any]]] = None
+    agy_matched_any = False
+    for path_str in ordered_agy:
         try:
             mtime = os.path.getmtime(path_str)
             lines = Path(path_str).read_text(encoding="utf-8", errors="ignore").splitlines()
             if not lines:
                 continue
-            raw_sample = "\n".join(lines[-200:])
-            is_zeno = ROOT.name in raw_sample or "Zeno" in raw_sample or "zeno.py" in raw_sample
-            if len(agy_files) > 1 and not is_zeno and (now - mtime > 300):
+            raw_full = "\n".join(lines)
+            is_zeno = ROOT.name in raw_full or "Zeno" in raw_full or "zeno.py" in raw_full
+            sess_id = Path(path_str).parts[-4] if len(Path(path_str).parts) >= 4 else "unknown"
+            in_tool_strict, in_window, in_tool_near, has_project_hint, in_doc_tool = _transcript_hint_signals(
+                lines, raw_full, hint, cutoff, ceiling, kind="antigravity"
+            )
+            is_matched_sid = bool(clean_sid and sess_id == clean_sid and (not hint or has_project_hint))
+            if len(agy_files) > 1 and not is_matched_sid and not is_zeno and not has_project_hint and (now - mtime > 300):
                 continue
 
             import agent_log
-            sess_id = Path(path_str).parts[-4] if len(Path(path_str).parts) >= 4 else "unknown"
             got = agent_log.antigravity_window_usage(lines, cutoff, ceiling, session_id=sess_id)
             if got is not None:
-                if is_zeno or len(agy_files) == 1:
-                    candidates.append((mtime, got))
-                    break
-                if fallback_agy is None:
-                    fallback_agy = (mtime, got)
+                rank = _cand_rank(
+                    in_tool_strict, in_window, in_tool_near, has_project_hint, in_doc_tool, is_matched_sid, got, mtime
+                )
+                if is_matched_sid or is_zeno or has_project_hint or len(agy_files) == 1:
+                    candidates.append((rank, got))
+                    agy_matched_any = True
+                elif fallback_agy is None or rank > fallback_agy[0]:
+                    fallback_agy = (rank, got)
         except Exception:
             continue
-    if fallback_agy is not None and not any(c[1].get("agent_name") == "Antigravity" for c in candidates):
+    if fallback_agy is not None and not agy_matched_any:
         candidates.append(fallback_agy)
 
-    # 2. Check Claude Code transcripts (~/.claude/projects/**/*.jsonl)
-    claude_sid = os.getenv("CLAUDE_CODE_SESSION_ID", "") if os.getenv("CLAUDECODE") else ""
-    claude_pattern = os.path.expanduser(f"~/.claude/projects/**/{claude_sid or '*'}.jsonl")
-    claude_files = sorted(glob.glob(claude_pattern, recursive=True), key=os.path.getmtime, reverse=True)
-    for path_str in claude_files[:20]:
+    # 2. Check Claude Code transcripts (~/.claude/projects/**/*.jsonl, including subagents/*.jsonl)
+    claude_sid = os.getenv("CLAUDE_CODE_SESSION_ID", "").strip() or (clean_sid or "")
+    claude_sid_files: List[str] = []
+    if claude_sid:
+        claude_sid_files = sorted(
+            glob.glob(os.path.expanduser(f"~/.claude/projects/**/{glob.escape(claude_sid)}.jsonl"), recursive=True),
+            key=os.path.getmtime,
+            reverse=True,
+        )
+    all_claude_files = sorted(
+        glob.glob(os.path.expanduser("~/.claude/projects/**/*.jsonl"), recursive=True),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+    seen_claude: set[str] = set()
+    claude_scan_list: List[Tuple[str, bool]] = []
+    for p in claude_sid_files:
+        rp = os.path.realpath(p)
+        if rp not in seen_claude:
+            seen_claude.add(rp)
+            claude_scan_list.append((p, False))
+    for p in all_claude_files[:25]:
+        rp = os.path.realpath(p)
+        if rp not in seen_claude:
+            seen_claude.add(rp)
+            claude_scan_list.append((p, True))
+
+    for path_str, require_recent in claude_scan_list:
         try:
             mtime = os.path.getmtime(path_str)
-            if not claude_sid and mtime < cutoff - 60:
+            if require_recent and mtime < cutoff - 60:
                 continue
             lines = Path(path_str).read_text(encoding="utf-8", errors="ignore").splitlines()
+            if not lines:
+                continue
+            raw_full = "\n".join(lines)
             import agent_log
-            if not agent_log.chat_size(path_str, ROOT):
+            is_subagent = "/subagents/" in path_str.replace("\\", "/")
+            if not (agent_log.chat_size(path_str, ROOT) or (is_subagent and ROOT.name in raw_full)):
                 continue
             got = claude_window_usage(lines, cutoff, ceiling)
             if got is None:
                 continue
-            got["session_id"] = Path(path_str).stem
-            candidates.append((mtime, got))
-            break
+            sess_id = Path(path_str).stem
+            got["session_id"] = sess_id
+            in_tool_strict, in_window, in_tool_near, has_project_hint, in_doc_tool = _transcript_hint_signals(
+                lines, raw_full, hint, cutoff, ceiling, kind="claude"
+            )
+            is_matched_sid = bool(claude_sid and sess_id == claude_sid and (not hint or has_project_hint))
+            rank = _cand_rank(
+                in_tool_strict, in_window, in_tool_near, has_project_hint, in_doc_tool, is_matched_sid, got, mtime
+            )
+            candidates.append((rank, got))
         except Exception:
             continue
 
@@ -490,7 +669,7 @@ def save_prepare_snapshot(
     t_tot = sum(r["total_tokens"] for r in clip_rows)
     raw_sec = round(sum(r["raw_seconds"] for r in clip_rows), 2)
     kept_sec = round(sum(r["kept_seconds"] for r in clip_rows), 2)
-    agent = detect_agent_usage(since_epoch=job_start_epoch)
+    agent = detect_agent_usage(since_epoch=job_start_epoch, project_hint=project_name)
 
     snapshot = {
         "project": project_name,
@@ -637,26 +816,55 @@ def finalize_job_telemetry(
     snap_path = proj_dir / "token_telemetry.json"
     snap: Dict[str, Any] = read_json(snap_path) if snap_path.is_file() else {}
 
-    if snap.get("job_start_epoch"):
-        job_start = float(snap["job_start_epoch"])
+    job_end = float(completed_at if completed_at is not None else snap.get("job_end_epoch") or time.time())
+    cand_snap: Optional[float] = None
+    try:
+        if snap.get("job_start_epoch") and float(snap["job_start_epoch"]) > 0:
+            cand_snap = float(snap["job_start_epoch"])
+    except (TypeError, ValueError):
+        cand_snap = None
+
+    cand_started: Optional[float] = None
+    started_file = proj_dir / "job_started.json"
+    if started_file.is_file():
+        try:
+            s_val = (read_json(started_file) or {}).get("start")
+            if s_val and float(s_val) > 0:
+                cand_started = float(s_val)
+        except Exception:
+            cand_started = None
+
+    valid_cands = [c for c in (cand_snap, cand_started) if c is not None and c <= job_end + 1.0]
+    if valid_cands:
+        job_start = max(valid_cands)
     else:
         started_at = 0.0
-        started_file = proj_dir / "job_started.json"
-        if started_file.is_file():
+        try:
+            from common import job_start_epoch
+            started_at = float(job_start_epoch(create=False))
+        except Exception:
+            started_at = 0.0
+        job_start = started_at if 0 < started_at <= job_end + 1.0 else (job_end - 900.0)
+
+    if job_end - job_start > MAX_EDIT_WINDOW_SEC:
+        window_lo = job_end - MAX_EDIT_WINDOW_SEC
+        earliest: Optional[float] = None
+        for ev in _read_jsonl(proj_dir / "stage_events.jsonl"):
             try:
-                started_at = float((read_json(started_file) or {}).get("start") or 0.0)
-            except Exception:
-                started_at = 0.0
-        if started_at <= 0:
-            try:
-                from common import job_start_epoch
-                started_at = float(job_start_epoch(create=False))
-            except Exception:
-                started_at = 0.0
-        job_start = started_at if started_at > 0 else (time.time() - 900.0)
-    job_end = float(completed_at if completed_at is not None else snap.get("job_end_epoch") or time.time())
-    agent = detect_agent_usage(since_epoch=job_start, until_epoch=job_end,
-                               session_id=snap.get("agent_session_id") if str(snap.get("agent_name", "")).startswith("Codex") else None)
+                at = float(ev.get("at") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if window_lo <= at <= job_end:
+                if earliest is None or at < earliest:
+                    earliest = at
+        job_start = earliest if earliest is not None else (job_end - 1800.0)
+
+    agent = detect_agent_usage(
+        since_epoch=job_start,
+        until_epoch=job_end,
+        session_id=snap.get("agent_session_id"),
+        project_hint=project_name,
+    )
 
     clips: List[Dict[str, Any]] = snap.get("clips") or []
     t_in = int(snap.get("transcribe_in_tokens") or sum(int(c.get("input_tokens") or 0) for c in clips))
@@ -1022,6 +1230,8 @@ def _version_headers() -> Dict[str, str]:
 
 
 def _sync_to_cloud(r: Dict[str, Any]) -> bool:
+    if os.getenv("ZENO_NO_CLOUD_TELEMETRY", "").strip().lower() in ("1", "true", "yes", "on"):
+        return False
     url = ""
     token = ""
     try:

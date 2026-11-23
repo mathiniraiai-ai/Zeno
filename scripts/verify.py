@@ -465,6 +465,19 @@ def _resolve_clip_cache_dir(src: Any, plan: Optional[Dict[str, Any]] = None) -> 
     return wdir
 
 
+# Where the cut check found its problems, for the console only. Filled by `check_cuts_and_pauses`;
+# it never affects the counts or the pass/fail result.
+_CUT_FAIL_NOTES: List[str] = []
+
+
+def _cut_note(msg: str) -> None:
+    try:
+        if len(_CUT_FAIL_NOTES) < 40:
+            _CUT_FAIL_NOTES.append(str(msg))
+    except Exception:
+        pass
+
+
 def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None) -> Tuple[bool, int, int, int, int]:
     """Check cut boundaries against cached word spans + silences, plus rendered MP4 dead-air and boundary click scan.
     Returns (passed, clipped_words_count, long_pauses_count, masked_jump_cuts_count, boundary_clicks_count).
@@ -474,6 +487,7 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
     long_pauses = 0
     jump_cuts_masked = 0
     boundary_clicks = 0
+    del _CUT_FAIL_NOTES[:]
 
     fps = int((plan.get("canvas") or {}).get("fps", 30) or 30)
     starts, seg_durs, _, seg_start_map = compute_timeline_starts(plan, fps)
@@ -547,6 +561,7 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
                     for rem_s, rem_e in _subtract_intervals(ov_s, ov_e, clip_mark_holds):
                         if (rem_e - rem_s) > seg_dead_air:
                             long_pauses += 1
+                            _cut_note(f"{sid} pause {rem_s:.2f}-{rem_e:.2f}s in {stem}")
             except Exception:
                 pass
 
@@ -617,6 +632,7 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
                         near_db = [db for t, db in rms if abs(t - boundary_t) <= 0.025]
                         if near_db and max(near_db) > CLIPPED_WORD_RMS_FLOOR_DB:
                             clipped_words += 1
+                            _cut_note(f"{sid} cut at {boundary_t:.2f}s is inside a word in {stem}")
                             continue
                     if vad_spans and rms:
                         in_vad_interior = any(
@@ -633,6 +649,7 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
                                 )
                                 if not in_verified_gap:
                                     clipped_words += 1
+                                    _cut_note(f"{sid} cut at {boundary_t:.2f}s is inside continuous speech in {stem}")
             except Exception:
                 pass
 
@@ -673,6 +690,7 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
                     for rem_s, rem_e in _subtract_intervals(ov_s, ov_e, timeline_mark_holds):
                         if (rem_e - rem_s) > seg_thresh:
                             long_pauses += 1
+                            _cut_note(f"cut #{idx_s + 1} silence at {rem_s:.2f}-{rem_e:.2f}s of the finished video")
         except Exception:
             pass
 
@@ -709,6 +727,7 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
                         max_step = max(abs(int(pcm[k]) - int(pcm[k - 1])) for k in range(lo, hi))
                         if max_step > 24000:
                             boundary_clicks += 1
+                            _cut_note(f"click at the join at {jt:.2f}s of the finished video")
         except Exception:
             pass
 
@@ -3501,6 +3520,10 @@ def run_verification(
         f"[CUTS   {'PASS' if cuts_ok else 'FAIL'}] {len(plan.get('segments', []))} segments verified: "
         f"{clipped_w} clipped words, {long_pauses} internal pauses >0.6s, {jc_masked} jump-cuts masked, {b_clicks} boundary clicks"
     )
+    if not cuts_ok and _CUT_FAIL_NOTES:
+        _shown = _CUT_FAIL_NOTES[:12]
+        _more = f" (+{len(_CUT_FAIL_NOTES) - 12} more)" if len(_CUT_FAIL_NOTES) > 12 else ""
+        print("[CUTS   WHERE] " + "; ".join(_shown) + _more)
     print(
         f"[SCRIPT {'PASS' if script_ok else 'FAIL'}] {cov_lines}/{tot_lines} script lines present in order "
         f"({pct}% coverage, {b_dups} boundary duplicates)"

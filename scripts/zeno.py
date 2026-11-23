@@ -62,6 +62,90 @@ COMPACT_Child_RE = re.compile(
 )
 
 
+_ABS_VIDEO_PATH_RE = re.compile(
+    r"(?:^|(?<=[\s(\['\"=,:@]))(?:[A-Za-z]:)?[/\\][^\n;'\"]*?[/\\]([^/\\\n;'\"]+?\.(?:mp4|mov|m4v|mkv|webm|avi))",
+    re.I,
+)
+
+
+def _short_paths(text: str) -> str:
+    """Console display only: show a clip's file name in place of its full absolute path."""
+    try:
+        return _ABS_VIDEO_PATH_RE.sub(lambda m: m.group(1), text)
+    except Exception:
+        return text
+
+
+def _blocked_line_details(
+    proj_dir: Path,
+    blocked_text: str,
+    max_ids: int = 10,
+    max_bytes: int = 40000,
+    plan: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Candidates and clip measurements for every script line named in a plan-gate block (same text as `--line`)."""
+    ids: List[str] = []
+    for m in re.finditer(r"\b(L\d+)[a-z]?\b", blocked_text):
+        if m.group(1) not in ids:
+            ids.append(m.group(1))
+    if not ids:
+        return ""
+    picked_ids = ids[:max_ids]
+    try:
+        import edit_packet
+
+        used: List[str] = []
+        for m in re.finditer(
+            r'"([^/\\\n"]+?\.(?:mp4|mov|m4v|mkv|webm|avi))"|\'([^\'/\\\n]+?\.(?:mp4|mov|m4v|mkv|webm|avi))\'|([^\s/\\\n;\'"(=,:@]+?\.(?:mp4|mov|m4v|mkv|webm|avi))\b',
+            _short_paths(blocked_text),
+            re.I,
+        ):
+            nm = (m.group(1) or m.group(2) or m.group(3) or "").strip()
+            if nm and nm not in used:
+                used.append(nm)
+        for seg in (plan or {}).get("segments") or []:
+            sid = re.match(r"(L\d+)", str(seg.get("id") or ""))
+            nm = Path(str(seg.get("src") or "")).name
+            if sid and sid.group(1) in picked_ids and nm and nm not in used:
+                used.append(nm)
+        if hasattr(edit_packet, "lines_detail"):
+            body = edit_packet.lines_detail(proj_dir, picked_ids, max_bytes=max_bytes, extra_sources=used)
+        else:
+            picked_blocks: List[str] = []
+            seen_facts: set[str] = set()
+            fact_blocks: List[str] = []
+            for lid in picked_ids:
+                try:
+                    txt = str(edit_packet.line_detail(proj_dir, lid) or "").strip()
+                except Exception:
+                    continue
+                if not txt:
+                    continue
+                parts = re.split(r"(?m)(?=^## )", txt)
+                cand_part = parts[0].strip()
+                if cand_part:
+                    picked_blocks.append(cand_part)
+                for fb in parts[1:]:
+                    fb_s = fb.strip()
+                    if fb_s and fb_s not in seen_facts:
+                        seen_facts.add(fb_s)
+                        fact_blocks.append(fb_s)
+            if not picked_blocks:
+                return ""
+            body = "\n\n".join(picked_blocks)
+            for fb in fact_blocks:
+                if max_bytes and len((body + "\n\n" + fb).encode("utf-8")) > max_bytes:
+                    body += '\n\n(more clip measurements left out to keep this short; run edit_packet.py <project> --clip "<name>" for one clip)'
+                    break
+                body += "\n\n" + fb
+    except Exception:
+        return ""
+    if not body or not body.strip():
+        return ""
+    more = f" (+{len(ids) - max_ids} more line(s) not shown)" if len(ids) > max_ids else ""
+    return f"[LINE DETAILS] {', '.join(picked_ids)}{more} — candidates and measurements, no separate lookup needed:\n{body}"
+
+
 def _venv_py_cmd() -> str:
     return r".venv\Scripts\python.exe" if common.IS_WIN else ".venv/bin/python"
 
@@ -144,30 +228,97 @@ def _archive_call(fn_name: str, *args: Any, **kwargs: Any) -> Any:
     return None
 
 
+MAX_EDIT_WINDOW_SEC = 4 * 3600
+
+
 def _job_start_from_project(proj_dir: Path, snap: Dict[str, Any]) -> float:
-    cand = snap.get("job_start_epoch")
+    now = time.time()
+    cand_snap: Optional[float] = None
+    raw_snap = snap.get("job_start_epoch")
     try:
-        if cand and float(cand) > 0:
-            return float(cand)
+        if raw_snap and float(raw_snap) > 0:
+            cand_snap = float(raw_snap)
     except (TypeError, ValueError):
-        pass
+        cand_snap = None
+
+    cand_started: Optional[float] = None
     started_file = proj_dir / "job_started.json"
     if started_file.is_file():
         try:
             started = json.loads(started_file.read_text(encoding="utf-8")).get("start")
             if started and float(started) > 0:
-                return float(started)
+                cand_started = float(started)
         except Exception:
-            pass
-    js_fn = getattr(common, "job_start_epoch", None)
-    if callable(js_fn):
-        try:
-            val = js_fn(create=False)
-            if val and float(val) > 0:
-                return float(val)
-        except Exception:
-            pass
-    return time.time() - 900.0
+            cand_started = None
+
+    cands = [c for c in (cand_snap, cand_started) if c is not None and c <= now + 5.0]
+    if cands:
+        chosen = max(cands)
+    else:
+        chosen = 0.0
+        js_fn = getattr(common, "job_start_epoch", None)
+        if callable(js_fn):
+            try:
+                val = js_fn(create=False)
+                if val and float(val) > 0:
+                    chosen = float(val)
+            except Exception:
+                pass
+        if chosen <= 0.0 or chosen > now + 5.0:
+            chosen = now - 900.0
+
+    if now - chosen > MAX_EDIT_WINDOW_SEC:
+        window_lo = now - MAX_EDIT_WINDOW_SEC
+        earliest: Optional[float] = None
+        events_file = proj_dir / "stage_events.jsonl"
+        if events_file.is_file():
+            try:
+                for line in events_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(ev, dict):
+                        continue
+                    try:
+                        at = float(ev.get("at") or 0.0)
+                    except (TypeError, ValueError):
+                        continue
+                    if window_lo <= at <= now:
+                        if earliest is None or at < earliest:
+                            earliest = at
+            except OSError:
+                pass
+        chosen = earliest if earliest is not None else (now - 1800.0)
+    return chosen
+
+
+def _detect_active_session_id(now: float, project_hint: Optional[str] = None) -> str:
+    if os.getenv("CLAUDECODE"):
+        sid = os.getenv("CLAUDE_CODE_SESSION_ID", "").strip()
+        if sid:
+            return sid
+    elif os.getenv("CODEX_THREAD_ID"):
+        sid = os.getenv("CODEX_THREAD_ID", "").strip()
+        if sid:
+            return sid
+    try:
+        import token_tracker
+
+        if hasattr(token_tracker, "detect_agent_usage"):
+            probe = token_tracker.detect_agent_usage(
+                since_epoch=now - 1800.0,
+                until_epoch=now + 60.0,
+                project_hint=project_hint,
+            )
+            cand_sid = str((probe or {}).get("session_id") or "").strip()
+            if cand_sid and cand_sid not in ("local", "unknown"):
+                return cand_sid
+    except Exception:
+        pass
+    return ""
 
 
 def _capture_token_session(proj_dir: Path, completed_at: Optional[float] = None) -> None:
@@ -178,12 +329,16 @@ def _capture_token_session(proj_dir: Path, completed_at: Optional[float] = None)
         if not hasattr(token_tracker, "detect_agent_usage"):
             return
         snap_path = proj_dir / "token_telemetry.json"
-        raw_snap = common.read_json(snap_path) if snap_path.is_file() else {}
+        raw_snap = common.read_json(snap_path, default={}) if snap_path.is_file() else {}
         snap: Dict[str, Any] = dict(raw_snap) if isinstance(raw_snap, dict) else {}
         job_start = _job_start_from_project(proj_dir, snap)
         now = float(completed_at if completed_at is not None else time.time())
-        codex_sid = snap.get("agent_session_id") if str(snap.get("agent_name", "")).startswith("Codex") else None
-        agent = token_tracker.detect_agent_usage(since_epoch=job_start, until_epoch=now, session_id=codex_sid)
+        agent = token_tracker.detect_agent_usage(
+            since_epoch=job_start,
+            until_epoch=now,
+            session_id=snap.get("agent_session_id"),
+            project_hint=proj_dir.name,
+        )
         if not isinstance(agent, dict):
             return
         a_in = int(agent.get("input_tokens") or 0)
@@ -191,7 +346,7 @@ def _capture_token_session(proj_dir: Path, completed_at: Optional[float] = None)
         a_out = int(agent.get("output_tokens") or 0)
         a_tot = int(agent.get("total_tokens") or (a_in + a_out))
         snap.setdefault("project", proj_dir.name)
-        snap.setdefault("job_start_epoch", job_start)
+        snap["job_start_epoch"] = job_start
         snap["job_end_epoch"] = now
         if a_tot > 0 or a_cache > 0 or not snap.get("agent_total_tokens"):
             snap["agent_name"] = agent.get("agent_name") or snap.get("agent_name") or "unknown"
@@ -502,7 +657,46 @@ def run_inspect(
     project_name = project_name or common.resolve_user_project_name(script_path.stem)
     work_dir = WORK / project_name
     common.stamp_job_owner(work_dir)
-    _archive_call("mark_started", work_dir)
+    is_retry = bool(os.environ.get("ZENO_RETRY_INCOMPLETE") or os.environ.get("ZENO_RETRY_CLIPS"))
+    if not is_retry:
+        try:
+            import inspect as _inspect
+            import job_archive as _ja
+
+            _params = _inspect.signature(_ja.mark_started).parameters
+            _accepts_kw = "force_fresh" in _params or any(
+                p.kind == _inspect.Parameter.VAR_KEYWORD for p in _params.values()
+            )
+        except Exception:
+            _accepts_kw = False
+        if _accepts_kw:
+            _archive_call("mark_started", work_dir, force_fresh=True)
+        else:
+            _archive_call("mark_started", work_dir)
+        try:
+            snap_path = work_dir / "token_telemetry.json"
+            if snap_path.is_file():
+                raw_snap = common.read_json(snap_path, default={})
+                if isinstance(raw_snap, dict) and raw_snap:
+                    snap = dict(raw_snap)
+                    now = time.time()
+                    try:
+                        old_start = float(snap.get("job_start_epoch") or 0.0)
+                    except (TypeError, ValueError):
+                        old_start = 0.0
+                    if snap.get("job_end_epoch") or (now - old_start > 2 * 3600):
+                        snap["job_start_epoch"] = round(now, 1)
+                        snap.pop("job_end_epoch", None)
+                        active_sid = _detect_active_session_id(now, project_hint=project_name)
+                        if active_sid:
+                            snap["agent_session_id"] = active_sid
+                        else:
+                            snap.pop("agent_session_id", None)
+                        common.write_json(snap_path, snap)
+        except Exception:
+            pass
+    else:
+        _archive_call("mark_started", work_dir)
 
     tracker = ProgressTracker(work_dir=work_dir, project_name=project_name, heartbeat_sec=48.0, video_name=name)
     tracker.start_heartbeat()
@@ -574,7 +768,9 @@ def print_inspect_guide(plan_path: Path, name: str = "") -> None:
         f"[TURN 2] WRITE PLAN: {rel_plan} (every spoken line once in order, `sp=\"Name\"`, all splits `z=1`).",
         f"[TURN 2] OPTIONAL: {rel_dir}/decisions.txt (`accept <id> <reason>` only for genuine unscripted gaps).",
         f"[TURN 3] EXECUTE & DELIVER: {py_cmd} scripts/zeno.py --execute {rel_plan} --square --compact",
-        f"[TURN 3] FIX ONE LINE:     {py_cmd} scripts/edit_packet.py {rel_dir} --line <ID> (avoid re-reading full packet on repairs)",
+        "[TURN 3] IF BLOCKED: the output already lists every problem line with its candidates and measurements — "
+        "fix all of them in one plan.edl edit, then run --execute once (no separate lookups, no full-packet re-read).",
+        f"[TURN 3] EXTRA LOOKUP (only if needed): {py_cmd} scripts/edit_packet.py {rel_dir} --line <ID>",
         "[WAIT]   End turn if backgrounded and wait for async wakeup (never poll sleep/stdin/tasks).",
         f"[TURN 4] Inspect {target_dl}review_sheet.jpg once, then start next video.",
     ]
@@ -600,10 +796,41 @@ def _clip_has_incomplete_issue(d: Dict[str, Any]) -> bool:
     return any((b - a) >= 2.0 for a, b in unc) or sum(max(0.0, b - a) for a, b in unc) >= 2.0
 
 
+def _auto_retry_incomplete(proj_dir: Path, rerun: Callable[[], Path]) -> Tuple[Path, Optional[List[Dict[str, Any]]], bool]:
+    """Run the existing --retry-incomplete pass once, inside the same inspect command, when clips are incomplete.
+
+    Same retry the agent would otherwise start by hand; healthy clip caches are preserved. Skipped when every
+    incomplete clip is waiting on a quota cooldown, since an immediate retry cannot help there.
+    Returns (plan_path_or_proj_dir, diagnostics_before_retry, retried).
+    """
+    before = _snapshot_clip_diags(proj_dir)
+    bad = [d for d in (before or []) if _clip_has_incomplete_issue(d)]
+    if not bad or os.environ.get("ZENO_NO_AUTO_RETRY", "").strip() == "1":
+        return proj_dir, before, False
+    if all(str(d.get("status") or "").lower() == "quota_exceeded" for d in bad):
+        return proj_dir, before, False
+    names = ", ".join(str(d.get("display_name")) for d in bad[:4]) + (f" (+{len(bad) - 4} more)" if len(bad) > 4 else "")
+    print(f"\n[AUTO RETRY] Incomplete clip(s): {names} — retrying them now (healthy clips are kept).", flush=True)
+    prev_env = os.environ.get("ZENO_RETRY_INCOMPLETE")
+    os.environ["ZENO_RETRY_INCOMPLETE"] = "1"
+    try:
+        new_plan = rerun()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[AUTO RETRY] Retry could not run ({exc}); continuing with the first pass.", flush=True)
+        return proj_dir, before, False
+    finally:
+        if prev_env is None:
+            os.environ.pop("ZENO_RETRY_INCOMPLETE", None)
+        else:
+            os.environ["ZENO_RETRY_INCOMPLETE"] = prev_env
+    return new_plan, before, True
+
+
 def _report_inspect_completeness(
     proj_dir: Path,
     before: Optional[List[Dict[str, Any]]] = None,
     retry_mode: bool = False,
+    auto_retried: bool = False,
 ) -> None:
     try:
         import edit_packet
@@ -669,8 +896,14 @@ def _report_inspect_completeness(
             parts.append(f"{d['display_name']} ({', '.join(details)})")
         more = f" (+{len(bad) - 4} more)" if len(bad) > 4 else ""
         print(
-            f"[INCOMPLETE CLIPS] {'; '.join(parts)}{more} — run `{py_cmd} scripts/zeno.py {rel_dir} --retry-incomplete --compact` "
-            f"(or `{py_cmd} scripts/edit_packet.py {rel_dir} --diagnose`) before planning.",
+            f"[INCOMPLETE CLIPS] {'; '.join(parts)}{more} — "
+            + (
+                "already retried once in this run; plan with what the packet holds and record genuine gaps in decisions.txt "
+                f"(details: `{py_cmd} scripts/edit_packet.py {rel_dir} --diagnose`)."
+                if auto_retried
+                else f"run `{py_cmd} scripts/zeno.py {rel_dir} --retry-incomplete --compact` "
+                f"(or `{py_cmd} scripts/edit_packet.py {rel_dir} --diagnose`) before planning."
+            ),
             flush=True,
         )
 
@@ -831,8 +1064,14 @@ def run_execute_and_deliver(
     blocked = order_gate(plan, p_path)
     _archive_call("snapshot_plan", p_path, "render", note=blocked or "pass")
     if blocked:
-        print(blocked, flush=True)
-        print("\n[BLOCKED] Render stopped by plan gate. Fix plan.edl and run --execute again.", flush=True)
+        print(_short_paths(blocked), flush=True)
+        details = _blocked_line_details(p_path.parent, blocked, plan=plan)
+        if details:
+            print("\n" + details, flush=True)
+        print(
+            "\n[BLOCKED] Render stopped by plan gate. Fix every line listed above in one plan.edl edit, then run --execute once.",
+            flush=True,
+        )
         reason = blocked.splitlines()[0]
         _capture_token_session(p_path.parent)
         _archive_call("event", p_path.parent, "blocked", reason=reason)
@@ -919,6 +1158,11 @@ def run_execute_and_deliver(
             tracker.stop_heartbeat(final_state="error", final_detail=f"render.py exited with {rc}")
             completed = True
             reason = f"render.py exited with code {rc}"
+            print(
+                "\n[BLOCKED] The render check failed and nothing was delivered. Each FAIL line above names the check; "
+                "a WHERE line under it names the cuts. Fix those in plan.edl in one edit, then run --execute once.",
+                flush=True,
+            )
             _capture_token_session(p_path.parent)
             _archive_call("event", p_path.parent, "failed", stage="render", rc=rc, reason=reason)
             _archive_call(
@@ -1050,10 +1294,33 @@ def run_queue(
                 name=job_name,
                 compact=compact,
             )
+            q_retry_mode = bool(os.environ.get("ZENO_RETRY_INCOMPLETE") or os.environ.get("ZENO_RETRY_CLIPS"))
+            q_before: Optional[List[Dict[str, Any]]] = None
+            q_auto = False
+            if not q_retry_mode:
+                _q_first = plan_path
+                q_res, q_auto_before, q_auto = _auto_retry_incomplete(
+                    plan_path.parent,
+                    lambda: run_inspect(
+                        raw_inputs=job_inputs,
+                        script_path=script_path,
+                        lang=job_lang,
+                        preset=job_preset,
+                        mark_pack=job_mark_pack,
+                        style=job_style,
+                        name=job_name,
+                        compact=compact,
+                        project_name=_q_first.parent.name,
+                    ),
+                )
+                if q_auto:
+                    plan_path, q_before = q_res, q_auto_before
             proj_dir = plan_path.parent
             _report_inspect_completeness(
                 proj_dir,
-                retry_mode=bool(os.environ.get("ZENO_RETRY_INCOMPLETE") or os.environ.get("ZENO_RETRY_CLIPS")),
+                before=q_before,
+                retry_mode=q_retry_mode or q_auto,
+                auto_retried=q_auto,
             )
             proj_rel = _rel_workspace_path(proj_dir)
             plan_rel = _rel_workspace_path(plan_path)
@@ -1434,8 +1701,29 @@ def main() -> None:
             compact=args.compact,
             project_name=eff_project,
         )
+        auto_retried = False
+        if not retry_mode:
+            _first_plan = plan_path
+            res, auto_before, auto_retried = _auto_retry_incomplete(
+                plan_path.parent,
+                lambda: run_inspect(
+                    raw_inputs=eff_inputs,
+                    script_path=script_path,
+                    lang=args.lang,
+                    preset=eff_preset,
+                    mark_pack=eff_mark_pack,
+                    style=eff_style,
+                    name=eff_name,
+                    compact=args.compact,
+                    project_name=eff_project or _first_plan.parent.name,
+                ),
+            )
+            if auto_retried:
+                plan_path, before_diag = res, auto_before
         print_inspect_guide(plan_path, name=eff_name)
-        _report_inspect_completeness(plan_path.parent, before=before_diag, retry_mode=retry_mode)
+        _report_inspect_completeness(
+            plan_path.parent, before=before_diag, retry_mode=retry_mode or auto_retried, auto_retried=auto_retried
+        )
         sys.exit(0)
 
     ap.print_help()

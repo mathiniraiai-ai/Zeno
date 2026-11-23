@@ -128,21 +128,40 @@ def _feedback(proj_dir: Path) -> List[Dict[str, Any]]:
     return out[-100:]
 
 
-def mark_started(proj_dir: Path) -> None:
+def mark_started(proj_dir: Path, force_fresh: bool = False) -> None:
     """Remember when this edit began (the first inspect), so the record can find the agent conversation of the whole job."""
     try:
-        f = Path(proj_dir) / STARTED
-        if f.is_file():
-            old = json.loads(f.read_text(encoding="utf-8")).get("start", 0)
-            if time.time() - float(old) < 12 * 3600:
-                return
-        Path(proj_dir).mkdir(parents=True, exist_ok=True)
-        try:
-            from common import job_start_epoch
-            start = job_start_epoch(create=False)
-        except Exception:
-            start = time.time()
-        f.write_text(json.dumps({"start": round(min(start, time.time()), 1)}), encoding="utf-8")
+        proj = Path(proj_dir)
+        f = proj / STARTED
+        now = time.time()
+        has_completed_end = False
+        snap_file = proj / "token_telemetry.json"
+        if snap_file.is_file():
+            try:
+                snap_data = json.loads(snap_file.read_text(encoding="utf-8"))
+                if isinstance(snap_data, dict) and snap_data.get("job_end_epoch"):
+                    has_completed_end = True
+            except Exception:
+                pass
+        if not force_fresh and not has_completed_end and f.is_file():
+            try:
+                old = json.loads(f.read_text(encoding="utf-8")).get("start", 0)
+                if old and (now - float(old)) < 2 * 3600:
+                    return
+            except Exception:
+                pass
+        proj.mkdir(parents=True, exist_ok=True)
+        if force_fresh or has_completed_end or f.is_file():
+            start = now
+        else:
+            try:
+                from common import job_start_epoch
+                start = float(job_start_epoch(create=False))
+            except Exception:
+                start = now
+            if start <= 0 or (now - start) >= 2 * 3600:
+                start = now
+        f.write_text(json.dumps({"start": round(min(start, now), 1)}), encoding="utf-8")
     except Exception:
         pass
 
