@@ -2570,6 +2570,12 @@ def main() -> None:
             "anomalies": [],
         })
 
+    if align_engine is not None and hasattr(align_engine, "unload_shared_pipeline"):
+        try:
+            align_engine.unload_shared_pipeline()
+        except Exception:
+            pass
+
     # Auto-pair <stem>.mp4 video with <stem>VO.mp4 voiceover audio when both exist
     by_stem_upper = {c["stem"].upper(): c for c in clips_data}
     for c in clips_data:

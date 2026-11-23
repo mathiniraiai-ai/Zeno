@@ -440,12 +440,6 @@ class IndicPhoneticMapper:
         if has_indic_chars:
             # Step 1: Transliterate native Indic script characters to Roman phonemes
             transliterated = cls.transliterate_indic_script(source_word)
-            alpha_only = re.sub(r'[^a-zA-Z]', '', transliterated)
-            # Fall back to uroman `word` cleanly if transliterate_indic_script produces < 2 chars
-            if len(alpha_only) < 2 and not cls.is_pure_indic(word):
-                uroman_alpha = re.sub(r'[^a-zA-Z]', '', word)
-                if len(uroman_alpha) > len(alpha_only):
-                    transliterated = word
             # Step 2: Convert numbers to words
             w = cls.number_to_words(transliterated.lower().strip())
             # Step 3: Apply language-specific Indic phoneme smoothing

@@ -562,6 +562,7 @@ def engine_versions() -> Dict[str, str]:
             ae / "onset_verifier.py",
             ae / "pipeline.py",
             ae / "__init__.py",
+            ae / "data" / "omniasr_vocab.json",
             *ae.glob("phonetics/*.py"),
         ]
         _engine_versions.update({

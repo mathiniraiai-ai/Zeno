@@ -2981,6 +2981,10 @@ def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path, plan_path:
             except Exception:
                 pass
             try:
+                moved += tighten_joins(plan)
+            except Exception:
+                pass
+            try:
                 cards_calibrated = calibrate_flashcards(plan, script_path, work_dir)
             except Exception:
                 pass
@@ -3664,22 +3668,23 @@ def cut_problems(plan: Dict[str, Any]) -> List[str]:
                 if in_word_gap:
                     continue
 
+                quiet_thr = _quiet_level(env) if env else -42.0
                 if name == "end":
                     has_next_word_gap = any(
                         t + 0.04 <= float(w["start"]) <= t + 0.65
                         for w in live_ws
                     )
-                    at_word_edge = any(
-                        float(w["end"]) - 0.02 <= t <= float(w["end"]) + 0.08
-                        for w in live_ws
-                    ) and ((sp1 - t) <= 0.18 or has_next_word_gap)
-                    if at_word_edge:
-                        continue
                     tail_loud = (
                         max((db for tt, db in env if t - 0.03 <= tt <= min(sp1, t + 0.30)), default=-140.0)
                         if env
                         else 0.0
                     )
+                    at_word_edge = any(
+                        float(w["end"]) - 0.02 <= t <= float(w["end"]) + (0.25 if (env and tail_loud < quiet_thr) else 0.12)
+                        for w in live_ws
+                    ) and ((sp1 - t) <= 0.22 or has_next_word_gap)
+                    if at_word_edge:
+                        continue
                     if (sp1 - t) > 0.22 and (not env or tail_loud >= -44.0) and not has_next_word_gap:
                         out.append(
                             f"{s.get('id')} {name} {t:.2f} cuts inside continuous VAD speech ({sp0:.2f}-{sp1:.2f}) — "
@@ -3691,17 +3696,17 @@ def cut_problems(plan: Dict[str, Any]) -> List[str]:
                         t - 0.65 <= float(w["end"]) <= t - 0.04
                         for w in live_ws
                     )
-                    at_word_edge = any(
-                        float(w["start"]) - 0.08 <= t <= float(w["start"]) + 0.02
-                        for w in live_ws
-                    ) and ((t - sp0) <= 0.18 or has_prev_word_gap)
-                    if at_word_edge:
-                        continue
                     head_loud = (
                         max((db for tt, db in env if max(sp0, t - 0.30) <= tt <= t + 0.03), default=-140.0)
                         if env
                         else 0.0
                     )
+                    at_word_edge = any(
+                        float(w["start"]) - (0.25 if (env and head_loud < quiet_thr) else 0.12) <= t <= float(w["start"]) + 0.02
+                        for w in live_ws
+                    ) and ((t - sp0) <= 0.22 or has_prev_word_gap)
+                    if at_word_edge:
+                        continue
                     if (t - sp0) > 0.22 and (not env or head_loud >= -44.0) and not has_prev_word_gap:
                         out.append(
                             f"{s.get('id')} {name} {t:.2f} cuts inside continuous VAD speech ({sp0:.2f}-{sp1:.2f}) — "
@@ -3711,6 +3716,8 @@ def cut_problems(plan: Dict[str, Any]) -> List[str]:
 
                 loud = max((db for tt, db in env if t - 0.03 <= tt <= t + 0.03), default=-140.0) if env else 0.0
                 if env and loud < -50.0:
+                    continue
+                if env and loud < quiet_thr and ((sp1 - t) if name == "end" else (t - sp0)) <= 0.25:
                     continue
                 out.append(
                     f"{s.get('id')} {name} {t:.2f} cuts inside active VAD speech ({sp0:.2f}-{sp1:.2f}; run --retry-incomplete if untranscribed)"
@@ -4312,23 +4319,38 @@ def snap_cuts(plan: Dict[str, Any]) -> int:
     return moved
 
 
-TAIL_REACH_SEC = 0.55     # Max a cut may move past the aligner's word end to keep the voice's natural fade-out / VAD tail
-ONSET_REACH_SEC = 0.30    # Max a cut may move before the aligner's word start to keep the voice's onset
-QUIET_FRAMES = 5          # 50 ms below the clip's quiet level counts as silence
+TAIL_REACH_SEC = 0.50     # Max a cut may move past the aligner's word end to keep the voice's natural fade-out
+ONSET_REACH_SEC = 0.16    # Max a cut may move before the aligner's word start to keep the voice's onset
+QUIET_FRAMES = 5          # 50 ms below the clip's voice-decay level confirms silence (ignores <=40 ms stop closures)
+
+JOIN_TARGET_SAME_SPEAKER_SEC = 0.09  # 90 ms audible silence between same-speaker cuts
+JOIN_TARGET_TURN_CHANGE_SEC = 0.13   # 130 ms audible silence across speaker changes
+JOIN_TARGET_TRANSITION_SEC = 0.18    # 180 ms audible silence when a visual transition spans the join
+JOIN_MIN_TAIL_CUSHION_SEC = 0.045    # Never trim closer than 45 ms after true RMS voice end
+JOIN_MIN_HEAD_CUSHION_SEC = 0.035    # Never trim closer than 35 ms before true RMS voice onset
+AUDIO_XFADE_SEC = 0.016              # Matches render.py 16 ms triangular audio acrossfade
 
 
 def _quiet_level(env: List[Tuple[float, float]]) -> float:
-    """Clip silence floor: 2nd-percentile dBFS + 8.0 dB, capped at -38.0 dB (safe even on 98%-speech clips)."""
+    """Clip voice-decay threshold separating real speech fade-out from room tone / soft breaths.
+
+    Uses 2nd-percentile noise floor + 10 dB and 75th-percentile speech - 22 dB, clamped to `[-42.0, -34.0]` dBFS.
+    """
     dbs = sorted(db for _, db in env)
     if not dbs:
-        return -42.0
-    return min(-38.0, dbs[max(0, int(len(dbs) * 0.02))] + 8.0)
+        return -40.0
+    floor = dbs[max(0, int(len(dbs) * 0.02))]
+    speech = dbs[min(len(dbs) - 1, int(len(dbs) * 0.75))]
+    return min(-34.0, max(-42.0, floor + 10.0, speech - 22.0))
 
 
 def protect_tails(plan: Dict[str, Any]) -> int:
-    """Keep every spoken word whole at the cut. Filters ghost words first, extends `seg['end']` across audible RMS
-    fade-outs (`db >= quiet`) AND active VAD `speech_spans` (up to +0.55s, bounded by `next_live_word.start - 0.04`
-    and clip duration) with >= 0.06s tail guard after the last word, and protects `seg['start']` onsets."""
+    """Keep every spoken word whole at cut edges without chasing Silero VAD's silent padding.
+
+    Filters ghost words first. Only extends `seg['end']` or pulls back `seg['start']` when real
+    audible voice energy (`db >= quiet`) is present at the cut boundary or the cut sits too close to
+    the first/last word (`<40ms` lead or `<50ms` tail). Never walks across pure room-tone VAD padding.
+    """
     from prepare import find_rms_minimum, words_in_silence
 
     moved = 0
@@ -4366,7 +4388,7 @@ def protect_tails(plan: Dict[str, Any]) -> int:
         st, en = float(s["start"]), float(s["end"])
         has_live_beat_tail = s.get("audio_end") is not None and _effective_audio_end_src(s, st, en) < en - 0.05
 
-        # 1) end: protect last live word fade-out and any active VAD span continuing past seg["end"]
+        # 1) end: protect last live word fade-out ONLY when audible voice is present at `en` or `en` is tight (<50ms)
         if not has_live_beat_tail:
             before = [w for w in ws if float(w["start"]) < en - 0.02]
             if before:
@@ -4374,7 +4396,9 @@ def protect_tails(plan: Dict[str, Any]) -> int:
                 w_end = float(w["end"])
                 after = [x for x in ws if float(x["start"]) >= max(w_end - 0.01, float(w["start"]) + 0.02) and x is not w]
                 nxt = float(after[0]["start"]) if after else clip_end
-                if en >= w_end - EDGE_GRAZE_MAX_SEC:
+                end_edge_db = max(db_at(en - 0.02), db_at(en - 0.01), db_at(en), db_at(en + 0.01))
+                needs_end_rescue = (en < w_end + 0.05) or (end_edge_db >= quiet)
+                if needs_end_rescue and en >= w_end - EDGE_GRAZE_MAX_SEC:
                     scan_from = max(en, w_end)
                     limit = min(max(w_end, en) + TAIL_REACH_SEC, w_end + TAIL_REACH_SEC, (nxt - 0.04) if after else clip_end, clip_end)
                     vad_tail = max(
@@ -4390,25 +4414,29 @@ def protect_tails(plan: Dict[str, Any]) -> int:
                     )
                     t, run, voice_end = scan_from, 0, None
                     while t <= limit:
-                        is_active = (db_at(t) >= quiet) or (vad_tail is not None and t < min(vad_tail, limit))
+                        d_now = db_at(t)
+                        is_active = (d_now >= quiet) or (
+                            vad_tail is not None and t < min(vad_tail, limit) and d_now >= quiet - 4.0
+                        )
                         run = 0 if is_active else (run + 1)
                         if run >= QUIET_FRAMES:
                             voice_end = t - (QUIET_FRAMES - 1) * step
                             break
                         t += step
                     if voice_end is not None:
-                        target = voice_end + 0.04
-                    elif vad_tail is not None and vad_tail <= limit + 0.02:
-                        target = min(limit, vad_tail + 0.04)
+                        target = voice_end + JOIN_MIN_TAIL_CUSHION_SEC
+                    elif vad_tail is not None and vad_tail <= limit + 0.02 and db_at(min(limit, vad_tail)) >= quiet - 4.0:
+                        target = min(limit, vad_tail + JOIN_MIN_TAIL_CUSHION_SEC)
                     else:
                         target = float(find_rms_minimum(env, scan_from, limit)[0]) if limit > scan_from else en
-                    min_tail_guard = min(limit, w_end + 0.06)
+                    min_tail_guard = min(limit, w_end + 0.05)
                     target = round(min(max(target, min_tail_guard), limit), 2)
                     if target > en + 0.01 and target - st > 0.1:
                         s["end"] = target
                         en = target
                         moved += 1
             elif spoken:
+                end_edge_db = max(db_at(en - 0.02), db_at(en - 0.01), db_at(en), db_at(en + 0.01))
                 vad_only_end = max(
                     (
                         float(sp1)
@@ -4417,23 +4445,33 @@ def protect_tails(plan: Dict[str, Any]) -> int:
                     ),
                     default=None,
                 )
-                if vad_only_end is not None:
+                if vad_only_end is not None and end_edge_db >= quiet:
                     nxt_w = min((float(x["start"]) for x in ws if float(x["start"]) > en + 0.02), default=clip_end)
                     limit = min(en + TAIL_REACH_SEC, (nxt_w - 0.04) if nxt_w < clip_end else clip_end, clip_end)
-                    target = round(min(vad_only_end + 0.04, limit), 2)
+                    t, run, voice_end = en, 0, None
+                    while t <= min(limit, vad_only_end):
+                        is_active = db_at(t) >= quiet - 4.0
+                        run = 0 if is_active else (run + 1)
+                        if run >= QUIET_FRAMES:
+                            voice_end = t - (QUIET_FRAMES - 1) * step
+                            break
+                        t += step
+                    target = round(min((voice_end if voice_end is not None else vad_only_end) + JOIN_MIN_TAIL_CUSHION_SEC, limit), 2)
                     if target > en + 0.01 and target - st > 0.1:
                         s["end"] = target
                         en = target
                         moved += 1
 
-        # 2) start: protect first live word onset (and any leading VAD onset right before it)
+        # 2) start: protect first live word onset ONLY when audible voice is present at `st` or `st` is tight (<40ms)
         later = [w for w in ws if float(w["end"]) > st + 0.02]
         if later:
             w = later[0]
             w_start = float(w["start"])
             prior = [x for x in ws if float(x["end"]) <= w_start + 0.01 and x is not w]
             prev_end = float(prior[-1]["end"]) if prior else 0.0
-            if st <= w_start + EDGE_GRAZE_MAX_SEC:
+            start_edge_db = max(db_at(st - 0.01), db_at(st), db_at(st + 0.01), db_at(st + 0.02))
+            needs_start_rescue = (st > w_start - 0.04) or (start_edge_db >= quiet)
+            if needs_start_rescue and st <= w_start + EDGE_GRAZE_MAX_SEC:
                 limit = max(w_start - ONSET_REACH_SEC, (prev_end + 0.04) if prior else 0.0, 0.0)
                 vad_head = min(
                     (
@@ -4447,7 +4485,10 @@ def protect_tails(plan: Dict[str, Any]) -> int:
                 )
                 t, run, onset = min(st, w_start), 0, None
                 while t >= limit:
-                    is_active = (db_at(t) >= quiet) or (vad_head is not None and t > max(vad_head, limit))
+                    d_now = db_at(t)
+                    is_active = (d_now >= quiet) or (
+                        vad_head is not None and t > max(vad_head, limit) and d_now >= quiet - 4.0
+                    )
                     run = 0 if is_active else (run + 1)
                     if run >= QUIET_FRAMES:
                         onset = t + (QUIET_FRAMES - 1) * step
@@ -4455,7 +4496,7 @@ def protect_tails(plan: Dict[str, Any]) -> int:
                     t -= step
                 if onset is not None:
                     max_start_guard = max(limit, w_start - 0.04)
-                    target = round(max(min(onset - 0.03, max_start_guard), limit), 2)
+                    target = round(max(min(onset - JOIN_MIN_HEAD_CUSHION_SEC, max_start_guard), limit), 2)
                     if target < st - 0.01 and float(s["end"]) - target > 0.1:
                         s["start"] = target
                         moved += 1
@@ -4465,6 +4506,292 @@ def protect_tails(plan: Dict[str, Any]) -> int:
                         s["start"] = target
                         moved += 1
     return moved
+
+
+def _shift_seg_relative_cues(seg: Dict[str, Any], delta_start: float, plan: Optional[Dict[str, Any]] = None) -> None:
+    """Shift segment-relative `at` / `@t` timestamps when `seg['start']` advances by `+delta_start` seconds."""
+    if abs(delta_start) < 1e-6:
+        return
+    sid = str(seg.get("id") or "")
+    for key in ("marks", "sfx", "banners", "flashcards"):
+        items = seg.get(key)
+        if isinstance(items, list):
+            for it in items:
+                if isinstance(it, dict) and it.get("at") is not None:
+                    try:
+                        it["at"] = round(max(0.0, float(it["at"]) - delta_start), 3)
+                    except (TypeError, ValueError):
+                        pass
+    if plan is not None and sid:
+        for key in ("marks", "sfx"):
+            items = plan.get(key)
+            if isinstance(items, list):
+                for it in items:
+                    if isinstance(it, dict) and str(it.get("segment") or "") == sid and it.get("at") is not None:
+                        try:
+                            it["at"] = round(max(0.0, float(it["at"]) - delta_start), 3)
+                        except (TypeError, ValueError):
+                            pass
+    zoom_val = seg.get("zoom")
+    if isinstance(zoom_val, str) and "@" in zoom_val:
+        def _repl(m: re.Match) -> str:
+            try:
+                nv = max(0.0, float(m.group(1)) - delta_start)
+                return f"@{nv:.2f}"
+            except ValueError:
+                return m.group(0)
+        seg["zoom"] = re.sub(r"@(\d+(?:\.\d+)?)", _repl, zoom_val)
+
+
+def _seg_marks_list(seg: Dict[str, Any], plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+    sid = str(seg.get("id") or "")
+    out: List[Dict[str, Any]] = []
+    if isinstance(seg.get("marks"), list):
+        out.extend(m for m in seg["marks"] if isinstance(m, dict))
+    if sid and isinstance(plan.get("marks"), list):
+        out.extend(m for m in plan["marks"] if isinstance(m, dict) and str(m.get("segment") or "") == sid)
+    return out
+
+
+def tighten_joins(plan: Dict[str, Any]) -> int:
+    """Pair-aware RMS join tightener that trims excess dead air across sentence-to-sentence cut boundaries.
+
+    Targets `~90 ms` audible silence between same-speaker cuts (`~130 ms` on speaker changes, `~180 ms` across
+    visual transitions) after accounting for `render.py`'s `16 ms` audio crossfade, while strictly preserving:
+      - `>= 45 ms` cushion after true RMS voice decay (`>= 40 ms` after last live word end),
+      - `>= 35 ms` cushion before true RMS voice onset (`<= first_word.start - 35 ms`),
+      - all post-word mark beats, `hold_tail`, `audio_end`, muted/beat hooks, and split-screen `peer` sync.
+    """
+    from prepare import words_in_silence
+
+    segs = plan.get("segments") or []
+    if not segs:
+        return 0
+
+    env_cache: Dict[str, List[Tuple[float, float]]] = {}
+    words_cache: Dict[str, List[Dict[str, Any]]] = {}
+
+    def _seg_acoustics(seg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not isinstance(seg, dict) or "start" not in seg or "end" not in seg:
+            return None
+        if _segment_is_muted(seg) or _segment_is_beat(seg):
+            return None
+        if abs(_segment_speed(seg) - 1.0) > 1e-4:
+            return None
+        src_k = str(seg.get("src", ""))
+        if src_k not in env_cache:
+            env_cache[src_k] = _env_of(seg)
+            raw_ws = _words_of(seg)
+            ghost_ids = {id(w) for w in words_in_silence(raw_ws, env_cache[src_k])} if (raw_ws and env_cache[src_k]) else set()
+            words_cache[src_k] = sorted(
+                (w for w in raw_ws if isinstance(w, dict) and not w.get("no_sound") and id(w) not in ghost_ids),
+                key=lambda w: (float(w.get("start", 0.0)), float(w.get("end", 0.0))),
+            )
+        env = env_cache[src_k]
+        ws = words_cache[src_k]
+        if not env:
+            return None
+        st, en = float(seg["start"]), float(seg["end"])
+        if en - st <= 0.16:
+            return None
+        quiet = _quiet_level(env)
+        inside_env = [(t, db) for t, db in env if st - 1e-4 <= t <= en + 1e-4]
+        if not inside_env:
+            return None
+        voiced_ts = [t for t, db in inside_env if db >= quiet]
+        if not voiced_ts:
+            return None
+        first_voiced = voiced_ts[0]
+        last_voiced = voiced_ts[-1]
+        cut_ws = [w for w in ws if float(w["end"]) > st + 0.04 and float(w["start"]) < en - 0.04]
+        first_word_s = float(cut_ws[0]["start"]) if cut_ws else first_voiced
+        last_word_e = float(cut_ws[-1]["end"]) if cut_ws else last_voiced
+        return {
+            "st": st,
+            "en": en,
+            "quiet": quiet,
+            "first_voiced": first_voiced,
+            "last_voiced": last_voiced,
+            "first_word_s": first_word_s,
+            "last_word_e": last_word_e,
+        }
+
+    def _can_trim_tail(seg: Dict[str, Any], st: float, en: float) -> Tuple[bool, float]:
+        if _segment_hold_tail(seg) > 0.01:
+            return False, en
+        if seg.get("audio_end") is not None and _effective_audio_end_src(seg, st, en) < en - 0.05:
+            return False, en
+        seg_dur = en - st
+        min_keep_end = st + 0.16
+        for m in _seg_marks_list(seg, plan):
+            m_at = float(m.get("at", 0.0) or 0.0)
+            m_dur = float(m.get("duration", POST_WORD_BEAT_DURATION) or POST_WORD_BEAT_DURATION)
+            if m_at + m_dur >= seg_dur - 0.25:
+                return False, en
+            min_keep_end = max(min_keep_end, st + m_at + m_dur + 0.02)
+        for key in ("sfx", "banners", "flashcards"):
+            for it in (seg.get(key) or []):
+                if isinstance(it, dict) and it.get("at") is not None:
+                    try:
+                        at_v = float(it["at"])
+                        dur_v = float(it.get("duration", 0.0) or 0.0)
+                        min_keep_end = max(min_keep_end, st + at_v + min(dur_v, 0.25) + 0.02)
+                    except (TypeError, ValueError):
+                        pass
+        return True, min_keep_end
+
+    def _can_trim_head(seg: Dict[str, Any]) -> bool:
+        for m in _seg_marks_list(seg, plan):
+            if float(m.get("at", 1.0) or 0.0) < 0.15:
+                return False
+        for key in ("sfx", "banners", "flashcards"):
+            for it in (seg.get(key) or []):
+                if isinstance(it, dict) and it.get("at") is not None:
+                    try:
+                        if float(it["at"]) < 0.15:
+                            return False
+                    except (TypeError, ValueError):
+                        pass
+        return True
+
+    def _apply_tail_trim(seg: Dict[str, Any], trim_sec: float) -> bool:
+        if trim_sec <= 0.01:
+            return False
+        new_end = round(float(seg["end"]) - trim_sec, 2)
+        actual_dt = round(float(seg["end"]) - new_end, 4)
+        if actual_dt <= 0.005 or new_end <= float(seg["start"]) + 0.15:
+            return False
+        seg["end"] = new_end
+        peer = seg.get("peer")
+        if isinstance(peer, dict) and peer.get("end") is not None and peer.get("start") is not None:
+            try:
+                p_end = round(float(peer["end"]) - actual_dt, 2)
+                if p_end > float(peer["start"]) + 0.08:
+                    peer["end"] = p_end
+            except (TypeError, ValueError):
+                pass
+        return True
+
+    def _apply_head_trim(seg: Dict[str, Any], trim_sec: float) -> bool:
+        if trim_sec <= 0.01:
+            return False
+        new_start = round(float(seg["start"]) + trim_sec, 2)
+        actual_dt = round(new_start - float(seg["start"]), 4)
+        if actual_dt <= 0.005 or new_start >= float(seg["end"]) - 0.15:
+            return False
+        seg["start"] = new_start
+        peer = seg.get("peer")
+        if isinstance(peer, dict) and peer.get("start") is not None and peer.get("end") is not None:
+            try:
+                p_start = round(float(peer["start"]) + actual_dt, 2)
+                if p_start < float(peer["end"]) - 0.08:
+                    peer["start"] = p_start
+            except (TypeError, ValueError):
+                pass
+        _shift_seg_relative_cues(seg, actual_dt, plan=plan)
+        return True
+
+    tightened = 0
+
+    # 1) Hook opening: avoid >100 ms silent lag before the very first spoken cut
+    first_ac = _seg_acoustics(segs[0])
+    if first_ac is not None and _can_trim_head(segs[0]):
+        sil_head0 = max(0.0, first_ac["first_voiced"] - first_ac["st"])
+        if sil_head0 > 0.10:
+            safe_start0 = min(
+                first_ac["first_voiced"] - JOIN_MIN_HEAD_CUSHION_SEC,
+                first_ac["first_word_s"] - JOIN_MIN_HEAD_CUSHION_SEC,
+            )
+            trim0 = min(sil_head0 - 0.05, max(0.0, safe_start0 - first_ac["st"]))
+            if _apply_head_trim(segs[0], trim0):
+                tightened += 1
+
+    # 2) Every spoken-to-spoken inter-sentence join
+    for i in range(len(segs) - 1):
+        seg_a, seg_b = segs[i], segs[i + 1]
+        ac_a = _seg_acoustics(seg_a)
+        ac_b = _seg_acoustics(seg_b)
+        if ac_a is None or ac_b is None:
+            continue
+
+        sil_tail_a = max(0.0, ac_a["en"] - ac_a["last_voiced"])
+        sil_head_b = max(0.0, ac_b["first_voiced"] - ac_b["st"])
+        audible_join = max(0.0, sil_tail_a + sil_head_b - AUDIO_XFADE_SEC)
+
+        sp_a = str(seg_a.get("speaker") or "").strip().lower()
+        sp_b = str(seg_b.get("speaker") or "").strip().lower()
+        same_speaker = (bool(sp_a and sp_b) and sp_a == sp_b) or (str(seg_a.get("src", "")) == str(seg_b.get("src", "")))
+        target_gap = JOIN_TARGET_SAME_SPEAKER_SEC if same_speaker else JOIN_TARGET_TURN_CHANGE_SEC
+        if seg_b.get("transition"):
+            target_gap = max(target_gap, JOIN_TARGET_TRANSITION_SEC)
+
+        excess = audible_join - target_gap
+        if excess <= 0.02:
+            continue
+
+        can_a, min_eff_end_a = _can_trim_tail(seg_a, ac_a["st"], ac_a["en"])
+        can_b = _can_trim_head(seg_b)
+
+        safe_min_end_a = max(
+            ac_a["last_voiced"] + JOIN_MIN_TAIL_CUSHION_SEC,
+            ac_a["last_word_e"] + 0.04,
+            min_eff_end_a,
+        )
+        safe_max_start_b = min(
+            ac_b["first_voiced"] - JOIN_MIN_HEAD_CUSHION_SEC,
+            ac_b["first_word_s"] - JOIN_MIN_HEAD_CUSHION_SEC,
+        )
+        slack_a = max(0.0, ac_a["en"] - safe_min_end_a) if can_a else 0.0
+        slack_b = max(0.0, safe_max_start_b - ac_b["st"]) if can_b else 0.0
+        if slack_a + slack_b <= 0.015:
+            continue
+
+        # Prefer trimming each side down toward a natural 60 ms tail / 45 ms head first, then share any remaining excess
+        ideal_tail = 0.060
+        ideal_head = 0.045
+        surplus_a = min(slack_a, max(0.0, sil_tail_a - ideal_tail))
+        surplus_b = min(slack_b, max(0.0, sil_head_b - ideal_head))
+        trim_a = 0.0
+        trim_b = 0.0
+        rem = excess
+        if surplus_a + surplus_b > 1e-6:
+            take = min(rem, surplus_a + surplus_b)
+            share_a = take * (surplus_a / (surplus_a + surplus_b))
+            trim_a = min(slack_a, share_a)
+            trim_b = min(slack_b, take - trim_a)
+            rem = max(0.0, rem - trim_a - trim_b)
+        if rem > 0.005:
+            extra_a = min(rem, max(0.0, slack_a - trim_a))
+            trim_a += extra_a
+            rem -= extra_a
+        if rem > 0.005:
+            extra_b = min(rem, max(0.0, slack_b - trim_b))
+            trim_b += extra_b
+
+        moved_pair = False
+        if _apply_tail_trim(seg_a, trim_a):
+            moved_pair = True
+        if _apply_head_trim(seg_b, trim_b):
+            moved_pair = True
+        if moved_pair:
+            tightened += 1
+
+    # 3) Final reel ending: trim excessive trailing silence (>180 ms) down to ~110 ms if no mark/hold beat
+    last_ac = _seg_acoustics(segs[-1])
+    if last_ac is not None:
+        can_last, min_eff_last = _can_trim_tail(segs[-1], last_ac["st"], last_ac["en"])
+        sil_tail_last = max(0.0, last_ac["en"] - last_ac["last_voiced"])
+        if can_last and sil_tail_last > 0.18:
+            safe_end_last = max(
+                last_ac["last_voiced"] + 0.10,
+                last_ac["last_word_e"] + 0.06,
+                min_eff_last,
+            )
+            trim_last = max(0.0, last_ac["en"] - safe_end_last)
+            if _apply_tail_trim(segs[-1], trim_last):
+                tightened += 1
+
+    return tightened
 
 
 def main() -> None:

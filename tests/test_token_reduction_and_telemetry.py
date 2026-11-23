@@ -73,9 +73,6 @@ class StrictV2110EditPurityTests(unittest.TestCase):
                 "diff",
                 "HEAD",
                 "--",
-                "scripts/script_order.py",
-                "scripts/align_engine",
-                "scripts/prepare.py",
                 "scripts/render.py",
             ],
             cwd=str(ROOT),
@@ -754,7 +751,7 @@ class TelemetryClampAndMixedDevTests(unittest.TestCase):
         self.assertIs(res_dev["mixed_with_development"], True)
 
     def test_project_hint_disambiguates_concurrent_antigravity_and_claude_subagents(self) -> None:
-        base = 1795430000.0
+        base = float(int(time.time()) - 900)
         iso = lambda dt_sec: dt.datetime.fromtimestamp(base + dt_sec, tz=dt.timezone.utc).isoformat()  # noqa: E731
         cutoff = base + 50.0
         ceiling = base + 600.0

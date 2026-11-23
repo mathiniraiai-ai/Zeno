@@ -468,6 +468,7 @@ def _resolve_clip_cache_dir(src: Any, plan: Optional[Dict[str, Any]] = None) -> 
 # Where the cut check found its problems, for the console only. Filled by `check_cuts_and_pauses`;
 # it never affects the counts or the pass/fail result.
 _CUT_FAIL_NOTES: List[str] = []
+_LAST_JOIN_GAP_STATS: Dict[str, Any] = {}
 
 
 def _cut_note(msg: str) -> None:
@@ -476,6 +477,75 @@ def _cut_note(msg: str) -> None:
             _CUT_FAIL_NOTES.append(str(msg))
     except Exception:
         pass
+
+
+def _measure_pcm_join_gaps(
+    pcm: array.array,
+    segs: List[Dict[str, Any]],
+    starts: List[float],
+    timeline_mark_holds: List[Tuple[float, float]],
+    sample_rate: int = 16000,
+    voice_db_floor: float = -38.0,
+) -> Dict[str, Any]:
+    """Measure audible silence spanning each spoken-to-spoken cut join directly from rendered 16 kHz PCM."""
+    if not pcm or len(segs) < 2 or len(starts) < 2:
+        return {}
+    n_samp = len(pcm)
+    frame = max(1, int(round(0.01 * sample_rate)))  # 10 ms frame
+
+    def _frame_db(sample_idx: int) -> float:
+        lo = max(0, sample_idx)
+        hi = min(n_samp, lo + frame)
+        if hi <= lo:
+            return -140.0
+        sq = 0.0
+        for k in range(lo, hi):
+            v = pcm[k] / 32768.0
+            sq += v * v
+        rms = math.sqrt(sq / float(hi - lo))
+        return 20.0 * math.log10(max(rms, 1e-7))
+
+    gaps_ms: List[int] = []
+    for idx in range(1, len(segs)):
+        prev_s = segs[idx - 1]
+        cur_s = segs[idx]
+        if _segment_is_muted(prev_s) or _segment_is_beat(prev_s) or _segment_is_muted(cur_s) or _segment_is_beat(cur_s):
+            continue
+        if _segment_hold_tail(prev_s) > 0.01:
+            continue
+        jt = float(starts[idx])
+        if any(a - 0.05 <= jt <= b + 0.05 for a, b in timeline_mark_holds):
+            continue
+        j_samp = int(round(jt * sample_rate))
+        # Walk backward from jt (up to 800 ms) until audible voice >= voice_db_floor
+        pre_frames = 0
+        for step_k in range(1, 81):
+            s0 = j_samp - step_k * frame
+            if s0 < 0 or _frame_db(s0) >= voice_db_floor:
+                break
+            pre_frames += 1
+        # Walk forward from jt (up to 800 ms) until audible voice >= voice_db_floor
+        post_frames = 0
+        for step_k in range(0, 80):
+            s0 = j_samp + step_k * frame
+            if s0 + frame > n_samp or _frame_db(s0) >= voice_db_floor:
+                break
+            post_frames += 1
+        gaps_ms.append((pre_frames + post_frames) * 10)
+
+    if not gaps_ms:
+        return {}
+    ordered = sorted(gaps_ms)
+    n_g = len(ordered)
+    med = ordered[n_g // 2] if (n_g % 2 == 1) else int(round(0.5 * (ordered[n_g // 2 - 1] + ordered[n_g // 2])))
+    p90 = ordered[min(n_g - 1, int(math.ceil(0.90 * n_g)) - 1)]
+    return {
+        "count": n_g,
+        "median_ms": med,
+        "p90_ms": p90,
+        "max_ms": ordered[-1],
+        "gaps_ms": gaps_ms,
+    }
 
 
 def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None) -> Tuple[bool, int, int, int, int]:
@@ -488,6 +558,7 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
     jump_cuts_masked = 0
     boundary_clicks = 0
     del _CUT_FAIL_NOTES[:]
+    _LAST_JOIN_GAP_STATS.clear()
 
     fps = int((plan.get("canvas") or {}).get("fps", 30) or 30)
     starts, seg_durs, _, seg_start_map = compute_timeline_starts(plan, fps)
@@ -728,6 +799,9 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
                         if max_step > 24000:
                             boundary_clicks += 1
                             _cut_note(f"click at the join at {jt:.2f}s of the finished video")
+                _LAST_JOIN_GAP_STATS.update(
+                    _measure_pcm_join_gaps(pcm, segs, starts, timeline_mark_holds, sample_rate=16000)
+                )
         except Exception:
             pass
 
@@ -3516,9 +3590,15 @@ def run_verification(
         f"[AUDIO  {'PASS' if audio_ok else 'FAIL'}] Integrated Loudness: {i_lufs:.1f} LUFS "
         f"(target {eff_target_lufs:.1f} LUFS), True Peak: {tp_db:.1f} dBTP"
     )
+    _jg_txt = (
+        f", join gaps median={_LAST_JOIN_GAP_STATS['median_ms']}ms "
+        f"p90={_LAST_JOIN_GAP_STATS['p90_ms']}ms max={_LAST_JOIN_GAP_STATS['max_ms']}ms"
+        if _LAST_JOIN_GAP_STATS.get("count")
+        else ""
+    )
     print(
         f"[CUTS   {'PASS' if cuts_ok else 'FAIL'}] {len(plan.get('segments', []))} segments verified: "
-        f"{clipped_w} clipped words, {long_pauses} internal pauses >0.6s, {jc_masked} jump-cuts masked, {b_clicks} boundary clicks"
+        f"{clipped_w} clipped words, {long_pauses} internal pauses >0.6s{_jg_txt}, {jc_masked} jump-cuts masked, {b_clicks} boundary clicks"
     )
     if not cuts_ok and _CUT_FAIL_NOTES:
         _shown = _CUT_FAIL_NOTES[:12]

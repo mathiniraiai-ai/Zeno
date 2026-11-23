@@ -1094,6 +1094,10 @@ def run_execute_and_deliver(
     kept = script_order.protect_tails(plan)
     if kept:
         print(f"[SNAP] {kept} cut(s) widened so no word's fade-out or onset is chopped.", flush=True)
+    tight_fn = getattr(script_order, "tighten_joins", None)
+    tightened = int(tight_fn(plan) or 0) if callable(tight_fn) else 0
+    if tightened:
+        print(f"[JOIN] {tightened} sentence join(s) tightened to crisp dialogue rhythm.", flush=True)
     script_path = _resolve_plan_script_path(plan, p_path)
     fc_fn = getattr(script_order, "calibrate_flashcards", None)
     cards_calibrated = (
@@ -1111,7 +1115,7 @@ def run_execute_and_deliver(
     )
     if calibrated:
         print(f"[BEATS] {calibrated} post-word beat(s) calibrated.", flush=True)
-    if moved or kept or cards_calibrated or calibrated:
+    if moved or kept or tightened or cards_calibrated or calibrated:
         p_path.write_text(edl_parser.format_edl(plan), encoding="utf-8")
 
     try:

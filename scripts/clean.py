@@ -325,6 +325,7 @@ LEGACY_1X_BLOAT_REL = (
     "scripts/zeno_mcp.py",
     "scripts/ai_director.py",
     "scripts/compact_run.py",
+    "scripts/align_engine/uroman",
 )
 
 
@@ -784,6 +785,24 @@ def cleanup_after_update(
         legacy_hooks_removed = _cleanup_legacy_claude_hooks(root_path)
         legacy_mcp_removed = _cleanup_legacy_claude_mcp(home_dir=home_dir)
         _ensure_codex_project_trust(root_path, home_dir=home_dir)
+        if not dev_guard:
+            uroman_dir = root_path / "scripts" / "align_engine" / "uroman"
+            if uroman_dir.is_dir():
+                try:
+                    sz = size_of(uroman_dir)
+                    shutil.rmtree(uroman_dir)
+                    freed += sz
+                    files += 1
+                except OSError:
+                    pass
+            elif uroman_dir.is_file() or uroman_dir.is_symlink():
+                try:
+                    sz = uroman_dir.stat().st_size if uroman_dir.is_file() else 0
+                    uroman_dir.unlink()
+                    freed += sz
+                    files += 1
+                except OSError:
+                    pass
 
         # 1. Clear stale Python bytecode caches inside scripts/, service/, and tests/ so updated .py files take effect immediately
         for code_sub in ("scripts", "service", "tests"):
@@ -795,6 +814,35 @@ def cleanup_after_update(
                         shutil.rmtree(pyc_dir, ignore_errors=True)
                         freed += sz
                         files += 1
+        # 1b. Prune obsolete Wav2Vec2 / MMS_FA checkpoints (removed in v3.0.0 in favor of Meta omniASR-CTC-300M-v2)
+        legacy_ckpt_dir = root_path / "models" / "torch" / "hub" / "checkpoints"
+        if legacy_ckpt_dir.is_dir():
+            matched_ckpts = sorted(
+                {
+                    fp
+                    for pat in ("*wav2vec2*.pth", "*wav2vec2*.pt", "*mms_fa*.pth", "*mms_fa*.pt")
+                    for fp in legacy_ckpt_dir.glob(pat)
+                }
+            )
+            for fp in matched_ckpts:
+                if fp.is_file() or fp.is_symlink():
+                    try:
+                        sz = fp.stat().st_size if fp.is_file() else 0
+                        fp.unlink()
+                        freed += sz
+                        files += 1
+                    except OSError:
+                        pass
+            for empty_dir in (
+                legacy_ckpt_dir,
+                root_path / "models" / "torch" / "hub",
+                root_path / "models" / "torch",
+            ):
+                try:
+                    if empty_dir.is_dir() and not any(empty_dir.iterdir()):
+                        empty_dir.rmdir()
+                except OSError:
+                    pass
         # 2. Clear render segment scratch from previous engine version
         seg = work / "_segments"
         if seg.is_dir():

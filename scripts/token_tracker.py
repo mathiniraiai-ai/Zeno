@@ -467,7 +467,7 @@ def collect_clip_telemetry(
         # Read Gemini transcription token usage from work/<stem>/gemini_transcript.json
         gt = {}
         gt_path = wdir / "gemini_transcript.json"
-        model_used = "offline_wav2vec2"
+        model_used = "offline_omniasr_ctc"
         in_tok = 0
         out_tok = 0
         tot_tok = 0

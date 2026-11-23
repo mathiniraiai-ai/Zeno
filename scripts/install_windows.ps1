@@ -94,7 +94,7 @@ if (Test-Path ".env") {
     Write-Host "[4/5] Created .env from .env.example"
 }
 
-# 5. Alignment model (Meta wav2vec2, about 360 MB, into models\torch) + automatic Google login + daily 11 AM auto-updater
+# 5. Alignment model (Meta omniASR-CTC-300M-v2, Apache 2.0, ~1.21 GB into models\omniASR-CTC-300M-v2) + automatic Google login + daily 11 AM auto-updater
 Write-Host "[5/5] Downloading the alignment model (first time only) and checking everything..."
 $ErrorActionPreference = "Continue"
 & .venv\Scripts\python.exe scripts\setup.py --prewarm | Out-Null

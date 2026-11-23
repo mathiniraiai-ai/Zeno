@@ -1,21 +1,21 @@
 """End-to-end multilingual forced alignment pipeline.
 
-Combines Indic G2P phonetics + `uroman`, Meta Wav2Vec2 95M CTC emission extraction,
-silence-masked Viterbi decoding, and acoustic onset/offset boundary refinement.
+Combines native-script Meta omniASR-CTC-300M-v2 (Apache 2.0) emission extraction,
+dual-script greedy-CTC phonetic bridging for code-switched speech, silence-masked
+Viterbi decoding, and acoustic onset/offset boundary refinement.
 """
 
 from __future__ import annotations
 
 import os
 import re
-import subprocess
-import sys
 import time
 import unicodedata
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Ensure PyTorch Hub model cache resolves to Zeno/models/torch before loading acoustic modules.
+# Ensure PyTorch hub model cache resolves to Zeno/models/torch before loading acoustic modules.
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _TORCH_HOME = _PROJECT_ROOT / "models" / "torch"
 os.environ.setdefault("TORCH_HOME", str(_TORCH_HOME))
@@ -41,13 +41,14 @@ except ImportError:
     else:
         raise
 
-# Normalize typographic quotes, dashes, ellipses, and NBSPs before romanization.
+# Normalize typographic quotes, dashes, ellipses, and NBSPs before tokenization.
 _SYMBOL_MAP = str.maketrans(
     {
         "\u2018": "'",
         "\u2019": "'",
         "\u201a": "'",
         "\u2032": "'",
+        "\u02bc": "'",
         "\u201c": '"',
         "\u201d": '"',
         "\u201e": '"',
@@ -59,147 +60,670 @@ _SYMBOL_MAP = str.maketrans(
     }
 )
 
+_INDIC_SCRIPT_RE = re.compile(r"[\u0900-\u0D7F]")
+_OMNIASR_INVISIBLE_CHARS: Tuple[str, ...] = tuple(
+    dict.fromkeys(
+        tuple(INVISIBLE_CHARS)
+        + (
+            "\u200b",  # zero-width space
+            "\u200c",  # zero-width non-joiner
+            "\u200d",  # zero-width joiner
+            "\ufeff",  # BOM / zero-width no-break space
+            "\u200e",  # left-to-right mark
+            "\u200f",  # right-to-left mark
+            "\u00ad",  # soft hyphen
+            "\u2060",  # word joiner
+        )
+    )
+)
 
-def _clean_symbols(word: str) -> str:
-    """NFC-normalize and strip zero-width joiners/typographic punctuation prior to romanization."""
-    w = unicodedata.normalize("NFC", word).translate(_SYMBOL_MAP)
-    for ch in INVISIBLE_CHARS:
-        w = w.replace(ch, "")
-    return w or word
+_EN_PHONETIC_OVERRIDES: Dict[str, str] = {
+    "i": "ai",
+    "im": "aim",
+    "you": "yu",
+    "are": "ar",
+    "do": "du",
+    "to": "tu",
+    "two": "tu",
+    "too": "tu",
+    "me": "mi",
+    "we": "vi",
+    "he": "hi",
+    "she": "shi",
+    "be": "bi",
+    "my": "mai",
+    "by": "bai",
+    "why": "vai",
+    "try": "trai",
+    "nice": "nais",
+    "like": "laik",
+    "time": "taim",
+    "fine": "fain",
+    "five": "faiv",
+    "nine": "nain",
+    "line": "lain",
+    "right": "rait",
+    "night": "nait",
+    "light": "lait",
+    "high": "hai",
+    "know": "no",
+    "now": "nau",
+    "how": "hau",
+    "out": "aut",
+    "one": "van",
+    "once": "vans",
+    "done": "dan",
+    "come": "kam",
+    "some": "sam",
+    "love": "lav",
+    "have": "hav",
+    "give": "giv",
+    "yes": "yes",
+    "yeah": "ya",
+    "please": "pliz",
+    "speak": "spik",
+    "read": "rid",
+    "need": "nid",
+    "see": "si",
+    "feel": "fil",
+    "real": "riyal",
+    "want": "vant",
+    "what": "vat",
+    "when": "ven",
+    "where": "ver",
+    "which": "vich",
+    "who": "hu",
+    "use": "yuz",
+    "new": "nyu",
+    "view": "vyu",
+    "sure": "shur",
+    "for": "far",
+    "work": "vark",
+    "word": "vard",
+    "world": "varld",
+    "first": "farst",
+    "sir": "sar",
+    "learn": "larn",
+}
+
+
+def _lowercase_latin_only(text: str) -> str:
+    """Lowercase ASCII and Latin-1 uppercase letters while keeping Indic/non-Latin scripts verbatim."""
+    out: List[str] = []
+    for ch in text:
+        if "A" <= ch <= "Z":
+            out.append(ch.lower())
+        elif "\u00c0" <= ch <= "\u00de" and ch != "\u00d7":
+            out.append(ch.lower())
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _is_word_char(ch: str) -> bool:
+    """Return True for letters, combining marks (Indic matras/viramas), and digits."""
+    cat = unicodedata.category(ch)
+    return bool(cat) and cat[0] in ("L", "M", "N")
+
+
+def _latin_g2p_segment(seg: str) -> str:
+    """Convert an English/Latin segment into a lightweight phonetic spelling."""
+    s = seg.lower().replace("'", "")
+    if not s:
+        return ""
+    if s in _EN_PHONETIC_OVERRIDES:
+        return _EN_PHONETIC_OVERRIDES[s]
+    s = s.replace("tion", "shan").replace("sion", "shan")
+    s = s.replace("igh", "ai")
+    s = re.sub(r"^kn", "n", s)
+    s = re.sub(r"^wr", "r", s)
+    s = s.replace("wh", "v").replace("ph", "f").replace("ck", "k")
+    s = re.sub(r"c([eiy])", r"s\1", s)
+    s = re.sub(r"c(?!h)", "k", s)
+    if len(s) >= 4:
+        s = re.sub(r"a([^aeiou])e(s?)$", r"e\1\2", s)
+        s = re.sub(r"i([^aeiou])e(s?)$", r"ai\1\2", s)
+    return s
+
+
+def _cross_script_phonetic_key(word: str) -> str:
+    """Compute a script-invariant canonical phonetic key across Latin, Indic, and digit tokens."""
+    text = unicodedata.normalize("NFC", str(word or "")).translate(_SYMBOL_MAP)
+    for inv in _OMNIASR_INVISIBLE_CHARS:
+        if inv in text:
+            text = text.replace(inv, "")
+
+    segments = re.findall(r"[A-Za-z']+|[0-9]+|[\u0900-\u0D7F]+", text)
+    if not segments:
+        return ""
+
+    parts: List[str] = []
+    for seg in segments:
+        if _INDIC_SCRIPT_RE.search(seg):
+            parts.append(IndicPhoneticMapper.transliterate_indic_script(seg).lower())
+        elif seg.isdigit():
+            num_words = IndicPhoneticMapper.number_to_words(seg).lower()
+            for nw in num_words.split():
+                parts.append(_latin_g2p_segment(nw))
+        else:
+            parts.append(_latin_g2p_segment(seg))
+
+    key = "".join(parts)
+    key = key.replace("oo", "u").replace("ee", "i")
+    key = re.sub(r"chh|ch", "c", key)
+    for src_pat, dst_pat in (
+        ("sh", "s"),
+        ("th", "t"),
+        ("dh", "d"),
+        ("bh", "b"),
+        ("gh", "g"),
+        ("kh", "k"),
+        ("jh", "j"),
+        ("zh", "l"),
+        ("ph", "f"),
+        ("w", "v"),
+        ("z", "s"),
+        ("q", "k"),
+        ("x", "ks"),
+    ):
+        key = key.replace(src_pat, dst_pat)
+    key = re.sub(r"[^a-z]", "", key)
+    key = re.sub(r"[ao]+", "a", key)
+    key = re.sub(r"[iey]+", "i", key)
+    key = re.sub(r"u+", "u", key)
+    key = re.sub(r"(.)\1+", r"\1", key)
+    return key
 
 
 class ZenoAcousticPipeline:
-    """Orchestrates multilingual G2P romanization, Wav2Vec2 CTC extraction, Viterbi alignment, and onset verification."""
+    """Orchestrates OmniASR CTC extraction, cross-script phonetic bridging, Viterbi alignment, and onset verification."""
 
     def __init__(self, device: Optional[str] = None):
         self.acoustic_model = AcousticModel(device=device)
         self.viterbi = ViterbiAligner(blank_id=self.acoustic_model.blank_id)
         self.onset_verifier = AcousticOnsetVerifier(sample_rate=self.acoustic_model.sample_rate)
-        self._uroman_cache: Dict[str, str] = {}
-        self._warned_unromanized: bool = False
+        self._id_to_token: Dict[int, str] = {}
+        self._id_to_token_vocab_len: int = -1
 
     def unload_model(self) -> None:
         """Unload acoustic neural weights from memory."""
         if self.acoustic_model is not None:
             self.acoustic_model.unload_model()
 
-    def _warn_unromanized(self, words: List[str], reason: str) -> None:
-        """Emit a single warning per pipeline instance if words cannot be romanized."""
-        if self._warned_unromanized:
-            return
-        self._warned_unromanized = True
-        sample = ", ".join(words[:5])
-        print(f"[align] WARNING: {len(words)} word(s) left unromanized ({reason}): {sample}", file=sys.stderr)
+    def _get_id_to_token(self) -> Dict[int, str]:
+        vocab: Dict[str, int] = getattr(self.acoustic_model, "dictionary", {}) or {}
+        if len(vocab) != self._id_to_token_vocab_len:
+            self._id_to_token = {int(v): str(k) for k, v in vocab.items()}
+            self._id_to_token_vocab_len = len(vocab)
+        return self._id_to_token
 
-    def batch_romanize_words(self, words: List[str]) -> List[str]:
-        """Convert words to Roman script using `IndicPhoneticMapper` fast-path and batched `uroman` fallback."""
-        if not words:
+    def _word_to_omniasr_tokens(self, orig_w: str, clean_w: str) -> List[int]:
+        """Tokenize a word directly into native-script OmniASR vocabulary IDs."""
+        vocab: Dict[str, int] = getattr(self.acoustic_model, "dictionary", {}) or {}
+        blank_id = int(getattr(self.acoustic_model, "blank_id", 0))
+        if not vocab:
             return []
 
-        results: List[Optional[str]] = [None] * len(words)
-        to_query_indices: List[int] = []
-        to_query_words: List[str] = []
+        raw_text = str(orig_w if orig_w else clean_w or "")
+        text = unicodedata.normalize("NFC", raw_text).translate(_SYMBOL_MAP)
+        for inv in _OMNIASR_INVISIBLE_CHARS:
+            if inv in text:
+                text = text.replace(inv, "")
+        text = _lowercase_latin_only(text)
 
-        for idx, w in enumerate(words):
-            w_clean = _clean_symbols(w)
-            if all(ord(c) < 128 for c in w_clean):
-                results[idx] = w_clean
-            elif w_clean in self._uroman_cache:
-                results[idx] = self._uroman_cache[w_clean]
-            elif IndicPhoneticMapper.is_pure_indic(w_clean):
-                trans = IndicPhoneticMapper.transliterate_indic_script(w_clean)
-                alpha = re.sub(r"[^a-zA-Z]", "", trans)
-                if len(alpha) >= 2:
-                    results[idx] = trans
-                    self._uroman_cache[w_clean] = trans
-                else:
-                    to_query_indices.append(idx)
-                    to_query_words.append(w_clean)
+        n = len(text)
+        token_ids: List[int] = []
+        for idx, ch in enumerate(text):
+            if ch.isspace():
+                continue
+            cat = unicodedata.category(ch)
+            cat0 = cat[0] if cat else ""
+
+            if cat0 == "C":
+                continue
+
+            # Strip punctuation/symbols so unpronounced marks never corrupt CTC trellises,
+            # while keeping strictly word-internal apostrophes (e.g. "don't") if present in vocab.
+            if cat0 in ("P", "S"):
+                if (
+                    ch == "'"
+                    and ch in vocab
+                    and vocab[ch] != blank_id
+                    and idx > 0
+                    and idx + 1 < n
+                    and _is_word_char(text[idx - 1])
+                    and _is_word_char(text[idx + 1])
+                ):
+                    token_ids.append(int(vocab[ch]))
+                continue
+
+            tok = vocab.get(ch)
+            if tok is not None and tok != blank_id:
+                token_ids.append(int(tok))
+                continue
+
+            # NFD decomposition fallback for precomposed characters absent from vocab.
+            nfd = unicodedata.normalize("NFD", ch)
+            if len(nfd) > 1 and all(
+                (vocab.get(sub) is not None and vocab.get(sub) != blank_id) for sub in nfd
+            ):
+                for sub in nfd:
+                    token_ids.append(int(vocab[sub]))
+
+        return token_ids
+
+    def _greedy_decode_words(self, log_probs: np.ndarray) -> List[Dict[str, Any]]:
+        """Fast greedy CTC collapse over `log_probs` `[T, V]`, splitting on `' '` or >=6 blank frames."""
+        T = int(log_probs.shape[0]) if log_probs is not None else 0
+        if T <= 0:
+            return []
+
+        vocab: Dict[str, int] = getattr(self.acoustic_model, "dictionary", {}) or {}
+        blank_id = int(getattr(self.acoustic_model, "blank_id", 0))
+        id_to_tok = self._get_id_to_token()
+        space_raw = vocab.get(" ")
+        space_id = int(space_raw) if (space_raw is not None and int(space_raw) != blank_id) else None
+
+        best_ids = np.argmax(log_probs, axis=-1)
+        best_lp = log_probs[np.arange(T), best_ids]
+
+        greedy_words: List[Dict[str, Any]] = []
+        cur_toks: List[int] = []
+        cur_lps: List[float] = []
+        cur_f_start = 0
+        cur_f_end = 0
+        prev_id: Optional[int] = None
+        blank_run = 0
+
+        def _flush() -> None:
+            nonlocal cur_toks, cur_lps
+            if not cur_toks:
+                return
+            text = "".join(id_to_tok.get(tid, "") for tid in cur_toks)
+            mean_prob = float(np.mean(np.exp(np.clip(np.asarray(cur_lps, dtype=np.float32), -20.0, 0.0))))
+            phon = _cross_script_phonetic_key(text)
+            if mean_prob >= 0.25 and len(cur_toks) >= 1 and len(phon) >= 1:
+                greedy_words.append(
+                    {
+                        "text": text,
+                        "token_ids": list(cur_toks),
+                        "f_start": int(cur_f_start),
+                        "f_end": int(cur_f_end),
+                        "mean_prob": mean_prob,
+                        "phon": phon,
+                    }
+                )
+            cur_toks = []
+            cur_lps = []
+
+        for t in range(T):
+            tid = int(best_ids[t])
+            tok = id_to_tok.get(tid, "")
+            is_control = tid == blank_id or (tok.startswith("<") and tok.endswith(">"))
+            if is_control:
+                prev_id = tid
+                blank_run += 1
+                if blank_run >= 6 and cur_toks:
+                    _flush()
+                continue
+
+            blank_run = 0
+            if (space_id is not None and tid == space_id) or (tok and tok.isspace()):
+                prev_id = tid
+                if cur_toks:
+                    _flush()
+                continue
+
+            if tok and not _is_word_char(tok[0]) and tok != "'":
+                prev_id = tid
+                continue
+
+            lp = float(best_lp[t])
+            if tid == prev_id and cur_toks:
+                if lp > cur_lps[-1]:
+                    cur_lps[-1] = lp
+                cur_f_end = t + 1
             else:
-                to_query_indices.append(idx)
-                to_query_words.append(w_clean)
+                if not cur_toks:
+                    cur_f_start = t
+                cur_toks.append(tid)
+                cur_lps.append(lp)
+                cur_f_end = t + 1
+            prev_id = tid
 
-        if not to_query_words:
-            return [r if r is not None else words[i] for i, r in enumerate(results)]
+        _flush()
+        return greedy_words
 
-        here = Path(__file__).resolve().parent
-        candidate_paths = [
-            here / "uroman" / "uroman" / "uroman.pl",
-            here / "uroman" / "bin" / "uroman.pl",
-            here / "uroman" / "uroman.pl",
-        ]
-        uroman_script = next((str(p) for p in candidate_paths if p.is_file()), None)
+    def _bridge_omniasr_words(
+        self,
+        words_info: List[Dict[str, Any]],
+        log_probs: np.ndarray,
+        language_code: str,
+    ) -> List[List[int]]:
+        """Bridge code-switched script mismatches using greedy CTC emissions and cross-script phonetic keys."""
+        del language_code
+        n_words = len(words_info)
+        out_tokens = [list(w.get("direct_tokens") or []) for w in words_info]
+        if n_words == 0 or log_probs is None or log_probs.ndim != 2:
+            return out_tokens
 
-        if not uroman_script:
-            self._warn_unromanized(to_query_words, "uroman.pl not found")
-            return [r if r is not None else words[i] for i, r in enumerate(results)]
+        T, V = int(log_probs.shape[0]), int(log_probs.shape[1])
+        if T <= 0 or V <= 0:
+            return out_tokens
 
-        uroman_dir = os.path.dirname(uroman_script)
-        uroman_root = os.path.dirname(uroman_dir) if os.path.basename(uroman_dir) in ("uroman", "bin") else uroman_dir
-        lib_dir = os.path.join(uroman_root, "lib")
+        greedy_words = self._greedy_decode_words(log_probs)
+        if not greedy_words:
+            return out_tokens
 
-        joined = "\n".join(to_query_words)
-        try:
-            cmd = ["perl"]
-            if os.path.exists(lib_dir):
-                cmd.extend(["-I", lib_dir])
-            cmd.extend([uroman_script, "-l", "xxx"])
-            proc = subprocess.run(
-                cmd,
-                input=joined.encode("utf-8"),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-            romanized_lines = proc.stdout.decode("utf-8").split("\n")
-            for q_i, orig_idx in enumerate(to_query_indices):
-                rom_val = romanized_lines[q_i].strip() if q_i < len(romanized_lines) else to_query_words[q_i]
-                results[orig_idx] = rom_val
-                self._uroman_cache[to_query_words[q_i]] = rom_val
-        except Exception as exc:
-            self._warn_unromanized(to_query_words, f"perl/uroman failed: {type(exc).__name__}")
-            for q_i, orig_idx in enumerate(to_query_indices):
-                results[orig_idx] = to_query_words[q_i]
+        id_to_tok = self._get_id_to_token()
+        bands: List[Tuple[int, int]] = []
+        direct_supports: List[float] = []
+        w_phons: List[str] = []
 
-        return [r if r is not None else words[i] for i, r in enumerate(results)]
+        for i, w in enumerate(words_info):
+            if T <= 400:
+                b0, b1 = 0, T
+            else:
+                b0 = max(0, int((i / max(1, n_words) - 0.35) * T))
+                b1 = min(T, int(((i + 1) / max(1, n_words) + 0.35) * T))
+                if b1 <= b0:
+                    b0, b1 = 0, T
+            bands.append((b0, b1))
 
-    def _word_to_phonetic_tokens(self, orig_w: str, clean_w: str, rw: str, language_code: str) -> str:
-        """Map a word (including bilingual Latin-Indic compounds) to Wav2Vec2 acoustic character tokens."""
-        has_indic = IndicPhoneticMapper.is_pure_indic(clean_w)
-        has_latin = bool(re.search(r"[A-Za-z0-9]", clean_w))
-
-        if has_indic and has_latin:
-            segments = re.findall(r"[A-Za-z0-9']+|[\u0900-\u0D7F]+", clean_w)
-            phonetic_parts: List[str] = []
-            for seg in segments:
-                if IndicPhoneticMapper.is_pure_indic(seg):
-                    phonetic_parts.append(
-                        IndicPhoneticMapper.map_to_acoustic_tokens(
-                            seg,
-                            lang=language_code,
-                            is_native_indic=True,
-                            orig_word=seg,
-                        )
+            valid_tids = [tid for tid in out_tokens[i] if 0 <= tid < V]
+            if valid_tids:
+                tok_probs = [
+                    float(np.max(np.exp(np.clip(log_probs[b0:b1, tid], -20.0, 0.0))))
+                    for tid in valid_tids
+                ]
+                sup = sum(tok_probs) / len(tok_probs)
+                latin_probs = [
+                    p
+                    for tid, p in zip(valid_tids, tok_probs)
+                    if "a" <= id_to_tok.get(tid, "").lower() <= "z"
+                ]
+                indic_probs = [
+                    p
+                    for tid, p in zip(valid_tids, tok_probs)
+                    if _INDIC_SCRIPT_RE.search(id_to_tok.get(tid, ""))
+                ]
+                if latin_probs and indic_probs:
+                    sup = min(
+                        sup,
+                        sum(latin_probs) / len(latin_probs),
+                        sum(indic_probs) / len(indic_probs),
                     )
+            else:
+                sup = 0.0
+            direct_supports.append(sup)
+            w_phons.append(_cross_script_phonetic_key(w.get("orig") or w.get("clean") or ""))
+
+        # 1) Monotonic DP anchoring strong-support words (>= 0.20) to greedy words.
+        strong_indices = [i for i in range(n_words) if direct_supports[i] >= 0.20 and w_phons[i]]
+        n_strong = len(strong_indices)
+        n_greedy = len(greedy_words)
+        anchors: List[Tuple[int, int]] = []
+
+        if n_strong > 0 and n_greedy > 0:
+            dp = np.zeros((n_strong + 1, n_greedy + 1), dtype=np.float64)
+            choice = np.zeros((n_strong + 1, n_greedy + 1), dtype=np.int8)
+
+            for si in range(1, n_strong + 1):
+                i = strong_indices[si - 1]
+                w_p = w_phons[i]
+                len_w = len(w_p)
+                b0_i, b1_i = bands[i]
+                rel_w = i / max(1, n_words)
+
+                for k in range(1, n_greedy + 1):
+                    best = dp[si - 1, k]
+                    ch = 0
+                    if dp[si, k - 1] > best:
+                        best = dp[si, k - 1]
+                        ch = 1
+
+                    gw = greedy_words[k - 1]
+                    if gw["f_end"] > b0_i and gw["f_start"] < b1_i:
+                        g_p = gw["phon"]
+                        len_g = len(g_p)
+                        mn, mx = (len_w, len_g) if len_w <= len_g else (len_g, len_w)
+                        if mx > 0 and (2.0 * mn) / (mn + mx) >= 0.75:
+                            sim = SequenceMatcher(None, w_p, g_p).ratio()
+                            if sim >= 0.75:
+                                rel_g = 0.5 * (gw["f_start"] + gw["f_end"]) / max(1, T)
+                                cand = dp[si - 1, k - 1] + 1.0 + sim - 0.01 * abs(rel_w - rel_g)
+                                if cand > best:
+                                    best = cand
+                                    ch = 2
+
+                    dp[si, k] = best
+                    choice[si, k] = ch
+
+            si, k = n_strong, n_greedy
+            while si > 0 and k > 0:
+                ch = int(choice[si, k])
+                if ch == 2:
+                    anchors.append((strong_indices[si - 1], k - 1))
+                    si -= 1
+                    k -= 1
+                elif ch == 0:
+                    si -= 1
                 else:
-                    phonetic_parts.append(
-                        IndicPhoneticMapper.map_to_acoustic_tokens(
-                            seg,
-                            lang="en",
-                            is_native_indic=False,
-                            orig_word=seg,
-                        )
-                    )
-            return "".join(phonetic_parts)
+                    k -= 1
+            anchors.reverse()
 
-        is_word_indic = has_indic
-        is_pure_english_word = not is_word_indic and bool(re.match(r"^[a-zA-Z0-9'-]+$", rw))
-        return IndicPhoneticMapper.map_to_acoustic_tokens(
-            rw,
-            lang="en" if is_pure_english_word else language_code,
-            is_native_indic=is_word_indic,
-            orig_word=clean_w,
+        # 2) Bridge weak-support words (< 0.20) monotonically inside each anchor-bounded span.
+        bounds = [(-1, -1)] + anchors + [(n_words, n_greedy)]
+        for (pw, pg), (nw, ng) in zip(bounds[:-1], bounds[1:]):
+            gap_weak = [i for i in range(pw + 1, nw) if direct_supports[i] < 0.20 and w_phons[i]]
+            gap_g_start = pg + 1
+            gap_g_count = ng - gap_g_start
+            if not gap_weak or gap_g_count <= 0:
+                continue
+
+            nw_gap = len(gap_weak)
+            gap_dp = np.zeros((nw_gap + 1, gap_g_count + 1), dtype=np.float64)
+            # Action codes: 0=skip weak, 1=skip greedy, 2=1:1, 3=1:2, 4=2:1
+            gap_act = np.zeros((nw_gap + 1, gap_g_count + 1), dtype=np.int8)
+
+            # Precompute best overlapping 1:1 ratio per gap weak word for 1:2 margin check.
+            best_1to1_map: Dict[int, float] = {}
+            for u in range(nw_gap):
+                wi = gap_weak[u]
+                w_p = w_phons[wi]
+                b0_i, b1_i = bands[wi]
+                best_r = 0.0
+                for gk in range(gap_g_start, ng):
+                    gw = greedy_words[gk]
+                    if gw["f_end"] > b0_i and gw["f_start"] < b1_i:
+                        r = SequenceMatcher(None, w_p, gw["phon"]).ratio()
+                        if r > best_r:
+                            best_r = r
+                best_1to1_map[u] = best_r
+
+            for u in range(nw_gap - 1, -1, -1):
+                wi = gap_weak[u]
+                w_p = w_phons[wi]
+                b0_i, b1_i = bands[wi]
+                rel_w = wi / max(1, n_words)
+                best_1to1 = best_1to1_map[u]
+
+                can_2to1 = (u + 1 < nw_gap) and (gap_weak[u + 1] == wi + 1)
+                if can_2to1:
+                    wi2 = gap_weak[u + 1]
+                    b0_pair = min(b0_i, bands[wi2][0])
+                    b1_pair = max(b1_i, bands[wi2][1])
+                    p_pair = re.sub(r"(.)\1+", r"\1", w_p + w_phons[wi2])
+                    rel_pair = 0.5 * (wi + wi2) / max(1, n_words)
+                else:
+                    b0_pair = b1_pair = 0
+                    p_pair = ""
+                    rel_pair = 0.0
+
+                for g_off in range(gap_g_count - 1, -1, -1):
+                    gk = gap_g_start + g_off
+                    gw = greedy_words[gk]
+                    rel_g = 0.5 * (gw["f_start"] + gw["f_end"]) / max(1, T)
+
+                    best = gap_dp[u + 1, g_off]
+                    act = 0
+                    if gap_dp[u, g_off + 1] > best:
+                        best = gap_dp[u, g_off + 1]
+                        act = 1
+
+                    if gw["f_end"] > b0_i and gw["f_start"] < b1_i:
+                        g_p = gw["phon"]
+                        min_1to1 = 0.80 if min(len(w_p), len(g_p)) <= 2 else 0.62
+                        mn, mx = (len(w_p), len(g_p)) if len(w_p) <= len(g_p) else (len(g_p), len(w_p))
+                        if mx > 0 and (2.0 * mn) / (mn + mx) >= min_1to1:
+                            sim_1to1 = SequenceMatcher(None, w_p, g_p).ratio()
+                            if sim_1to1 >= min_1to1:
+                                cand = gap_dp[u + 1, g_off + 1] + 1.0 + sim_1to1 - 0.01 * abs(rel_w - rel_g)
+                                if cand > best:
+                                    best = cand
+                                    act = 2
+
+                    if gk + 1 < ng:
+                        gw2 = greedy_words[gk + 1]
+                        if (
+                            gw["f_end"] > b0_i
+                            and gw["f_start"] < b1_i
+                            and gw2["f_end"] > b0_i
+                            and gw2["f_start"] < b1_i
+                            and (gw2["f_start"] - gw["f_end"]) <= 25
+                        ):
+                            g_comb = re.sub(r"(.)\1+", r"\1", gw["phon"] + gw2["phon"])
+                            mn, mx = (len(w_p), len(g_comb)) if len(w_p) <= len(g_comb) else (len(g_comb), len(w_p))
+                            if mx > 0 and (2.0 * mn) / (mn + mx) >= 0.72:
+                                sim_1to2 = SequenceMatcher(None, w_p, g_comb).ratio()
+                                if sim_1to2 >= 0.72 and sim_1to2 >= best_1to1 + 0.10:
+                                    rel_g2 = 0.5 * (gw["f_start"] + gw2["f_end"]) / max(1, T)
+                                    cand = gap_dp[u + 1, g_off + 2] + 1.0 + sim_1to2 - 0.01 * abs(rel_w - rel_g2)
+                                    if cand > best:
+                                        best = cand
+                                        act = 3
+
+                    if (
+                        can_2to1
+                        and len(gw["token_ids"]) >= 2
+                        and gw["f_end"] > b0_pair
+                        and gw["f_start"] < b1_pair
+                    ):
+                        g_p = gw["phon"]
+                        mn, mx = (len(p_pair), len(g_p)) if len(p_pair) <= len(g_p) else (len(g_p), len(p_pair))
+                        if mx > 0 and (2.0 * mn) / (mn + mx) >= 0.75:
+                            sim_2to1 = SequenceMatcher(None, p_pair, g_p).ratio()
+                            if sim_2to1 >= 0.75:
+                                cand = gap_dp[u + 2, g_off + 1] + 2.0 + sim_2to1 - 0.01 * abs(rel_pair - rel_g)
+                                if cand > best:
+                                    best = cand
+                                    act = 4
+
+                    gap_dp[u, g_off] = best
+                    gap_act[u, g_off] = act
+
+            u, g_off = 0, 0
+            while u < nw_gap and g_off < gap_g_count:
+                act = int(gap_act[u, g_off])
+                wi = gap_weak[u]
+                gk = gap_g_start + g_off
+                if act == 2:
+                    out_tokens[wi] = list(greedy_words[gk]["token_ids"])
+                    u += 1
+                    g_off += 1
+                elif act == 3:
+                    out_tokens[wi] = list(greedy_words[gk]["token_ids"]) + list(greedy_words[gk + 1]["token_ids"])
+                    u += 1
+                    g_off += 2
+                elif act == 4:
+                    wi2 = gap_weak[u + 1]
+                    g_toks = greedy_words[gk]["token_ids"]
+                    len1 = max(1, len(w_phons[wi]))
+                    len2 = max(1, len(w_phons[wi2]))
+                    split_at = int(round(len(g_toks) * len1 / float(len1 + len2)))
+                    split_at = max(1, min(len(g_toks) - 1, split_at))
+                    out_tokens[wi] = list(g_toks[:split_at])
+                    out_tokens[wi2] = list(g_toks[split_at:])
+                    u += 2
+                    g_off += 1
+                elif act == 0:
+                    u += 1
+                else:
+                    g_off += 1
+
+        return out_tokens
+
+    def _build_target_sequence_for_slice(
+        self,
+        words_info: List[Dict[str, Any]],
+        log_probs: np.ndarray,
+        language_code: str,
+    ) -> Tuple[List[int], List[Dict[str, Any]]]:
+        """Apply cross-script bridging and cross-word geminate `' '` separators for Viterbi alignment."""
+        active_items: List[Dict[str, Any]] = []
+        for w in words_info:
+            dtoks = w.get("direct_tokens")
+            if dtoks is None:
+                dtoks = self._word_to_omniasr_tokens(str(w.get("orig") or ""), str(w.get("clean") or ""))
+                w = {**w, "direct_tokens": dtoks}
+            if dtoks:
+                active_items.append(w)
+        if not active_items:
+            return [], []
+
+        bridged_tokens = self._bridge_omniasr_words(active_items, log_probs, language_code)
+
+        vocab: Dict[str, int] = getattr(self.acoustic_model, "dictionary", {}) or {}
+        blank_id = int(getattr(self.acoustic_model, "blank_id", 0))
+        space_raw = vocab.get(" ")
+        space_id = int(space_raw) if (space_raw is not None and int(space_raw) != blank_id) else None
+        id_to_tok = self._get_id_to_token()
+
+        active_pairs = [(w, toks) for w, toks in zip(active_items, bridged_tokens) if toks]
+        if not active_pairs:
+            return [], []
+
+        geminate_spaces = sum(
+            1
+            for k in range(1, len(active_pairs))
+            if active_pairs[k - 1][1][-1] == active_pairs[k][1][0]
         )
+        total_tokens = sum(len(toks) for _, toks in active_pairs) + geminate_spaces
+        allow_geminate_space = (
+            space_id is not None
+            and log_probs is not None
+            and len(log_probs) >= total_tokens + 6
+        )
+
+        token_ids: List[int] = []
+        word_spans_meta: List[Dict[str, Any]] = []
+
+        for w_item, w_toks in active_pairs:
+            if allow_geminate_space and token_ids and token_ids[-1] == w_toks[0]:
+                token_ids.append(space_id)
+
+            tok_start = len(token_ids)
+            token_ids.extend(int(t) for t in w_toks)
+            tok_end = len(token_ids)
+            valid_chars = tok_end - tok_start
+
+            orig_w = str(w_item.get("orig") or "")
+            is_indic = bool(_INDIC_SCRIPT_RE.search(orig_w)) or any(
+                _INDIC_SCRIPT_RE.search(id_to_tok.get(int(t), "")) for t in w_toks
+            )
+            phonetic_len = max(valid_chars, int(round(valid_chars * 1.8))) if is_indic else valid_chars
+            word_spans_meta.append(
+                {
+                    "word": orig_w,
+                    "num_chars": valid_chars,
+                    "phonetic_len": phonetic_len,
+                    "tok_start": tok_start,
+                    "tok_end": tok_end,
+                    "orig_idx": int(w_item["orig_idx"]),
+                }
+            )
+
+        return token_ids, word_spans_meta
 
     def align(
         self,
@@ -221,6 +745,7 @@ class ZenoAcousticPipeline:
             )
 
         self.acoustic_model._ensure_model_loaded()
+        self.viterbi.blank_id = int(getattr(self.acoustic_model, "blank_id", 0))
         t0 = time.time()
 
         if word_list is not None and len(word_list) > 0:
@@ -233,49 +758,24 @@ class ZenoAcousticPipeline:
         if not input_words:
             return {"status": "error", "detail": "Empty transcript", "words": []}
 
-        clean_words = []
-        clean_indices = []
+        words_info: List[Dict[str, Any]] = []
+        clean_words: List[str] = []
         for idx, orig_w in enumerate(input_words):
             clean_w = re.sub(r"[^\w\s\u0900-\u0D7F'-]", "", str(orig_w)).strip().strip("-")
             if clean_w:
                 clean_words.append(clean_w)
-                clean_indices.append(idx)
+                direct_toks = self._word_to_omniasr_tokens(orig_w, clean_w)
+                if direct_toks:
+                    words_info.append(
+                        {
+                            "orig": orig_w,
+                            "clean": clean_w,
+                            "orig_idx": idx,
+                            "direct_tokens": direct_toks,
+                        }
+                    )
 
-        romanized_words = self.batch_romanize_words(clean_words)
-
-        token_ids: List[int] = []
-        word_spans_meta: List[Dict[str, Any]] = []
-        sep_id = getattr(self.acoustic_model, "dictionary", {}).get("|")
-
-        for clean_idx, orig_idx in enumerate(clean_indices):
-            orig_w = input_words[orig_idx]
-            clean_w = clean_words[clean_idx]
-            rw = romanized_words[clean_idx] if clean_idx < len(romanized_words) else clean_w
-
-            phonetic_tokens = self._word_to_phonetic_tokens(orig_w, clean_w, rw, language_code)
-            tok_start = len(token_ids)
-            valid_chars = 0
-            for c in phonetic_tokens:
-                if c in self.acoustic_model.dictionary:
-                    token_ids.append(self.acoustic_model.dictionary[c])
-                    valid_chars += 1
-            tok_end = len(token_ids)
-
-            if valid_chars > 0:
-                if sep_id is not None:
-                    token_ids.append(sep_id)
-                word_spans_meta.append(
-                    {
-                        "word": orig_w,
-                        "num_chars": valid_chars,
-                        "phonetic_len": len(phonetic_tokens),
-                        "tok_start": tok_start,
-                        "tok_end": tok_end,
-                        "orig_idx": orig_idx,
-                    }
-                )
-
-        if not token_ids or not word_spans_meta:
+        if not words_info:
             return {"status": "error", "detail": "No valid phonetic token targets found", "words": []}
 
         log_probs, raw_waveform, duration_sec, time_per_frame = self.acoustic_model.extract_emissions(audio_path)
@@ -315,6 +815,14 @@ class ZenoAcousticPipeline:
                     log_probs_for_viterbi = log_probs[:bounded_frames]
             else:
                 log_probs_for_viterbi = log_probs
+
+        token_ids, word_spans_meta = self._build_target_sequence_for_slice(
+            words_info,
+            log_probs_for_viterbi,
+            language_code,
+        )
+        if not token_ids or not word_spans_meta:
+            return {"status": "error", "detail": "No valid phonetic token targets found", "words": []}
 
         silent = self.onset_verifier.silent_runs(raw_waveform)
         if vad_spans:
@@ -409,6 +917,7 @@ class ZenoAcousticPipeline:
     ) -> Dict[str, Any]:
         """Align multi-sentence clips locally within VAD-expanded cue windows without slicing active speech."""
         self.acoustic_model._ensure_model_loaded()
+        self.viterbi.blank_id = int(getattr(self.acoustic_model, "blank_id", 0))
         t0 = time.time()
 
         if not cues:
@@ -420,25 +929,26 @@ class ZenoAcousticPipeline:
                 "processing_time_sec": 0.0,
             }
 
-        cue_word_lists = []
-        flat_clean_words = []
+        cue_word_lists: List[List[Dict[str, Any]]] = []
         for cue in cues:
             raw_cw = cue.get("words", [])
             if not raw_cw and cue.get("text"):
                 raw_cw = [w for w in str(cue["text"]).split() if w]
 
-            c_words = []
-            for w in raw_cw:
+            c_words: List[Dict[str, Any]] = []
+            for idx, w in enumerate(raw_cw):
                 w_str = w.get("word", "") if isinstance(w, dict) else str(w)
                 w_clean = re.sub(r"[^\w\s\u0900-\u0D7F'-]", "", w_str).strip().strip("-")
-                c_words.append({"orig": w_str, "clean": w_clean})
-                if w_clean:
-                    flat_clean_words.append(w_clean)
+                direct_toks = self._word_to_omniasr_tokens(w_str, w_clean) if w_clean else []
+                c_words.append(
+                    {
+                        "orig": w_str,
+                        "clean": w_clean,
+                        "orig_idx": idx,
+                        "direct_tokens": direct_toks,
+                    }
+                )
             cue_word_lists.append(c_words)
-
-        unique_clean = list(dict.fromkeys(flat_clean_words))
-        unique_romanized = self.batch_romanize_words(unique_clean) if unique_clean else []
-        rom_map = dict(zip(unique_clean, unique_romanized))
 
         clip_sr = int(getattr(self.acoustic_model, "sample_rate", 16000) or 16000)
         probed_dur = float(total_duration_sec or 0.0)
@@ -451,7 +961,7 @@ class ZenoAcousticPipeline:
                 probed_dur = 0.0
 
         # Extract full-clip emissions ONCE for normal clips (<= 180s) and slice in memory;
-        # fall back to extract_emissions_range for > 180s clips or unit-test mocks without extract_emissions.
+        # fall back to extract_emissions_range for > 180s clips or mocks without extract_emissions.
         full_log_probs: Optional[np.ndarray] = None
         full_waveform: Optional[np.ndarray] = None
         full_dur: float = 0.0
@@ -477,7 +987,7 @@ class ZenoAcousticPipeline:
 
         total_dur = full_dur if full_dur > 0.0 else probed_dur
 
-        # Compute Silero VAD speech_spans once across the clip waveform when available
+        # Compute Silero VAD speech_spans once across the clip waveform when available.
         clip_vad_spans: List[Tuple[float, float]] = []
         vad_wf = full_waveform
         if vad_wf is None and audio_path:
@@ -530,7 +1040,6 @@ class ZenoAcousticPipeline:
                 total_duration=total_dur if total_dur > 0.0 else total_duration_sec,
             )
 
-        sep_id = getattr(self.acoustic_model, "dictionary", {}).get("|")
         aligned_cues_out: List[Dict[str, Any]] = []
         all_aligned_words_out: List[Dict[str, Any]] = []
 
@@ -544,40 +1053,8 @@ class ZenoAcousticPipeline:
             if not c_words_info:
                 continue
 
-            token_ids: List[int] = []
-            word_spans_meta: List[Dict[str, Any]] = []
-
-            for idx, w_info in enumerate(c_words_info):
-                orig_w = w_info["orig"]
-                clean_w = w_info["clean"]
-                if not clean_w:
-                    continue
-
-                rw = rom_map.get(clean_w, clean_w)
-                phonetic_tokens = self._word_to_phonetic_tokens(orig_w, clean_w, rw, language_code)
-                tok_start = len(token_ids)
-                valid_chars = 0
-                for c in phonetic_tokens:
-                    if c in self.acoustic_model.dictionary:
-                        token_ids.append(self.acoustic_model.dictionary[c])
-                        valid_chars += 1
-                tok_end = len(token_ids)
-
-                if valid_chars > 0:
-                    if sep_id is not None:
-                        token_ids.append(sep_id)
-                    word_spans_meta.append(
-                        {
-                            "word": orig_w,
-                            "num_chars": valid_chars,
-                            "phonetic_len": len(phonetic_tokens),
-                            "tok_start": tok_start,
-                            "tok_end": tok_end,
-                            "orig_idx": idx,
-                        }
-                    )
-
-            if not token_ids or not word_spans_meta:
+            init_tokens: List[int] = [t for w in c_words_info for t in w["direct_tokens"]]
+            if not init_tokens:
                 dur = max(0.2, c_end - c_start)
                 step = dur / max(1, len(c_words_info))
                 fallback_words = []
@@ -646,8 +1123,8 @@ class ZenoAcousticPipeline:
                     win_end = min(total_dur, win_end)
 
             req_frames = (
-                len(token_ids)
-                + sum(1 for k in range(1, len(token_ids)) if token_ids[k] == token_ids[k - 1])
+                len(init_tokens)
+                + sum(1 for k in range(1, len(init_tokens)) if init_tokens[k] == init_tokens[k - 1])
                 + 4
             )
 
@@ -664,6 +1141,31 @@ class ZenoAcousticPipeline:
                 if len(log_probs) < req_frames:
                     full_e = total_dur if total_dur > 0.0 else max(win_end, c_end_bound + 8.0)
                     log_probs, raw_waveform, slice_dur, time_per_frame, actual_slice_start = _get_slice(0.0, full_e)
+
+                token_ids, word_spans_meta = self._build_target_sequence_for_slice(
+                    c_words_info,
+                    log_probs,
+                    language_code,
+                )
+                bridged_req = (
+                    len(token_ids)
+                    + sum(1 for k in range(1, len(token_ids)) if token_ids[k] == token_ids[k - 1])
+                    + 4
+                )
+                if len(log_probs) < bridged_req:
+                    widen_s = max(0.0, min(actual_slice_start, c_start_bound - 3.5))
+                    widen_e = max(actual_slice_start + slice_dur, c_end_bound + 3.5)
+                    if total_dur > 0.0:
+                        widen_e = min(total_dur, widen_e)
+                    if widen_e - widen_s > slice_dur + 0.05:
+                        log_probs, raw_waveform, slice_dur, time_per_frame, actual_slice_start = _get_slice(
+                            widen_s, widen_e
+                        )
+                        token_ids, word_spans_meta = self._build_target_sequence_for_slice(
+                            c_words_info,
+                            log_probs,
+                            language_code,
+                        )
 
                 silent = self.onset_verifier.silent_runs(raw_waveform) if len(raw_waveform) > 0 else []
                 if clip_vad_spans:
@@ -840,4 +1342,15 @@ def get_shared_pipeline(device: Optional[str] = None) -> ZenoAcousticPipeline:
 def reset_shared_pipeline() -> None:
     """Reset the shared pipeline singleton (e.g., to reinitialize on CPU after a GPU error)."""
     global _shared_pipeline
+    if _shared_pipeline is not None:
+        try:
+            _shared_pipeline.unload_model()
+        except Exception:
+            pass
     _shared_pipeline = None
+
+
+def unload_shared_pipeline() -> None:
+    """Unload the shared acoustic model weights if already instantiated (no-op when never loaded)."""
+    if _shared_pipeline is not None:
+        _shared_pipeline.unload_model()

@@ -224,6 +224,8 @@ OBSOLETE_PATHS: Tuple[str, ...] = (
     "scripts/knowledge_sync.py",
     "scripts/editor_note.py",
     "scripts/learn_reference.py",
+    # Deleted 2.x alignment assets (replaced by Meta omniASR-CTC-300M-v2 in v3.0.0)
+    "scripts/align_engine/uroman",
     # Deleted 1.x tests
     "tests/test_cost_controls.py",
     "tests/test_editorial_retrieval.py",

@@ -12,3 +12,6 @@ google-genai==2.34.0
 httpx==0.28.1
 certifi==2026.10.23
 python-dotenv==1.2.4
+transformers>=4.46.0
+huggingface-hub>=0.26.0
+safetensors>=0.4.5

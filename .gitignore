@@ -30,6 +30,8 @@ input/standins/*
 tools/ffmpeg/ffmpeg*
 tools/ffmpeg/ffprobe*
 models/torch/
+models/omniASR-*/
+models/hf_cache/
 
 # Explicitly keep reusable assets, segregated formats, ONNX face model, and scripts
 !assets/**

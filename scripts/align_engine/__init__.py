@@ -2,8 +2,8 @@
 
 4-Stage Transcription & Acoustic Boundary Alignment Stack:
   - Stage 0: Gemini / Zeno Cloud verbatim transcriber + orthographic guardian (`gemini_transcriber.py`, `guardian.py`)
-  - Stage 1: Indic G2P phonetic mapper (`phonetics/indic_phonemes.py`), `uroman`, and 22-language lexicon (`lexicon.py`)
-  - Stage 2: Meta Wav2Vec2 Base 95M CTC emission extractor (`acoustic.py`)
+  - Stage 1: Indic G2P phonetic mapper (`phonetics/indic_phonemes.py`), cross-script phonetic bridge, and 22-language lexicon (`lexicon.py`)
+  - Stage 2: Meta omniASR-CTC-300M-v2 CTC emission extractor (`acoustic.py`)
   - Stage 3: Silence-masked Viterbi forced aligner (`viterbi.py`), Silero VAD (`vad.py`), and waveform onset/offset verifier (`onset_verifier.py`)
 """
 
@@ -40,6 +40,7 @@ from .pipeline import (
     ZenoAcousticPipeline,
     get_shared_pipeline,
     reset_shared_pipeline,
+    unload_shared_pipeline,
 )
 from .script_matcher import (
     compute_dual_span_similarity,
@@ -1066,7 +1067,7 @@ def transcribe_and_align_clip(
             "transcript_meta": meta,
         }
 
-    # 2. Forced alignment via Wav2Vec2 95M + IndicPhoneticMapper + uroman + Viterbi + OnsetVerifier
+    # 2. Forced alignment via Meta omniASR-CTC-300M-v2 + cross-script phonetic bridge + Viterbi + OnsetVerifier
     timed_cues = [
         c for c in cues
         if isinstance(c, dict)
@@ -1224,6 +1225,7 @@ __all__ = [
     "EditFlowAcousticPipeline",
     "get_shared_pipeline",
     "reset_shared_pipeline",
+    "unload_shared_pipeline",
     "AcousticModel",
     "AudioCaptionAlignmentAgent",
     "ViterbiAligner",

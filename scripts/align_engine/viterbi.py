@@ -90,7 +90,7 @@ def _numpy_vectorized_viterbi(
                 {
                     "start": int(frames[0]),
                     "end": int(frames[-1] + 1),
-                    "score": float(np.mean(trellis[frames, s_idx])),
+                    "score": float(np.mean(log_probs[frames, ext_targets[s_idx]])),
                 }
             )
         else:
@@ -153,7 +153,7 @@ class ViterbiAligner:
                 lp_tensor = torch.from_numpy(log_probs).unsqueeze(0).float()
                 targets = torch.tensor([token_ids], dtype=torch.int32)
                 aligned_tokens, scores = F.forced_align(lp_tensor.cpu(), targets, blank=self.blank_id)
-                spans_raw = F.merge_tokens(aligned_tokens[0], scores[0])
+                spans_raw = F.merge_tokens(aligned_tokens[0], scores[0], blank=self.blank_id)
                 cand_spans = [{"start": sp.start, "end": sp.end, "score": sp.score} for sp in spans_raw]
                 if len(cand_spans) == len(token_ids) and all(np.isfinite(sp["score"]) for sp in cand_spans):
                     token_spans = cand_spans
@@ -193,7 +193,12 @@ class ViterbiAligner:
 
                 score_sum = sum(sp["score"] if isinstance(sp, dict) else sp.score for sp in word_spans)
                 score_val = score_sum / len(word_spans)
-                conf = float(np.exp(score_val)) if score_val <= 0 else 0.95
+                if score_val <= 0.0:
+                    conf = float(np.exp(score_val))
+                elif score_val <= 1.0:
+                    conf = float(score_val)
+                else:
+                    conf = 0.95
 
                 words.append(
                     {

@@ -2,10 +2,10 @@
 """One-command cross-platform bootstrap & health check for Zeno (macOS & Windows).
 
 Usage:
-    python3 scripts/setup.py              # Verify FFmpeg, venv, wav2vec2 cache, and all asset packs
+    python3 scripts/setup.py              # Verify FFmpeg, venv, Meta omniASR-CTC-300M-v2 cache, and all asset packs
     python3 scripts/setup.py --init-venv  # Create local .venv and install ML/audio dependencies
-    python3 scripts/setup.py --prewarm    # Pre-download torchaudio wav2vec2 checkpoint
-    python3 scripts/setup.py --smoke      # Run real checks (FFmpeg filters, wav2vec2, auth)
+    python3 scripts/setup.py --prewarm    # Pre-download Meta omniASR-CTC-300M-v2 checkpoint (Apache-2.0)
+    python3 scripts/setup.py --smoke      # Run real checks (FFmpeg filters, omniASR-CTC-300M-v2, auth)
     python3 scripts/setup.py --login      # Open browser for Google Sign-In and save session
     python3 scripts/setup.py --whoami     # Check active Zeno Cloud / Gemini auth status
     python3 scripts/setup.py --logout     # Clear saved local Zeno Cloud session token
@@ -94,6 +94,9 @@ def check_or_setup_venv(init_venv: bool = False, prewarm: bool = False) -> bool:
     required_mods = [
         "torch",
         "torchaudio",
+        "transformers",
+        "huggingface_hub",
+        "safetensors",
         "cv2",
         "numpy",
         "soundfile",
@@ -138,15 +141,14 @@ def check_or_setup_venv(init_venv: bool = False, prewarm: bool = False) -> bool:
         print(f"  [!] Could not inspect packages in {venv_py}: {exc}")
         pkgs_ok = False
 
-    print("\n[3/5] Checking Meta wav2vec2 Alignment Checkpoint Cache...")
-    ckpt_dir = common.MODELS_DIR / "torch" / "hub" / "checkpoints"
-    wav2vec_ckpts = list(ckpt_dir.glob("*wav2vec2*")) if ckpt_dir.is_dir() else []
-    if wav2vec_ckpts:
-        for ckpt in wav2vec_ckpts:
-            mb = ckpt.stat().st_size / (1024 * 1024)
-            print(f"  [OK] Cached checkpoint: {ckpt} ({mb:.1f} MB)")
+    print("\n[3/5] Checking Meta omniASR-CTC-300M-v2 Alignment Checkpoint Cache...")
+    omni_dir = common.MODELS_DIR / "omniASR-CTC-300M-v2"
+    omni_weights = omni_dir / "model.safetensors"
+    if omni_weights.is_file() and (omni_dir / "config.json").is_file():
+        mb = omni_weights.stat().st_size / (1024 * 1024)
+        print(f"  [OK] Cached checkpoint: {omni_weights} ({mb:.1f} MB, Meta omniASR-CTC-300M-v2 Apache-2.0)")
     elif prewarm:
-        print("  + Pre-warming torchaudio wav2vec2 checkpoint (~360 MB)...")
+        print("  + Pre-warming Meta omniASR-CTC-300M-v2 alignment model (~1.21 GB)...")
         prewarm_code = (
             "import sys; sys.path.insert(0, r'%s'); "
             "from align_engine.acoustic import AcousticModel; "
@@ -154,10 +156,10 @@ def check_or_setup_venv(init_venv: bool = False, prewarm: bool = False) -> bool:
         )
         r = subprocess.run([str(venv_py), "-B", "-c", prewarm_code], check=False)
         if r.returncode != 0:
-            print("  [!] wav2vec2 pre-warm failed; verify network/SSL and retry with --prewarm.")
+            print("  [!] omniASR-CTC-300M-v2 pre-warm failed; verify network/SSL and retry with --prewarm.")
             return False
     else:
-        print(f"  [i] wav2vec2 checkpoint not yet cached in {ckpt_dir} (will auto-download on first CTC alignment or run with --prewarm).")
+        print(f"  [i] omniASR-CTC-300M-v2 weights not yet cached in {omni_dir} (will auto-download on first CTC alignment or run with --prewarm).")
 
     return pkgs_ok
 
@@ -231,7 +233,7 @@ def check_env() -> None:
 
 
 def smoke_test() -> bool:
-    """Prove the machine can really edit: FFmpeg filters Zeno uses, the wav2vec2 aligner, and the Gemini key setting."""
+    """Prove the machine can really edit: FFmpeg filters Zeno uses, the Meta omniASR-CTC-300M-v2 aligner, and the Gemini key setting."""
     print("\n[smoke] Running real checks (about 1-2 minutes the first time)...")
     ok = True
     ffmpeg_path = common.resolve_ffmpeg()
@@ -269,7 +271,7 @@ def smoke_test() -> bool:
     r = subprocess.run([str(venv_py), "-B", "-c", code], capture_output=True, text=True)
     line = (r.stdout.strip().splitlines() or [""])[-1]
     good = r.returncode == 0 and line.startswith("OK")
-    print(f"  [{'OK' if good else 'FAIL'}] wav2vec2 alignment model: {line if good else (r.stderr.strip()[-300:] or 'no output')}")
+    print(f"  [{'OK' if good else 'FAIL'}] omniASR-CTC-300M-v2 alignment model: {line if good else (r.stderr.strip()[-300:] or 'no output')}")
     ok = ok and good
 
     common.load_dotenv()
@@ -304,8 +306,8 @@ def smoke_test() -> bool:
 def main():
     ap = argparse.ArgumentParser(description="Bootstrap and verify Zeno cross-platform setup.")
     ap.add_argument("--init-venv", action="store_true", help="Create local .venv and install dependencies")
-    ap.add_argument("--prewarm", action="store_true", help="Pre-download wav2vec2 checkpoint into models/torch")
-    ap.add_argument("--smoke", action="store_true", help="Run real checks: FFmpeg filters, wav2vec2 forward pass, auth")
+    ap.add_argument("--prewarm", action="store_true", help="Pre-download Meta omniASR-CTC-300M-v2 checkpoint into models/omniASR-CTC-300M-v2 (Apache-2.0)")
+    ap.add_argument("--smoke", action="store_true", help="Run real checks: FFmpeg filters, Meta omniASR-CTC-300M-v2 forward pass, auth")
     ap.add_argument("--login", action="store_true", help="Open browser for Google Sign-In and auto-save session token")
     ap.add_argument("--whoami", action="store_true", help="Check active Zeno Cloud / Gemini authentication status")
     ap.add_argument("--logout", action="store_true", help="Clear saved local Zeno Cloud session token")

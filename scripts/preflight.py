@@ -2,7 +2,7 @@
 """Pre-job readiness gate for Zeno (`scripts/preflight.py`).
 
 Verifies FFmpeg/FFprobe, GPU compute & H.264 encoder, OpenCV + YuNet face detector,
-PyTorch/torchaudio wav2vec2 aligner, Node.js subtitle renderer, and transcription credentials,
+PyTorch/torchaudio Meta omniASR-CTC-300M-v2 aligner, Node.js subtitle renderer, and transcription credentials,
 plus optional footage & script validation.
 
 Usage:
@@ -130,16 +130,17 @@ def check_opencv() -> Check:
 
 
 def check_pytorch_audio() -> Check:
-    """Verify PyTorch, torchaudio, soundfile, and wav2vec2 acoustic alignment forward pass."""
+    """Verify PyTorch, torchaudio, transformers/safetensors, soundfile, and Meta omniASR-CTC-300M-v2 acoustic alignment."""
     scripts_dir = Path(__file__).resolve().parent
-    torch_home = common.MODELS_DIR / "torch"
+    omni_dir = common.MODELS_DIR / "omniASR-CTC-300M-v2"
+    omni_weights = omni_dir / "model.safetensors"
+    omni_cfg = omni_dir / "config.json"
     code = (
         "import importlib.util, os, sys, tempfile, time\n"
         "sys.dont_write_bytecode = True\n"
-        f"os.environ.setdefault('TORCH_HOME', r'{torch_home}')\n"
         "os.environ.setdefault('PYTORCH_ENABLE_MPS_FALLBACK', '1')\n"
         f"sys.path.insert(0, r'{scripts_dir}')\n"
-        "import numpy as np, soundfile as sf, torch, torchaudio\n"
+        "import huggingface_hub, numpy as np, safetensors, soundfile as sf, torch, torchaudio, transformers\n"
         "import common\n"
         "t = time.time()\n"
         "acoustic_py = os.path.join(r'" + str(scripts_dir) + "', 'align_engine', 'acoustic.py')\n"
@@ -152,8 +153,12 @@ def check_pytorch_audio() -> Check:
         "        mod = importlib.util.module_from_spec(spec)\n"
         "        spec.loader.exec_module(mod)\n"
         "        AcousticModel = mod.AcousticModel\n"
-        "if AcousticModel is not None:\n"
-        "    m = AcousticModel()\n"
+        "if AcousticModel is None:\n"
+        "    sys.stderr.write('align_engine.acoustic.AcousticModel unavailable\\n')\n"
+        "    sys.exit(1)\n"
+        "m = AcousticModel()\n"
+        f"weights_cached = os.path.isfile(r'{omni_weights}') and os.path.isfile(r'{omni_cfg}')\n"
+        "if weights_cached:\n"
         "    fd, p = tempfile.mkstemp(suffix='.wav'); os.close(fd)\n"
         "    try:\n"
         "        sf.write(p, np.zeros(16000, dtype='float32'), 16000)\n"
@@ -162,13 +167,13 @@ def check_pytorch_audio() -> Check:
         "        if os.path.exists(p): os.unlink(p)\n"
         "    print('OK device=%s frames=%d seconds=%.1f' % (m.device, lp.shape[0], time.time() - t))\n"
         "else:\n"
-        "    from torchaudio.pipelines import WAV2VEC2_ASR_BASE_960H as bundle\n"
-        "    dev = common.compute_device()\n"
-        "    model = bundle.get_model().to(dev).eval()\n"
-        "    with torch.inference_mode():\n"
-        "        em, _ = model(torch.zeros((1, 16000), dtype=torch.float32, device=dev))\n"
-        "    print('OK torch=%s torchaudio=%s device=%s frames=%d seconds=%.1f' % (\n"
-        "        torch.__version__, torchaudio.__version__, dev, em.shape[1], time.time() - t))\n"
+        "    dev = torch.device(common.compute_device())\n"
+        "    _ = torch.zeros((1, 1600), dtype=torch.float32, device=dev).sum().item()\n"
+        "    vocab = len(getattr(m, 'dictionary', {}) or {})\n"
+        "    if vocab <= 0:\n"
+        "        sys.stderr.write('AcousticModel dictionary is empty\\n')\n"
+        "        sys.exit(1)\n"
+        "    print('OK device=%s vocab=%d (weights auto-download on first --inspect)' % (m.device, vocab))\n"
     )
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -182,9 +187,9 @@ def check_pytorch_audio() -> Check:
         )
         line = (r.stdout.strip().splitlines() or [""])[-1]
         ok = r.returncode == 0 and line.startswith("OK ")
-        return ok, "PyTorch & wav2vec2", line[3:] if ok else (r.stderr.strip()[-200:] or "aligner check produced no output")
+        return ok, "PyTorch & omniASR-CTC", line[3:] if ok else (r.stderr.strip()[-200:] or "aligner check produced no output")
     except Exception as exc:
-        return False, "PyTorch & wav2vec2", f"{type(exc).__name__}: {str(exc)[:160]}"
+        return False, "PyTorch & omniASR-CTC", f"{type(exc).__name__}: {str(exc)[:160]}"
 
 
 check_aligner = check_pytorch_audio

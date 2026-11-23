@@ -5,8 +5,7 @@ All models, libraries, fonts, and audio/visual assets bundled in or downloaded b
 | Component | Path in Repo | License | Commercial-Safe? | Attribution / Notes |
 |---|---|---|---|---|
 | **Zeno Core Software** | `scripts/`, `agent/`, `styles/`, `service/` | **Supernova Internal Use License** (`LICENSE`) | Yes (Internal) | Copyright (c) 2026 Supernova. All rights reserved. |
-| **Meta Wav2Vec2 Base (`95M`)** | `models/torch/` (`WAV2VEC2_ASR_BASE_960H` via `torchaudio`) | **MIT License** | Yes | Meta Platforms, Inc. (No `mms-300m` CC-BY-NC weights are used). |
-| **uroman (`v1.3.1.1`)** | `scripts/align_engine/uroman/` | **MIT License** (`scripts/align_engine/uroman/LICENSE.txt`) | Yes | Copyright (c) 2015–2024 Ulf Hermjakob, USC Information Sciences Institute. |
+| **Meta Omnilingual ASR (`omniASR-CTC-300M-v2`)** | `models/omniASR-CTC-300M-v2/` & `scripts/align_engine/data/omniasr_vocab.json` | **Apache License 2.0** | Yes | Copyright (c) Meta Platforms, Inc. (`facebookresearch/omnilingual-asr`, Hugging Face `Wav2Vec2ForCTC` `safetensors` weights via `aadel4/omniASR-CTC-300M-v2`). |
 | **YuNet Face Detector** | `models/face_detection_yunet_2023mar.onnx` | **MIT License** (OpenCV Zoo / `libfacedetection`) | Yes | Copyright (c) 2018–2023 Shiqi Yu, Wei Wu, Hanyang Peng (`opencv/opencv_zoo`). |
 | **Montserrat-ExtraBold Font (`v7.200`)** | `assets/fonts/Montserrat-ExtraBold.ttf` | **SIL Open Font License 1.1 (OFL-1.1)** | Yes | Copyright 2011 The Montserrat Project Authors (`github.com/JulietaUla/Montserrat`). |
 | **Sound Effects (`assets/sfx/`)** | `assets/sfx/*.wav`, `assets/sfx/*.mp3` | **Supernova Proprietary & Synthesized Audio** (`LICENSE` Sec. 7) | Yes (Internal) | Supernova production packs (`sn_*`, `kn20228_*`, `w42_*`, `whoosh.wav`) and synthesized cues (`buzzer.wav`, `correct_ding.wav`, `click.wav`, `ding.wav`, `pop.wav`, `riser.wav`). |
