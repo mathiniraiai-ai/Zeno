@@ -14,6 +14,7 @@ The script is the master timeline. From the aligned words inside each cut, this 
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from collections import Counter
@@ -2577,12 +2578,56 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
                 continue
 
             words = _get_seg_words()
+            env_pre = _env_of(seg)
             if words:
                 first_word_end_rel = max(0.0, _src_to_seg_time(seg, min(en, float(words[0].get("end", en)))))
                 last_word_end_rel = max(0.0, _src_to_seg_time(seg, min(en, float(words[-1].get("end", en)))))
             else:
                 first_word_end_rel = 0.0
                 last_word_end_rel = round(raw_dur * 0.75, 3)
+
+            has_silent_last_overhang = False
+            pre_voice_end_src: Optional[float] = None
+            pre_voice_end_rel: Optional[float] = None
+            true_voice_end_rel = last_word_end_rel
+            if words and env_pre:
+                quiet_pre = _quiet_level(env_pre)
+                step_pre = (env_pre[1][0] - env_pre[0][0]) if len(env_pre) > 1 else 0.01
+                last_w_end_src = min(en, float(words[-1].get("end", en)))
+                inside_pre = [(t, db) for t, db in env_pre if st - 1e-4 <= t <= last_w_end_src + 1e-4]
+                _, pre_voice_end_src = _find_voiced_bounds(inside_pre, quiet_pre, max(0.08, last_w_end_src - st))
+                if pre_voice_end_src is not None:
+                    # Never ignore short 10-25ms final stop-consonant bursts (-p/-t/-k) inside the final word
+                    last_w_start_src = max(st, float(words[-1].get("start", st)))
+                    in_word_peaks = [t for t, db in inside_pre if last_w_start_src - 0.01 <= t <= last_w_end_src + 0.01 and db >= quiet_pre]
+                    if in_word_peaks:
+                        pre_voice_end_src = max(pre_voice_end_src, in_word_peaks[-1])
+                    pre_voice_end_rel = max(0.0, _src_to_seg_time(seg, min(en, pre_voice_end_src)))
+                    if (
+                        last_word_end_rel - pre_voice_end_rel > 0.14
+                        and _max_rms_between(env_pre, pre_voice_end_src + 0.045, last_w_end_src, min_run=1) < -50.0
+                    ):
+                        last_word_end_rel = pre_voice_end_rel
+                        has_silent_last_overhang = True
+                anchor_src = pre_voice_end_src if (has_silent_last_overhang and pre_voice_end_src is not None) else last_w_end_src
+                true_voice_end_rel = last_word_end_rel
+                fade_limit = min(en, anchor_src + 0.45)
+                if fade_limit > anchor_src + step_pre:
+                    t_f, q_f, fade_end = anchor_src, 0, None
+                    while t_f <= fade_limit + 1e-6:
+                        idx_f = min(len(env_pre) - 1, max(0, int(round((t_f - env_pre[0][0]) / step_pre))))
+                        if env_pre[idx_f][1] >= quiet_pre:
+                            q_f = 0
+                        else:
+                            q_f += 1
+                            if q_f >= QUIET_FRAMES:
+                                fade_end = t_f - (QUIET_FRAMES - 1) * step_pre
+                                break
+                        t_f += step_pre
+                    if fade_end is None:
+                        fade_end = fade_limit
+                    if fade_end > anchor_src + 0.02:
+                        true_voice_end_rel = max(true_voice_end_rel, _src_to_seg_time(seg, min(en, fade_end)))
 
             matched_end: Optional[float] = None
             if is_wrong_beat and words:
@@ -2604,8 +2649,18 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
                     if me is not None:
                         matched_end = me
                         break
+            if (
+                matched_end is not None
+                and has_silent_last_overhang
+                and pre_voice_end_rel is not None
+                and pre_voice_end_src is not None
+                and matched_end - pre_voice_end_rel > 0.14
+            ):
+                matched_end_src = min(en, _seg_to_src_time(seg, matched_end))
+                if _max_rms_between(env_pre, pre_voice_end_src + 0.045, matched_end_src, min_run=1) < -50.0:
+                    matched_end = pre_voice_end_rel
 
-            word_end_rel = matched_end if matched_end is not None else last_word_end_rel
+            word_end_rel = matched_end if matched_end is not None else true_voice_end_rel
             beat_at = round(max(0.0, word_end_rel), 3)
 
             def _is_explicit_mid_cut(at_raw: Any) -> bool:
@@ -2689,8 +2744,25 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
                             changed += 1
                     else:
                         target_b_at = fallback_anchor_at
-                        is_post_word = b_at_raw is not None and b_at >= max(0.0, target_b_at - 0.08)
-                        if not (is_post_word and has_custom_dur):
+                        is_too_late_no_match = (
+                            bool(words)
+                            and bool(env_pre)
+                            and b_at_raw is not None
+                            and b_at > max(target_b_at, true_voice_end_rel) + 0.12
+                        )
+                        is_post_word = (
+                            b_at_raw is not None
+                            and b_at >= max(0.0, target_b_at - 0.08)
+                            and not is_too_late_no_match
+                        )
+                        if is_too_late_no_match:
+                            b["at"] = target_b_at
+                            banners_modified = True
+                            changed += 1
+                            if b_dur_raw is None:
+                                b["duration"] = beat_dur
+                                changed += 1
+                        elif not (is_post_word and has_custom_dur):
                             if not is_post_word and (b_at_raw is None or abs(b_at - target_b_at) > 0.002):
                                 b["at"] = target_b_at
                                 banners_modified = True
@@ -2772,6 +2844,15 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
                                 wm["at"] = target_wm_at
                                 wm["duration"] = beat_dur
                                 changed += 1
+                            elif (
+                                words
+                                and env_pre
+                                and wm_at > max(target_wm_at, true_voice_end_rel) + 0.12
+                            ):
+                                wm["at"] = target_wm_at
+                                if wm.get("duration") is None:
+                                    wm["duration"] = beat_dur
+                                changed += 1
                             elif wm.get("duration") is None:
                                 wm["duration"] = beat_dur
                                 changed += 1
@@ -2793,7 +2874,19 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
                     changed += 1
                 else:
                     for rm in right_marks:
-                        if rm.get("duration") is None:
+                        rm_at_raw = rm.get("at")
+                        rm_at = float(rm_at_raw) if rm_at_raw is not None else 0.0
+                        if (
+                            words
+                            and env_pre
+                            and not _is_explicit_mid_cut(rm_at_raw)
+                            and rm_at > true_voice_end_rel + 0.12
+                        ):
+                            rm["at"] = round(max(0.0, true_voice_end_rel), 3)
+                            if rm.get("duration") is None:
+                                rm["duration"] = beat_dur
+                            changed += 1
+                        elif rm.get("duration") is None:
                             rm["duration"] = beat_dur
                             changed += 1
                 for lid in lids:
@@ -2818,18 +2911,19 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
 
                 had_audio_end = seg.get("audio_end") is not None and not isinstance(seg.get("audio_end"), bool)
                 en_spoken_cap = _effective_audio_end_src(seg, st, en) if had_audio_end else en
-                word_end_src = (
-                    min(en, max(float(w.get("end", st)) for w in words))
-                    if words
-                    else en_spoken_cap
-                )
-                base_spoken_en = word_end_src if had_audio_end else max(en, word_end_src)
+                if has_silent_last_overhang and pre_voice_end_src is not None:
+                    word_end_src = min(en, pre_voice_end_src)
+                elif words:
+                    word_end_src = min(en, max(float(w.get("end", st)) for w in words))
+                else:
+                    word_end_src = en_spoken_cap
+                base_spoken_en = word_end_src if (had_audio_end or has_silent_last_overhang) else max(en, word_end_src)
                 safe_src_limit = (
                     _real_speech_bounds_after(seg, word_end_src, src_path, segs, idx, plan, work_dir)
                     if src_exists
                     else en
                 )
-                env_beat = _env_of(seg)
+                env_beat = env_pre or _env_of(seg)
                 spoken_beat = _speech_spans_for(seg)
                 scan_limit = min(safe_src_limit, max(base_spoken_en, word_end_src) + 0.55)
                 vad_end = max(
@@ -2968,31 +3062,29 @@ def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path, plan_path:
     _ACTIVE_WORK_DIR = Path(work_dir) if work_dir is not None else prev_wd
     try:
         unread = unread_plan_lines(plan, plan_path) if plan_path else []
+        adj: Dict[str, int] = {"snap": 0, "tails": 0, "cards": 0, "beats": 0, "joins": 0}
         if plan.get("segments") and not unread:
-            moved = 0
-            cards_calibrated = 0
-            calibrated = 0
             try:
-                moved = snap_cuts(plan)
+                adj["snap"] = int(snap_cuts(plan) or 0)
             except Exception:
                 pass
             try:
-                moved += protect_tails(plan)
+                adj["tails"] = int(protect_tails(plan) or 0)
             except Exception:
                 pass
             try:
-                moved += tighten_joins(plan)
+                adj["cards"] = int(calibrate_flashcards(plan, script_path, work_dir) or 0)
             except Exception:
                 pass
             try:
-                cards_calibrated = calibrate_flashcards(plan, script_path, work_dir)
+                adj["beats"] = int(calibrate_post_word_beats(plan, script_path, work_dir) or 0)
             except Exception:
                 pass
             try:
-                calibrated = calibrate_post_word_beats(plan, script_path, work_dir)
+                adj["joins"] = int(tighten_joins(plan) or 0)
             except Exception:
                 pass
-            if (moved or cards_calibrated or calibrated) and plan_path and Path(plan_path).is_file():
+            if any(adj.values()) and plan_path and Path(plan_path).is_file():
                 try:
                     import edl_parser
 
@@ -3000,6 +3092,7 @@ def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path, plan_path:
                 except Exception:
                     pass
         g = gate(plan, script_path, work_dir)
+        g["adjustments"] = adj
         ok = g["accepted"]
 
         def still_open(items: List[str]) -> List[str]:
@@ -3067,6 +3160,12 @@ def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path, plan_path:
             mid_tr = still_open(mid_sentence_transition_problems(plan))
             if mid_tr:
                 g["problems"]["MID-SENTENCE TRANSITION"] = mid_tr
+        except Exception:
+            pass
+        try:
+            sc_prob = still_open(split_continuity_problems(plan, s_lines, work_dir))
+            if sc_prob:
+                g["problems"]["SPLIT CONTINUITY"] = sc_prob
         except Exception:
             pass
         g["blocked"] = bool(g["problems"])
@@ -3630,6 +3729,10 @@ def cut_problems(plan: Dict[str, Any]) -> List[str]:
                         if ghost_ids and id(w) in ghost_ids:
                             continue
                         loud = max((db for tt, db in env if t - 0.03 <= tt <= t + 0.03), default=-140.0) if env else 0.0
+                        if env and loud < -50.0:
+                            tail_lo, tail_hi = (t - 0.02, b) if name == "end" else (a, t + 0.02)
+                            if _max_rms_between(env, tail_lo, tail_hi, min_run=1) < -50.0:
+                                continue
                         if spoken and not any(x0 - 0.03 <= t <= x1 + 0.03 for x0, x1 in spoken):
                             if not env or loud < -45.0:
                                 continue
@@ -3715,6 +3818,10 @@ def cut_problems(plan: Dict[str, Any]) -> List[str]:
                         continue
 
                 loud = max((db for tt, db in env if t - 0.03 <= tt <= t + 0.03), default=-140.0) if env else 0.0
+                if env and loud < -50.0:
+                    vad_lo, vad_hi = (t - 0.02, sp1) if name == "end" else (sp0, t + 0.02)
+                    if _max_rms_between(env, vad_lo, vad_hi, min_run=1) < -50.0:
+                        continue
                 if env and loud < -50.0:
                     continue
                 if env and loud < quiet_thr and ((sp1 - t) if name == "end" else (t - sp0)) <= 0.25:
@@ -3982,6 +4089,163 @@ def mid_sentence_transition_problems(plan: Dict[str, Any]) -> List[str]:
         out.append(
             f"{prev_sid} -> {sid}: {kind} inside line {lb} (mid-sentence pause cut); use tr=cut instead"
         )
+    return out
+
+
+_SPLIT_TAKEOVER_CUE_RE = re.compile(
+    r"\b(?:full[\s-]*screen|takes?\s+over|goes?\s+full[\s-]*screen|selfie(?:\s+style)?|cutaway|solo\s+shot|close[\s-]*up|flashback)\b",
+    re.I,
+)
+_SPLIT_HOOK_OR_CTA_RE = re.compile(
+    r"\b(?:hook|b[\s-]*roll|montage|cta|outro|end[\s-]*card|takeover|full[\s-]*screen|close[\s-]*up|selfie|cutaway|solo\s+shot|flashback)\b",
+    re.I,
+)
+
+
+def _norm_split_continuity_layout(seg: Dict[str, Any]) -> str:
+    raw = str(seg.get("layout") or "single").split(":")[0].strip().lower()
+    if raw in ("", "auto", "full", "fullscreen"):
+        return "single"
+    if raw in ("left_right", "hstack", "side_by_side"):
+        return "split_h"
+    if raw in ("top_bottom", "vstack"):
+        return "split_v"
+    return raw
+
+
+def split_continuity_problems(
+    plan: Dict[str, Any],
+    script_lines: Any = None,
+    work_dir: Optional[Path] = None,
+) -> List[str]:
+    """Enforce split-screen continuity across segments (`full_gate` hard block).
+
+    Blocks:
+    1) Unscripted `split -> single -> split` drops unless the line/segment has an explicit takeover/cutaway cue,
+       is muted/beat, or is a baked split panel (`slot`/`active` left/right/top/bottom).
+    2) Unscripted non-baked `single` segments when the project format (`script_analysis.md`) forbids `single`
+       (e.g. `split_screen`, `scrolling_text`), unless an explicit hook/takeover/CTA cue is present.
+    3) Any segment whose script line specifies `layout_hint` in `SPLIT_FAMILY` yet drops to non-baked `single`.
+    """
+    segs = [s for s in (plan.get("segments") or []) if isinstance(s, dict)]
+    if not segs:
+        return []
+
+    s_lines_list: List[Dict[str, Any]] = []
+    if isinstance(script_lines, list):
+        s_lines_list = [l for l in script_lines if isinstance(l, dict)]
+    else:
+        sp_cand = script_lines or plan.get("script")
+        if sp_cand:
+            try:
+                from prepare import parse_script_file
+
+                sp_path = Path(str(sp_cand))
+                if sp_path.is_file():
+                    _, s_lines_list = parse_script_file(sp_path)
+            except Exception:
+                s_lines_list = []
+
+    by_id: Dict[str, Dict[str, Any]] = {
+        str(l["id"]).upper(): l for l in s_lines_list if isinstance(l, dict) and l.get("id")
+    }
+    split_set = set(SPLIT_FAMILY)
+    fmt = plan_edit_format(work_dir)
+    is_strict_split_fmt = bool(
+        fmt
+        and fmt.get("id") in ("split_screen", "scrolling_text")
+        and "single" not in (fmt.get("layouts") or [])
+    )
+
+    n = len(segs)
+    norm_lays: List[str] = []
+    is_split: List[bool] = []
+    is_baked: List[bool] = []
+    is_exempt: List[bool] = []
+    line_objs_per_seg: List[List[Dict[str, Any]]] = []
+    has_takeover: List[bool] = []
+    has_hook_or_cta: List[bool] = []
+
+    for s in segs:
+        sid = str(s.get("id") or "")
+        lay = _norm_split_continuity_layout(s)
+        norm_lays.append(lay)
+        sp_flag = lay in split_set
+        is_split.append(sp_flag)
+        baked = (
+            not sp_flag
+            and lay == "single"
+            and str(s.get("slot") or s.get("active") or "").strip().lower() in ("left", "right", "top", "bottom")
+        )
+        is_baked.append(baked)
+        is_exempt.append(_segment_is_muted(s) or _segment_is_beat(s))
+
+        lids = _seg_lines(sid)
+        l_objs = [by_id[lid] for lid in lids if lid in by_id]
+        line_objs_per_seg.append(l_objs)
+
+        cue_blobs = [str(s.get("note") or "")]
+        for l_obj in l_objs:
+            for fk in ("scene_visual", "note", "direction", "visual", "scene"):
+                v = str(l_obj.get(fk) or "").strip()
+                if v:
+                    cue_blobs.append(v)
+        joined_cues = " ".join(cue_blobs)
+        tk_flag = any(
+            str(l_obj.get("layout_hint") or "").strip().lower() == "single"
+            for l_obj in l_objs
+        ) or bool(_SPLIT_TAKEOVER_CUE_RE.search(joined_cues))
+        has_takeover.append(tk_flag)
+        has_hook_or_cta.append(tk_flag or bool(_SPLIT_HOOK_OR_CTA_RE.search(joined_cues)))
+
+    out: List[str] = []
+    flagged_idxs: set[int] = set()
+
+    # 1) Detect contiguous non-split runs strictly bordered by split segments on both sides
+    idx = 0
+    while idx < n:
+        if is_split[idx]:
+            idx += 1
+            continue
+        run_start = idx
+        while idx < n and not is_split[idx]:
+            idx += 1
+        run_end = idx - 1
+        if run_start > 0 and run_end < n - 1 and is_split[run_start - 1] and is_split[run_end + 1]:
+            for k in range(run_start, run_end + 1):
+                if is_exempt[k] or is_baked[k] or has_takeover[k] or norm_lays[k] != "single":
+                    continue
+                sid_k = str(segs[k].get("id") or f"S{k + 1}")
+                out.append(
+                    f"{sid_k} [SPLIT CONTINUITY] dropped to layout=single inside split scene "
+                    f"(split -> single -> split); keep layout={norm_lays[run_start - 1]} with advancing silent peer"
+                )
+                flagged_idxs.add(k)
+
+    # 2) Pure split formats (`split_screen`, `scrolling_text`) + explicit split `layout_hint`
+    for k, s in enumerate(segs):
+        if k in flagged_idxs or is_split[k] or is_baked[k] or is_exempt[k] or norm_lays[k] != "single":
+            continue
+        sid_k = str(s.get("id") or f"S{k + 1}")
+        exp_hints = [
+            str(l_obj.get("layout_hint") or "").strip().lower()
+            for l_obj in line_objs_per_seg[k]
+            if str(l_obj.get("layout_hint") or "").strip().lower() in split_set
+        ]
+        if exp_hints and not _SPLIT_TAKEOVER_CUE_RE.search(str(s.get("note") or "")):
+            out.append(
+                f"{sid_k} [SPLIT CONTINUITY] script requires layout={exp_hints[0]}, got single; "
+                "keep split-screen layout with advancing peer"
+            )
+            flagged_idxs.add(k)
+            continue
+        if is_strict_split_fmt and not has_hook_or_cta[k]:
+            out.append(
+                f"{sid_k} [SPLIT CONTINUITY] format {fmt['id']} forbids unscripted layout=single; "
+                f"use layout={fmt['layouts'][0]} or document an explicit hook/takeover cue"
+            )
+            flagged_idxs.add(k)
+
     return out
 
 
@@ -4344,6 +4608,62 @@ def _quiet_level(env: List[Tuple[float, float]]) -> float:
     return min(-34.0, max(-42.0, floor + 10.0, speech - 22.0))
 
 
+def _find_voiced_bounds(
+    inside_env: List[Tuple[float, float]],
+    quiet: float,
+    dur: float,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Return `(first_voiced, last_voiced)` requiring `>=3` consecutive `>= quiet` 10ms frames.
+
+    Falls back to single-frame bounds only when `dur < 0.15` or no `>=3` consecutive run exists.
+    """
+    if not inside_env:
+        return None, None
+    single_ts = [t for t, db in inside_env if db >= quiet]
+    if not single_ts:
+        return None, None
+    if dur < 0.15 or len(inside_env) < 3:
+        return single_ts[0], single_ts[-1]
+
+    runs: List[Tuple[float, float]] = []
+    run_start: Optional[float] = None
+    run_last: Optional[float] = None
+    run_len = 0
+    for t, db in inside_env:
+        if db >= quiet:
+            if run_len == 0:
+                run_start = t
+            run_last = t
+            run_len += 1
+        else:
+            if run_len >= 3 and run_start is not None and run_last is not None:
+                runs.append((run_start, run_last))
+            run_len = 0
+            run_start = None
+            run_last = None
+    if run_len >= 3 and run_start is not None and run_last is not None:
+        runs.append((run_start, run_last))
+
+    if runs:
+        return runs[0][0], runs[-1][1]
+    return single_ts[0], single_ts[-1]
+
+
+def _max_rms_between(env: List[Tuple[float, float]], t0: float, t1: float, min_run: int = 1) -> float:
+    """Return peak dBFS (over `>= min_run` consecutive 10ms frames, default single-frame `1`) in `env` inside `[t0, t1]`.
+
+    Single-frame peak (`min_run=1`) preserves short 10-25ms voiceless stop-consonant bursts (`-p/-t/-k/-d`).
+    """
+    if not env or t1 < t0 - 1e-6:
+        return -140.0
+    vals = [db for t, db in env if t0 - 1e-4 <= t <= t1 + 1e-4]
+    if not vals:
+        return -140.0
+    if min_run <= 1 or len(vals) < min_run:
+        return max(vals)
+    return max(min(vals[i : i + min_run]) for i in range(len(vals) - min_run + 1))
+
+
 def protect_tails(plan: Dict[str, Any]) -> int:
     """Keep every spoken word whole at cut edges without chasing Silero VAD's silent padding.
 
@@ -4509,19 +4829,59 @@ def protect_tails(plan: Dict[str, Any]) -> int:
 
 
 def _shift_seg_relative_cues(seg: Dict[str, Any], delta_start: float, plan: Optional[Dict[str, Any]] = None) -> None:
-    """Shift segment-relative `at` / `@t` timestamps when `seg['start']` advances by `+delta_start` seconds."""
+    """Shift segment-relative `at` / `@t` / `audio_end` / `zoom_at` timestamps when `seg['start']` advances by `+delta_start` seconds."""
     if abs(delta_start) < 1e-6:
         return
     sid = str(seg.get("id") or "")
-    for key in ("marks", "sfx", "banners", "flashcards"):
+    for key in ("marks", "sfx", "banners", "freezes"):
         items = seg.get(key)
         if isinstance(items, list):
             for it in items:
                 if isinstance(it, dict) and it.get("at") is not None:
                     try:
-                        it["at"] = round(max(0.0, float(it["at"]) - delta_start), 3)
+                        orig_at = float(it["at"])
+                        it["at"] = 0.0 if orig_at <= 0.05 else round(max(0.0, orig_at - delta_start), 3)
                     except (TypeError, ValueError):
                         pass
+    fc_items = seg.get("flashcards")
+    if isinstance(fc_items, list):
+        orig_fc_meta: List[Tuple[Optional[float], Optional[float]]] = []
+        for it in fc_items:
+            if isinstance(it, dict):
+                try:
+                    oat = float(it["at"]) if it.get("at") is not None else None
+                except (TypeError, ValueError):
+                    oat = None
+                try:
+                    odur = float(it["duration"]) if it.get("duration") is not None else None
+                except (TypeError, ValueError):
+                    odur = None
+                orig_fc_meta.append((oat, odur))
+                if oat is not None:
+                    it["at"] = 0.0 if oat <= 0.05 else round(max(0.0, oat - delta_start), 3)
+            else:
+                orig_fc_meta.append((None, None))
+        for k_fc in range(len(fc_items) - 1):
+            it_cur = fc_items[k_fc]
+            it_nxt = fc_items[k_fc + 1]
+            if not isinstance(it_cur, dict) or not isinstance(it_nxt, dict):
+                continue
+            orig_cur_at, orig_cur_dur = orig_fc_meta[k_fc]
+            orig_nxt_at, _ = orig_fc_meta[k_fc + 1]
+            if (
+                orig_cur_at is not None
+                and orig_cur_dur is not None
+                and orig_nxt_at is not None
+                and orig_nxt_at > 0.05
+                and it_nxt.get("at") is not None
+                and it_cur.get("at") is not None
+                and (orig_cur_at <= 0.05 or abs((orig_cur_at + orig_cur_dur) - orig_nxt_at) <= 0.08)
+            ):
+                try:
+                    new_dur = round(max(0.10, float(it_nxt["at"]) - float(it_cur["at"])), 3)
+                    it_cur["duration"] = min(round(orig_cur_dur, 3), new_dur)
+                except (TypeError, ValueError):
+                    pass
     if plan is not None and sid:
         for key in ("marks", "sfx"):
             items = plan.get(key)
@@ -4529,14 +4889,29 @@ def _shift_seg_relative_cues(seg: Dict[str, Any], delta_start: float, plan: Opti
                 for it in items:
                     if isinstance(it, dict) and str(it.get("segment") or "") == sid and it.get("at") is not None:
                         try:
-                            it["at"] = round(max(0.0, float(it["at"]) - delta_start), 3)
+                            orig_at = float(it["at"])
+                            it["at"] = 0.0 if orig_at <= 0.05 else round(max(0.0, orig_at - delta_start), 3)
                         except (TypeError, ValueError):
                             pass
+    if seg.get("audio_end") is not None and not isinstance(seg.get("audio_end"), bool):
+        try:
+            orig_ae = float(seg["audio_end"])
+            if orig_ae > 0.04:
+                seg["audio_end"] = round(max(0.05, orig_ae - delta_start), 3)
+        except (TypeError, ValueError):
+            pass
+    if seg.get("zoom_at") is not None and not isinstance(seg.get("zoom_at"), bool):
+        try:
+            orig_zat = float(seg["zoom_at"])
+            seg["zoom_at"] = 0.0 if orig_zat <= 0.05 else round(max(0.0, orig_zat - delta_start), 4)
+        except (TypeError, ValueError):
+            pass
     zoom_val = seg.get("zoom")
     if isinstance(zoom_val, str) and "@" in zoom_val:
         def _repl(m: re.Match) -> str:
             try:
-                nv = max(0.0, float(m.group(1)) - delta_start)
+                orig_zm = float(m.group(1))
+                nv = 0.0 if orig_zm <= 0.05 else max(0.0, orig_zm - delta_start)
                 return f"@{nv:.2f}"
             except ValueError:
                 return m.group(0)
@@ -4557,9 +4932,9 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
     """Pair-aware RMS join tightener that trims excess dead air across sentence-to-sentence cut boundaries.
 
     Targets `~90 ms` audible silence between same-speaker cuts (`~130 ms` on speaker changes, `~180 ms` across
-    visual transitions) after accounting for `render.py`'s `16 ms` audio crossfade, while strictly preserving:
-      - `>= 45 ms` cushion after true RMS voice decay (`>= 40 ms` after last live word end),
-      - `>= 35 ms` cushion before true RMS voice onset (`<= first_word.start - 35 ms`),
+    visual transitions), while strictly preserving:
+      - `>= 45 ms` cushion after true RMS voice decay (`>= 40 ms` after last live word end unless silent overhang),
+      - `>= 35 ms` cushion before true RMS voice onset (`<= first_word.start - 35 ms` unless silent lead-in),
       - all post-word mark beats, `hold_tail`, `audio_end`, muted/beat hooks, and split-screen `peer` sync.
     """
     from prepare import words_in_silence
@@ -4592,28 +4967,59 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
         if not env:
             return None
         st, en = float(seg["start"]), float(seg["end"])
-        if en - st <= 0.16:
+        en_audio = _effective_audio_end_src(seg, st, en)
+        if en_audio - st <= 0.16:
             return None
         quiet = _quiet_level(env)
-        inside_env = [(t, db) for t, db in env if st - 1e-4 <= t <= en + 1e-4]
+        inside_env = [(t, db) for t, db in env if st - 1e-4 <= t <= en_audio + 1e-4]
         if not inside_env:
             return None
-        voiced_ts = [t for t, db in inside_env if db >= quiet]
-        if not voiced_ts:
+        first_voiced, last_voiced = _find_voiced_bounds(inside_env, quiet, en_audio - st)
+        if first_voiced is None or last_voiced is None:
             return None
-        first_voiced = voiced_ts[0]
-        last_voiced = voiced_ts[-1]
-        cut_ws = [w for w in ws if float(w["end"]) > st + 0.04 and float(w["start"]) < en - 0.04]
+        cut_ws = [w for w in ws if float(w["end"]) > st + 0.04 and float(w["start"]) < en_audio - 0.04]
         first_word_s = float(cut_ws[0]["start"]) if cut_ws else first_voiced
         last_word_e = float(cut_ws[-1]["end"]) if cut_ws else last_voiced
+
+        # Protect short 10-25ms voiceless stop-consonant bursts (-p/-t/-k/-d) inside spoken word boundaries
+        if cut_ws:
+            in_word_voiced = [
+                t for t, db in inside_env
+                if (first_word_s - 0.01 <= t <= last_word_e + 0.01) and db >= quiet
+            ]
+            if in_word_voiced:
+                first_voiced = min(first_voiced, in_word_voiced[0])
+                last_voiced = max(last_voiced, in_word_voiced[-1])
+
+        if (
+            last_word_e - last_voiced > 0.14
+            and _max_rms_between(env, last_voiced + 0.045, min(en_audio, last_word_e), min_run=1) < -50.0
+        ):
+            # 80ms tail guarantees [t-0.03, t+0.03] sits strictly inside verified <-50 dBFS silence (matches cut_problems)
+            word_min_end = last_voiced + 0.08
+        else:
+            word_min_end = last_word_e + 0.04
+
+        if (
+            first_voiced - first_word_s > 0.14
+            and _max_rms_between(env, max(st, first_word_s), first_voiced - 0.035, min_run=1) < -50.0
+        ):
+            # 70ms lead guarantees [t-0.03, t+0.03] sits strictly inside verified <-50 dBFS silence (matches cut_problems)
+            word_max_start = first_voiced - 0.07
+        else:
+            word_max_start = first_word_s - JOIN_MIN_HEAD_CUSHION_SEC
+
         return {
             "st": st,
             "en": en,
+            "en_audio": en_audio,
             "quiet": quiet,
             "first_voiced": first_voiced,
             "last_voiced": last_voiced,
             "first_word_s": first_word_s,
             "last_word_e": last_word_e,
+            "word_min_end": word_min_end,
+            "word_max_start": word_max_start,
         }
 
     def _can_trim_tail(seg: Dict[str, Any], st: float, en: float) -> Tuple[bool, float]:
@@ -4642,52 +5048,77 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
 
     def _can_trim_head(seg: Dict[str, Any]) -> bool:
         for m in _seg_marks_list(seg, plan):
-            if float(m.get("at", 1.0) or 0.0) < 0.15:
+            m_at = float(m.get("at", 1.0) or 0.0)
+            if 0.05 < m_at < 0.15:
                 return False
-        for key in ("sfx", "banners", "flashcards"):
-            for it in (seg.get(key) or []):
-                if isinstance(it, dict) and it.get("at") is not None:
-                    try:
-                        if float(it["at"]) < 0.15:
-                            return False
-                    except (TypeError, ValueError):
-                        pass
         return True
 
-    def _apply_tail_trim(seg: Dict[str, Any], trim_sec: float) -> bool:
+    def _apply_tail_trim(seg: Dict[str, Any], trim_sec: float, min_end: Optional[float] = None) -> bool:
         if trim_sec <= 0.01:
             return False
-        new_end = round(float(seg["end"]) - trim_sec, 2)
-        actual_dt = round(float(seg["end"]) - new_end, 4)
-        if actual_dt <= 0.005 or new_end <= float(seg["start"]) + 0.15:
+        cur_start = float(seg["start"])
+        cur_end = float(seg["end"])
+        new_end = round(cur_end - trim_sec, 2)
+        if min_end is not None:
+            ceil_min = math.ceil(float(min_end) * 100.0 - 1e-9) / 100.0
+            new_end = max(new_end, ceil_min)
+        new_end = min(new_end, cur_end)
+        actual_dt = round(cur_end - new_end, 4)
+        if actual_dt <= 0.005 or new_end <= cur_start + 0.15:
             return False
         seg["end"] = new_end
         peer = seg.get("peer")
-        if isinstance(peer, dict) and peer.get("end") is not None and peer.get("start") is not None:
-            try:
-                p_end = round(float(peer["end"]) - actual_dt, 2)
-                if p_end > float(peer["start"]) + 0.08:
-                    peer["end"] = p_end
-            except (TypeError, ValueError):
-                pass
+        if isinstance(peer, dict):
+            if peer.get("end") is not None and peer.get("start") is not None:
+                try:
+                    p_end = round(float(peer["end"]) - actual_dt, 2)
+                    if p_end > float(peer["start"]) + 0.08:
+                        peer["end"] = p_end
+                except (TypeError, ValueError):
+                    pass
+            ispan = peer.get("idle_span")
+            if isinstance(ispan, (list, tuple)) and len(ispan) >= 2:
+                try:
+                    ip0, ip1 = float(ispan[0]), float(ispan[1])
+                    ip1_new = round(ip1 - actual_dt, 2)
+                    if ip1_new > ip0 + 0.08:
+                        peer["idle_span"] = [round(ip0, 3), ip1_new]
+                except (TypeError, ValueError):
+                    pass
         return True
 
-    def _apply_head_trim(seg: Dict[str, Any], trim_sec: float) -> bool:
+    def _apply_head_trim(seg: Dict[str, Any], trim_sec: float, max_start: Optional[float] = None) -> bool:
         if trim_sec <= 0.01:
             return False
-        new_start = round(float(seg["start"]) + trim_sec, 2)
-        actual_dt = round(new_start - float(seg["start"]), 4)
-        if actual_dt <= 0.005 or new_start >= float(seg["end"]) - 0.15:
+        cur_start = float(seg["start"])
+        cur_end = float(seg["end"])
+        new_start = round(cur_start + trim_sec, 2)
+        if max_start is not None:
+            floor_max = math.floor(float(max_start) * 100.0 + 1e-9) / 100.0
+            new_start = min(new_start, floor_max)
+        new_start = max(new_start, cur_start)
+        actual_dt = round(new_start - cur_start, 4)
+        if actual_dt <= 0.005 or new_start >= cur_end - 0.15:
             return False
         seg["start"] = new_start
         peer = seg.get("peer")
-        if isinstance(peer, dict) and peer.get("start") is not None and peer.get("end") is not None:
-            try:
-                p_start = round(float(peer["start"]) + actual_dt, 2)
-                if p_start < float(peer["end"]) - 0.08:
-                    peer["start"] = p_start
-            except (TypeError, ValueError):
-                pass
+        if isinstance(peer, dict):
+            if peer.get("start") is not None and peer.get("end") is not None:
+                try:
+                    p_start = round(float(peer["start"]) + actual_dt, 2)
+                    if p_start < float(peer["end"]) - 0.08:
+                        peer["start"] = p_start
+                except (TypeError, ValueError):
+                    pass
+            ispan = peer.get("idle_span")
+            if isinstance(ispan, (list, tuple)) and len(ispan) >= 2:
+                try:
+                    ip0, ip1 = float(ispan[0]), float(ispan[1])
+                    ip0_new = round(ip0 + actual_dt, 2)
+                    if ip0_new < ip1 - 0.08:
+                        peer["idle_span"] = [ip0_new, round(ip1, 3)]
+                except (TypeError, ValueError):
+                    pass
         _shift_seg_relative_cues(seg, actual_dt, plan=plan)
         return True
 
@@ -4700,46 +5131,72 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
         if sil_head0 > 0.10:
             safe_start0 = min(
                 first_ac["first_voiced"] - JOIN_MIN_HEAD_CUSHION_SEC,
-                first_ac["first_word_s"] - JOIN_MIN_HEAD_CUSHION_SEC,
+                first_ac["word_max_start"],
             )
             trim0 = min(sil_head0 - 0.05, max(0.0, safe_start0 - first_ac["st"]))
-            if _apply_head_trim(segs[0], trim0):
+            if _apply_head_trim(segs[0], trim0, max_start=safe_start0):
                 tightened += 1
 
-    # 2) Every spoken-to-spoken inter-sentence join
+    # 2) Every spoken-to-spoken inter-sentence join (and head-trim seg_b after beat/muted/mark-tail seg_a)
     for i in range(len(segs) - 1):
         seg_a, seg_b = segs[i], segs[i + 1]
         ac_a = _seg_acoustics(seg_a)
         ac_b = _seg_acoustics(seg_b)
-        if ac_a is None or ac_b is None:
+        if ac_b is None:
+            continue
+
+        can_b = _can_trim_head(seg_b)
+        if ac_a is None:
+            if can_b:
+                sil_head_b = max(0.0, ac_b["first_voiced"] - ac_b["st"])
+                if sil_head_b > 0.10:
+                    safe_max_start_b = min(
+                        ac_b["first_voiced"] - JOIN_MIN_HEAD_CUSHION_SEC,
+                        ac_b["word_max_start"],
+                    )
+                    trim_b = min(max(0.0, sil_head_b - 0.045), max(0.0, safe_max_start_b - ac_b["st"]))
+                    if _apply_head_trim(seg_b, trim_b, max_start=safe_max_start_b):
+                        tightened += 1
+            continue
+
+        can_a, min_eff_end_a = _can_trim_tail(seg_a, ac_a["st"], ac_a["en"])
+        if not can_a:
+            if can_b:
+                sil_head_b = max(0.0, ac_b["first_voiced"] - ac_b["st"])
+                if sil_head_b > 0.10:
+                    safe_max_start_b = min(
+                        ac_b["first_voiced"] - JOIN_MIN_HEAD_CUSHION_SEC,
+                        ac_b["word_max_start"],
+                    )
+                    trim_b = min(max(0.0, sil_head_b - 0.045), max(0.0, safe_max_start_b - ac_b["st"]))
+                    if _apply_head_trim(seg_b, trim_b, max_start=safe_max_start_b):
+                        tightened += 1
             continue
 
         sil_tail_a = max(0.0, ac_a["en"] - ac_a["last_voiced"])
         sil_head_b = max(0.0, ac_b["first_voiced"] - ac_b["st"])
-        audible_join = max(0.0, sil_tail_a + sil_head_b - AUDIO_XFADE_SEC)
+        audible_join = max(0.0, sil_tail_a + sil_head_b)
 
         sp_a = str(seg_a.get("speaker") or "").strip().lower()
         sp_b = str(seg_b.get("speaker") or "").strip().lower()
         same_speaker = (bool(sp_a and sp_b) and sp_a == sp_b) or (str(seg_a.get("src", "")) == str(seg_b.get("src", "")))
         target_gap = JOIN_TARGET_SAME_SPEAKER_SEC if same_speaker else JOIN_TARGET_TURN_CHANGE_SEC
-        if seg_b.get("transition"):
+        tr_b = str(seg_b.get("transition") or "").split("@")[0].strip().lower()
+        if tr_b not in ("", "cut", "none"):
             target_gap = max(target_gap, JOIN_TARGET_TRANSITION_SEC)
 
         excess = audible_join - target_gap
         if excess <= 0.02:
             continue
 
-        can_a, min_eff_end_a = _can_trim_tail(seg_a, ac_a["st"], ac_a["en"])
-        can_b = _can_trim_head(seg_b)
-
         safe_min_end_a = max(
             ac_a["last_voiced"] + JOIN_MIN_TAIL_CUSHION_SEC,
-            ac_a["last_word_e"] + 0.04,
+            ac_a["word_min_end"],
             min_eff_end_a,
         )
         safe_max_start_b = min(
             ac_b["first_voiced"] - JOIN_MIN_HEAD_CUSHION_SEC,
-            ac_b["first_word_s"] - JOIN_MIN_HEAD_CUSHION_SEC,
+            ac_b["word_max_start"],
         )
         slack_a = max(0.0, ac_a["en"] - safe_min_end_a) if can_a else 0.0
         slack_b = max(0.0, safe_max_start_b - ac_b["st"]) if can_b else 0.0
@@ -4769,9 +5226,9 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
             trim_b += extra_b
 
         moved_pair = False
-        if _apply_tail_trim(seg_a, trim_a):
+        if _apply_tail_trim(seg_a, trim_a, min_end=safe_min_end_a):
             moved_pair = True
-        if _apply_head_trim(seg_b, trim_b):
+        if _apply_head_trim(seg_b, trim_b, max_start=safe_max_start_b):
             moved_pair = True
         if moved_pair:
             tightened += 1
@@ -4784,11 +5241,11 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
         if can_last and sil_tail_last > 0.18:
             safe_end_last = max(
                 last_ac["last_voiced"] + 0.10,
-                last_ac["last_word_e"] + 0.06,
+                max(last_ac["word_min_end"], last_ac["last_voiced"] + 0.06),
                 min_eff_last,
             )
             trim_last = max(0.0, last_ac["en"] - safe_end_last)
-            if _apply_tail_trim(segs[-1], trim_last):
+            if _apply_tail_trim(segs[-1], trim_last, min_end=safe_end_last):
                 tightened += 1
 
     return tightened

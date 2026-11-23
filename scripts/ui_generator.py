@@ -1439,7 +1439,7 @@ def ensure_mark_png(
 # ---------------------------------------------------------------------------
 # 5. Bilingual Flashcard Renderer (`render_flashcard_png` & `render_flashcards_batch`)
 # ---------------------------------------------------------------------------
-_FLASHCARD_CACHE_VERSION = _CACHE_VERSION
+_FLASHCARD_CACHE_VERSION = f"{_CACHE_VERSION}_v2"
 
 
 def _normalize_flashcard_style(style: Optional[str]) -> str:
@@ -1449,8 +1449,16 @@ def _normalize_flashcard_style(style: Optional[str]) -> str:
     return "clean"
 
 
+def _flashcard_spec_fonts(spec: Dict[str, Any]) -> Tuple[str, str, str]:
+    font = str(spec.get("font") or "").strip()
+    en_font = str(spec.get("enFont") or spec.get("en_font") or font or "").strip()
+    native_font = str(spec.get("nativeFont") or spec.get("native_font") or font or "").strip()
+    return font, en_font, native_font
+
+
 def _normalize_flashcard_spec(
     spec: Dict[str, Any],
+    batch_sig: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Path, Optional[Path]]:
     """Normalize one flashcard spec into `(node_payload, cache_path, target_out_path)`."""
     raw_en = spec.get("en") if "en" in spec else spec.get("english", "")
@@ -1461,11 +1469,12 @@ def _normalize_flashcard_spec(
     h_norm = max(48, int(spec.get("height") or 290))
     style_norm = _normalize_flashcard_style(spec.get("style"))
     compact_norm = bool(spec.get("compact", False))
+    font_norm, en_font_norm, native_font_norm = _flashcard_spec_fonts(spec)
 
     raw_out = spec.get("out_path") if spec.get("out_path") is not None else spec.get("out")
     target_out: Optional[Path] = Path(raw_out) if raw_out is not None else None
 
-    cache_payload = {
+    cache_payload: Dict[str, Any] = {
         "v": _FLASHCARD_CACHE_VERSION,
         "en": en_norm,
         "native": native_norm,
@@ -1474,12 +1483,21 @@ def _normalize_flashcard_spec(
         "style": style_norm,
         "compact": compact_norm,
     }
+    if font_norm:
+        cache_payload["font"] = font_norm
+    if en_font_norm:
+        cache_payload["enFont"] = en_font_norm
+    if native_font_norm:
+        cache_payload["nativeFont"] = native_font_norm
+    if batch_sig:
+        cache_payload["batch"] = batch_sig
+
     digest = hashlib.sha1(
         json.dumps(cache_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()[:16]
     cache_path = UI_CACHE_DIR / f"flashcard_{digest}.png"
 
-    node_entry = {
+    node_entry: Dict[str, Any] = {
         "en": en_norm,
         "native": native_norm,
         "width": w_norm,
@@ -1488,6 +1506,12 @@ def _normalize_flashcard_spec(
         "compact": compact_norm,
         "out": str(cache_path),
     }
+    if font_norm:
+        node_entry["font"] = font_norm
+    if en_font_norm:
+        node_entry["enFont"] = en_font_norm
+    if native_font_norm:
+        node_entry["nativeFont"] = native_font_norm
     return node_entry, cache_path, target_out
 
 
@@ -1575,12 +1599,38 @@ def render_flashcards_batch(specs: List[Dict[str, Any]]) -> List[Path]:
         return []
 
     UI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    # Compute batch group signature when >=2 cards share geometry/fonts so batch-uniform
+    # typography never reuses stale standalone single-card renders.
+    group_items: Dict[Tuple[Any, ...], List[Tuple[str, str]]] = {}
+    spec_keys: List[Tuple[Any, ...]] = []
+    for spec in specs:
+        raw_en = spec.get("en") if "en" in spec else spec.get("english", "")
+        raw_native = spec.get("native", "")
+        en_n = re.sub(r"\s+", " ", str(raw_en or "").strip())
+        nat_n = re.sub(r"\s+", " ", str(raw_native or "").strip())
+        w_n = max(64, int(spec.get("width") or 660))
+        h_n = max(48, int(spec.get("height") or 290))
+        c_n = bool(spec.get("compact", False))
+        _f_n, ef_n, nf_n = _flashcard_spec_fonts(spec)
+        gk = (w_n, h_n, c_n, bool(en_n), bool(nat_n), ef_n, nf_n)
+        spec_keys.append(gk)
+        group_items.setdefault(gk, []).append((en_n, nat_n))
+
+    group_sigs: Dict[Tuple[Any, ...], Optional[str]] = {}
+    for gk, items in group_items.items():
+        if len(items) >= 2:
+            group_sigs[gk] = hashlib.sha1(
+                json.dumps(sorted(items), ensure_ascii=False).encode("utf-8")
+            ).hexdigest()[:12]
+        else:
+            group_sigs[gk] = None
+
     normalized: List[Tuple[Dict[str, Any], Path, Optional[Path]]] = []
     misses: List[Dict[str, Any]] = []
     seen_miss_paths: set[Path] = set()
 
-    for spec in specs:
-        node_entry, cache_path, target_out = _normalize_flashcard_spec(spec)
+    for spec, gk in zip(specs, spec_keys):
+        node_entry, cache_path, target_out = _normalize_flashcard_spec(spec, batch_sig=group_sigs.get(gk))
         normalized.append((node_entry, cache_path, target_out))
         is_cached = cache_path.is_file() and cache_path.stat().st_size > 100
         if not is_cached and cache_path not in seen_miss_paths:
@@ -1615,19 +1665,25 @@ def render_flashcard_png(
     style: str = "clean",
     compact: bool = False,
     out_path: Optional[Path] = None,
+    font: str = "",
+    en_font: str = "",
+    native_font: str = "",
 ) -> Path:
     """Render a single bilingual flashcard PNG (`width x height` RGBA) via HarfBuzz/Pango."""
-    return render_flashcards_batch(
-        [
-            {
-                "en": en,
-                "native": native,
-                "width": width,
-                "height": height,
-                "style": style,
-                "compact": compact,
-                "out_path": out_path,
-            }
-        ]
-    )[0]
+    payload: Dict[str, Any] = {
+        "en": en,
+        "native": native,
+        "width": width,
+        "height": height,
+        "style": style,
+        "compact": compact,
+        "out_path": out_path,
+    }
+    if font:
+        payload["font"] = font
+    if en_font:
+        payload["enFont"] = en_font
+    if native_font:
+        payload["nativeFont"] = native_font
+    return render_flashcards_batch([payload])[0]
 

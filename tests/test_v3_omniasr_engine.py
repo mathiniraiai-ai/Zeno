@@ -231,7 +231,8 @@ class ZenoV3OmniAsrEngineTests(unittest.TestCase):
             (root / "VERSION").write_text("2.1.11\n", encoding="utf-8")
             (root / ".env").write_text("ZENO_TOKEN=keep\n", encoding="utf-8")
 
-            blob, _count, sha = release.build_bundle_bytes(version="3.0.0", clear_work_projects=False)
+            expected_ver = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+            blob, _count, sha = release.build_bundle_bytes(version=expected_ver, clear_work_projects=False)
             with (
                 mock.patch.object(Path, "home", return_value=Path(tmp) / "home"),
                 mock.patch.object(auto_updater, "ROOT", root),
@@ -239,7 +240,7 @@ class ZenoV3OmniAsrEngineTests(unittest.TestCase):
                 mock.patch.object(auto_updater, "RELEASE_STATE_FILE", root / "work" / ".cloud_release_state.json"),
                 mock.patch.object(auto_updater.subprocess, "run"),
             ):
-                res = auto_updater.apply_bundle_bytes(blob, expected_sha256=sha, version="3.0.0", sha="v300sha")
+                res = auto_updater.apply_bundle_bytes(blob, expected_sha256=sha, version=expected_ver, sha="v300sha")
 
             self.assertTrue(res["ok"], res)
             self.assertFalse((root / "scripts" / "align_engine" / "uroman").exists())
@@ -247,7 +248,7 @@ class ZenoV3OmniAsrEngineTests(unittest.TestCase):
             self.assertTrue((root / "scripts" / "align_engine" / "data" / "omniasr_vocab.json").is_file())
             self.assertTrue(yunet.is_file())
             self.assertTrue(gem_cache.is_file())
-            self.assertEqual((root / "VERSION").read_text(encoding="utf-8").strip(), "3.0.0")
+            self.assertEqual((root / "VERSION").read_text(encoding="utf-8").strip(), expected_ver)
 
     def test_protect_tails_ignores_silent_vad_padding_but_still_rescues_active_rms_voice(self) -> None:
         import script_order

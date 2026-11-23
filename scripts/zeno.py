@@ -946,6 +946,18 @@ def order_gate(plan: Dict[str, Any], plan_path: Path) -> str:
         job_report.record_plan_check(plan_path.parent, g)
     except Exception:
         pass
+    if not g.get("blocked"):
+        adj = g.get("adjustments") or {}
+        if adj.get("snap"):
+            print(f"[SNAP] {int(adj['snap'])} cut boundary(s) snapped to quietest breath gap.", flush=True)
+        if adj.get("tails"):
+            print(f"[SNAP] {int(adj['tails'])} cut(s) widened so no word's fade-out or onset is chopped.", flush=True)
+        if adj.get("cards"):
+            print(f"[CARDS] {int(adj['cards'])} flashcard(s) calibrated.", flush=True)
+        if adj.get("beats"):
+            print(f"[BEATS] {int(adj['beats'])} post-word beat(s) calibrated.", flush=True)
+        if adj.get("joins"):
+            print(f"[JOIN] {int(adj['joins'])} sentence join(s) tightened to crisp dialogue rhythm.", flush=True)
     if g.get("voice_note"):
         print(f"[VOICE] {g['voice_note']}", flush=True)
     for t in g.get("tighten") or []:
@@ -1088,41 +1100,17 @@ def run_execute_and_deliver(
 
     import script_order
 
-    moved = script_order.snap_cuts(plan)
-    if moved:
-        print(f"[SNAP] {moved} cut boundary(s) snapped to quietest breath gap.", flush=True)
-    kept = script_order.protect_tails(plan)
-    if kept:
-        print(f"[SNAP] {kept} cut(s) widened so no word's fade-out or onset is chopped.", flush=True)
-    tight_fn = getattr(script_order, "tighten_joins", None)
-    tightened = int(tight_fn(plan) or 0) if callable(tight_fn) else 0
-    if tightened:
-        print(f"[JOIN] {tightened} sentence join(s) tightened to crisp dialogue rhythm.", flush=True)
-    script_path = _resolve_plan_script_path(plan, p_path)
-    fc_fn = getattr(script_order, "calibrate_flashcards", None)
-    cards_calibrated = (
-        int(fc_fn(plan, script_path, p_path.parent) or 0)
-        if callable(fc_fn)
-        else 0
-    )
-    if cards_calibrated:
-        print(f"[CARDS] {cards_calibrated} flashcard(s) calibrated.", flush=True)
-    cal_fn = getattr(script_order, "calibrate_post_word_beats", None)
-    calibrated = (
-        int(cal_fn(plan, script_path, p_path.parent) or 0)
-        if callable(cal_fn) and script_path is not None
-        else 0
-    )
-    if calibrated:
-        print(f"[BEATS] {calibrated} post-word beat(s) calibrated.", flush=True)
-    if moved or kept or tightened or cards_calibrated or calibrated:
-        p_path.write_text(edl_parser.format_edl(plan), encoding="utf-8")
-
     try:
         tight_notes = script_order.tight_report(plan)
-        pause_risks = [ln for ln in tight_notes if "pause between" in ln and (": 0.6" in ln or ": 0.7" in ln or ": 0.8" in ln or ": 0.9" in ln or re.search(r": [1-9]\.\d+s pause between", ln))]
+        pause_risks = []
+        for ln in tight_notes:
+            if "pause between" not in ln:
+                continue
+            m_p = re.search(r":\s*(\d+(?:\.\d+)?)s\s+pause between", ln)
+            if m_p and float(m_p.group(1)) >= 0.48:
+                pause_risks.append(ln)
         if pause_risks:
-            print(f"[PAUSE RISK] {len(pause_risks)} internal pause(s) >=0.60s may fail deep QC cuts check:", flush=True)
+            print(f"[PAUSE RISK] {len(pause_risks)} internal pause(s) >=0.48s may fail deep QC cuts check:", flush=True)
             for pr_ln in pause_risks[:4]:
                 print(f"             {pr_ln}", flush=True)
     except Exception:

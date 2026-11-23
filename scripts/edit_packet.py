@@ -233,7 +233,7 @@ def _format_untranscribed_line(uncovered: Sequence[Tuple[float, float]]) -> str:
 
 def _compact_pauses_intervals(
     intervals: Sequence[Tuple[float, float]],
-    min_dur: float = 0.35,
+    min_dur: float = 0.30,
     max_items: int = 20,
 ) -> List[Tuple[float, float]]:
     """Keep genuine acoustic pauses >= `min_dur` seconds, capped at `max_items` (longest kept, chronological)."""
@@ -340,7 +340,7 @@ def compact_facts(
     """Compact `facts.md` while preserving exact `focus=x,y` zoom values, safe two-shot spans, `pauses:`, beat times, and word timestamps.
 
     Strips redundant `# FACTS:` banners and duplicate VAD/voiced interval lists, while ALWAYS preserving compacted `pauses:`
-    (`>=0.35s`, up to 20 intervals) on spoken clips so the Host AI sees genuine acoustic pauses vs continuous speech,
+    (`>=0.30s`, up to 20 intervals) on spoken clips so the Host AI sees genuine acoustic pauses vs continuous speech,
     and adding an explicit `untranscribed_speech:` warning whenever >=1.2s of active VAD speech lacks word timestamps.
     On large shoots (`>= min_clips_for_diet` clip blocks) with non-empty `active_clips`, collapses raw word-timestamp
     lines on zero-CAND unused spoken clips while keeping active, silent/ambient, uncovered-speech, and two-shot clips full.

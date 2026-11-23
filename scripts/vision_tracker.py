@@ -53,7 +53,7 @@ YUNET_MODEL: Path = getattr(
 TARGET_HEADROOM_PCT: float = 14.0
 TARGET_EYELINE_PCT: float = 38.0
 MIN_SLOT_FILL: float = 0.55
-MAX_EXTRA_ZOOM: float = 1.35
+MAX_EXTRA_ZOOM: float = 1.55
 SAFE_ZOOM_LEVELS: Tuple[float, ...] = (1.05, 1.08, 1.10)
 STATIC_CAMERA_MOTION_MAX: float = 2.8
 
@@ -317,21 +317,50 @@ def detect_faces_in_frame(
         except Exception:
             raw_faces = None
 
-    if raw_faces is None or len(raw_faces) == 0:
-        return []
+        fg_raw: List[Any] = []
+        if raw_faces is not None and len(raw_faces) > 0:
+            for det in raw_faces:
+                fw_norm = float(det[2]) / float(w)
+                fh_norm = float(det[3]) / float(h)
+                conf = float(det[14])
+                if fw_norm >= min_fw_ratio and fh_norm >= 0.055 and conf >= 0.62:
+                    fg_raw.append(det)
 
-    fg_raw = []
-    for det in raw_faces:
-        fw_norm = float(det[2]) / float(w)
-        fh_norm = float(det[3]) / float(h)
-        conf = float(det[14])
-        if fw_norm >= min_fw_ratio and fh_norm >= 0.055 and conf >= 0.62:
-            fg_raw.append(det)
+            if not fg_raw:
+                best_det = max(raw_faces, key=lambda item: float(item[14]))
+                if float(best_det[14]) >= 0.55 and (float(best_det[2]) / float(w)) >= 0.045:
+                    fg_raw = [best_det]
 
-    if not fg_raw:
-        best_det = max(raw_faces, key=lambda item: float(item[14]))
-        if float(best_det[14]) >= 0.55 and (float(best_det[2]) / float(w)) >= 0.045:
-            fg_raw = [best_det]
+        # Gentle lower-threshold retry pass for stylized/metallic AI faces or profiles
+        if not fg_raw and hasattr(detector, "setScoreThreshold"):
+            prev_thr = float(detector.getScoreThreshold()) if hasattr(detector, "getScoreThreshold") else 0.55
+            try:
+                detector.setScoreThreshold(0.38)
+                _, retry_faces = detector.detect(arr_bgr)
+            except Exception:
+                retry_faces = None
+            finally:
+                try:
+                    detector.setScoreThreshold(prev_thr)
+                except Exception:
+                    pass
+            if retry_faces is not None and len(retry_faces) > 0:
+                for det in retry_faces:
+                    fw_norm = float(det[2]) / float(w)
+                    fh_norm = float(det[3]) / float(h)
+                    conf = float(det[14])
+                    if fw_norm >= min_fw_ratio and fh_norm >= 0.055 and conf >= 0.38:
+                        fg_raw.append(det)
+                if not fg_raw:
+                    def _det_prom(item: Any) -> float:
+                        cx_n = (float(item[0]) + 0.5 * float(item[2])) / float(w)
+                        cw = max(0.25, 1.0 - 0.35 * abs(cx_n - 0.5))
+                        area_n = (float(item[2]) / float(w)) * (float(item[3]) / float(h))
+                        return area_n * max(0.2, float(item[14])) * cw
+
+                    best_det = max(retry_faces, key=_det_prom)
+                    if float(best_det[14]) >= 0.38 and (float(best_det[2]) / float(w)) >= 0.045:
+                        fg_raw = [best_det]
 
     if not fg_raw:
         return []
@@ -418,6 +447,59 @@ def prominent_faces(
 
     biggest = max(_area(f) for f in faces)
     return [f for f in faces if biggest > 0.0 and _area(f) >= min_area_ratio * biggest]
+
+
+def _face_prominence_score(face: Dict[str, Any]) -> float:
+    """Score a detected face by area, confidence, and horizontal centrality."""
+    bb = face.get("bbox_norm") or [0.0, 0.0, 0.0, 0.0]
+    if len(bb) < 4:
+        return 0.0
+    x0, y0, x1, y1 = [float(v) for v in bb[:4]]
+    area = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    cx = 0.5 * (x0 + x1)
+    conf = float(face.get("confidence") or 0.0)
+    center_weight = max(0.25, 1.0 - 0.35 * abs(cx - 0.5))
+    return area * max(0.2, conf) * center_weight
+
+
+def _vis_has_real_face(vis: Optional[Dict[str, Any]]) -> bool:
+    """Return True when `vis` carries an actual detected face rather than the synthetic default box."""
+    if not isinstance(vis, dict) or not vis.get("bbox_norm"):
+        return False
+    if "confidence" in vis:
+        return float(vis.get("confidence") or 0.0) > 0.0
+    faces = vis.get("faces")
+    if isinstance(faces, list) and faces:
+        if any(isinstance(f, dict) and "confidence" in f for f in faces):
+            return any(isinstance(f, dict) and float(f.get("confidence") or 0.0) > 0.0 for f in faces)
+        return True
+    bb = [round(float(v), 4) for v in (vis.get("bbox_norm") or [])[:4]]
+    return len(bb) >= 4 and bb != [0.24, 0.14, 0.76, 0.86]
+
+
+def _is_talking_head_panel(
+    vis: Optional[Dict[str, Any]],
+    fh: float,
+    slot_w: int,
+    slot_h: int,
+    is_muted_broll: bool = False,
+) -> bool:
+    """Return True when a split panel is a talking-head portrait rather than B-roll or non-face video."""
+    if is_muted_broll:
+        return False
+    if not _vis_has_real_face(vis):
+        return False
+    if float(fh) < 0.13:
+        return False
+    assert isinstance(vis, dict)
+    raw_w = float(vis.get("width") or 0.0)
+    raw_h = float(vis.get("height") or 0.0)
+    raw_src_ar = float(vis.get("aspect_ratio") or 0.0) or (
+        raw_w / raw_h if raw_w > 0.0 and raw_h > 0.0 else 0.0
+    )
+    if raw_src_ar > 1.25 and float(fh) < 0.16:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -662,6 +744,7 @@ def compute_slot_crop_filter(
     focus: Optional[Sequence[float]] = None,
     headroom_pct: float = TARGET_HEADROOM_PCT,
     extra_zoom: float = 1.0,
+    max_slot_fill: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Compute an FFmpeg `scale=sw:sh:flags=lanczos,crop=slot_w:slot_h:cx:cy` filter that
     centers the speaker horizontally and anchors their crown at `headroom_pct` (`14%`).
@@ -671,31 +754,45 @@ def compute_slot_crop_filter(
     slot_w = _even(max(16, slot_w))
     slot_h = _even(max(16, slot_h))
 
+    has_real_bbox = False
     if bbox_norm and len(bbox_norm) >= 4:
         x0, y0, x1, y1 = [min(1.0, max(0.0, float(v))) for v in bbox_norm[:4]]
-        if x1 <= x0 or y1 <= y0:
-            x0, y0, x1, y1 = 0.25, 0.12, 0.75, 0.88
+        is_synthetic = (
+            round(x0, 4) == 0.24
+            and round(y0, 4) == 0.14
+            and round(x1, 4) == 0.76
+            and round(y1, 4) == 0.86
+        )
+        if x1 > x0 and y1 > y0 and not is_synthetic:
+            has_real_bbox = True
+        else:
+            x0, y0, x1, y1 = 0.25, 0.14, 0.75, 0.42
     elif focus and len(focus) >= 2:
         fx, fy = float(focus[0]), float(focus[1])
-        x0 = max(0.02, fx - 0.22)
-        x1 = min(0.98, fx + 0.22)
-        y0 = max(0.02, fy - 0.22)
-        y1 = min(0.98, fy + 0.50)
+        x0 = max(0.02, fx - 0.18)
+        x1 = min(0.98, fx + 0.18)
+        y0 = max(0.04, fy - 0.14)
+        y1 = min(0.96, fy + 0.16)
     else:
-        x0, y0, x1, y1 = 0.25, 0.14, 0.75, 0.88
+        x0, y0, x1, y1 = 0.25, 0.14, 0.75, 0.42
 
     s0 = max(slot_w / float(src_w), slot_h / float(src_h))
     fill_now = (y1 - y0) * src_h * s0 / float(slot_h)
     k = 1.0
-    if fill_now < MIN_SLOT_FILL:
-        k = min(MAX_EXTRA_ZOOM, MIN_SLOT_FILL / max(fill_now, 1e-3))
+    if has_real_bbox:
+        if fill_now < MIN_SLOT_FILL:
+            k = min(MAX_EXTRA_ZOOM, MIN_SLOT_FILL / max(fill_now, 1e-3))
 
-    if y1 > y0 and y0 < 0.95:
-        sh_needed_bot = (1.0 - headroom_pct / 100.0) * slot_h / max(0.1, 1.0 - y0)
-        sh_needed_top = (headroom_pct / 100.0) * slot_h / max(0.05, y0)
-        k_head = max(sh_needed_bot, sh_needed_top) / max(1.0, src_h * s0)
-        if k_head > k:
-            k = min(MAX_EXTRA_ZOOM, k_head)
+        if y1 > y0 and y0 < 0.95:
+            sh_needed_bot = (1.0 - headroom_pct / 100.0) * slot_h / max(0.1, 1.0 - y0)
+            sh_needed_top = (headroom_pct / 100.0) * slot_h / max(0.05, y0)
+            k_head = max(sh_needed_bot, sh_needed_top) / max(1.0, src_h * s0)
+            if k_head > k:
+                k = min(MAX_EXTRA_ZOOM, k_head)
+
+        if max_slot_fill is not None and fill_now > 1e-3:
+            k_cap = max(1.0, float(max_slot_fill) / fill_now)
+            k = min(k, k_cap)
 
     s = s0 * k * max(1.0, float(extra_zoom or 1.0))
     sw = max(slot_w, _even(src_w * s))
@@ -731,26 +828,50 @@ def _canonical_split_clip(clip_path: Union[str, Path]) -> Path:
     p = Path(clip_path)
     if not p.is_file():
         return p
-    stem = p.stem
-    role_re = r"[\s_-]*(dfv|sfv|speaking|listening|idle|silent)\b.*$"
-    if re.search(r"\b(dfv|speaking|talk|dialogue)\b", stem, re.I):
-        char_prefix = re.sub(role_re, "", stem, flags=re.I).strip().lower()
-        if char_prefix:
-            for cand in sorted(p.parent.glob(f"*{p.suffix}")):
-                if cand == p or not cand.is_file():
-                    continue
-                c_prefix = re.sub(role_re, "", cand.stem, flags=re.I).strip().lower()
-                if c_prefix == char_prefix and re.search(r"\b(sfv|listening|idle|silent)\b", cand.stem, re.I):
-                    return cand
-    if re.search(r"\bsplit\b", stem, re.I) and not re.search(r"\b(sfv|listening|idle|silent)\b", stem, re.I):
+
+    silent_re = re.compile(
+        r"\b(?:sfv|listening|idle|silent|without[\s_-]*dialog(?:ue)?)\b",
+        re.I,
+    )
+    speak_re = re.compile(
+        r"\b(?:dfv|speaking|talk|talking|with[\s_-]*dialog(?:ue)?|dialog(?:ue)?|voice)\b",
+        re.I,
+    )
+    role_re = re.compile(
+        r"[\s_()\[\]-]*(?:without[\s_-]*dialog(?:ue)?|with[\s_-]*dialog(?:ue)?|"
+        r"dfv|sfv|speaking|listening|idle|silent|talk|talking|dialog(?:ue)?|voice)\b.*$",
+        re.I,
+    )
+
+    def _norm_stem(s: str) -> str:
+        return re.sub(r"[\s_-]+", " ", s).strip().lower()
+
+    norm_stem = _norm_stem(p.stem)
+    is_silent = bool(silent_re.search(norm_stem))
+    is_speak = (not is_silent) and bool(speak_re.search(norm_stem))
+    char_prefix = role_re.sub("", norm_stem).strip()
+
+    if char_prefix and (is_speak or is_silent):
+        silent_cands: List[Path] = []
+        for cand in sorted(p.parent.iterdir()):
+            if not cand.is_file() or cand.suffix.lower() != p.suffix.lower():
+                continue
+            c_norm = _norm_stem(cand.stem)
+            c_prefix = role_re.sub("", c_norm).strip()
+            if c_prefix == char_prefix and silent_re.search(c_norm):
+                silent_cands.append(cand)
+        if silent_cands:
+            return silent_cands[0]
+
+    if re.search(r"\bsplit\b", norm_stem, re.I) and not is_silent:
         p_vis = analyze_clip_vision(p) or {}
         p_bb = p_vis.get("bbox_norm") or [0.35, 0.14, 0.65, 0.42]
         best_cand: Optional[Path] = None
         best_dist = 0.08
-        for cand in sorted(p.parent.glob(f"*{p.suffix}")):
-            if cand == p or not cand.is_file():
+        for cand in sorted(p.parent.iterdir()):
+            if cand == p or not cand.is_file() or cand.suffix.lower() != p.suffix.lower():
                 continue
-            if re.search(r"\b(sfv|listening|idle|silent)\b", cand.stem, re.I):
+            if silent_re.search(_norm_stem(cand.stem)):
                 c_vis = analyze_clip_vision(cand) or {}
                 c_bb = c_vis.get("bbox_norm") or [0.35, 0.14, 0.65, 0.42]
                 dist = (
@@ -764,6 +885,229 @@ def _canonical_split_clip(clip_path: Union[str, Path]) -> Path:
         if best_cand is not None:
             return best_cand
     return p
+
+
+def _resolve_split_headroom() -> float:
+    try:
+        return round(max(0.12, min(0.24, float(os.environ.get("ZENO_SPLIT_HEADROOM", "0.14")))), 4)
+    except ValueError:
+        return 0.14
+
+
+def _extract_split_panel_geom(
+    clip_path: Union[str, Path],
+    fallback_focus: Optional[Sequence[float]],
+    src_w: int,
+    src_h: int,
+) -> Tuple[float, float, float, float, float, bool, Dict[str, Any]]:
+    """Extract `(fx, y0, fh, ey, fw, detected, vis)` for a split panel without synthetic box poisoning."""
+    vis: Dict[str, Any] = {}
+    p_orig = Path(clip_path)
+    try:
+        canon = _canonical_split_clip(p_orig)
+        if canon.is_file():
+            vis = analyze_clip_vision(canon) or {}
+        if not _vis_has_real_face(vis) and canon != p_orig and p_orig.is_file():
+            vis_orig = analyze_clip_vision(p_orig) or {}
+            if _vis_has_real_face(vis_orig):
+                vis = vis_orig
+    except Exception:
+        vis = {}
+
+    if vis and "aspect_ratio" not in vis and src_h > 0:
+        vis = dict(vis, aspect_ratio=round(src_w / float(src_h), 4))
+
+    if _vis_has_real_face(vis):
+        bbox = vis.get("bbox_norm")
+        v_foc = vis.get("focus")
+        eye_c = vis.get("eye_center_norm")
+        if bbox and len(bbox) >= 4:
+            x0, y0, x1, y1 = [min(1.0, max(0.0, float(v))) for v in bbox[:4]]
+            if x1 > x0 and y1 > y0:
+                cx = 0.5 * (x0 + x1)
+                fx = 0.65 * cx + 0.35 * float(v_foc[0]) if (v_foc and len(v_foc) >= 2) else cx
+                fh = max(0.02, min(0.75, y1 - y0))
+                fw = max(0.02, min(0.75, x1 - x0))
+                ey = float(eye_c[1]) if (eye_c and len(eye_c) >= 2) else (y0 + 0.42 * fh)
+                return max(0.05, min(0.95, fx)), max(0.02, min(0.70, y0)), fh, ey, fw, True, vis
+
+    if fallback_focus and len(fallback_focus) >= 2:
+        fx = max(0.05, min(0.95, float(fallback_focus[0])))
+        fy = max(0.10, min(0.75, float(fallback_focus[1])))
+        y0 = max(0.06, fy - 0.14)
+        return fx, y0, 0.28, fy, 0.32, False, vis
+    return 0.5, 0.18, 0.28, 0.30, 0.32, False, vis
+
+
+def _base_talking_head_zoom(
+    y0: float,
+    fx: float,
+    hr_ratio: float,
+    w_ratio: float,
+    res_max_k: float,
+    common_hr: float,
+    min_zoom: float = 1.0,
+) -> float:
+    k_top = (common_hr / max(0.05, y0 * hr_ratio)) if (y0 * hr_ratio < common_hr) else 1.0
+    k_bot = (1.0 - common_hr) / max(0.10, (1.0 - y0) * hr_ratio)
+    k_hr = min(res_max_k, max(1.0, k_top, k_bot))
+
+    k_cx = 1.0
+    if w_ratio <= 1.01 and abs(fx - 0.50) > 0.025:
+        min_edge = max(0.20, min(fx, 1.0 - fx))
+        k_cx = min(1.14, max(1.06, 0.5 / (min_edge * max(0.5, w_ratio))))
+
+    return min(res_max_k, max(k_hr, k_cx, float(min_zoom or 1.0)))
+
+
+def _eyeline_bounds_for_panel(
+    y0: float,
+    ey: float,
+    ratio: float,
+    hr_min: float,
+    hr_max: float,
+) -> Tuple[float, float, float]:
+    """Return `(lo, hi, eye_drop)` for panel eyeline fraction with `pad_top == 0`."""
+    eye_drop = (ey - y0) * ratio
+    phys_lo = 1.0 - (1.0 - ey) * ratio
+    phys_hi = ey * ratio
+    if phys_lo > phys_hi:
+        mid = 0.5 * (phys_lo + phys_hi)
+        return mid, mid, eye_drop
+    lo = max(phys_lo, min(phys_hi, hr_min + eye_drop))
+    hi = min(phys_hi, max(phys_lo, hr_max + eye_drop))
+    if lo > hi:
+        mid = min(phys_hi, max(phys_lo, 0.5 * (lo + hi)))
+        lo = hi = mid
+    return lo, hi, eye_drop
+
+
+def _solve_talking_head_group(
+    specs: List[Dict[str, Any]],
+    common_hr: float,
+    is_split_v: bool,
+    target_vis_fh_override: Optional[float] = None,
+    target_ey_override: Optional[float] = None,
+) -> Tuple[float, float, List[float]]:
+    """Solve shared `(target_vis_fh, target_ey, k_list)` across a group of talking-head panels."""
+    max_vis_fh = 0.56 if is_split_v else 0.36
+    floor_fh = 0.38 if is_split_v else 0.24
+
+    base_ks: List[float] = []
+    base_vis_fhs: List[float] = []
+    for sp in specs:
+        k0 = _base_talking_head_zoom(
+            sp["y0"], sp["fx"], sp["hr_ratio"], sp["w_ratio"],
+            sp["res_max_k"], common_hr, sp.get("min_zoom", 1.0),
+        )
+        base_ks.append(k0)
+        base_vis_fhs.append(sp["fh"] * sp["hr_ratio"] * k0)
+
+    if target_vis_fh_override is not None:
+        eff_cap = max(max_vis_fh, min(max_vis_fh + 0.04, float(target_vis_fh_override)))
+        capped_bases = [min(eff_cap, vf) for vf in base_vis_fhs]
+        t_vfh = min(eff_cap, max([float(target_vis_fh_override)] + capped_bases))
+    else:
+        t_vfh = min(max_vis_fh, max(base_vis_fhs + [floor_fh]))
+
+    k_list: List[float] = []
+    for sp, k0 in zip(specs, base_ks):
+        k_match = t_vfh / max(0.08, sp["fh"] * sp["hr_ratio"])
+        k_val = min(sp["res_max_k"], max(k0, k_match))
+        k_list.append(k_val)
+
+    hr_min = 0.08
+    hr_max = max(0.26, common_hr + 0.08)
+
+    def _eval_bounds(ks: List[float]) -> Tuple[float, float, float]:
+        los, his, drops = [], [], []
+        for sp, kv in zip(specs, ks):
+            sh_i = max(sp["slot_h"], _even(sp["h_in"] * sp["s0"] * kv))
+            ratio_i = sh_i / float(sp["slot_h"])
+            lo_i, hi_i, drop_i = _eyeline_bounds_for_panel(sp["y0"], sp["ey"], ratio_i, hr_min, hr_max)
+            los.append(lo_i)
+            his.append(hi_i)
+            drops.append(drop_i)
+        return max(los), min(his), sum(drops) / float(len(drops))
+
+    lo, hi, avg_drop = _eval_bounds(k_list)
+    if lo > hi and len(specs) >= 2 and target_ey_override is None:
+        max_m = min(
+            min(sp["res_max_k"] / max(1e-3, kv) for sp, kv in zip(specs, k_list)),
+            min((max_vis_fh + 0.04) / max(1e-3, sp["fh"] * sp["hr_ratio"] * kv) for sp, kv in zip(specs, k_list)),
+        )
+        for m in (1.02, 1.04, 1.06, 1.08, 1.10, 1.12, 1.14, 1.16):
+            if m > max_m + 1e-6:
+                break
+            cand_ks = [kv * m for kv in k_list]
+            c_lo, c_hi, c_drop = _eval_bounds(cand_ks)
+            if c_lo <= c_hi:
+                k_list = cand_ks
+                lo, hi, avg_drop = c_lo, c_hi, c_drop
+                t_vfh = min(max_vis_fh + 0.04, max(sp["fh"] * sp["hr_ratio"] * kv for sp, kv in zip(specs, k_list)))
+                break
+
+    if target_ey_override is not None:
+        t_ey = float(target_ey_override)
+        if lo <= hi:
+            t_ey = min(hi, max(lo, t_ey))
+        else:
+            t_ey = min(max(lo, hi), max(min(lo, hi), t_ey))
+    elif lo <= hi:
+        ideal_ey = common_hr + avg_drop
+        t_ey = min(hi, max(lo, ideal_ey))
+    else:
+        t_ey = 0.5 * (lo + hi)
+
+    return round(t_vfh, 5), round(t_ey, 5), k_list
+
+
+def compute_split_group_targets(
+    panels: Sequence[Dict[str, Any]],
+    common_hr: Optional[float] = None,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Compute shared `(target_vis_fh, target_ey)` across a group of talking-head split panels."""
+    eff_hr = float(common_hr) if common_hr is not None else _resolve_split_headroom()
+    th_specs: List[Dict[str, Any]] = []
+    is_split_v = False
+
+    for p in panels:
+        src_p = p.get("src")
+        if not src_p:
+            continue
+        slot_w = _even(max(16, int(p.get("slot_w") or 540)))
+        slot_h = _even(max(16, int(p.get("slot_h") or 1920)))
+        w_in = max(16, int(p.get("w_in") or slot_w))
+        h_in = max(16, int(p.get("h_in") or slot_h))
+        if slot_w > slot_h:
+            is_split_v = True
+        fx, y0, fh, ey, fw, detected, vis = _extract_split_panel_geom(
+            src_p, p.get("focus"), w_in, h_in,
+        )
+        if not _is_talking_head_panel(vis, fh, slot_w, slot_h, is_muted_broll=bool(p.get("is_broll"))):
+            continue
+        s0 = max(slot_w / float(w_in), slot_h / float(h_in))
+        th_specs.append({
+            "w_in": w_in,
+            "h_in": h_in,
+            "slot_w": slot_w,
+            "slot_h": slot_h,
+            "s0": s0,
+            "hr_ratio": (h_in * s0) / float(slot_h),
+            "w_ratio": (w_in * s0) / float(slot_w),
+            "res_max_k": min(MAX_EXTRA_ZOOM, max(1.20, 2.5 / max(1.0, s0))),
+            "fx": fx,
+            "y0": y0,
+            "fh": fh,
+            "ey": ey,
+            "fw": fw,
+            "min_zoom": float(p.get("min_zoom") or 1.0),
+        })
+
+    if not th_specs:
+        return None, None
+    t_vfh, t_ey, _ = _solve_talking_head_group(th_specs, eff_hr, is_split_v=is_split_v)
+    return t_vfh, t_ey
 
 
 def compute_paired_split_crop_filters(
@@ -782,58 +1126,33 @@ def compute_paired_split_crop_filters(
     return_focus: bool = False,
     live_offset_y: float = 0.0,
     peer_offset_y: float = 0.0,
+    live_is_broll: bool = False,
+    peer_is_broll: bool = False,
+    target_vis_fh: Optional[float] = None,
+    target_ey: Optional[float] = None,
+    live_min_zoom: float = 1.0,
+    peer_min_zoom: float = 1.0,
 ) -> Union[
     Tuple[Dict[str, Any], Dict[str, Any]],
     Tuple[Dict[str, Any], Dict[str, Any], List[float], List[float]],
 ]:
     """Compute matched FFmpeg scale+crop filters for a two-character split screen (`split_h` or
-    `split_v`) so both characters share identical headroom, matched face scale, and symmetric
-    framing across speaker/listener turns, with optional per-panel vertical offsets
-    (`live_offset_y`, `peer_offset_y`; positive shifts the character downward in that panel).
+    `split_v`) so talking-head panels share matched face scale, aligned eyeline, and symmetric
+    framing across speaker/listener turns while B-roll panels stay locked at `1.0x`.
     """
     live_slot_w, live_slot_h = _even(max(16, live_slot_w)), _even(max(16, live_slot_h))
     peer_slot_w, peer_slot_h = _even(max(16, peer_slot_w)), _even(max(16, peer_slot_h))
     src_w, src_h = max(16, int(src_w or live_slot_w)), max(16, int(src_h or live_slot_h))
     peer_w, peer_h = max(16, int(peer_w or peer_slot_w)), max(16, int(peer_h or peer_slot_h))
 
-    def _extract_geom(
-        clip_path: Union[str, Path],
-        fallback_focus: Optional[Sequence[float]],
-    ) -> Tuple[float, float, float, float, float]:
-        vis: Dict[str, Any] = {}
-        try:
-            canon = _canonical_split_clip(clip_path)
-            if canon.is_file():
-                vis = analyze_clip_vision(canon) or {}
-        except Exception:
-            vis = {}
-        bbox = vis.get("bbox_norm")
-        v_foc = vis.get("focus")
-        eye_c = vis.get("eye_center_norm")
-        if bbox and len(bbox) >= 4:
-            x0, y0, x1, y1 = [min(1.0, max(0.0, float(v))) for v in bbox[:4]]
-            if x1 > x0 and y1 > y0:
-                cx = 0.5 * (x0 + x1)
-                fx = 0.65 * cx + 0.35 * float(v_foc[0]) if (v_foc and len(v_foc) >= 2) else cx
-                fh = max(0.10, min(0.65, y1 - y0))
-                fw = max(0.10, min(0.75, x1 - x0))
-                ey = float(eye_c[1]) if (eye_c and len(eye_c) >= 2) else (y0 + 0.42 * fh)
-                return max(0.05, min(0.95, fx)), max(0.04, min(0.65, y0)), fh, ey, fw
-        if fallback_focus and len(fallback_focus) >= 2:
-            fx = max(0.05, min(0.95, float(fallback_focus[0])))
-            fy = max(0.10, min(0.75, float(fallback_focus[1])))
-            y0 = max(0.06, fy - 0.14)
-            return fx, y0, 0.26, fy, 0.32
-        return 0.5, 0.18, 0.26, 0.30, 0.32
+    fx_a, y0_a, fh_a, ey_a, fw_a, det_a, vis_a = _extract_split_panel_geom(
+        live_src, live_focus, src_w, src_h,
+    )
+    fx_b, y0_b, fh_b, ey_b, fw_b, det_b, vis_b = _extract_split_panel_geom(
+        peer_src, peer_focus, peer_w, peer_h,
+    )
 
-    fx_a, y0_a, fh_a, ey_a, fw_a = _extract_geom(live_src, live_focus)
-    fx_b, y0_b, fh_b, ey_b, fw_b = _extract_geom(peer_src, peer_focus)
-
-    try:
-        common_hr = round(max(0.12, min(0.24, float(os.environ.get("ZENO_SPLIT_HEADROOM", "0.14")))), 4)
-    except ValueError:
-        common_hr = 0.14
-
+    common_hr = _resolve_split_headroom()
     try:
         live_off = float(live_offset_y or 0.0)
     except (TypeError, ValueError):
@@ -849,37 +1168,83 @@ def compute_paired_split_crop_filters(
     s0_b = max(peer_slot_w / float(peer_w), peer_slot_h / float(peer_h))
     hr_ratio_a = (src_h * s0_a) / float(live_slot_h)
     hr_ratio_b = (peer_h * s0_b) / float(peer_slot_h)
+    w_ratio_a = (src_w * s0_a) / float(live_slot_w)
+    w_ratio_b = (peer_w * s0_b) / float(peer_slot_w)
+    res_max_k_a = min(MAX_EXTRA_ZOOM, max(1.20, 2.5 / max(1.0, s0_a)))
+    res_max_k_b = min(MAX_EXTRA_ZOOM, max(1.20, 2.5 / max(1.0, s0_b)))
 
-    def _scale_for_lower_head(y0: float, h_ratio: float, fw: float) -> float:
-        target_crown = max(common_hr, 0.135)
-        k_bot = (1.0 - target_crown) / max(0.15, (1.0 - y0) * h_ratio)
-        max_z = 1.213 if fw >= 0.35 else MAX_EXTRA_ZOOM
-        return min(max_z, max(1.0, k_bot))
+    is_split_v = (live_slot_w > live_slot_h) and (peer_slot_w > peer_slot_h)
+    is_th_a = _is_talking_head_panel(vis_a, fh_a, live_slot_w, live_slot_h, is_muted_broll=live_is_broll)
+    is_th_b = _is_talking_head_panel(vis_b, fh_b, peer_slot_w, peer_slot_h, is_muted_broll=peer_is_broll)
 
-    if abs(y0_a - y0_b) >= 0.08:
-        if y0_a > y0_b:
-            k_a = _scale_for_lower_head(y0_a, hr_ratio_a, fw_a)
-            sh_a_tmp = max(live_slot_h, _even(src_h * s0_a * k_a))
-            cy_a_tmp = int(round(min(max(y0_a * sh_a_tmp - common_hr * live_slot_h, 0), sh_a_tmp - live_slot_h)))
-            achieved_eye = (ey_a * sh_a_tmp - cy_a_tmp) / float(live_slot_h)
-            k_b = min(1.30, max(1.0, achieved_eye / max(0.10, ey_b * hr_ratio_b)))
-        else:
-            k_b = _scale_for_lower_head(y0_b, hr_ratio_b, fw_b)
-            sh_b_tmp = max(peer_slot_h, _even(peer_h * s0_b * k_b))
-            cy_b_tmp = int(round(min(max(y0_b * sh_b_tmp - common_hr * peer_slot_h, 0), sh_b_tmp - peer_slot_h)))
-            achieved_eye = (ey_b * sh_b_tmp - cy_b_tmp) / float(peer_slot_h)
-            k_a = min(1.30, max(1.0, achieved_eye / max(0.10, ey_a * hr_ratio_a)))
-    else:
-        def _min_scale_for_headroom(y0: float, h_ratio: float) -> float:
-            k_top = common_hr / max(0.05, y0 * h_ratio) if y0 * h_ratio > common_hr else 1.0
+    spec_a = {
+        "w_in": src_w, "h_in": src_h, "slot_w": live_slot_w, "slot_h": live_slot_h,
+        "s0": s0_a, "hr_ratio": hr_ratio_a, "w_ratio": w_ratio_a,
+        "res_max_k": res_max_k_a, "fx": fx_a, "y0": y0_a, "fh": fh_a, "ey": ey_a, "fw": fw_a,
+        "min_zoom": float(live_min_zoom or 1.0),
+    }
+    spec_b = {
+        "w_in": peer_w, "h_in": peer_h, "slot_w": peer_slot_w, "slot_h": peer_slot_h,
+        "s0": s0_b, "hr_ratio": hr_ratio_b, "w_ratio": w_ratio_b,
+        "res_max_k": res_max_k_b, "fx": fx_b, "y0": y0_b, "fh": fh_b, "ey": ey_b, "fw": fw_b,
+        "min_zoom": float(peer_min_zoom or 1.0),
+    }
+
+    ey_target_a: Optional[float] = None
+    ey_target_b: Optional[float] = None
+    broll_a = False
+    broll_b = False
+
+    if is_th_a and is_th_b:
+        _, solved_ey, ks = _solve_talking_head_group(
+            [spec_a, spec_b],
+            common_hr,
+            is_split_v=is_split_v,
+            target_vis_fh_override=target_vis_fh,
+            target_ey_override=target_ey,
+        )
+        k_a, k_b = ks[0], ks[1]
+        ey_target_a = solved_ey
+        ey_target_b = solved_ey
+    elif is_th_a:
+        _, solved_ey_a, ks = _solve_talking_head_group(
+            [spec_a],
+            common_hr,
+            is_split_v=is_split_v,
+            target_vis_fh_override=target_vis_fh,
+            target_ey_override=target_ey,
+        )
+        k_a = ks[0]
+        ey_target_a = solved_ey_a
+        k_b = 1.0
+        broll_b = True
+    elif is_th_b:
+        _, solved_ey_b, ks = _solve_talking_head_group(
+            [spec_b],
+            common_hr,
+            is_split_v=is_split_v,
+            target_vis_fh_override=target_vis_fh,
+            target_ey_override=target_ey,
+        )
+        k_b = ks[0]
+        ey_target_b = solved_ey_b
+        k_a = 1.0
+        broll_a = True
+    elif not det_a and not det_b and not live_is_broll and not peer_is_broll:
+        # Undetected fallback pair (e.g. unit tests with focus hints): frame independently
+        def _fallback_k(y0: float, h_ratio: float, res_k: float, min_z: float) -> float:
+            k_top = (common_hr / max(0.05, y0 * h_ratio)) if (y0 * h_ratio < common_hr) else 1.0
             k_bot = (1.0 - common_hr) / max(0.10, (1.0 - y0) * h_ratio)
-            return min(MAX_EXTRA_ZOOM, max(1.0, k_top, k_bot))
+            return min(res_k, max(1.0, k_top, k_bot, float(min_z or 1.0)))
 
-        k_hr_a = _min_scale_for_headroom(y0_a, hr_ratio_a)
-        k_hr_b = _min_scale_for_headroom(y0_b, hr_ratio_b)
-        common_fh = max(fh_a * hr_ratio_a * k_hr_a, fh_b * hr_ratio_b * k_hr_b, MIN_SLOT_FILL * 0.52)
-        k_a = min(MAX_EXTRA_ZOOM, max(1.0, k_hr_a, common_fh / max(0.08, fh_a * hr_ratio_a)))
-        k_b = min(MAX_EXTRA_ZOOM, max(1.0, k_hr_b, common_fh / max(0.08, fh_b * hr_ratio_b)))
+        k_a = _fallback_k(y0_a, hr_ratio_a, res_max_k_a, live_min_zoom)
+        k_b = _fallback_k(y0_b, hr_ratio_b, res_max_k_b, peer_min_zoom)
+    else:
+        # Both are B-roll / non-talking-head panels: keep both locked at 1.0x
+        k_a = 1.0
+        k_b = 1.0
+        broll_a = True
+        broll_b = True
 
     def _build_one(
         w_in: int,
@@ -889,21 +1254,39 @@ def compute_paired_split_crop_filters(
         s0: float,
         fx: float,
         y0: float,
+        fh: float,
         ey: float,
         k: float,
         eff_hr: float,
         off: float,
+        ey_target: Optional[float],
+        is_broll_panel: bool,
+        detected: bool,
     ) -> Dict[str, Any]:
         s = s0 * k
         sw = max(sw_slot, _even(w_in * s))
         sh = max(sh_slot, _even(h_in * s))
         crop_x = int(round(min(max(fx * sw - sw_slot / 2.0, 0), sw - sw_slot)))
-        want_y = y0 * sh - eff_hr * sh_slot
-        crop_y = int(round(min(max(want_y, 0), sh - sh_slot)))
-        pad_top = int(round(-want_y)) if want_y < -2 else 0
-        pad_top = min(pad_top, int(sh_slot * 0.30))
+
+        if ey_target is not None:
+            want_y = ey * sh - (ey_target + off) * sh_slot
+        elif is_broll_panel and not detected:
+            want_y = ey * sh - 0.5 * sh_slot - off * sh_slot
+        else:
+            want_y = y0 * sh - eff_hr * sh_slot
+
+        if abs(off) <= 1e-4 and ey_target is not None:
+            # Clamp strictly inside source height so talking heads never get fillborders smear
+            crop_y = int(round(min(max(want_y, 0), max(0, sh - sh_slot))))
+            pad_top = 0
+        else:
+            crop_y = int(round(min(max(want_y, 0), max(0, sh - sh_slot))))
+            pad_top = int(round(-want_y)) if want_y < -2 else 0
+            pad_top = min(pad_top, int(sh_slot * 0.30))
+
         slot_fx = round(min(0.65, max(0.35, (fx * sw - crop_x) / float(sw_slot))), 4)
-        fy_raw = (ey * sh - crop_y + pad_top) / float(sh_slot)
+        anchor_y = (y0 + fh) if (is_broll_panel and detected) else ey
+        fy_raw = (anchor_y * sh - crop_y + pad_top) / float(sh_slot)
         slot_fy = (
             round(min(0.65, max(0.18, fy_raw)), 4)
             if abs(off) > 1e-4
@@ -925,6 +1308,7 @@ def compute_paired_split_crop_filters(
             "offset_y": round(off, 4),
             "extra_zoom": round(k, 3),
             "slot_focus": [slot_fx, slot_fy],
+            "is_talking_head": not is_broll_panel and detected,
             "geom": {
                 "s": sw / float(w_in),
                 "ox": float(crop_x),
@@ -933,8 +1317,14 @@ def compute_paired_split_crop_filters(
             },
         }
 
-    live_crop = _build_one(src_w, src_h, live_slot_w, live_slot_h, s0_a, fx_a, y0_a, ey_a, k_a, eff_hr_live, live_off)
-    peer_crop = _build_one(peer_w, peer_h, peer_slot_w, peer_slot_h, s0_b, fx_b, y0_b, ey_b, k_b, eff_hr_peer, peer_off)
+    live_crop = _build_one(
+        src_w, src_h, live_slot_w, live_slot_h, s0_a, fx_a, y0_a, fh_a, ey_a, k_a,
+        eff_hr_live, live_off, ey_target_a, broll_a, det_a,
+    )
+    peer_crop = _build_one(
+        peer_w, peer_h, peer_slot_w, peer_slot_h, s0_b, fx_b, y0_b, fh_b, ey_b, k_b,
+        eff_hr_peer, peer_off, ey_target_b, broll_b, det_b,
+    )
     if return_focus:
         return live_crop, peer_crop, list(live_crop["slot_focus"]), list(peer_crop["slot_focus"])
     return live_crop, peer_crop
@@ -1493,6 +1883,7 @@ def analyze_clip_vision(
                 cached = read_json(disk_cache_file)
                 if (
                     isinstance(cached, dict)
+                    and int(cached.get("vision_version") or 1) >= 2
                     and cached.get("bbox_norm")
                     and "baked_split" in cached
                     and "seam_frac" in cached
@@ -1591,24 +1982,24 @@ def analyze_clip_vision(
             rep_faces = two_face_frames[len(two_face_frames) // 2][:2]
             face_count = 2
         else:
-            one_face_frames = [fl for fl in sampled_faces if len(fl) >= 1]
+            best_faces = [max(fl, key=_face_prominence_score) for fl in sampled_faces if fl]
             avg_bbox = [
-                round(sum(fl[0]["bbox_norm"][k] for fl in one_face_frames) / len(one_face_frames), 4)
+                round(sum(f["bbox_norm"][k] for f in best_faces) / len(best_faces), 4)
                 for k in range(4)
             ]
             avg_eye = [
-                round(sum(fl[0]["eye_center_norm"][k] for fl in one_face_frames) / len(one_face_frames), 4)
+                round(sum(f["eye_center_norm"][k] for f in best_faces) / len(best_faces), 4)
                 for k in range(2)
             ]
             avg_focus = compute_eye_anchored_focus(avg_bbox, avg_eye)
 
-            half_idx = max(1, len(one_face_frames) // 2)
-            first_h = one_face_frames[:half_idx]
-            last_h = one_face_frames[half_idx:] or first_h
-            bbox_0 = [round(sum(fl[0]["bbox_norm"][k] for fl in first_h) / len(first_h), 4) for k in range(4)]
-            eye_0 = [round(sum(fl[0]["eye_center_norm"][k] for fl in first_h) / len(first_h), 4) for k in range(2)]
-            bbox_1 = [round(sum(fl[0]["bbox_norm"][k] for fl in last_h) / len(last_h), 4) for k in range(4)]
-            eye_1 = [round(sum(fl[0]["eye_center_norm"][k] for fl in last_h) / len(last_h), 4) for k in range(2)]
+            half_idx = max(1, len(best_faces) // 2)
+            first_h = best_faces[:half_idx]
+            last_h = best_faces[half_idx:] or first_h
+            bbox_0 = [round(sum(f["bbox_norm"][k] for f in first_h) / len(first_h), 4) for k in range(4)]
+            eye_0 = [round(sum(f["eye_center_norm"][k] for f in first_h) / len(first_h), 4) for k in range(2)]
+            bbox_1 = [round(sum(f["bbox_norm"][k] for f in last_h) / len(last_h), 4) for k in range(4)]
+            eye_1 = [round(sum(f["eye_center_norm"][k] for f in last_h) / len(last_h), 4) for k in range(2)]
             f0 = compute_eye_anchored_focus(bbox_0, eye_0)
             f1 = compute_eye_anchored_focus(bbox_1, eye_1)
             if math.hypot(f1[0] - f0[0], f1[1] - f0[1]) > 0.04:
@@ -1616,7 +2007,7 @@ def analyze_clip_vision(
             else:
                 focus_start, focus_end = avg_focus, avg_focus
 
-            primary = dict(one_face_frames[len(one_face_frames) // 2][0])
+            primary = dict(best_faces[len(best_faces) // 2])
             primary["bbox_norm"] = avg_bbox
             primary["eye_center_norm"] = avg_eye
             primary["focus"] = focus_start
@@ -1695,7 +2086,7 @@ def analyze_clip_vision(
     }
     cam_motion = round(float(sum(bg_motion_deltas) / len(bg_motion_deltas)), 3) if bg_motion_deltas else 0.0
 
-    primary_face = rep_faces[0]
+    primary_face = max(rep_faces, key=_face_prominence_score)
     idle_info = find_listening_idle_window(resolved, speech_spans=speech_spans, duration=dur)
     has_mixed_seams = bool(baked_seams and frames_sampled > 1 and len(baked_seams) < frames_sampled)
     has_mixed_faces = bool(
@@ -1706,6 +2097,7 @@ def analyze_clip_vision(
     mixed_framing = has_mixed_seams or has_mixed_faces
 
     result: Dict[str, Any] = {
+        "vision_version": 2,
         "path": str(resolved),
         "width": w,
         "height": h,
@@ -1714,6 +2106,7 @@ def analyze_clip_vision(
         "aspect_ratio": aspect,
         "orientation": orientation,
         "face_count": face_count,
+        "confidence": round(float(primary_face.get("confidence") or 0.0), 3),
         "shot_type": shot_type,
         "baked_split": baked_split,
         "mixed_framing": mixed_framing,

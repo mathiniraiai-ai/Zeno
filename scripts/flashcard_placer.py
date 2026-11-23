@@ -630,11 +630,10 @@ def _card_size_presets(W: int, H: int, square: bool) -> Dict[str, Tuple[int, int
 
 
 def _resolve_card_style(tier: str, compact: bool, explicit_style: Optional[str]) -> str:
+    _ = (tier, compact)
     st = str(explicit_style or "").strip().lower()
     if st and st != "auto":
         return st
-    if compact and tier in ("body_center", "bottom_safe"):
-        return "minimal"
     return "clean"
 
 
@@ -651,6 +650,8 @@ def _solve_face_safe_rect_strict(
     style: Optional[str] = None,
     y_max_frac: float = 0.86,
     allow_ultra_compact: bool = True,
+    allowed_preset_keys: Optional[Sequence[str]] = None,
+    target_xy: Optional[Tuple[float, float]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Strict HARD-GATE-0 solver returning a `0 px`-face-overlap placement dict, or `None`
     when no valid placement exists inside safe bounds.
@@ -709,6 +710,17 @@ def _solve_face_safe_rect_strict(
             "style": _resolve_card_style(tier, compact, style),
         }
 
+    def _filter_keys(keys: Sequence[str]) -> Tuple[str, ...]:
+        if allowed_preset_keys is None:
+            return tuple(keys)
+        allowed_set = set(allowed_preset_keys)
+        return tuple(k for k in keys if k in allowed_set)
+
+    def _pos_bias(rx0: int, ry0: int) -> float:
+        if target_xy is None:
+            return 0.0
+        return 0.30 * (abs(rx0 - target_xy[0]) / float(W_i) + abs(ry0 - target_xy[1]) / float(H_i))
+
     # ------------------------------------------------------------------
     # Tier 1: `top_empty` (top-center headroom, y0 in 3%..14% H, y1 <= min_top_face_y0)
     # ------------------------------------------------------------------
@@ -719,7 +731,7 @@ def _solve_face_safe_rect_strict(
         step_y = max(6, int(round(0.010 * H_i)))
         gap_y = max(8, int(round(0.012 * H_i)))
 
-        for key in ("standard", "scaled_88", "compact_wide"):
+        for key in _filter_keys(("standard", "scaled_88", "compact_wide")):
             cw, ch, is_compact = presets[key]
             if cw > (x_max - x_min):
                 continue
@@ -763,7 +775,7 @@ def _solve_face_safe_rect_strict(
                         continue
                     clutter = box_clutter_score(clutter_maps, rect, W_i, H_i)
                     y_dev = abs(ry0 - pref_y0) / float(H_i)
-                    score = 0.50 * clutter + 0.30 * cx_dev + 0.20 * y_dev
+                    score = 0.50 * clutter + 0.30 * cx_dev + 0.20 * y_dev + _pos_bias(rx0, ry0)
                     key_rank = (round(score, 5), cx_dev)
                     if best_score is None or key_rank < best_score:
                         best_score = key_rank
@@ -781,7 +793,7 @@ def _solve_face_safe_rect_strict(
         left_x = max(x_min, int(round(0.04 * W_i)))
         right_edge = min(x_max, int(round(0.96 * W_i)))
 
-        for key in ("standard", "scaled_88", "compact_wide", "side_compact"):
+        for key in _filter_keys(("standard", "scaled_88", "compact_wide", "side_compact")):
             cw, ch, is_compact = presets[key]
             if cw > (x_max - x_min) or ch > (y_max - y_min):
                 continue
@@ -831,7 +843,7 @@ def _solve_face_safe_rect_strict(
                     clutter = box_clutter_score(clutter_maps, rect, W_i, H_i)
                     cy_norm = (ry0 + ry1) / (2.0 * H_i)
                     r_ui = _right_ui_overlap(rect, W_i, H_i)
-                    score = 0.52 * clutter + 0.18 * cy_norm + 0.15 * cx_dev + 0.10 * body_ov + 0.05 * r_ui
+                    score = 0.52 * clutter + 0.18 * cy_norm + 0.15 * cx_dev + 0.10 * body_ov + 0.05 * r_ui + _pos_bias(rx0, ry0)
                     if best_score is None or score < best_score:
                         best_score = score
                         best_rect = rect
@@ -851,7 +863,7 @@ def _solve_face_safe_rect_strict(
         step_y = max(8, int(round(0.015 * H_i)))
         gap = max(8, int(round(0.010 * H_i)))
 
-        for key in ("standard", "scaled_88", "compact_wide", "scaled_84", "scaled_74"):
+        for key in _filter_keys(("standard", "scaled_88", "compact_wide", "scaled_84", "scaled_74")):
             cw, ch, is_compact = presets[key]
             if cw > (x_max - x_min):
                 continue
@@ -892,7 +904,7 @@ def _solve_face_safe_rect_strict(
                         continue
                     cy_norm = (ry0 + ry1) / (2.0 * H_i)
                     clutter = box_clutter_score(clutter_maps, rect, W_i, H_i)
-                    score = 0.45 * cx_dev + 0.40 * abs(cy_norm - 0.58) + 0.15 * clutter
+                    score = 0.45 * cx_dev + 0.40 * abs(cy_norm - 0.58) + 0.15 * clutter + _pos_bias(rx0, ry0)
                     if best_score is None or score < best_score:
                         best_score = score
                         best_rect = rect
@@ -910,7 +922,7 @@ def _solve_face_safe_rect_strict(
         left_x = max(x_min, int(round(0.04 * W_i)))
         right_edge = min(x_max, int(round(0.96 * W_i)))
 
-        bot_keys: Tuple[str, ...] = (
+        bot_keys: Tuple[str, ...] = _filter_keys((
             "standard",
             "scaled_88",
             "compact_wide",
@@ -925,7 +937,7 @@ def _solve_face_safe_rect_strict(
             "scaled_84",
             "scaled_74",
             "compact_74",
-        )
+        ))
         for key in bot_keys:
             cw, ch, is_compact = presets[key]
             if cw > (x_max - x_min):
@@ -972,7 +984,7 @@ def _solve_face_safe_rect_strict(
                         continue
                     cy_norm = (ry0 + ry1) / (2.0 * H_i)
                     clutter = box_clutter_score(clutter_maps, rect, W_i, H_i)
-                    score = 0.45 * cx_dev + 0.35 * abs(cy_norm - 0.75) + 0.20 * clutter
+                    score = 0.45 * cx_dev + 0.35 * abs(cy_norm - 0.75) + 0.20 * clutter + _pos_bias(rx0, ry0)
                     if best_score is None or score < best_score:
                         best_score = score
                         best_rect = rect
@@ -986,13 +998,19 @@ def _solve_face_safe_rect_strict(
     def _try_any_zero_overlap(dodge_sub: bool = True) -> Optional[Dict[str, Any]]:
         step_y = max(8, int(round(0.015 * H_i)))
         step_x = max(12, int(round(0.04 * W_i)))
-        sweep_keys: Tuple[str, ...] = (
-            ("compact_wide", "scaled_74", "compact_74", "side_compact", "ultra_compact")
-            if allow_ultra_compact
-            else ("compact_wide", "scaled_74", "compact_74", "side_compact")
-        )
+        if allowed_preset_keys is not None:
+            sweep_keys: Tuple[str, ...] = tuple(
+                k for k in allowed_preset_keys
+                if k in presets and (allow_ultra_compact or k != "ultra_compact")
+            )
+        else:
+            sweep_keys = (
+                ("compact_wide", "scaled_74", "compact_74", "side_compact", "ultra_compact")
+                if allow_ultra_compact
+                else ("compact_wide", "scaled_74", "compact_74", "side_compact")
+            )
         for key in sweep_keys:
-            cw, ch, _ = presets[key]
+            cw, ch, is_compact = presets[key]
             if cw > (x_max - x_min) or ch > (y_max - y_min):
                 continue
             x_cands = list(range(x_min, x_max - cw + 1, step_x))
@@ -1020,7 +1038,7 @@ def _solve_face_safe_rect_strict(
                     if dodge_sub and _hits_sub(rect):
                         continue
                     clutter = box_clutter_score(clutter_maps, rect, W_i, H_i)
-                    score = 0.50 * cx_dev + 0.50 * clutter
+                    score = 0.50 * cx_dev + 0.50 * clutter + _pos_bias(rx0, ry0)
                     if best_score is None or score < best_score:
                         best_score = score
                         best_rect = rect
@@ -1031,7 +1049,7 @@ def _solve_face_safe_rect_strict(
                     if best_rect[3] <= min_top_face_y0
                     else ("bottom_safe" if cy_norm >= 0.68 else ("body_center" if cy_norm >= 0.45 else "alt_empty"))
                 )
-                return _mk_result(best_rect, True, tier)
+                return _mk_result(best_rect, is_compact, tier)
         return None
 
     pos_norm = str(pref_pos or "auto").strip().lower()
@@ -1446,6 +1464,7 @@ def _render_cards_into_dir(
     cards_dir: Path,
     *,
     is_square: bool = False,
+    font: str = "",
 ) -> None:
     """Render exact-sized flashcard PNGs into `cards_dir` via `ui_generator.render_flashcards_batch`
     (with graceful single-card / Pillow fallback if the batch helper is not yet installed).
@@ -1461,7 +1480,8 @@ def _render_cards_into_dir(
     for idx, card in enumerate(placed_cards):
         target = cards_dir / f"{card['id']}{suffix}.png"
         targets.append(target)
-        specs.append({
+        card_font = str(card.get("font") or font or "").strip()
+        spec_item: Dict[str, Any] = {
             "id": card["id"],
             "en": card["en"],
             "english": card["en"],
@@ -1478,7 +1498,11 @@ def _render_cards_into_dir(
             "compact": bool(card["compact"]),
             "out_path": str(target),
             "output": str(target),
-        })
+        }
+        if card_font:
+            spec_item["font"] = card_font
+            spec_item["enFont"] = card_font
+        specs.append(spec_item)
 
     rendered_paths: Optional[List[Optional[Path]]] = None
     batch_fn = getattr(ui_generator, "render_flashcards_batch", None) if ui_generator is not None else None
@@ -1527,8 +1551,10 @@ def _render_cards_into_dir(
                         ("style", card["style"]),
                         ("compact", bool(card["compact"])),
                         ("out_path", target),
+                        ("font", str(card.get("font") or font or "")),
+                        ("en_font", str(card.get("font") or font or "")),
                     ):
-                        if k_name in sig.parameters:
+                        if k_name in sig.parameters and (k_name not in ("font", "en_font") or val):
                             call_kw[k_name] = val
                     r_p = single_fn(**call_kw)
                 if r_p:
@@ -1639,11 +1665,137 @@ def place_timeline_flashcards(
         frame_cache[key] = (shs, cmap)
         return shs, cmap
 
+    subs_font = ""
+    if isinstance(plan, dict) and isinstance(plan.get("subs"), dict):
+        raw_sf = str(plan["subs"].get("font") or "").strip()
+        if raw_sf:
+            try:
+                import subtitles as _subs_mod
+                subs_font = _subs_mod.resolve_font(raw_sf) or raw_sf
+            except Exception:
+                subs_font = raw_sf
+
+    def _combine_group(grp: Sequence[Dict[str, Any]]) -> Tuple[List[Rect], List[Any], str]:
+        all_sh: List[Rect] = []
+        all_cm: List[Any] = []
+        lays: List[str] = []
+        for item in grp:
+            all_sh.extend(item["shields"])
+            all_cm.extend(item["clutters"])
+            if item["layout"] not in lays:
+                lays.append(item["layout"])
+        if len(all_cm) > 6:
+            idxs = [int(round(k * (len(all_cm) - 1) / 5.0)) for k in range(6)]
+            all_cm = [all_cm[k] for k in idxs]
+        grp_lay = lays[0] if len(lays) == 1 else (
+            "split_v" if "split_v" in lays else ("split_h" if "split_h" in lays else lays[0])
+        )
+        return all_sh, all_cm, grp_lay
+
+    def _solve_span(
+        span: Dict[str, Any],
+        overlapped: List[Dict[str, Any]],
+        *,
+        allowed_preset_keys: Optional[Sequence[str]] = None,
+        target_xy: Optional[Tuple[float, float]] = None,
+        strict_only: bool = False,
+        style_override: Optional[str] = None,
+    ) -> Optional[List[Tuple[float, float, Dict[str, Any], List[Rect], str, List[str]]]]:
+        t0, t1 = float(span["t0"]), float(span["t1"])
+        eff_style = style_override if style_override is not None else (span["style"] or None)
+        allow_uc = bool(allowed_preset_keys is not None and "ultra_compact" in allowed_preset_keys)
+
+        def _solve_strict_chunk(grp: Sequence[Dict[str, Any]]) -> Optional[Tuple[Dict[str, Any], List[Rect], str]]:
+            all_sh, all_cm, grp_lay = _combine_group(grp)
+            rect_info = _solve_face_safe_rect_strict(
+                W_i, H_i, all_sh,
+                clutter_maps=all_cm if all_cm else None,
+                pref_pos=span["pos"],
+                layout=grp_lay,
+                is_square=is_square,
+                subtitle_band=subtitle_band,
+                style=eff_style,
+                allow_ultra_compact=(allow_uc or len(grp) == 1),
+                allowed_preset_keys=allowed_preset_keys,
+                target_xy=target_xy,
+            )
+            if rect_info is None:
+                return None
+            return rect_info, all_sh, grp_lay
+
+        whole_sol = _solve_strict_chunk(overlapped)
+        sub_solutions: List[Tuple[float, float, Dict[str, Any], List[Rect], str, List[str]]] = []
+
+        if whole_sol is not None:
+            rect_info, all_sh, grp_lay = whole_sol
+            sub_solutions.append((
+                t0, t1, rect_info, all_sh, grp_lay, [ov["seg_id"] for ov in overlapped],
+            ))
+            return sub_solutions
+
+        if len(overlapped) > 1:
+            i = 0
+            while i < len(overlapped):
+                best_j = i
+                best_pack = _solve_strict_chunk(overlapped[i : i + 1])
+                if best_pack is None and strict_only:
+                    return None
+                if best_pack is not None:
+                    for j in range(i + 1, len(overlapped)):
+                        cand_pack = _solve_strict_chunk(overlapped[i : j + 1])
+                        if cand_pack is not None:
+                            best_j = j
+                            best_pack = cand_pack
+                        else:
+                            break
+                grp = overlapped[i : best_j + 1]
+                if best_pack is not None:
+                    rect_info, all_sh, grp_lay = best_pack
+                else:
+                    all_sh, all_cm, grp_lay = _combine_group(grp)
+                    rect_info = choose_face_safe_rect(
+                        W_i, H_i, all_sh,
+                        clutter_maps=all_cm if all_cm else None,
+                        pref_pos=span["pos"],
+                        layout=grp_lay,
+                        is_square=is_square,
+                        subtitle_band=subtitle_band,
+                        style=eff_style,
+                    )
+                sub_t0 = t0 if i == 0 else grp[0]["a"]
+                sub_t1 = t1 if best_j == len(overlapped) - 1 else grp[-1]["b"]
+                sub_solutions.append((
+                    sub_t0, sub_t1, rect_info, all_sh, grp_lay, [ov["seg_id"] for ov in grp],
+                ))
+                i = best_j + 1
+            return sub_solutions
+
+        if strict_only:
+            return None
+
+        all_sh, all_cm, grp_lay = _combine_group(overlapped)
+        rect_info = choose_face_safe_rect(
+            W_i, H_i, all_sh,
+            clutter_maps=all_cm if all_cm else None,
+            pref_pos=span["pos"],
+            layout=grp_lay,
+            is_square=is_square,
+            subtitle_band=subtitle_band,
+            style=eff_style,
+        )
+        sub_solutions.append((
+            t0, t1, rect_info, all_sh, grp_lay, [ov["seg_id"] for ov in overlapped],
+        ))
+        return sub_solutions
+
+    span_overlapped: List[List[Dict[str, Any]]] = []
+    span_sub_solutions: Dict[int, List[Tuple[float, float, Dict[str, Any], List[Rect], str, List[str]]]] = {}
+
     placed_cards: List[Dict[str, Any]] = []
     try:
+        # Pass 1: Collect face shields and clutter maps across all spans
         for span in spans:
             t0, t1 = float(span["t0"]), float(span["t1"])
-            # Find all timeline segments overlapped by [t0, t1]
             overlapped: List[Dict[str, Any]] = []
             for s_idx in range(n_segs):
                 s0 = float(starts[s_idx])
@@ -1679,103 +1831,147 @@ def place_timeline_flashcards(
                     if cmap is not None:
                         seg_clutters.append(cmap)
                 ov["shields"] = _union_face_tracks(per_frame_sh)
-                # Keep up to 4 evenly spaced clutter maps per segment for fast O(1) scoring
                 if len(seg_clutters) > 4:
                     idxs = [int(round(k * (len(seg_clutters) - 1) / 3.0)) for k in range(4)]
                     ov["clutters"] = [seg_clutters[k] for k in idxs]
                 else:
                     ov["clutters"] = seg_clutters
+            span_overlapped.append(overlapped)
 
-            def _combine_group(grp: Sequence[Dict[str, Any]]) -> Tuple[List[Rect], List[Any], str]:
-                all_sh: List[Rect] = []
-                all_cm: List[Any] = []
-                lays: List[str] = []
-                for item in grp:
-                    all_sh.extend(item["shields"])
-                    all_cm.extend(item["clutters"])
-                    if item["layout"] not in lays:
-                        lays.append(item["layout"])
-                if len(all_cm) > 6:
-                    idxs = [int(round(k * (len(all_cm) - 1) / 5.0)) for k in range(6)]
-                    all_cm = [all_cm[k] for k in idxs]
-                grp_lay = lays[0] if len(lays) == 1 else (
-                    "split_v" if "split_v" in lays else ("split_h" if "split_h" in lays else lays[0])
-                )
-                return all_sh, all_cm, grp_lay
+        # Pass 2: Reel-wide uniformity solver grouped by (primary_layout, pref_pos, style)
+        groups: Dict[Tuple[str, str, str], List[int]] = {}
+        for s_i, span in enumerate(spans):
+            eff_st = _resolve_card_style("top_empty", False, span["style"] or None)
+            gkey = (span["layout"], span["pos"], eff_st)
+            groups.setdefault(gkey, []).append(s_i)
 
-            def _solve_strict_group(grp: Sequence[Dict[str, Any]]) -> Optional[Tuple[Dict[str, Any], List[Rect], str]]:
-                all_sh, all_cm, grp_lay = _combine_group(grp)
-                rect_info = _solve_face_safe_rect_strict(
-                    W_i, H_i, all_sh,
-                    clutter_maps=all_cm if all_cm else None,
-                    pref_pos=span["pos"],
-                    layout=grp_lay,
+        PRESET_ORDER: Tuple[str, ...] = (
+            "standard",
+            "scaled_88",
+            "compact_wide",
+            "scaled_84",
+            "scaled_74",
+            "compact_74",
+            "side_compact",
+            "ultra_compact",
+        )
+
+        for (_g_lay, g_pos, g_style), grp_idxs in groups.items():
+            if len(grp_idxs) < 2:
+                si = grp_idxs[0]
+                sol = _solve_span(spans[si], span_overlapped[si], strict_only=False)
+                if sol is not None:
+                    span_sub_solutions[si] = sol
+                continue
+
+            # Step 2a: Try ONE shared stationary rect across ALL spans in the group
+            all_grp_ov = [ov for si in grp_idxs for ov in span_overlapped[si]]
+            all_sh, all_cm, grp_lay = _combine_group(all_grp_ov)
+            shared_rect = _solve_face_safe_rect_strict(
+                W_i, H_i, all_sh,
+                clutter_maps=all_cm if all_cm else None,
+                pref_pos=g_pos,
+                layout=grp_lay,
+                is_square=is_square,
+                subtitle_band=subtitle_band,
+                style=g_style,
+                allow_ultra_compact=False,
+            )
+            if shared_rect is not None:
+                for si in grp_idxs:
+                    sp = spans[si]
+                    sp_sh, _sp_cm, sp_lay = _combine_group(span_overlapped[si])
+                    span_sub_solutions[si] = [(
+                        float(sp["t0"]),
+                        float(sp["t1"]),
+                        dict(shared_rect),
+                        sp_sh,
+                        sp_lay,
+                        [ov["seg_id"] for ov in span_overlapped[si]],
+                    )]
+                continue
+
+            # Step 2b: Largest shared preset (w, h, compact) yielding 0-px face overlap
+            # across every card (or maximal subset >=2 if one extreme closeup outlier fails).
+            best_preset: Optional[str] = None
+            best_subset_sols: Dict[int, List[Tuple[float, float, Dict[str, Any], List[Rect], str, List[str]]]] = {}
+            best_rank: Tuple[int, int] = (-1, -999)
+
+            for p_idx, preset_key in enumerate(PRESET_ORDER):
+                cand_sols: Dict[int, List[Tuple[float, float, Dict[str, Any], List[Rect], str, List[str]]]] = {}
+                for si in grp_idxs:
+                    sol = _solve_span(
+                        spans[si],
+                        span_overlapped[si],
+                        allowed_preset_keys=(preset_key,),
+                        strict_only=True,
+                        style_override=g_style,
+                    )
+                    if sol is not None:
+                        cand_sols[si] = sol
+                if len(cand_sols) == len(grp_idxs):
+                    best_preset = preset_key
+                    best_subset_sols = cand_sols
+                    break
+                if len(cand_sols) >= 2:
+                    rank = (len(cand_sols), -p_idx)
+                    if rank > best_rank:
+                        best_rank = rank
+                        best_preset = preset_key
+                        best_subset_sols = cand_sols
+
+            if best_preset is not None and best_subset_sols:
+                fit_idxs = list(best_subset_sols.keys())
+                # If the fitting subset admits a single shared stationary rect, use it
+                fit_ov = [ov for si in fit_idxs for ov in span_overlapped[si]]
+                fit_sh, fit_cm, fit_lay = _combine_group(fit_ov)
+                subset_stationary = _solve_face_safe_rect_strict(
+                    W_i, H_i, fit_sh,
+                    clutter_maps=fit_cm if fit_cm else None,
+                    pref_pos=g_pos,
+                    layout=fit_lay,
                     is_square=is_square,
                     subtitle_band=subtitle_band,
-                    style=span["style"] or None,
-                    allow_ultra_compact=(len(grp) == 1),
+                    style=g_style,
+                    allow_ultra_compact=(best_preset == "ultra_compact"),
+                    allowed_preset_keys=(best_preset,),
                 )
-                if rect_info is None:
-                    return None
-                return rect_info, all_sh, grp_lay
-
-            # Try ONE stationary placement across the entire multi-cut span first
-            whole_sol = _solve_strict_group(overlapped)
-            sub_solutions: List[Tuple[float, float, Dict[str, Any], List[Rect], str, List[str]]] = []
-
-            if whole_sol is not None:
-                rect_info, all_sh, grp_lay = whole_sol
-                sub_solutions.append((
-                    t0, t1, rect_info, all_sh, grp_lay, [ov["seg_id"] for ov in overlapped],
-                ))
-            elif len(overlapped) > 1:
-                # Incompatible face positions across cuts -> split strictly on segment cut boundaries
-                i = 0
-                while i < len(overlapped):
-                    best_j = i
-                    best_pack = _solve_strict_group(overlapped[i : i + 1])
-                    for j in range(i + 1, len(overlapped)):
-                        cand_pack = _solve_strict_group(overlapped[i : j + 1])
-                        if cand_pack is not None:
-                            best_j = j
-                            best_pack = cand_pack
-                        else:
-                            break
-                    grp = overlapped[i : best_j + 1]
-                    if best_pack is not None:
-                        rect_info, all_sh, grp_lay = best_pack
-                    else:
-                        all_sh, all_cm, grp_lay = _combine_group(grp)
-                        rect_info = choose_face_safe_rect(
-                            W_i, H_i, all_sh,
-                            clutter_maps=all_cm if all_cm else None,
-                            pref_pos=span["pos"],
-                            layout=grp_lay,
-                            is_square=is_square,
-                            subtitle_band=subtitle_band,
-                            style=span["style"] or None,
+                if subset_stationary is not None:
+                    for si in fit_idxs:
+                        sp = spans[si]
+                        sp_sh, _sp_cm, sp_lay = _combine_group(span_overlapped[si])
+                        span_sub_solutions[si] = [(
+                            float(sp["t0"]),
+                            float(sp["t1"]),
+                            dict(subset_stationary),
+                            sp_sh,
+                            sp_lay,
+                            [ov["seg_id"] for ov in span_overlapped[si]],
+                        )]
+                else:
+                    xs = sorted(sol[2]["x0"] for si in fit_idxs for sol in best_subset_sols[si])
+                    ys = sorted(sol[2]["y0"] for si in fit_idxs for sol in best_subset_sols[si])
+                    med_xy = (float(xs[len(xs) // 2]), float(ys[len(ys) // 2]))
+                    for si in fit_idxs:
+                        aligned = _solve_span(
+                            spans[si],
+                            span_overlapped[si],
+                            allowed_preset_keys=(best_preset,),
+                            target_xy=med_xy,
+                            strict_only=True,
+                            style_override=g_style,
                         )
-                    sub_t0 = t0 if i == 0 else grp[0]["a"]
-                    sub_t1 = t1 if best_j == len(overlapped) - 1 else grp[-1]["b"]
-                    sub_solutions.append((
-                        sub_t0, sub_t1, rect_info, all_sh, grp_lay, [ov["seg_id"] for ov in grp],
-                    ))
-                    i = best_j + 1
-            else:
-                all_sh, all_cm, grp_lay = _combine_group(overlapped)
-                rect_info = choose_face_safe_rect(
-                    W_i, H_i, all_sh,
-                    clutter_maps=all_cm if all_cm else None,
-                    pref_pos=span["pos"],
-                    layout=grp_lay,
-                    is_square=is_square,
-                    subtitle_band=subtitle_band,
-                    style=span["style"] or None,
-                )
-                sub_solutions.append((
-                    t0, t1, rect_info, all_sh, grp_lay, [ov["seg_id"] for ov in overlapped],
-                ))
+                        span_sub_solutions[si] = aligned if aligned is not None else best_subset_sols[si]
 
+            # Fall back to per-span solver only for outlier cards that could not fit any shared preset
+            for si in grp_idxs:
+                if si not in span_sub_solutions:
+                    sol = _solve_span(spans[si], span_overlapped[si], strict_only=False)
+                    if sol is not None:
+                        span_sub_solutions[si] = sol
+
+        for span_idx, span in enumerate(spans):
+            sub_solutions = span_sub_solutions.get(span_idx, [])
             for part_idx, (st0, st1, rect_info, all_sh, grp_lay, seg_ids) in enumerate(sub_solutions):
                 st0_r = round(float(st0), 4)
                 st1_r = round(float(st1), 4)
@@ -1812,6 +2008,7 @@ def place_timeline_flashcards(
                     "layout": grp_lay,
                     "seg_ids": seg_ids,
                     "face_overlap_px": int(max_shield_overlap_px(r_box, all_sh)),
+                    **({"font": subs_font} if subs_font else {}),
                     "png": "",
                 })
     finally:
@@ -1819,7 +2016,7 @@ def place_timeline_flashcards(
             cap.release()
 
     cards_dir = out_base / "flashcards"
-    _render_cards_into_dir(placed_cards, cards_dir, is_square=is_square)
+    _render_cards_into_dir(placed_cards, cards_dir, is_square=is_square, font=subs_font)
 
     meta_name = "flashcards_sq_meta.json" if is_square else "flashcards_meta.json"
     meta_path = out_base / meta_name

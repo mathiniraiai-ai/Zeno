@@ -653,6 +653,13 @@ def _collect_timeline_model(
         resolved_sfx = _resolve_sfx_path(sfx_path, sfx_pack=sfx_pack)
         if not resolved_sfx or not resolved_sfx.exists():
             return
+        sfx_name_low = resolved_sfx.name.lower()
+        for existing_track in a_tracks[2:]:
+            if any(
+                str(ex.get("name", "")).lower() == sfx_name_low and abs(float(ex.get("t_start", 0.0)) - float(start_sec)) <= 0.08
+                for ex in existing_track
+            ):
+                return
         raw_dur = get_media_dur(resolved_sfx, is_still=False)
         dur = min(raw_dur, max_dur) if max_dur else raw_dur
         if dur <= 0.02:
@@ -1543,6 +1550,16 @@ def _collect_timeline_model(
                     "link_id": None,
                 })
 
+            explicit_wrong_gain = (
+                (plan.get("tuning") or {}).get("wrong_sfx_gain_db")
+                if isinstance(plan.get("tuning"), dict)
+                else None
+            )
+            wrong_default_gain = (
+                float(explicit_wrong_gain)
+                if explicit_wrong_gain is not None
+                else float(_plan_tuning.get("wrong_sfx_gain_db", 1.0)) - 5.5
+            )
             has_explicit_sfx = "sfx" in mk
             mk_sfx_req = mk.get("sfx")
             if has_explicit_sfx and (mk_sfx_req is None or str(mk_sfx_req).strip().lower() in ("none", "off", "silent")):
@@ -1557,7 +1574,7 @@ def _collect_timeline_model(
                             mk.get("sfx_gain_db")
                             if mk.get("sfx_gain_db") is not None
                             else (
-                                _plan_tuning.get("wrong_sfx_gain_db", 1.0)
+                                wrong_default_gain
                                 if kind == "wrong"
                                 else _plan_tuning.get("right_sfx_gain_db", 0.5)
                             )
@@ -1566,7 +1583,11 @@ def _collect_timeline_model(
             elif kind == "wrong":
                 wrong_req = str(plan.get("error_sfx") or "wrong")
                 wrong_p = _resolve_sfx_path(wrong_req, sfx_pack=sfx_pack) or (REPO / "assets" / "sfx" / "sn_wrong.wav")
-                place_sfx(wrong_p, mk_start, gain_db=float(_plan_tuning.get("wrong_sfx_gain_db", 1.0)))
+                place_sfx(
+                    wrong_p,
+                    mk_start,
+                    gain_db=float(mk["sfx_gain_db"]) if mk.get("sfx_gain_db") is not None else wrong_default_gain,
+                )
             else:
                 right_p = _resolve_sfx_path("right", sfx_pack=sfx_pack) or (REPO / "assets" / "sfx" / "correct_ding.wav")
                 place_sfx(right_p, mk_start, gain_db=float(_plan_tuning.get("right_sfx_gain_db", 0.5)))

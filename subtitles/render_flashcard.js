@@ -302,7 +302,7 @@ function quoteFamily(name) {
   return `"${name}"`;
 }
 
-function buildFontSpec(text, fontSize, isNativeLine, customFamily = '') {
+function buildFontSpec(text, fontSize, isNativeLine, customFamily = '', targetWeightOverride = null) {
   const customFam = resolveFlashcardFamily(customFamily);
   const { indicFams, winFallbacks, customSupportsIndic } = detectIndicInfo(text, customFam);
   const hasIndic = indicFams.length > 0;
@@ -317,7 +317,7 @@ function buildFontSpec(text, fontSize, isNativeLine, customFamily = '') {
     const indicOrdered = [...indicFams, 'Nirmala UI', 'Nirmala Text', ...winFallbacks];
     const tail = isNativeLine
       ? ['Montserrat', 'Noto Sans']
-      : ['Montserrat', 'Baloo Tamma 2', 'Inter', 'Noto Sans'];
+      : ['Noto Sans', 'Montserrat', 'Inter'];
     const stack = (customFam && customSupportsIndic)
       ? [customFam, ...indicOrdered, ...tail]
       : (customFam ? [...indicOrdered, customFam, ...tail] : [...indicOrdered, ...tail]);
@@ -330,7 +330,7 @@ function buildFontSpec(text, fontSize, isNativeLine, customFamily = '') {
   }
 
   if (isNativeLine) {
-    const weight = customFam ? snapFlashcardWeight(customFam, 700) : 700;
+    const weight = customFam ? snapFlashcardWeight(customFam, Number(targetWeightOverride) || 700) : 700;
     const stack = customFam
       ? [customFam, 'Montserrat', 'Nirmala UI', 'Nirmala Text', 'Noto Sans']
       : ['Montserrat', 'Nirmala UI', 'Nirmala Text', 'Noto Sans'];
@@ -342,11 +342,12 @@ function buildFontSpec(text, fontSize, isNativeLine, customFamily = '') {
     };
   }
 
-  // English / top line: bold rounded geometric sans modeled on the approved
-  // reference video's stacked high-contrast look (or optional custom family).
+  // English / top line: align cleanly with Zeno subtitle typography (Montserrat default,
+  // or Noto Sans 700 when paired with an Indic native line and no explicit enFont).
+  const reqEnWeight = Number(targetWeightOverride) || 800;
   if (customFam) {
-    const weight = snapFlashcardWeight(customFam, 800);
-    const dedup = Array.from(new Set([customFam, 'Baloo Tamma 2', 'Montserrat', 'Inter', 'Noto Sans']));
+    const weight = snapFlashcardWeight(customFam, reqEnWeight);
+    const dedup = Array.from(new Set([customFam, 'Montserrat', 'Inter', 'Noto Sans']));
     return {
       css: `${weight} ${fontSize}px ${dedup.map(quoteFamily).join(', ')}, sans-serif`,
       hasIndic: false,
@@ -355,7 +356,7 @@ function buildFontSpec(text, fontSize, isNativeLine, customFamily = '') {
   }
 
   return {
-    css: `800 ${fontSize}px "Baloo Tamma 2", "Montserrat", "Inter", "Noto Sans", sans-serif`,
+    css: `${reqEnWeight} ${fontSize}px "Montserrat", "Inter", "Noto Sans", sans-serif`,
     hasIndic: false,
     emboldenGurmukhi: false,
   };
@@ -370,6 +371,45 @@ function roundedRectPath(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, rad);
   ctx.arcTo(x, y, x + w, y, rad);
   ctx.closePath();
+}
+
+function computeFrameInnerBounds(W, H, style, compact) {
+  const styleNorm = String(style || 'clean').trim().toLowerCase();
+  const isMinimal = styleNorm === 'minimal' || styleNorm === 'pill' || styleNorm === 'flat';
+
+  const baseH = compact ? 200 : 290;
+  const scale = Math.max(0.55, Math.min(1.85, Math.min(W / 660, H / baseH)));
+
+  const shadowBlur = Math.round((compact ? 9 : 13) * scale);
+  const shadowOffsetY = Math.round((compact ? 4 : 6) * scale);
+  const padX = Math.max(8, shadowBlur + 2);
+  const padTop = Math.max(4, Math.round(shadowBlur - shadowOffsetY + 2));
+  const padBot = Math.max(10, shadowBlur + shadowOffsetY + 2);
+
+  const cx = padX;
+  const cy = padTop;
+  const cw = Math.max(32, W - padX * 2);
+  const ch = Math.max(32, H - padTop - padBot);
+
+  if (isMinimal) {
+    const borderW = Math.max(2, Math.round((compact ? 3.5 : 4) * scale));
+    const inset = borderW + Math.round(2 * scale);
+    return {
+      ix: cx + inset,
+      iy: cy + inset,
+      iw: cw - inset * 2,
+      ih: ch - inset * 2,
+      scale,
+    };
+  }
+
+  const frameW = Math.max(7, Math.round((compact ? 9 : 13) * scale));
+  const trimW = Math.max(3, Math.round((compact ? 3.5 : 4.5) * scale));
+  const ix = cx + frameW + trimW;
+  const iy = cy + frameW + trimW;
+  const iw = cw - (frameW + trimW) * 2;
+  const ih = ch - (frameW + trimW) * 2;
+  return { ix, iy, iw, ih, scale };
 }
 
 /**
@@ -559,8 +599,8 @@ function drawCardFrame(ctx, W, H, style, compact) {
   return { ix, iy, iw, ih, scale };
 }
 
-function measureStyledLine(ctx, text, fontSize, isNativeLine, customFamily = '') {
-  const spec = buildFontSpec(text, fontSize, isNativeLine, customFamily);
+function measureStyledLine(ctx, text, fontSize, isNativeLine, customFamily = '', targetWeight = null) {
+  const spec = buildFontSpec(text, fontSize, isNativeLine, customFamily, targetWeight);
   ctx.font = spec.css;
   ctx.textBaseline = 'alphabetic';
   ctx.textAlign = 'left';
@@ -605,12 +645,12 @@ function measureStyledLine(ctx, text, fontSize, isNativeLine, customFamily = '')
   };
 }
 
-function fitLineToWidth(ctx, text, startSize, maxTextW, isNativeLine, minSize = 18, customFamily = '') {
+function fitLineToWidth(ctx, text, startSize, maxTextW, isNativeLine, minSize = 18, customFamily = '', targetWeight = null) {
   let size = Math.max(minSize, Math.round(startSize));
-  let m = measureStyledLine(ctx, text, size, isNativeLine, customFamily);
+  let m = measureStyledLine(ctx, text, size, isNativeLine, customFamily, targetWeight);
   while (m.inkW > maxTextW && size > minSize) {
     size = Math.max(minSize, size - 2);
-    m = measureStyledLine(ctx, text, size, isNativeLine, customFamily);
+    m = measureStyledLine(ctx, text, size, isNativeLine, customFamily, targetWeight);
   }
   return m;
 }
@@ -640,26 +680,26 @@ function drawMeasuredLine(ctx, measured, centerX, baselineY, fillColor) {
   ctx.restore();
 }
 
-function renderCard(spec) {
+function resolveCardTypographySpec(spec) {
   const en = String(spec.en || '').replace(/\s+/g, ' ').trim();
   const native = String(spec.native || '').replace(/\s+/g, ' ').trim();
   const W = Math.max(64, Math.round(Number(spec.width) || 660));
   const H = Math.max(48, Math.round(Number(spec.height) || 290));
   const style = String(spec.style || 'clean').trim().toLowerCase();
   const compact = Boolean(spec.compact);
-  const enFont = String(spec.enFont || spec.font || '').trim();
+  const rawEnFont = String(spec.enFont || spec.font || '').trim();
   const nativeFont = String(spec.nativeFont || spec.font || '').trim();
+  const hasNativeIndic = /[\u0900-\u0D7F]/.test(native);
+  const enFont = rawEnFont || (hasNativeIndic ? 'Noto Sans' : '');
+  const enWeight = (!rawEnFont && hasNativeIndic) ? 700 : null;
+  return { en, native, W, H, style, compact, enFont, enWeight, nativeFont, hasEn: en.length > 0, hasNative: native.length > 0 };
+}
 
-  const canvas = createCanvas(W, H);
-  const ctx = canvas.getContext('2d');
-  ctx.antialias = 'subpixel';
-
-  const { ix, iy, iw, ih } = drawCardFrame(ctx, W, H, style, compact);
-
-  const hasEn = en.length > 0;
-  const hasNative = native.length > 0;
+function fitCardLines(ctx, info, targetOverrides = null) {
+  const { en, native, W, H, style, compact, enFont, enWeight, nativeFont, hasEn, hasNative } = info;
+  const { ix, iy, iw, ih } = computeFrameInnerBounds(W, H, style, compact);
   if (!hasEn && !hasNative) {
-    return canvas;
+    return { ix, iy, iw, ih, enSize: 0, natSize: 0 };
   }
 
   const padX = Math.max(16, Math.round(iw * (compact ? 0.052 : 0.064)));
@@ -670,23 +710,27 @@ function renderCard(spec) {
   const centerX = ix + iw / 2;
 
   if (hasEn && hasNative) {
-    // 2-line stacked bilingual: English TOP (#0A0A0A), Native BOTTOM (#111827)
-    const startEn = Math.min(
+    const rawStartEn = Math.min(
       Math.round(ih * (compact ? 0.305 : 0.285)),
       Math.round(iw * 0.115)
     );
-    const startNat = Math.min(
+    const rawStartNat = Math.min(
       Math.round(ih * (compact ? 0.295 : 0.275)),
       Math.round(iw * 0.112)
     );
+    const startEn = (targetOverrides && targetOverrides.enTargetSz > 0)
+      ? Math.min(rawStartEn, Math.round(targetOverrides.enTargetSz))
+      : rawStartEn;
+    const startNat = (targetOverrides && targetOverrides.natTargetSz > 0)
+      ? Math.min(rawStartNat, Math.round(targetOverrides.natTargetSz))
+      : rawStartNat;
 
-    let enM = fitLineToWidth(ctx, en, startEn, maxTextW, false, 18, enFont);
+    let enM = fitLineToWidth(ctx, en, startEn, maxTextW, false, 18, enFont, enWeight);
     let natM = fitLineToWidth(ctx, native, startNat, maxTextW, true, 18, nativeFont);
 
-    // Keep English balanced if native phrase shrunk considerably
     const maxBalancedEn = Math.max(24, Math.round(natM.fontSize * 1.38));
     if (enM.fontSize > maxBalancedEn) {
-      enM = fitLineToWidth(ctx, en, maxBalancedEn, maxTextW, false, 18, enFont);
+      enM = fitLineToWidth(ctx, en, maxBalancedEn, maxTextW, false, 18, enFont, enWeight);
     }
 
     const gapRatio = compact ? 0.24 : 0.32;
@@ -697,17 +741,75 @@ function renderCard(spec) {
     let enBelow = Math.max(enM.descent, enM.fontSize * 0.14);
     let totalSafeH = enM.ascent + enBelow + gap + natM.ascent + natM.safeDescent;
 
-    // Iteratively fit vertically so neither top ascenders nor >=0.38em Indic descenders clip
     while (totalSafeH > availH && (enM.fontSize > 18 || natM.fontSize > 18)) {
       const nextEn = Math.max(18, enM.fontSize - 2);
       const nextNat = Math.max(18, natM.fontSize - 2);
-      enM = fitLineToWidth(ctx, en, nextEn, maxTextW, false, 18, enFont);
+      enM = fitLineToWidth(ctx, en, nextEn, maxTextW, false, 18, enFont, enWeight);
       natM = fitLineToWidth(ctx, native, nextNat, maxTextW, true, 18, nativeFont);
       gap = calcGap();
       enBelow = Math.max(enM.descent, enM.fontSize * 0.14);
       totalSafeH = enM.ascent + enBelow + gap + natM.ascent + natM.safeDescent;
     }
 
+    return {
+      mode: 'bilingual',
+      ix, iy, iw, ih, padTop, padBot, centerX,
+      enM, natM, gap, enBelow,
+      startEn: rawStartEn, startNat: rawStartNat,
+      enSize: enM.fontSize, natSize: natM.fontSize,
+    };
+  }
+
+  const isNative = !hasEn;
+  const text = isNative ? native : en;
+  const lineFont = isNative ? nativeFont : enFont;
+  const lineWeight = isNative ? null : enWeight;
+  const rawStartSz = Math.min(
+    Math.round(ih * (compact ? 0.42 : 0.36)),
+    Math.round(iw * 0.13)
+  );
+  const overrideSz = isNative
+    ? (targetOverrides && targetOverrides.natTargetSz)
+    : (targetOverrides && targetOverrides.enTargetSz);
+  const startSz = (overrideSz && overrideSz > 0)
+    ? Math.min(rawStartSz, Math.round(overrideSz))
+    : rawStartSz;
+
+  let m = fitLineToWidth(ctx, text, startSz, maxTextW, isNative, 18, lineFont, lineWeight);
+  while (m.ascent + m.safeDescent > availH && m.fontSize > 18) {
+    m = fitLineToWidth(ctx, text, m.fontSize - 2, maxTextW, isNative, 18, lineFont, lineWeight);
+  }
+  return {
+    mode: 'single',
+    isNative,
+    ix, iy, iw, ih, padTop, padBot, centerX,
+    m,
+    startEn: isNative ? 0 : rawStartSz,
+    startNat: isNative ? rawStartSz : 0,
+    enSize: isNative ? 0 : m.fontSize,
+    natSize: isNative ? m.fontSize : 0,
+  };
+}
+
+function renderCard(spec, targetOverrides = null) {
+  const info = resolveCardTypographySpec(spec);
+  const { W, H, style, compact, hasEn, hasNative } = info;
+
+  const canvas = createCanvas(W, H);
+  const ctx = canvas.getContext('2d');
+  ctx.antialias = 'subpixel';
+
+  drawCardFrame(ctx, W, H, style, compact);
+
+  if (!hasEn && !hasNative) {
+    return canvas;
+  }
+
+  const fit = fitCardLines(ctx, info, targetOverrides);
+  const { ix, iy, iw, ih, padTop, padBot, centerX } = fit;
+
+  if (fit.mode === 'bilingual') {
+    const { enM, natM, gap, enBelow } = fit;
     // Visually center ink block while strictly enforcing >=0.38em bottom safety clearance
     const visualNatDesc = Math.max(natM.descent, natM.fontSize * 0.20);
     const visualBlockH = enM.ascent + enBelow + gap + natM.ascent + visualNatDesc;
@@ -732,20 +834,8 @@ function renderCard(spec) {
     drawMeasuredLine(ctx, enM, centerX, enBaselineY, '#0A0A0A');
     drawMeasuredLine(ctx, natM, centerX, natBaselineY, '#111827');
   } else {
-    // Single-line mode: vertically center whichever side is present
-    const isNative = !hasEn;
-    const text = isNative ? native : en;
+    const { isNative, m } = fit;
     const color = isNative ? '#111827' : '#0A0A0A';
-    const lineFont = isNative ? nativeFont : enFont;
-    const startSz = Math.min(
-      Math.round(ih * (compact ? 0.42 : 0.36)),
-      Math.round(iw * 0.13)
-    );
-    let m = fitLineToWidth(ctx, text, startSz, maxTextW, isNative, 18, lineFont);
-    while (m.ascent + m.safeDescent > availH && m.fontSize > 18) {
-      m = fitLineToWidth(ctx, text, m.fontSize - 2, maxTextW, isNative, 18, lineFont);
-    }
-
     const visDesc = isNative ? Math.max(m.descent, m.fontSize * 0.20) : m.descent;
     let baselineY = iy + ih / 2 + (m.ascent - visDesc) / 2;
     const maxBaseline = iy + ih - padBot - m.safeDescent;
@@ -788,6 +878,50 @@ function main() {
   const tRenderStart = performance.now();
   const outputs = [];
 
+  // Batch-uniform font size pre-pass grouped by (width, height, compact, hasEn, hasNative)
+  const measureCanvas = createCanvas(64, 64);
+  const measureCtx = measureCanvas.getContext('2d');
+  const groupBuckets = new Map();
+  for (let i = 0; i < specs.length; i += 1) {
+    const spec = specs[i] || {};
+    const info = resolveCardTypographySpec(spec);
+    if (!info.hasEn && !info.hasNative) continue;
+    const gKey = `${info.W}x${info.H}|${info.compact ? 1 : 0}|${info.hasEn ? 1 : 0}|${info.hasNative ? 1 : 0}|${info.enFont}|${info.nativeFont}`;
+    let bucket = groupBuckets.get(gKey);
+    if (!bucket) {
+      bucket = [];
+      groupBuckets.set(gKey, bucket);
+    }
+    bucket.push({ idx: i, info, fit: fitCardLines(measureCtx, info, null) });
+  }
+
+  const targetByIdx = new Map();
+  const pickUniformTarget = (sizes, starts) => {
+    const valid = sizes.filter((s) => s > 0).sort((a, b) => a - b);
+    if (valid.length < 2) return 0;
+    const medianSz = valid[Math.floor(valid.length / 2)];
+    const outlierFloor = Math.max(24, Math.round(medianSz * 0.80));
+    const normal = valid.filter((s) => s >= outlierFloor);
+    const chosen = normal.length > 0 ? Math.min(...normal) : Math.max(24, medianSz);
+    const maxStart = Math.max(...starts);
+    return Math.max(24, Math.min(maxStart, chosen));
+  };
+
+  for (const bucket of groupBuckets.values()) {
+    if (bucket.length < 2) continue;
+    const enTargetSz = pickUniformTarget(
+      bucket.map((b) => b.fit.enSize),
+      bucket.map((b) => b.fit.startEn)
+    );
+    const natTargetSz = pickUniformTarget(
+      bucket.map((b) => b.fit.natSize),
+      bucket.map((b) => b.fit.startNat)
+    );
+    for (const b of bucket) {
+      targetByIdx.set(b.idx, { enTargetSz, natTargetSz });
+    }
+  }
+
   for (let i = 0; i < specs.length; i += 1) {
     const spec = specs[i] || {};
     if (!spec.out) {
@@ -795,7 +929,7 @@ function main() {
     }
     const outPath = path.resolve(String(spec.out));
     fs.mkdirSync(path.dirname(outPath), { recursive: true });
-    const canvas = renderCard(spec);
+    const canvas = renderCard(spec, targetByIdx.get(i) || null);
     const buf = canvas.toBuffer('image/png', PNG_OPTS);
     fs.writeFileSync(outPath, buf);
     outputs.push(outPath);

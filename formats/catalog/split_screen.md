@@ -16,6 +16,7 @@ Declare on line 1 of `script_analysis.md`: `Format: split_screen (<sub-format>)`
 - **B-Roll / "Describe This Scene" Overlays (`clip` on top, characters below)**: Put muted B-roll directly in `plan.edl` via `layout=split_v mute=1` or `layout=top_pip` (`peer=` muted B-roll in `slot=top`) — never manually pre-bake composite MP4s or custom caption scripts outside `zeno.py --execute`.
 
 ## Framing, Captions & Pacing
+- **Split continuity**: once split screen starts (`split_h`/`split_v`), maintain that split layout continuously across every turn and scene — NEVER drop to `layout=single` mid-split (`split -> single -> split` is hard-blocked).
 - **`z=1` always** on every split segment — zero pushes, pulls, or punch-ins. Maintain one fixed frame per character, matched backgrounds, and **14% headroom**.
 - Keep dialogue joins tight (`0.06–0.15s`); inside a still split, cut internal pauses only when `>=0.50s` so natural breaths stay intact.
 - **Captions**: Strict single-line subtitles only (`54px`); on `split_v`, always lock onto the center divider at `y=50`; on `split_h` and `video_call`, use `#subs auto y=65` clear of faces and banners.

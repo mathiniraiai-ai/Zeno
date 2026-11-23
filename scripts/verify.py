@@ -417,7 +417,7 @@ def _subtract_intervals(
     return spans
 
 
-DEAD_AIR_THRESHOLD = 0.60
+DEAD_AIR_THRESHOLD = 0.48
 CLIPPED_WORD_MARGIN_SEC = 0.035
 CLIPPED_WORD_RMS_FLOOR_DB = -42.0
 
@@ -486,8 +486,13 @@ def _measure_pcm_join_gaps(
     timeline_mark_holds: List[Tuple[float, float]],
     sample_rate: int = 16000,
     voice_db_floor: float = -38.0,
+    max_normal_join_ms: int = 380,
 ) -> Dict[str, Any]:
-    """Measure audible silence spanning each spoken-to-spoken cut join directly from rendered 16 kHz PCM."""
+    """Measure audible silence spanning each spoken-to-spoken cut join directly from rendered 16 kHz PCM.
+
+    Separates normal dry dialogue-to-dialogue joins (`gaps_ms`, flagging `> max_normal_join_ms` as `excessive_joins`)
+    from intentional visual-beat / mark / hold-tail / transition joins (`beat_gaps_ms`).
+    """
     if not pcm or len(segs) < 2 or len(starts) < 2:
         return {}
     n_samp = len(pcm)
@@ -505,17 +510,44 @@ def _measure_pcm_join_gaps(
         rms = math.sqrt(sq / float(hi - lo))
         return 20.0 * math.log10(max(rms, 1e-7))
 
+    def _stats(vals: List[int]) -> Tuple[int, int, int]:
+        ordered = sorted(vals)
+        n_v = len(ordered)
+        med_v = (
+            ordered[n_v // 2]
+            if (n_v % 2 == 1)
+            else int(round(0.5 * (ordered[n_v // 2 - 1] + ordered[n_v // 2])))
+        )
+        p90_v = ordered[min(n_v - 1, int(math.ceil(0.90 * n_v)) - 1)]
+        return med_v, p90_v, ordered[-1]
+
     gaps_ms: List[int] = []
-    for idx in range(1, len(segs)):
+    beat_gaps_ms: List[int] = []
+    excessive_joins: List[Dict[str, Any]] = []
+    for idx in range(1, min(len(segs), len(starts))):
         prev_s = segs[idx - 1]
         cur_s = segs[idx]
         if _segment_is_muted(prev_s) or _segment_is_beat(prev_s) or _segment_is_muted(cur_s) or _segment_is_beat(cur_s):
             continue
-        if _segment_hold_tail(prev_s) > 0.01:
-            continue
         jt = float(starts[idx])
-        if any(a - 0.05 <= jt <= b + 0.05 for a, b in timeline_mark_holds):
-            continue
+
+        has_live_ae_tail = False
+        ae_raw = prev_s.get("audio_end")
+        if ae_raw is not None and not isinstance(ae_raw, bool):
+            try:
+                ae_f = float(ae_raw)
+                if ae_f > 0.04 and (_segment_play_duration(prev_s) - ae_f) > 0.05:
+                    has_live_ae_tail = True
+            except (TypeError, ValueError):
+                pass
+        tr_cur = str(cur_s.get("transition") or "").split("@")[0].strip().lower()
+        is_beat_join = (
+            _segment_hold_tail(prev_s) > 0.01
+            or has_live_ae_tail
+            or tr_cur not in ("", "cut", "none")
+            or any(a - 0.05 <= jt <= b + 0.05 for a, b in timeline_mark_holds)
+        )
+
         j_samp = int(round(jt * sample_rate))
         # Walk backward from jt (up to 800 ms) until audible voice >= voice_db_floor
         pre_frames = 0
@@ -531,21 +563,38 @@ def _measure_pcm_join_gaps(
             if s0 + frame > n_samp or _frame_db(s0) >= voice_db_floor:
                 break
             post_frames += 1
-        gaps_ms.append((pre_frames + post_frames) * 10)
+        gap_ms = (pre_frames + post_frames) * 10
+        if is_beat_join:
+            beat_gaps_ms.append(gap_ms)
+        else:
+            gaps_ms.append(gap_ms)
+            if gap_ms > int(max_normal_join_ms):
+                excessive_joins.append({
+                    "prev_segment": str(prev_s.get("id") or f"S{idx}"),
+                    "segment": str(cur_s.get("id") or f"S{idx + 1}"),
+                    "at_sec": round(jt, 2),
+                    "gap_ms": gap_ms,
+                })
 
-    if not gaps_ms:
+    if not gaps_ms and not beat_gaps_ms:
         return {}
-    ordered = sorted(gaps_ms)
-    n_g = len(ordered)
-    med = ordered[n_g // 2] if (n_g % 2 == 1) else int(round(0.5 * (ordered[n_g // 2 - 1] + ordered[n_g // 2])))
-    p90 = ordered[min(n_g - 1, int(math.ceil(0.90 * n_g)) - 1)]
-    return {
-        "count": n_g,
-        "median_ms": med,
-        "p90_ms": p90,
-        "max_ms": ordered[-1],
+    out: Dict[str, Any] = {
+        "count": len(gaps_ms),
         "gaps_ms": gaps_ms,
+        "excessive_joins": excessive_joins,
+        "beat_count": len(beat_gaps_ms),
+        "beat_gaps_ms": beat_gaps_ms,
     }
+    if gaps_ms:
+        med, p90, mx = _stats(gaps_ms)
+        out["median_ms"] = med
+        out["p90_ms"] = p90
+        out["max_ms"] = mx
+    if beat_gaps_ms:
+        b_med, _, b_mx = _stats(beat_gaps_ms)
+        out["beat_median_ms"] = b_med
+        out["beat_max_ms"] = b_mx
+    return out
 
 
 def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None) -> Tuple[bool, int, int, int, int]:
@@ -613,30 +662,6 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
 
         # Scale silence thresholds by 1.0 / speed on unmuted slowed segments
         seg_dead_air = (DEAD_AIR_THRESHOLD / max(0.25, spd)) if spd < 1.0 else DEAD_AIR_THRESHOLD
-
-        # Check internal pauses inside [st, en] (>seg_dead_air threshold, excluding mark flash holds)
-        sil_path = wdir / "silences.json"
-        if sil_path.is_file():
-            try:
-                raw_sils = read_json(sil_path)
-                merged: List[Dict[str, float]] = []
-                for sl in sorted(raw_sils, key=lambda x: float(x["start"])):
-                    s0, s1 = float(sl["start"]), float(sl["end"])
-                    if merged and s0 - merged[-1]["end"] <= 0.04:
-                        merged[-1]["end"] = max(merged[-1]["end"], s1)
-                    else:
-                        merged.append({"start": s0, "end": s1})
-                for sl in merged:
-                    ov_s = max(st + 0.15, sl["start"])
-                    ov_e = min(en - 0.15, sl["end"])
-                    for rem_s, rem_e in _subtract_intervals(ov_s, ov_e, clip_mark_holds):
-                        if (rem_e - rem_s) > seg_dead_air:
-                            long_pauses += 1
-                            _cut_note(f"{sid} pause {rem_s:.2f}-{rem_e:.2f}s in {stem}")
-            except Exception:
-                pass
-
-        # Check if cut boundary (including active audio_end boundary) slices through a kept word or continuous VAD speech
         en_audio = en
         if s.get("audio_end") is not None and not isinstance(s.get("audio_end"), bool):
             try:
@@ -645,6 +670,30 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
                     en_audio = min(en, st + ae_val * spd)
             except (TypeError, ValueError):
                 pass
+
+        # Check internal pauses inside [st, en_audio] (>seg_dead_air threshold, excluding mark flash holds)
+        sil_path = wdir / "silences.json"
+        if sil_path.is_file():
+            try:
+                raw_sils = read_json(sil_path)
+                merged: List[Dict[str, float]] = []
+                for sl in sorted(raw_sils, key=lambda x: float(x["start"])):
+                    s0, s1 = float(sl["start"]), float(sl["end"])
+                    if merged and s0 - merged[-1]["end"] <= 0.08:
+                        merged[-1]["end"] = max(merged[-1]["end"], s1)
+                    else:
+                        merged.append({"start": s0, "end": s1})
+                for sl in merged:
+                    ov_s = max(st + 0.06, sl["start"])
+                    ov_e = min(en_audio - 0.06, sl["end"])
+                    for rem_s, rem_e in _subtract_intervals(ov_s, ov_e, clip_mark_holds):
+                        if (rem_e - rem_s) > seg_dead_air:
+                            long_pauses += 1
+                            _cut_note(f"{sid} pause {rem_s:.2f}-{rem_e:.2f}s in {stem}")
+            except Exception:
+                pass
+
+        # Check if cut boundary (including active audio_end boundary) slices through a kept word or continuous VAD speech
         audio_bounds: List[float] = [st, en_audio]
         words_path = wdir / "hq_words.json"
         if not words_path.is_file():
@@ -754,8 +803,8 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
                 s_start = max(0.0, s_end - s_dur)
                 for idx_s, t0_s in enumerate(starts):
                     t1_s = t0_s + seg_durs[idx_s]
-                    ov_s = max(t0_s + 0.15, s_start)
-                    ov_e = min(t1_s - 0.15, s_end)
+                    ov_s = max(t0_s + 0.06, s_start)
+                    ov_e = min(t1_s - 0.06, s_end)
                     spd_s = seg_speeds[idx_s] if idx_s < len(seg_speeds) else 1.0
                     seg_thresh = (DEAD_AIR_THRESHOLD / max(0.25, spd_s)) if spd_s < 1.0 else DEAD_AIR_THRESHOLD
                     for rem_s, rem_e in _subtract_intervals(ov_s, ov_e, timeline_mark_holds):
@@ -805,7 +854,18 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
         except Exception:
             pass
 
-    passed = (clipped_words == 0 and long_pauses == 0 and boundary_clicks == 0)
+    excessive_joins = _LAST_JOIN_GAP_STATS.get("excessive_joins") or []
+    for ej in excessive_joins:
+        _cut_note(
+            f"loose join {ej['prev_segment']} -> {ej['segment']} at {ej['at_sec']:.2f}s: "
+            f"{ej['gap_ms']}ms (>380ms)"
+        )
+    passed = (
+        clipped_words == 0
+        and long_pauses == 0
+        and boundary_clicks == 0
+        and not excessive_joins
+    )
     return passed, clipped_words, long_pauses, jump_cuts_masked, boundary_clicks
 
 
@@ -1790,11 +1850,6 @@ def check_split_and_hook_rules(plan: Dict[str, Any]) -> Tuple[bool, str]:
                         slot_samples.setdefault((lay_norm, live_slot), []).append((sid, hr_live, fy_live))
                     if abs(peer_off_y) <= 1e-4:
                         slot_samples.setdefault((lay_norm, peer_slot), []).append((sid, hr_peer, fy_peer))
-                    if abs(live_off_y) <= 1e-4 and abs(peer_off_y) <= 1e-4:
-                        if abs(hr_live - hr_peer) > 8.0 or abs(fy_live - fy_peer) > 0.14:
-                            split_violations.append(
-                                f"{sid}:headroom_mismatch(live={hr_live:.1f}%,peer={hr_peer:.1f}%)"
-                            )
 
     for (lay_norm, slot_name), entries in sorted(slot_samples.items()):
         if len(entries) < 2:
@@ -1809,6 +1864,22 @@ def check_split_and_hook_rules(plan: Dict[str, Any]) -> Tuple[bool, str]:
             split_violations.append(
                 f"{lay_norm}:{slot_name}:eyeline_drift({min(fys):.2f}..{max(fys):.2f})"
             )
+
+    try:
+        import script_order as _so
+
+        w_dir = Path(str(plan["_plan_dir"])) if plan.get("_plan_dir") else None
+        scr_arg = plan.get("script")
+        if not scr_arg and w_dir is not None and (w_dir / "plan.json").is_file():
+            scr_arg = read_json(w_dir / "plan.json").get("script")
+        accepted_map = _so.read_accepted(w_dir) if w_dir is not None else {}
+        for prob in _so.split_continuity_problems(plan, script_lines=scr_arg, work_dir=w_dir):
+            p_sid = (prob.split() or [""])[0]
+            if p_sid and _so._is_seg_accepted(p_sid, accepted_map):
+                continue
+            split_violations.append(f"{p_sid or 'plan'}:split_continuity({prob})")
+    except Exception:
+        pass
 
     explicit_max_hook = plan.get("max_hook_transitions")
     if explicit_max_hook is not None:
@@ -2014,6 +2085,8 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
         "lingering_banners": [],
         "face_crop": [],
         "no_face": [],
+        "split_alignment": [],
+        "split_alignment_warnings": [],
         "note": "",
     }
     try:
@@ -2050,6 +2123,23 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
             else FROZEN_MIN_STEPS
         )
         sid, lay = str(seg.get("id")), str(seg.get("layout") or "single").lower()
+        lay_norm = {
+            "left_right": "split_h",
+            "hstack": "split_h",
+            "side_by_side": "split_h",
+            "top_bottom": "split_v",
+            "vstack": "split_v",
+        }.get(lay, lay)
+        try:
+            _live_off_y = float(seg.get("offset_y") or 0.0)
+        except (TypeError, ValueError):
+            _live_off_y = 0.0
+        _peer_obj = seg.get("peer") if isinstance(seg.get("peer"), dict) else {}
+        try:
+            _peer_off_y = float(_peer_obj.get("offset_y") or 0.0)
+        except (TypeError, ValueError):
+            _peer_off_y = 0.0
+        has_asym_offset_y = abs(_live_off_y - _peer_off_y) > 0.02
         for m_in in seg.get("marks", []) or []:
             marks_by_seg.setdefault(sid, []).append(
                 (float(m_in.get("at", 0)), float(m_in.get("at", 0)) + float(m_in.get("duration", 0.56)) + 0.1)
@@ -2096,9 +2186,11 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
         panels = {
             "split_h": [("left", (0, 0, W // 2, H)), ("right", (W // 2, 0, W, H))],
             "split_v": [("top", (0, 0, W, H // 2)), ("bottom", (0, H // 2, W, H))],
-        }.get(lay, [("frame", (0, 0, W, H))])
+        }.get(lay_norm, [("frame", (0, 0, W, H))])
         seen = {name: 0 for name, _ in panels}
         missing: Dict[str, List[float]] = {name: [] for name, _ in panels}
+        split_h_bad: List[str] = []
+        split_v_bad: List[str] = []
         prev_gray: Optional[Any] = None
         run_anchor_gray: Optional[Any] = None
         frozen_run = 0
@@ -2156,9 +2248,11 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
                                 run_anchor_gray = gray
                         prev_gray = gray
 
+                    panel_faces: Dict[str, List[Dict[str, Any]]] = {}
                     for name, (x0, y0, x1, y1) in panels:
                         seen[name] += 1
                         faces = vision_tracker.prominent_faces(vision_tracker.detect_faces_in_frame(frame[y0:y1, x0:x1]))
+                        panel_faces[name] = faces or []
                         if result["frames"] % 6 == 1 and name in ("frame", "left", "top"):
                             try:
                                 import vision_scan
@@ -2183,11 +2277,58 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
                                         if box_overlap_share(canvas_bbox, (b["x0"], b["y0"], b["x1"], b["y1"]), W, H) > BANNER_FACE_OVERLAP:
                                             lbl = f"{sid} ({name})" if name != "frame" else sid
                                             result["banner_on_face"].append(f"{lbl} at {t0 + t:.1f}s: '{b['text']}' covers a face")
+
+                    def _primary_panel_face(flist: List[Dict[str, Any]], min_fh: float) -> Optional[Dict[str, Any]]:
+                        cands = []
+                        for f_obj in flist:
+                            if not isinstance(f_obj, dict) or not f_obj.get("bbox_norm"):
+                                continue
+                            if float(f_obj.get("confidence", 1.0)) <= 0.5:
+                                continue
+                            bb = f_obj["bbox_norm"]
+                            fh = float(bb[3]) - float(bb[1])
+                            if fh >= min_fh:
+                                cands.append((fh, f_obj))
+                        return max(cands, key=lambda x: x[0])[1] if cands else None
+
+                    if lay_norm == "split_h":
+                        f_l = _primary_panel_face(panel_faces.get("left", []), 0.10)
+                        f_r = _primary_panel_face(panel_faces.get("right", []), 0.10)
+                        if f_l is not None and f_r is not None:
+                            fh_l = float(f_l["bbox_norm"][3]) - float(f_l["bbox_norm"][1])
+                            fh_r = float(f_r["bbox_norm"][3]) - float(f_r["bbox_norm"][1])
+                            ratio_lr = max(fh_l, fh_r) / max(1e-4, min(fh_l, fh_r))
+                            ey_l = float((f_l.get("eye_center_norm") or [0.5, 0.5 * (float(f_l["bbox_norm"][1]) + float(f_l["bbox_norm"][3]))])[1])
+                            ey_r = float((f_r.get("eye_center_norm") or [0.5, 0.5 * (float(f_r["bbox_norm"][1]) + float(f_r["bbox_norm"][3]))])[1])
+                            if ratio_lr > 1.38 or ((not has_asym_offset_y) and abs(ey_l - ey_r) > 0.08):
+                                split_h_bad.append(
+                                    f"{sid} at {t0 + t:.1f}s: split_h alignment mismatch "
+                                    f"(fh L={fh_l:.2f}/R={fh_r:.2f} ratio={ratio_lr:.2f}, ey L={ey_l:.2f}/R={ey_r:.2f})"
+                                )
+                    elif lay_norm == "split_v":
+                        f_t = _primary_panel_face(panel_faces.get("top", []), 0.14)
+                        f_b = _primary_panel_face(panel_faces.get("bottom", []), 0.14)
+                        if f_t is not None and f_b is not None:
+                            bb_t, bb_b = f_t["bbox_norm"], f_b["bbox_norm"]
+                            fh_t = float(bb_t[3]) - float(bb_t[1])
+                            fh_b = float(bb_b[3]) - float(bb_b[1])
+                            ratio_tb = max(fh_t, fh_b) / max(1e-4, min(fh_t, fh_b))
+                            cx_t = 0.5 * (float(bb_t[0]) + float(bb_t[2]))
+                            cx_b = 0.5 * (float(bb_b[0]) + float(bb_b[2]))
+                            if ratio_tb > 1.38 or abs(cx_t - cx_b) > 0.10:
+                                split_v_bad.append(
+                                    f"{sid} at {t0 + t:.1f}s: split_v alignment warning "
+                                    f"(cx T={cx_t:.2f}/B={cx_b:.2f}, fh T={fh_t:.2f}/B={fh_b:.2f} ratio={ratio_tb:.2f})"
+                                )
             else:
                 prev_gray = None
                 run_anchor_gray = None
                 frozen_run = 0
             t += FRAME_STEP_SEC
+        if len(split_h_bad) >= 2:
+            result["split_alignment"].append(split_h_bad[0])
+        if len(split_v_bad) >= 2:
+            result["split_alignment_warnings"].append(split_v_bad[0])
         if not is_beat:
             for name, times in missing.items():
                 if seen[name] >= 3 and len(times) / seen[name] > MISSING_FACE_SHARE:
@@ -2199,6 +2340,7 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
         not result["black"]
         and not result["frozen"]
         and len(result["banner_on_face"]) < 2
+        and not result["split_alignment"]
     )
     return result
 
@@ -2437,6 +2579,53 @@ def _extract_plan_banner_texts(plan: Dict[str, Any]) -> List[str]:
     return texts
 
 
+def _segment_strikethrough_windows(
+    seg: Dict[str, Any],
+    seg_start: float,
+    seg_dur: float,
+    plan: Optional[Dict[str, Any]] = None,
+) -> List[Tuple[float, float]]:
+    """Return absolute timeline `(t0, t1)` windows suppressed by phrase strikethrough banners."""
+    if not isinstance(seg, dict) or _segment_is_muted(seg) or _segment_is_beat(seg):
+        return []
+    subs_spec = (plan or {}).get("subs")
+    if isinstance(subs_spec, dict) and subs_spec.get("with_banners"):
+        return []
+    seg_subs_raw = seg.get("subs")
+    subs_on = (
+        bool(seg.get("subs_on"))
+        or (seg_subs_raw is True)
+        or (isinstance(seg_subs_raw, str) and seg_subs_raw.strip().lower() in ("on", "true", "1", "yes"))
+    )
+    if subs_on:
+        return []
+    try:
+        import subtitles as _subs
+
+        fn = getattr(_subs, "segment_strikethrough_windows", None)
+        if callable(fn):
+            wins = fn(seg, seg_start, seg_dur, plan=plan)
+            if isinstance(wins, list):
+                return [(float(a), float(b)) for a, b in wins if float(b) > float(a)]
+    except Exception:
+        pass
+    try:
+        import layouts as _lay
+
+        raw_banners = _lay.parse_banners(seg, seg_dur)
+    except Exception:
+        raw_banners = []
+    wins: List[Tuple[float, float]] = []
+    for txt, t0, t1, is_hdr in raw_banners:
+        if is_hdr or not str(txt or "").strip():
+            continue
+        a = max(seg_start, seg_start + float(t0) - 0.04)
+        b = min(seg_start + seg_dur, seg_start + float(t1) + 0.04)
+        if b > a:
+            wins.append((a, b))
+    return wins
+
+
 def check_subtitles_srt(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, str]:
     """Verify expected `.srt` sidecar exists, contains monotonic non-overlapping cues,
     covers every eligible spoken segment (`>= 1.8s`), and respects canvas bounds.
@@ -2449,10 +2638,28 @@ def check_subtitles_srt(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, str
 
     fps = int(round(float((plan.get("canvas") or {}).get("fps") or 30))) or 30
     starts, durs, _, _ = compute_timeline_starts(plan, fps)
-    all_suppressed = all(
-        _segment_subs_suppressed(s, plan, starts[i], starts[i] + durs[i])
-        for i, s in enumerate(segs)
-    )
+
+    seg_rem_spans: List[List[Tuple[float, float]]] = []
+    all_suppressed = True
+    for i, s in enumerate(segs):
+        seg_s = starts[i]
+        seg_d = durs[i]
+        seg_e = seg_s + seg_d
+        spoken_e = seg_e
+        ae_raw = s.get("audio_end")
+        if ae_raw is not None and not isinstance(ae_raw, bool):
+            try:
+                ae_f = float(ae_raw)
+                if 0.04 < ae_f < seg_d:
+                    spoken_e = seg_s + ae_f
+            except (TypeError, ValueError):
+                pass
+        strike_wins = _segment_strikethrough_windows(s, seg_s, max(0.0, spoken_e - seg_s), plan=plan)
+        rem_spans = _subtract_intervals(seg_s, spoken_e, strike_wins) if spoken_e > seg_s else []
+        seg_rem_spans.append(rem_spans)
+        rem_dur = sum(b - a for a, b in rem_spans)
+        if not (_segment_subs_suppressed(s, plan, seg_s, seg_e) or rem_dur <= 0.25):
+            all_suppressed = False
 
     srt_cands = [
         mp4_path.with_suffix(".srt"),
@@ -2501,7 +2708,8 @@ def check_subtitles_srt(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, str
         cue_spans.append((t_s, t_e))
 
     # Per-segment SRT coverage gate: every spoken, non-muted, non-beat, non-subs_off,
-    # non-flashcard-suppressed segment >= 1.8s must have >= 1 overlapping cue.
+    # non-flashcard-suppressed segment >= 1.8s (with >0.25s remaining outside strikethrough banners)
+    # must have >= 1 overlapping cue.
     if not all_suppressed:
         uncaptioned: List[str] = []
         for i, s in enumerate(segs):
@@ -2512,9 +2720,14 @@ def check_subtitles_srt(plan: Dict[str, Any], mp4_path: Path) -> Tuple[bool, str
                 continue
             if _segment_subs_suppressed(s, plan, seg_s, seg_e):
                 continue
+            rem_spans = seg_rem_spans[i]
+            rem_dur = sum(b - a for a, b in rem_spans)
+            if rem_dur <= 0.25:
+                continue
             covered = any(
-                (c_e > seg_s + 0.25 and c_s < seg_e - 0.25)
-                or (c_s >= seg_s - 0.02 and c_e <= seg_e + 0.02)
+                (c_e > a + 0.25 and c_s < b - 0.25)
+                or (c_s >= a - 0.02 and c_e <= b + 0.02)
+                for a, b in rem_spans
                 for c_s, c_e in cue_spans
             )
             if not covered:
@@ -3590,15 +3803,26 @@ def run_verification(
         f"[AUDIO  {'PASS' if audio_ok else 'FAIL'}] Integrated Loudness: {i_lufs:.1f} LUFS "
         f"(target {eff_target_lufs:.1f} LUFS), True Peak: {tp_db:.1f} dBTP"
     )
-    _jg_txt = (
-        f", join gaps median={_LAST_JOIN_GAP_STATS['median_ms']}ms "
-        f"p90={_LAST_JOIN_GAP_STATS['p90_ms']}ms max={_LAST_JOIN_GAP_STATS['max_ms']}ms"
-        if _LAST_JOIN_GAP_STATS.get("count")
-        else ""
-    )
+    _jg_parts: List[str] = []
+    if _LAST_JOIN_GAP_STATS.get("count"):
+        _jg_parts.append(
+            f"join gaps median={_LAST_JOIN_GAP_STATS['median_ms']}ms "
+            f"p90={_LAST_JOIN_GAP_STATS['p90_ms']}ms max={_LAST_JOIN_GAP_STATS['max_ms']}ms"
+        )
+    if _LAST_JOIN_GAP_STATS.get("beat_count"):
+        _jg_parts.append(
+            f"post-beat gaps({_LAST_JOIN_GAP_STATS['beat_count']}) "
+            f"median={_LAST_JOIN_GAP_STATS['beat_median_ms']}ms "
+            f"max={_LAST_JOIN_GAP_STATS['beat_max_ms']}ms"
+        )
+    _jg_exc = _LAST_JOIN_GAP_STATS.get("excessive_joins") or []
+    if _jg_exc:
+        _jg_parts.append(f"{len(_jg_exc)} loose join(s) >380ms")
+    _jg_txt = (", " + ", ".join(_jg_parts)) if _jg_parts else ""
     print(
         f"[CUTS   {'PASS' if cuts_ok else 'FAIL'}] {len(plan.get('segments', []))} segments verified: "
-        f"{clipped_w} clipped words, {long_pauses} internal pauses >0.6s{_jg_txt}, {jc_masked} jump-cuts masked, {b_clicks} boundary clicks"
+        f"{clipped_w} clipped words, {long_pauses} internal pauses >{DEAD_AIR_THRESHOLD:.2f}s{_jg_txt}, "
+        f"{jc_masked} jump-cuts masked, {b_clicks} boundary clicks"
     )
     if not cuts_ok and _CUT_FAIL_NOTES:
         _shown = _CUT_FAIL_NOTES[:12]
@@ -3630,6 +3854,7 @@ def run_verification(
         f"{frames['frames']} frames: {len(frames['black'])} black, "
         f"{len(frames['frozen'])} frozen, "
         f"{len(frames['banner_on_face'])} banner-on-face, "
+        f"{len(frames.get('split_alignment', []))} split-alignment, "
         f"{len(frames['no_face'])} panel(s) with missing faces"
     )
     if frames.get("lingering_banners"):
@@ -3639,6 +3864,8 @@ def run_verification(
         ("BLACK", frames["black"]),
         ("FROZEN", frames["frozen"]),
         ("BANNER ON FACE", frames["banner_on_face"]),
+        ("SPLIT ALIGNMENT", frames.get("split_alignment", [])),
+        ("SPLIT ALIGNMENT (warning)", frames.get("split_alignment_warnings", [])),
         ("LINGERING BANNER (warning)", frames.get("lingering_banners", [])),
         ("FACE CROP (warning)", frames["face_crop"]),
         ("NO FACE (warning)", frames["no_face"]),

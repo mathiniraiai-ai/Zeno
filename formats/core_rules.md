@@ -13,6 +13,7 @@
 ## 3. Split-Screen Invariants
 - `Left:`/`Right:` = `split_h`; `Top:`/`Bottom:` = `split_v`; `split_h`, `split_v`, `top_pip`, baked splits: ALWAYS `z=1` (`14%` headroom).
 - Advance silent `peer="Name:clip.mp4"@in-out@side`; baked split: `single` + `slot=left|right|top|bottom z=1`.
+- **Split continuity**: once a split-screen section starts (`split_h`/`split_v`), maintain that split layout continuously across every turn — NEVER drop to `layout=single` mid-split (`split -> single -> split` is hard-blocked unless explicitly scripted as a fullscreen takeover/cutaway).
 
 ## 4. Full-Frame Zoom & Slo-Mo (`single`)
 - `1.0` on calm cuts (`>=25%`), pans, edge 2-shots, holograms; reset to `z=1` on speaker/clip cuts; pass `focus=x,y`.

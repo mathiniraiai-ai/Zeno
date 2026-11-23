@@ -56,6 +56,24 @@ CATALOG_FORMAT_IDS = (
 )
 
 _SPLIT_LAYOUT_SET = {"split_h", "split_v", "video_call", "top_pip"}
+_SPLIT_EXPLICIT_STOP_CUES = (
+    "stop saying",
+    "never say",
+    "never to say",
+    "struck out",
+    "strikethrough",
+    "strike-through",
+    "strike through",
+    "red x",
+    "x sign",
+    "strike_text=",
+)
+_FULLSCREEN_TAKEOVER_RE = re.compile(
+    r"\bfull[\s-]*screen\b|\btakes?\s+over(?:\s+the)?\s+(?:full\s+)?screen|\bgoes?\s+full[\s-]*screen\b"
+    r"|\bselfie\b|\btalking\s+to\s+camera\b|\bstraight\s+to\s+camera\b|\btalking\s+head\b"
+    r"|\baddresses\s+the\s+camera\b|\blooking\s+at\s+the\s+camera\b",
+    re.I,
+)
 _STOP_SAYING_PHRASES = (
     "stop saying",
     "never say",
@@ -372,14 +390,22 @@ def detect_catalog_format(
     )
     wrong_indicators = max(wrong_mark_lines, len(_WRONG_MARK_TAG_RE.findall(blob)))
     has_teaching_cue = any(_has_phrase(blob, p) for p in _TEACHING_CORRECTION_CUES)
-    if (
-        any(_has_phrase(blob, p) for p in _STOP_SAYING_PHRASES)
-        or bool(_NEVER_EVER_SAY_RE.search(blob))
-        or strike_hits >= 2
-        or cross_hits >= 2
-        or wrong_mark_lines >= 3
-        or (wrong_indicators >= 2 and has_teaching_cue)
-    ):
+    if has_split:
+        is_stop_saying = (
+            any(_has_phrase(blob, p) for p in _SPLIT_EXPLICIT_STOP_CUES)
+            or bool(_NEVER_EVER_SAY_RE.search(blob))
+            or strike_hits >= 1
+        )
+    else:
+        is_stop_saying = (
+            any(_has_phrase(blob, p) for p in _STOP_SAYING_PHRASES)
+            or bool(_NEVER_EVER_SAY_RE.search(blob))
+            or strike_hits >= 2
+            or cross_hits >= 2
+            or wrong_mark_lines >= 3
+            or (wrong_indicators >= 2 and has_teaching_cue)
+        )
+    if is_stop_saying:
         return "stop_saying"
 
     # 6. Street interview micro-narrative (never triggered by bare "interview" like "visa interview")
@@ -400,37 +426,42 @@ def detect_catalog_format(
 
     # 8. Pure split screen (entire video in split / video_call without a full-frame story scene)
     scene_hints = [str(sc.get("layout_hint") or "").lower() for sc in scenes]
-    all_scenes_split = bool(scenes) and all(
+    scene_is_split = [
         h in _SPLIT_LAYOUT_SET or any(k in str(sc.get("visual") or "").lower() for k in ("split", "video call", "left:", "top:"))
         for sc, h in zip(scenes, scene_hints)
-    )
+    ]
+    all_scenes_split = bool(scenes) and all(scene_is_split)
+    has_fullscreen_takeover = any(
+        h == "single" or bool(_FULLSCREEN_TAKEOVER_RE.search(str(sc.get("visual") or "")))
+        for sc, h in zip(scenes, scene_hints)
+    ) or bool(re.search(r"\b(?:takes?\s+over(?:\s+the)?\s+(?:full\s+)?screen|goes?\s+full[\s-]*screen)\b", body_blob, re.I))
+    has_non_split_opening = any(not is_sp for is_sp in scene_is_split[: scene_is_split.index(True)]) if any(scene_is_split) else False
     if (
         all_split_segs
         or all_scenes_split
-        or (_has_phrase(header_blob, "split screen") and len(scenes) <= 1)
+        or (
+            (_has_phrase(header_blob, "split screen") or (_has_phrase(blob, "split screen") and not has_non_split_opening))
+            and not has_fullscreen_takeover
+        )
         or (_has_phrase(blob, "video call") and not scenes and not has_split_words)
     ):
         return "split_screen"
 
     # 9. Live conversation (AI teacher & human share the same frame or tablet/hologram; never split)
-    if any(_has_phrase(blob, p) for p in (
+    if not has_split and any(_has_phrase(blob, p) for p in (
         "live conversation",
         "live grammar correction",
         "grammar correction",
         "speak more politely",
-    )) or (
-        not has_split
-        and any(_has_phrase(blob, p) for p in (
-            "hologram",
-            "tablet",
-            "giant phone",
-            "interactive",
-            "they continue talking",
-            "same shot",
-            "same frame",
-            "stands beside",
-        ))
-    ):
+        "hologram",
+        "tablet",
+        "giant phone",
+        "interactive",
+        "they continue talking",
+        "same shot",
+        "same frame",
+        "stands beside",
+    )):
         return "live_conversation"
 
     # 10. Direct hook micro-narrative (solo talking-head / selfie hook into AI split)

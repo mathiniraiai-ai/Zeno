@@ -173,6 +173,34 @@ const CaptionRenderer = (() => {
     return /[\u0900-\u0D7F]/.test(String(w ?? ''));
   }
 
+  const INDIC_RUN_RE = /([\u0900-\u0D7F\u200C\u200D]+(?:[\u0300-\u036F\uFE00-\uFE0F]+[\u0900-\u0D7F\u200C\u200D]*)*)/g;
+
+  /**
+   * Split a token into contiguous Indic vs non-Indic (Latin/digits/punctuation) script runs
+   * so mixed words like `"doubtలో"` or `"చెప్పకండి,"` keep Latin letters and ASCII punctuation
+   * in the reel's Latin font instead of being hijacked by an Indic font's embedded ASCII cmap.
+   */
+  function splitWordScriptRuns(w) {
+    const str = String(w ?? '');
+    if (!str) return [];
+    if (!isIndicWord(str)) return [{ text: str, isIndic: false }];
+    const runs = [];
+    let lastIdx = 0;
+    INDIC_RUN_RE.lastIndex = 0;
+    let m;
+    while ((m = INDIC_RUN_RE.exec(str)) !== null) {
+      if (m.index > lastIdx) {
+        runs.push({ text: str.slice(lastIdx, m.index), isIndic: false });
+      }
+      runs.push({ text: m[0], isIndic: true });
+      lastIdx = m.index + m[0].length;
+    }
+    if (lastIdx < str.length) {
+      runs.push({ text: str.slice(lastIdx), isIndic: false });
+    }
+    return runs.length > 0 ? runs : [{ text: str, isIndic: true }];
+  }
+
   /**
    * Formats a word according to style.textTransform ('uppercase', 'lowercase', 'sentence', 'capitalize', 'preserve', 'none').
    * Preserves Indic Unicode codepoints, matras, and ZWJ/ZWNJ intact on case transforms.
@@ -318,33 +346,7 @@ const CaptionRenderer = (() => {
     return resultPromise;
   }
 
-  async function _renderCueToPngInternal({
-    cue,
-    width,
-    height,
-    fullHeight,
-    bandY0 = 0,
-    style = {},
-    animProgress = 1.0,
-    wordScale = 1.0,
-  }) {
-    const canvasObj = createRenderCanvas(width, height);
-    const canvas = canvasObj.canvas;
-    const ctx = canvasObj.ctx || canvas.getContext('2d');
-
-    // Reset full canvas context state and clear to fully transparent
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, width, height);
-    if (typeof ctx.filter !== 'undefined') ctx.filter = 'none';
-    ctx.globalAlpha = 1.0;
-    ctx.shadowColor = 'transparent';
-    ctx.shadowBlur = 0;
-    ctx.shadowOffsetX = 0;
-    ctx.shadowOffsetY = 0;
-
-    const frameHeight = (typeof fullHeight === 'number' && fullHeight > 0) ? fullHeight : height;
-    const offsetY = (typeof bandY0 === 'number' && bandY0 > 0) ? bandY0 : 0;
-
+  function resolveCueLayout(ctx, { cue, width, frameHeight, style = {} }) {
     const sanitizeWord = (w) => (typeof w === 'string' ? w : String(w?.text ?? w?.word ?? ''))
       .replace(/[\r\n]+/g, ' ')
       .replace(/\s+/g, ' ')
@@ -372,7 +374,7 @@ const CaptionRenderer = (() => {
     }
 
     if (words.length === 0) {
-      return await canvasToBuffer(canvasObj);
+      return null;
     }
 
     // ── Font Setup (Width-anchored 1080 scale + 0.78x 1:1 Square adaptation) ──
@@ -460,12 +462,13 @@ const CaptionRenderer = (() => {
 
     const sampleStr = words.join(' ') || text;
     const hasRegional = /[\u0900-\u0D7F]/.test(sampleStr);
+    const useRegionalMetrics = Boolean(style._jobHasIndic || hasRegional);
     const scriptFallbacks = getIndicFallbackFonts(fontFamily, sampleStr);
 
     function makeFontStr(pxSize, isIndic = false, runText = '') {
       const effectiveText = runText || sampleStr;
       const treatAsIndic = Boolean(isIndic || (runText && isIndicWord(runText)));
-      const sz = treatAsIndic ? Math.max(12, Math.round(pxSize * 1.06)) : pxSize;
+      const sz = pxSize;
       // Bundled static Noto Sans <Script> bold TTFs are weight 700; locking Indic bold runs
       // to 700 and normal style prevents PangoWin32/CoreText synthetic lookup failures.
       const runWeight = (treatAsIndic && Number(fw) >= 700) ? 700 : fw;
@@ -475,6 +478,40 @@ const CaptionRenderer = (() => {
         return `${runStyle} ${runWeight} ${sz}px ${stackStr}`;
       }
       return `${runStyle} ${runWeight} ${sz}px "${fontFamily}", ${scriptFallbacks}`;
+    }
+
+    function measureWordRuns(word, pxSize, baseFontStr, customRunFontFn = null) {
+      const runs = splitWordScriptRuns(word);
+      if (runs.length <= 1) {
+        const singleIndic = Boolean(runs[0] && runs[0].isIndic);
+        const fStr = customRunFontFn
+          ? customRunFontFn(pxSize, word, singleIndic)
+          : (singleIndic ? makeFontStr(pxSize, true, word) : baseFontStr);
+        ctx.font = fStr;
+        const m = ctx.measureText(word);
+        return {
+          width: m.width,
+          ascent: m.actualBoundingBoxAscent || 0,
+          descent: m.actualBoundingBoxDescent || 0,
+          runs: [{ text: word, isIndic: singleIndic, font: fStr, width: m.width }],
+        };
+      }
+      let totalW = 0;
+      let maxAsc = 0;
+      let maxDesc = 0;
+      const measuredRuns = [];
+      for (const r of runs) {
+        const fStr = customRunFontFn
+          ? customRunFontFn(pxSize, r.text, r.isIndic)
+          : makeFontStr(pxSize, r.isIndic, r.text);
+        ctx.font = fStr;
+        const m = ctx.measureText(r.text);
+        totalW += m.width;
+        if (m.actualBoundingBoxAscent > maxAsc) maxAsc = m.actualBoundingBoxAscent;
+        if (m.actualBoundingBoxDescent > maxDesc) maxDesc = m.actualBoundingBoxDescent;
+        measuredRuns.push({ text: r.text, isIndic: r.isIndic, font: fStr, width: m.width });
+      }
+      return { width: totalW, ascent: maxAsc, descent: maxDesc, runs: measuredRuns };
     }
 
     let fontString = makeFontStr(effectiveFontSize, false);
@@ -580,8 +617,10 @@ const CaptionRenderer = (() => {
     function measureLineMetrics(wordsList, currentFontStr, effSize, heroBaseWords = null, lineWordOffset = 0) {
       ctx.font = currentFontStr;
       const curSpaceW = ctx.measureText(' ').width * 0.75;
-      let maxAscent = effSize * (hasRegional ? 0.78 : 0.74);
-      let maxDescent = effSize * (hasRegional ? 0.28 : 0.18);
+      const jobAscent = effSize * (useRegionalMetrics ? 0.84 : 0.83);
+      const jobDescent = effSize * (useRegionalMetrics ? 0.34 : 0.24);
+      let maxAscent = jobAscent;
+      let maxDescent = jobDescent;
       let lineW = 0;
 
       if (!forceSingleLine && (style.highlightMode === 'spotlight' || style.id === 6 || style.name === 'Spotlight')) {
@@ -649,17 +688,20 @@ const CaptionRenderer = (() => {
         for (let idx = 0; idx < wordsList.length; idx++) {
           const w = wordsList[idx];
           if (lineWordOffset + idx === heroIdx) {
-            ctx.font = makeGadzhiFont(luxeHeroSize, w, true);
-            const m = ctx.measureText(w);
-            lineW += m.width + effSize * 0.14;
-            if (m.actualBoundingBoxAscent > maxAscent) maxAscent = m.actualBoundingBoxAscent;
-            if (m.actualBoundingBoxDescent > maxDescent) maxDescent = m.actualBoundingBoxDescent;
+            const mwHero = measureWordRuns(
+              w,
+              luxeHeroSize,
+              currentFontStr,
+              (sz, txt, isInd) => isInd ? makeFontStr(sz, true, txt) : makeGadzhiFont(sz, txt, true)
+            );
+            lineW += mwHero.width + effSize * 0.14;
+            if (mwHero.ascent > maxAscent) maxAscent = mwHero.ascent;
+            if (mwHero.descent > maxDescent) maxDescent = mwHero.descent;
           } else {
-            ctx.font = isIndicWord(w) ? makeFontStr(effSize, true, w) : currentFontStr;
-            const m = ctx.measureText(w);
-            lineW += m.width;
-            if (m.actualBoundingBoxAscent > maxAscent) maxAscent = m.actualBoundingBoxAscent;
-            if (m.actualBoundingBoxDescent > maxDescent) maxDescent = m.actualBoundingBoxDescent;
+            const mw = measureWordRuns(w, effSize, currentFontStr);
+            lineW += mw.width;
+            if (mw.ascent > maxAscent) maxAscent = mw.ascent;
+            if (mw.descent > maxDescent) maxDescent = mw.descent;
           }
         }
         lineW += curSpaceW * Math.max(0, wordsList.length - 1);
@@ -668,11 +710,10 @@ const CaptionRenderer = (() => {
         let sumW = 0;
         for (let idx = 0; idx < wordsList.length; idx++) {
           const w = wordsList[idx];
-          ctx.font = isIndicWord(w) ? makeFontStr(effSize, true, w) : currentFontStr;
-          const m = ctx.measureText(w);
-          sumW += m.width;
-          if (m.actualBoundingBoxAscent > maxAscent) maxAscent = m.actualBoundingBoxAscent;
-          if (m.actualBoundingBoxDescent > maxDescent) maxDescent = m.actualBoundingBoxDescent;
+          const mw = measureWordRuns(w, effSize, currentFontStr);
+          sumW += mw.width;
+          if (mw.ascent > maxAscent) maxAscent = mw.ascent;
+          if (mw.descent > maxDescent) maxDescent = mw.descent;
         }
         ctx.font = currentFontStr;
         if (style.highlightMode === 'sticker' || style.id === 12 || style.name === 'Sticker Cutout') {
@@ -683,7 +724,7 @@ const CaptionRenderer = (() => {
       }
 
       const inkH = maxAscent + maxDescent;
-      const contentH = Math.max((hasRegional ? 1.08 : 0.94) * effSize, inkH);
+      const contentH = Math.max((useRegionalMetrics ? 1.18 : 1.07) * effSize, inkH);
       const baselineOffset = (maxAscent - maxDescent) / 2;
       return { width: lineW, maxAscent, maxDescent, inkH, contentH, baselineOffset, spaceW: curSpaceW };
     }
@@ -735,15 +776,118 @@ const CaptionRenderer = (() => {
     let iterations = 0;
     while ((layoutState.maxLineW + layoutState.bleed.extraPadW) > maxAllowedWidth && effectiveFontSize > minFontSize && iterations < 12) {
       const shrinkRatio = maxAllowedWidth / (layoutState.maxLineW + layoutState.bleed.extraPadW);
-      const nextFontSize = Math.max(minFontSize, Math.floor(effectiveFontSize * shrinkRatio * 0.96));
+      const nextFontSize = Math.max(minFontSize, Math.floor(effectiveFontSize * shrinkRatio * 0.99));
       effectiveFontSize = nextFontSize < effectiveFontSize ? nextFontSize : Math.max(minFontSize, effectiveFontSize - 1);
       layoutState = buildWrappedLines(effectiveFontSize);
       iterations++;
     }
 
-    fontString = layoutState.fontStr;
+    return {
+      words,
+      text,
+      highlightIdx,
+      baseFontSize,
+      resScale,
+      fontSize,
+      effectiveFontSize,
+      fw,
+      fst,
+      highlightMode,
+      forceSingleLine,
+      useRegionalMetrics,
+      scriptFallbacks,
+      makeFontStr,
+      makeSpotlightFont,
+      makeGadzhiFont,
+      layoutState,
+    };
+  }
+
+  function computeUniformFontSize({
+    cues,
+    width = 1080,
+    height = 1920,
+    fullHeight,
+    style = {},
+  }) {
+    const baseFontSize = Math.max(12, Number(style.fontSize) || 54);
+    if (!Array.isArray(cues) || cues.length === 0) return baseFontSize;
+    const frameHeight = (typeof fullHeight === 'number' && fullHeight > 0) ? fullHeight : height;
+    const canvasObj = createRenderCanvas(Math.max(32, width), Math.max(32, Math.min(height, 256)));
+    const ctx = canvasObj.ctx || canvasObj.canvas.getContext('2d');
+    const minDesignFs = Math.max(16, Math.round(baseFontSize * 0.84));
+    let targetDesignFs = baseFontSize;
+
+    for (const cue of cues) {
+      if (!cue) continue;
+      const cueStyle = { ...style, ...(cue.style || {}) };
+      if (Number(cueStyle.fontSize) > 0 && Number(cueStyle.fontSize) !== baseFontSize) continue;
+      const layout = resolveCueLayout(ctx, { cue, width, frameHeight, style: cueStyle });
+      if (!layout) continue;
+      const joined = layout.words.join(' ');
+      if (layout.words.length > 5 || joined.length > 32) continue;
+      if (layout.effectiveFontSize < layout.fontSize && layout.resScale > 0) {
+        const fitDesignFs = Math.max(minDesignFs, Math.floor(layout.effectiveFontSize / layout.resScale));
+        if (fitDesignFs < targetDesignFs) {
+          targetDesignFs = fitDesignFs;
+        }
+      }
+    }
+    return Math.max(minDesignFs, Math.min(baseFontSize, targetDesignFs));
+  }
+
+  async function _renderCueToPngInternal({
+    cue,
+    width,
+    height,
+    fullHeight,
+    bandY0 = 0,
+    style = {},
+    animProgress = 1.0,
+    wordScale = 1.0,
+  }) {
+    const canvasObj = createRenderCanvas(width, height);
+    const canvas = canvasObj.canvas;
+    const ctx = canvasObj.ctx || canvas.getContext('2d');
+
+    // Reset full canvas context state and clear to fully transparent
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    if (typeof ctx.filter !== 'undefined') ctx.filter = 'none';
+    ctx.globalAlpha = 1.0;
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+
+    const frameHeight = (typeof fullHeight === 'number' && fullHeight > 0) ? fullHeight : height;
+    const offsetY = (typeof bandY0 === 'number' && bandY0 > 0) ? bandY0 : 0;
+
+    const resolved = resolveCueLayout(ctx, { cue, width, frameHeight, style });
+    if (!resolved) {
+      return await canvasToBuffer(canvasObj);
+    }
+
+    const {
+      words,
+      highlightIdx,
+      resScale,
+      fontSize,
+      effectiveFontSize,
+      fw,
+      highlightMode,
+      forceSingleLine,
+      useRegionalMetrics,
+      scriptFallbacks,
+      makeFontStr,
+      makeSpotlightFont,
+      makeGadzhiFont,
+      layoutState,
+    } = resolved;
+
+    let fontString = layoutState.fontStr;
     ctx.font = fontString;
-    spaceW = layoutState.lines[0].metrics.spaceW;
+    let spaceW = layoutState.lines[0].metrics.spaceW;
     const { leftBleed, rightBleed, extraPadW } = layoutState.bleed;
     const wrappedLines = layoutState.lines;
     const totalW = layoutState.maxLineW;
@@ -758,7 +902,7 @@ const CaptionRenderer = (() => {
     const mLine0 = wrappedLines[0].metrics;
     const mLine1 = isTwoLine ? wrappedLines[1].metrics : null;
     const rowGap = isTwoLine
-      ? Math.max((mLine0.contentH + mLine1.contentH) * 0.62, effectiveFontSize * (hasRegional ? 1.34 : 1.20))
+      ? Math.max((mLine0.contentH + mLine1.contentH) * 0.62, effectiveFontSize * (useRegionalMetrics ? 1.34 : 1.20))
       : 0;
     const lineCenterYs = isTwoLine ? [textY - rowGap / 2, textY + rowGap / 2] : [textY];
     const contentH = isTwoLine
@@ -835,7 +979,7 @@ const CaptionRenderer = (() => {
       const blockRightX = blockCenterX + maxBlockW / 2;
 
       const heroY = textY;
-      const tierSpacing = hasRegional ? 0.58 : 0.50;
+      const tierSpacing = useRegionalMetrics ? 0.58 : 0.50;
       const prefixY = heroY - heroFontSize * tierSpacing;
       const suffixY = heroY + heroFontSize * tierSpacing;
 
@@ -1006,8 +1150,8 @@ const CaptionRenderer = (() => {
       const topFont = makeGadzhiFont(topFontSize, topWords.join(' '), false);
       const botFont = makeGadzhiFont(botFontSize, botWords.join(' '), true);
 
-      const topCenterY = textY - effectiveFontSize * (hasRegional ? 0.52 : 0.44);
-      const botCenterY = textY + effectiveFontSize * (hasRegional ? 0.48 : 0.40);
+      const topCenterY = textY - effectiveFontSize * (useRegionalMetrics ? 0.52 : 0.44);
+      const botCenterY = textY + effectiveFontSize * (useRegionalMetrics ? 0.48 : 0.40);
       const topBaselineY = topCenterY + topFontSize * 0.34;
       const botBaselineY = botCenterY + botFontSize * 0.32;
 
@@ -1274,7 +1418,7 @@ const CaptionRenderer = (() => {
         style,
         resScale,
         effectiveFontSize,
-        hasRegional,
+        useRegionalMetrics,
         animProgress,
         scriptFallbacks,
         ln.startIdx,
@@ -1345,19 +1489,51 @@ const CaptionRenderer = (() => {
     const fontScaleRatio = unitScale;
     const strokeW = (style.strokeWidth ?? 0) * unitScale;
     const dropShadow = (style.dropShadow ?? 0) * unitScale;
-    const contentH = (lineMetrics && lineMetrics.contentH) ? lineMetrics.contentH : ((hasRegional ? 1.08 : 0.94) * fontSize);
+    const useRegional = Boolean(hasRegional || style._jobHasIndic);
+    const contentH = (lineMetrics && lineMetrics.contentH) ? lineMetrics.contentH : ((useRegional ? 1.18 : 1.07) * fontSize);
     const inkH = (lineMetrics && lineMetrics.inkH) ? lineMetrics.inkH : contentH;
     const isStickerStyle = (highlightMode === 'sticker' || style.id === 12 || style.name === 'Sticker Cutout');
     const isGlassGreyStyle = Boolean(style.isGlossy || style.id === 3 || style.name === 'Glass Grey');
+    const wStroke = useRegional ? strokeW * 0.88 : strokeW;
 
     for (let i = 0; i < words.length; i++) {
       const globalIdx = lineWordOffset + i;
       const word = words[i];
       const wordIsIndic = isIndicWord(word);
-      const wordFont = makeFontStr ? makeFontStr(fontSize, wordIsIndic, word) : font;
-      ctx.font = wordFont;
-      const wordW = ctx.measureText(word).width;
-      const wStroke = wordIsIndic ? strokeW * 0.82 : strokeW;
+      const scriptRuns = splitWordScriptRuns(word);
+      let wordW = 0;
+      const wordRuns = [];
+      if (scriptRuns.length <= 1) {
+        const wordFont = makeFontStr ? makeFontStr(fontSize, wordIsIndic, word) : font;
+        ctx.font = wordFont;
+        wordW = ctx.measureText(word).width;
+        wordRuns.push({ text: word, isIndic: wordIsIndic, font: wordFont, width: wordW });
+      } else {
+        for (const r of scriptRuns) {
+          const rf = makeFontStr ? makeFontStr(fontSize, r.isIndic, r.text) : font;
+          ctx.font = rf;
+          const rw = ctx.measureText(r.text).width;
+          wordW += rw;
+          wordRuns.push({ text: r.text, isIndic: r.isIndic, font: rf, width: rw });
+        }
+        ctx.font = wordRuns[0].font;
+      }
+      const drawWordRuns = (mode, tx, ty, runsOverride = wordRuns) => {
+        if (!runsOverride || runsOverride.length === 0) return;
+        if (runsOverride.length === 1) {
+          ctx.font = runsOverride[0].font;
+          if (mode === 'stroke') ctx.strokeText(runsOverride[0].text, tx, ty);
+          else ctx.fillText(runsOverride[0].text, tx, ty);
+          return;
+        }
+        let rx = tx;
+        for (const r of runsOverride) {
+          ctx.font = r.font;
+          if (mode === 'stroke') ctx.strokeText(r.text, rx, ty);
+          else ctx.fillText(r.text, rx, ty);
+          rx += r.width;
+        }
+      };
       const isHighlighted = globalIdx === highlightIdx;
 
       // Center-anchored active-word karaoke scale pop (neighbors NEVER shift X positions)
@@ -1377,7 +1553,7 @@ const CaptionRenderer = (() => {
         // Style 4 (Blue Highlight / word-box): real Indic glyph ascent/descent rounded pill + subtle specular border
         if (highlightMode === 'word-box' && isHighlighted && wordBoxColor !== 'transparent') {
           const padX = fontSize * 0.23;
-          const padY = fontSize * (wordIsIndic ? 0.18 : 0.13);
+          const padY = fontSize * (useRegional ? 0.18 : 0.13);
           const wordBoxH = contentH + padY * 2;
           const wordBoxY = textY - wordBoxH / 2;
           const wordRadius = Math.max((borderRadius || 14) * unitScale, fontSize * 0.20);
@@ -1419,7 +1595,7 @@ const CaptionRenderer = (() => {
         } else if (isGlassGreyStyle && isHighlighted) {
           // Style 3 (Glass Grey): gold karaoke highlight pill inside the glossy glass bar
           const padX = fontSize * 0.16;
-          const padY = fontSize * (wordIsIndic ? 0.16 : 0.11);
+          const padY = fontSize * (useRegional ? 0.16 : 0.11);
           const pillH = contentH + padY * 2;
           const pillY = textY - pillH / 2;
           const pillR = Math.max(8 * resScale, fontSize * 0.18);
@@ -1494,7 +1670,7 @@ const CaptionRenderer = (() => {
               ctx.shadowOffsetY = sY;
               ctx.shadowBlur = sBlur;
               ctx.fillStyle = wFillCol;
-              ctx.fillText(word, x, baselineY + offsetY);
+              drawWordRuns('fill', x, baselineY + offsetY);
               ctx.restore();
             }
             if (isCurrent) {
@@ -1503,18 +1679,18 @@ const CaptionRenderer = (() => {
               ctx.shadowBlur = Math.max(6, fontSize * 0.20);
               ctx.shadowOffsetY = Math.max(1.5, fontSize * 0.04);
               ctx.fillStyle = wFillCol;
-              ctx.fillText(word, x, baselineY + offsetY);
+              drawWordRuns('fill', x, baselineY + offsetY);
               ctx.restore();
             }
             if (wStroke > 0) {
               ctx.save();
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 2;
-              ctx.strokeText(word, x, baselineY + offsetY);
+              drawWordRuns('stroke', x, baselineY + offsetY);
               ctx.restore();
             }
             ctx.fillStyle = wFillCol;
-            ctx.fillText(word, x, baselineY + offsetY);
+            drawWordRuns('fill', x, baselineY + offsetY);
             ctx.restore();
           }
 
@@ -1575,7 +1751,7 @@ const CaptionRenderer = (() => {
               ctx.shadowOffsetY = Math.max(2, dropShadow * 0.35);
               ctx.shadowBlur = Math.max(4, dropShadow * 1.15);
               ctx.fillStyle = fillCol;
-              ctx.fillText(word, x, baselineY);
+              drawWordRuns('fill', x, baselineY);
               ctx.restore();
             }
 
@@ -1587,7 +1763,7 @@ const CaptionRenderer = (() => {
               ctx.lineWidth = wStroke * 2;
               ctx.lineJoin = 'round';
               ctx.lineCap = 'round';
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
               ctx.restore();
             }
 
@@ -1595,7 +1771,7 @@ const CaptionRenderer = (() => {
             ctx.shadowColor = 'transparent';
             ctx.shadowBlur = 0;
             ctx.fillStyle = fillCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
             ctx.restore();
 
             if (typeof ctx.filter !== 'undefined') ctx.filter = 'none';
@@ -1612,7 +1788,7 @@ const CaptionRenderer = (() => {
           if (isHighlighted) {
             ctx.save();
             const padX = fontSize * 0.18;
-            const padY = fontSize * (wordIsIndic ? 0.18 : 0.14);
+            const padY = fontSize * (useRegional ? 0.18 : 0.14);
             const boxH = contentH + padY * 2;
             const boxY = textY - boxH / 2;
             const br = fontSize * 0.22;
@@ -1631,10 +1807,10 @@ const CaptionRenderer = (() => {
             if (wStroke > 0) {
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 1.5;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
             }
             ctx.fillStyle = '#000000';
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
             ctx.restore();
           } else {
             const inactiveCol = style.color || style.fontColor || '#FFFFFF';
@@ -1644,19 +1820,19 @@ const CaptionRenderer = (() => {
               ctx.shadowBlur = dropShadow * 1.5;
               ctx.shadowOffsetY = dropShadow * 0.4;
               ctx.fillStyle = inactiveCol;
-              ctx.fillText(word, x, baselineY);
+              drawWordRuns('fill', x, baselineY);
               ctx.restore();
             }
             if (wStroke > 0) {
               ctx.save();
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 2;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
               ctx.restore();
             }
             ctx.save();
             ctx.fillStyle = inactiveCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
             ctx.restore();
           }
           x += wordW + spaceW;
@@ -1669,7 +1845,7 @@ const CaptionRenderer = (() => {
           if (isHighlighted) {
             ctx.save();
             const padX = fontSize * 0.24;
-            const padY = fontSize * (wordIsIndic ? 0.16 : 0.12);
+            const padY = fontSize * (useRegional ? 0.16 : 0.12);
             const boxH = contentH + padY * 2;
             const centerX = x + wordW / 2;
             const centerY = textY;
@@ -1686,7 +1862,7 @@ const CaptionRenderer = (() => {
             ctx.shadowColor = 'transparent';
             ctx.shadowBlur = 0;
             ctx.fillStyle = '#18181B';
-            ctx.fillText(word, -wordW / 2, baselineY - textY);
+            drawWordRuns('fill', -wordW / 2, baselineY - textY);
             ctx.restore();
           } else {
             const inactiveCol = style.color || style.fontColor || '#FFFFFF';
@@ -1695,18 +1871,18 @@ const CaptionRenderer = (() => {
             ctx.shadowBlur = dropShadow > 0 ? dropShadow * 1.5 : 8 * unitScale;
             ctx.shadowOffsetY = dropShadow > 0 ? dropShadow * 0.45 : 3 * unitScale;
             ctx.fillStyle = inactiveCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
             ctx.restore();
             if (wStroke > 0) {
               ctx.save();
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 2;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
               ctx.restore();
             }
             ctx.save();
             ctx.fillStyle = inactiveCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
             ctx.restore();
           }
           x += wordW + spaceW;
@@ -1727,21 +1903,21 @@ const CaptionRenderer = (() => {
               ctx.shadowBlur = dropShadow * 1.5;
               ctx.shadowOffsetY = dropShadow * 0.42;
               ctx.fillStyle = baseEdCol;
-              ctx.fillText(word, x, baselineY);
+              drawWordRuns('fill', x, baselineY);
             }
             if (wStroke > 0) {
               ctx.shadowColor = 'transparent';
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 2;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
             }
             ctx.shadowColor = goldCol;
             ctx.shadowBlur = fontSize * 0.36;
             ctx.shadowOffsetY = 0;
             ctx.fillStyle = baseEdCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
 
-            const lineY = baselineY + fontSize * (wordIsIndic ? 0.28 : 0.20);
+            const lineY = baselineY + fontSize * (useRegional ? 0.28 : 0.20);
             const lineH = Math.max(2, fontSize * 0.08);
             ctx.fillStyle = goldCol;
             ctx.shadowColor = goldCol;
@@ -1760,11 +1936,11 @@ const CaptionRenderer = (() => {
               ctx.shadowColor = 'transparent';
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 2;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
               ctx.restore();
             }
             ctx.fillStyle = isSpoken ? baseEdCol : 'rgba(250, 247, 242, 0.58)';
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
             ctx.restore();
           }
           x += wordW + spaceW;
@@ -1781,7 +1957,7 @@ const CaptionRenderer = (() => {
           const tCol = textCols[globalIdx % textCols.length];
 
           const padX = fontSize * 0.24;
-          const padY = fontSize * (wordIsIndic ? 0.16 : 0.13);
+          const padY = fontSize * (useRegional ? 0.16 : 0.13);
           const boxW = wordW + padX * 2;
           const boxH = contentH + padY * 2;
           const centerX = x + padX + wordW / 2;
@@ -1811,10 +1987,10 @@ const CaptionRenderer = (() => {
           if (wStroke > 0 && tCol === '#FFFFFF') {
             ctx.strokeStyle = strokeCol;
             ctx.lineWidth = wStroke * 1.4;
-            ctx.strokeText(word, -wordW / 2, baselineY - textY);
+            drawWordRuns('stroke', -wordW / 2, baselineY - textY);
           }
           ctx.fillStyle = tCol;
-          ctx.fillText(word, -wordW / 2, baselineY - textY);
+          drawWordRuns('fill', -wordW / 2, baselineY - textY);
           ctx.restore();
 
           x += wordW + spaceW + fontSize * 0.52;
@@ -1832,7 +2008,7 @@ const CaptionRenderer = (() => {
 
           if (isHighlighted) {
             const padX = fontSize * 0.21;
-            const padY = fontSize * (wordIsIndic ? 0.15 : 0.10);
+            const padY = fontSize * (useRegional ? 0.15 : 0.10);
             const pillH = contentH + padY * 2;
             const pillY = textY - pillH / 2;
             const pillR = Math.max(8 * resScale, fontSize * 0.16);
@@ -1853,19 +2029,19 @@ const CaptionRenderer = (() => {
             ctx.shadowBlur = Math.max(4, dropShadow * 1.35);
             ctx.shadowOffsetY = Math.max(2, dropShadow * 0.40);
             ctx.fillStyle = cinemaCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
             ctx.restore();
           }
           if (wStroke > 0) {
             ctx.save();
             ctx.strokeStyle = cinemaStroke;
             ctx.lineWidth = wStroke * 2.0;
-            ctx.strokeText(word, x, baselineY);
+            drawWordRuns('stroke', x, baselineY);
             ctx.restore();
           }
           ctx.save();
           ctx.fillStyle = cinemaCol;
-          ctx.fillText(word, x, baselineY);
+          drawWordRuns('fill', x, baselineY);
           ctx.restore();
           x += wordW + spaceW;
           continue;
@@ -1883,14 +2059,14 @@ const CaptionRenderer = (() => {
             ctx.shadowBlur = dropShadow * 1.4;
             ctx.shadowOffsetY = dropShadow * 0.4;
             ctx.fillStyle = textCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
           }
           if (wStroke > 0) {
             ctx.shadowColor = 'transparent';
             ctx.shadowBlur = 0;
             ctx.strokeStyle = strokeCol;
             ctx.lineWidth = wStroke * 2;
-            ctx.strokeText(word, x, baselineY);
+            drawWordRuns('stroke', x, baselineY);
           }
           if (isHighlighted) {
             ctx.shadowColor = activeTwCol;
@@ -1901,7 +2077,7 @@ const CaptionRenderer = (() => {
             ctx.shadowBlur = 0;
           }
           ctx.fillStyle = textCol;
-          ctx.fillText(word, x, baselineY);
+          drawWordRuns('fill', x, baselineY);
           ctx.restore();
           x += wordW + spaceW;
           continue;
@@ -1925,10 +2101,10 @@ const CaptionRenderer = (() => {
           if (wStroke > 0) {
             ctx.strokeStyle = style.strokeColor || '#000000';
             ctx.lineWidth = wStroke * 2;
-            ctx.strokeText(word, x, baselineY);
+            drawWordRuns('stroke', x, baselineY);
           }
           ctx.fillStyle = magmaGrad;
-          ctx.fillText(word, x, baselineY);
+          drawWordRuns('fill', x, baselineY);
           ctx.restore();
           x += wordW + spaceW;
           continue;
@@ -1944,14 +2120,14 @@ const CaptionRenderer = (() => {
             ctx.shadowBlur = dropShadow * 1.4;
             ctx.shadowOffsetY = dropShadow * 0.4;
             ctx.fillStyle = isSpoken ? baseWfCol : 'rgba(255, 255, 255, 0.65)';
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
           }
           if (wStroke > 0) {
             ctx.shadowColor = 'transparent';
             ctx.shadowBlur = 0;
             ctx.strokeStyle = strokeCol;
             ctx.lineWidth = wStroke * 2;
-            ctx.strokeText(word, x, baselineY);
+            drawWordRuns('stroke', x, baselineY);
           }
           if (isHighlighted) {
             ctx.shadowColor = style.activeColor || '#EC4899';
@@ -1963,7 +2139,7 @@ const CaptionRenderer = (() => {
             ctx.shadowBlur = 0;
             ctx.fillStyle = isSpoken ? baseWfCol : 'rgba(255, 255, 255, 0.65)';
           }
-          ctx.fillText(word, x, baselineY);
+          drawWordRuns('fill', x, baselineY);
           ctx.restore();
           x += wordW + spaceW;
           continue;
@@ -1975,7 +2151,7 @@ const CaptionRenderer = (() => {
           const hudInactive = style.color || style.fontColor || '#E2E8F0';
           if (isHighlighted) {
             ctx.save();
-            const padY = fontSize * (wordIsIndic ? 0.12 : 0.08);
+            const padY = fontSize * (useRegional ? 0.12 : 0.08);
             const bw = wordW + fontSize * 0.28;
             const bh = contentH + padY * 2;
             const bx = x - fontSize * 0.14;
@@ -1999,11 +2175,11 @@ const CaptionRenderer = (() => {
               ctx.shadowColor = 'transparent';
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 2;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
               ctx.restore();
             }
             ctx.fillStyle = hudCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
             ctx.restore();
           } else {
             ctx.save();
@@ -2012,17 +2188,17 @@ const CaptionRenderer = (() => {
               ctx.shadowBlur = dropShadow * 1.5;
               ctx.shadowOffsetY = dropShadow * 0.42;
               ctx.fillStyle = hudInactive;
-              ctx.fillText(word, x, baselineY);
+              drawWordRuns('fill', x, baselineY);
             }
             if (wStroke > 0) {
               ctx.shadowColor = 'transparent';
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 2;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
             }
             ctx.shadowColor = 'transparent';
             ctx.fillStyle = hudInactive;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
             ctx.restore();
           }
           x += wordW + spaceW;
@@ -2046,16 +2222,16 @@ const CaptionRenderer = (() => {
           ctx.shadowBlur = 0;
           ctx.shadowOffsetY = beastDrop;
           ctx.fillStyle = isHighlighted ? actCol : baseBeastCol;
-          ctx.fillText(word, x, baselineY);
+          drawWordRuns('fill', x, baselineY);
 
           ctx.shadowColor = 'rgba(0,0,0,0.95)';
           ctx.shadowBlur = 12 * unitScale;
           ctx.shadowOffsetY = beastDrop * 1.4;
           ctx.strokeStyle = strokeCol;
           ctx.lineWidth = wStroke > 0 ? Math.max(wStroke * 2, fontSize * 0.07) : Math.max(2, fontSize * 0.07);
-          ctx.strokeText(word, x, baselineY);
+          drawWordRuns('stroke', x, baselineY);
           ctx.fillStyle = isHighlighted ? actCol : baseBeastCol;
-          ctx.fillText(word, x, baselineY);
+          drawWordRuns('fill', x, baselineY);
           ctx.restore();
           x += wordW + spaceW;
           continue;
@@ -2072,33 +2248,33 @@ const CaptionRenderer = (() => {
             ctx.shadowBlur = dropShadow * 1.5;
             ctx.shadowOffsetY = dropShadow * 0.45;
             ctx.fillStyle = baseVhsCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
             ctx.restore();
           }
           if (isHighlighted) {
             ctx.fillStyle = '#00FFFF';
-            ctx.fillText(word, x - vhsOff, baselineY);
+            drawWordRuns('fill', x - vhsOff, baselineY);
             ctx.fillStyle = '#FF0055';
-            ctx.fillText(word, x + vhsOff, baselineY);
+            drawWordRuns('fill', x + vhsOff, baselineY);
             if (wStroke > 0) {
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 2;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
             }
             ctx.fillStyle = '#FFFFFF';
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
           } else {
             ctx.fillStyle = 'rgba(0,255,255,0.35)';
-            ctx.fillText(word, x - vhsOff * 0.5, baselineY);
+            drawWordRuns('fill', x - vhsOff * 0.5, baselineY);
             ctx.fillStyle = 'rgba(255,0,85,0.35)';
-            ctx.fillText(word, x + vhsOff * 0.5, baselineY);
+            drawWordRuns('fill', x + vhsOff * 0.5, baselineY);
             if (wStroke > 0) {
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 2;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
             }
             ctx.fillStyle = baseVhsCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
           }
           ctx.restore();
           x += wordW + spaceW;
@@ -2112,7 +2288,7 @@ const CaptionRenderer = (() => {
           if (isHighlighted) {
             ctx.save();
             const padX = fontSize * 0.26;
-            const padY = fontSize * (wordIsIndic ? 0.16 : 0.12);
+            const padY = fontSize * (useRegional ? 0.16 : 0.12);
             const boxW = wordW + padX * 2;
             const boxH = contentH + padY * 2;
             ctx.fillStyle = brushCol;
@@ -2127,12 +2303,12 @@ const CaptionRenderer = (() => {
             if (wStroke > 0) {
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 2;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
             }
             ctx.fillStyle = '#FFFFFF';
             ctx.shadowColor = 'rgba(0,0,0,0.35)';
             ctx.shadowBlur = 2 * unitScale;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
             ctx.restore();
           } else {
             ctx.save();
@@ -2147,9 +2323,9 @@ const CaptionRenderer = (() => {
             if (wStroke > 0) {
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 2;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
             }
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
             ctx.restore();
           }
           x += wordW + spaceW;
@@ -2166,12 +2342,12 @@ const CaptionRenderer = (() => {
             if (wStroke > 0) {
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 2;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
             }
             ctx.shadowColor = 'rgba(255, 255, 255, 0.9)';
             ctx.shadowBlur = fontSize * 0.36;
             ctx.fillStyle = vfCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
           } else if (isSpoken) {
             if (dropShadow > 0) {
               ctx.shadowColor = 'rgba(0, 0, 0, 0.85)';
@@ -2181,17 +2357,17 @@ const CaptionRenderer = (() => {
             if (wStroke > 0) {
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 2;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
             }
             ctx.fillStyle = vfCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
           } else {
             ctx.globalAlpha = 0.38;
             if (typeof ctx.filter !== 'undefined') {
               ctx.filter = `blur(${Math.max(1.5, fontSize * 0.04)}px)`;
             }
             ctx.fillStyle = vfCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
             if (typeof ctx.filter !== 'undefined') {
               ctx.filter = 'none';
             }
@@ -2204,7 +2380,7 @@ const CaptionRenderer = (() => {
         // Style 24 (3D Comic Slap)
         if (highlightMode === 'comic-slap' || style.id === 24 || style.name === '3D Comic Slap') {
           const isCurrent = isHighlighted;
-          const comicOutlineW = Math.max(wStroke * 2, (wordIsIndic ? 0.105 : 0.13) * fontSize);
+          const comicOutlineW = Math.max(wStroke * 2, (useRegional ? 0.105 : 0.13) * fontSize);
           ctx.save();
           if (isCurrent) {
             const slapY = baselineY - 0.06 * fontSize;
@@ -2216,24 +2392,24 @@ const CaptionRenderer = (() => {
             ctx.save();
             ctx.strokeStyle = '#000000';
             ctx.lineWidth = comicOutlineW;
-            ctx.strokeText(word, x + ext1, slapY + ext1);
+            drawWordRuns('stroke', x + ext1, slapY + ext1);
             ctx.fillStyle = accentCol;
-            ctx.fillText(word, x + ext1, slapY + ext1);
+            drawWordRuns('fill', x + ext1, slapY + ext1);
             ctx.restore();
 
             ctx.save();
             ctx.strokeStyle = '#000000';
             ctx.lineWidth = comicOutlineW;
-            ctx.strokeText(word, x + ext2, slapY + ext2);
+            drawWordRuns('stroke', x + ext2, slapY + ext2);
             ctx.fillStyle = '#000000';
-            ctx.fillText(word, x + ext2, slapY + ext2);
+            drawWordRuns('fill', x + ext2, slapY + ext2);
             ctx.restore();
 
             ctx.strokeStyle = '#000000';
             ctx.lineWidth = comicOutlineW;
-            ctx.strokeText(word, x, slapY);
+            drawWordRuns('stroke', x, slapY);
             ctx.fillStyle = actFill;
-            ctx.fillText(word, x, slapY);
+            drawWordRuns('fill', x, slapY);
           } else {
             const blockOff = 0.065 * fontSize;
             const inactFill = style.color || style.fontColor || '#FFFFFF';
@@ -2241,16 +2417,16 @@ const CaptionRenderer = (() => {
             ctx.save();
             ctx.strokeStyle = '#000000';
             ctx.lineWidth = comicOutlineW;
-            ctx.strokeText(word, x + blockOff, baselineY + blockOff);
+            drawWordRuns('stroke', x + blockOff, baselineY + blockOff);
             ctx.fillStyle = '#000000';
-            ctx.fillText(word, x + blockOff, baselineY + blockOff);
+            drawWordRuns('fill', x + blockOff, baselineY + blockOff);
             ctx.restore();
 
             ctx.strokeStyle = '#000000';
             ctx.lineWidth = comicOutlineW;
-            ctx.strokeText(word, x, baselineY);
+            drawWordRuns('stroke', x, baselineY);
             ctx.fillStyle = inactFill;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
           }
           ctx.restore();
           x += wordW + spaceW;
@@ -2266,7 +2442,7 @@ const CaptionRenderer = (() => {
           ctx.save();
           if (isCurrent) {
             const pillPadX = fontSize * 0.20;
-            const pillPadY = fontSize * (wordIsIndic ? 0.16 : 0.12);
+            const pillPadY = fontSize * (useRegional ? 0.16 : 0.12);
             const pillW = wordW + pillPadX * 2;
             const pillH = contentH + pillPadY * 2;
             const pillX = x - pillPadX;
@@ -2285,25 +2461,25 @@ const CaptionRenderer = (() => {
               ctx.save();
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 1.7;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
               ctx.restore();
             }
 
             ctx.shadowColor = hexToRgba(actLyricCol, 0.85);
             ctx.shadowBlur = 12 * unitScale;
             ctx.fillStyle = '#FFFFFF';
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
           } else {
             ctx.globalAlpha = isSpoken ? 0.94 : 0.68;
             if (wStroke > 0) {
               ctx.save();
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 1.5;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
               ctx.restore();
             }
             ctx.fillStyle = lyricCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
           }
           ctx.restore();
           x += wordW + spaceW;
@@ -2324,16 +2500,16 @@ const CaptionRenderer = (() => {
             }
             ctx.strokeStyle = '#000000';
             ctx.lineWidth = koStrokeW;
-            ctx.strokeText(word, x, baselineY);
+            drawWordRuns('stroke', x, baselineY);
 
             ctx.shadowColor = 'transparent';
             ctx.shadowBlur = 0;
             ctx.shadowOffsetY = 0;
             ctx.fillStyle = voltCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
 
             const barH = Math.max(3, 0.08 * fontSize);
-            const barY = baselineY + fontSize * (wordIsIndic ? 0.24 : 0.14);
+            const barY = baselineY + fontSize * (useRegional ? 0.24 : 0.14);
             ctx.fillStyle = voltCol;
             ctx.strokeStyle = '#000000';
             ctx.lineWidth = Math.max(1.5, fontSize * 0.03);
@@ -2348,10 +2524,10 @@ const CaptionRenderer = (() => {
               ctx.shadowOffsetY = dropShadow * 0.35;
             }
             ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
             ctx.strokeStyle = style.color || style.fontColor || '#FFFFFF';
             ctx.lineWidth = Math.max(2, fontSize * 0.055);
-            ctx.strokeText(word, x, baselineY);
+            drawWordRuns('stroke', x, baselineY);
           }
           ctx.restore();
           x += wordW + spaceW;
@@ -2364,7 +2540,7 @@ const CaptionRenderer = (() => {
           ctx.save();
           if (isCurrent) {
             const padX = fontSize * 0.20;
-            const padY = fontSize * (wordIsIndic ? 0.18 : 0.13);
+            const padY = fontSize * (useRegional ? 0.18 : 0.13);
             const boxW = wordW + padX * 2;
             const boxH = contentH + padY * 2;
             const boxX = x - padX;
@@ -2395,7 +2571,7 @@ const CaptionRenderer = (() => {
               ctx.save();
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 1.6;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
               ctx.restore();
             }
 
@@ -2403,23 +2579,23 @@ const CaptionRenderer = (() => {
             ctx.shadowBlur = 3 * unitScale;
             ctx.shadowOffsetY = 1.5 * unitScale;
             ctx.fillStyle = '#FFFFFF';
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
           } else {
             const inactCol = style.color || style.fontColor || '#FFFFFF';
             ctx.shadowColor = 'rgba(0, 0, 0, 0.85)';
             ctx.shadowBlur = dropShadow > 0 ? dropShadow * 1.45 : 10 * unitScale;
             ctx.shadowOffsetY = dropShadow > 0 ? dropShadow * 0.42 : 3 * unitScale;
             ctx.fillStyle = inactCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
 
             ctx.shadowColor = 'transparent';
             ctx.shadowBlur = 0;
             ctx.shadowOffsetY = 0;
             ctx.strokeStyle = strokeCol;
             ctx.lineWidth = Math.max(wStroke * 2, fontSize * 0.06);
-            ctx.strokeText(word, x, baselineY);
+            drawWordRuns('stroke', x, baselineY);
             ctx.fillStyle = inactCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
           }
           ctx.restore();
           x += wordW + spaceW;
@@ -2437,7 +2613,7 @@ const CaptionRenderer = (() => {
           ctx.save();
           if (isCurrent) {
             const pillPadX = fontSize * 0.21;
-            const pillPadY = fontSize * (wordIsIndic ? 0.14 : 0.10);
+            const pillPadY = fontSize * (useRegional ? 0.14 : 0.10);
             const pillW = wordW + pillPadX * 2;
             const pillH = Math.max(inkH + pillPadY * 2, contentH + pillPadY * 1.4);
             const pillX = x - pillPadX;
@@ -2460,18 +2636,18 @@ const CaptionRenderer = (() => {
             if (wStroke > 0) {
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 2;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
             }
             ctx.fillStyle = markerCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
           } else {
             if (wStroke > 0) {
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 1.8;
-              ctx.strokeText(word, x, baselineY);
+              drawWordRuns('stroke', x, baselineY);
             }
             ctx.fillStyle = isSpoken ? spokenDocCol : futureDocCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
           }
           ctx.restore();
           x += wordW + spaceW;
@@ -2486,7 +2662,7 @@ const CaptionRenderer = (() => {
           ctx.save();
           if (isCurrent) {
             const padX = fontSize * 0.16;
-            const padY = fontSize * (wordIsIndic ? 0.16 : 0.12);
+            const padY = fontSize * (useRegional ? 0.16 : 0.12);
             const plateW = wordW + padX * 2;
             const plateH = contentH + padY * 2;
             const plateX = x - padX;
@@ -2510,14 +2686,14 @@ const CaptionRenderer = (() => {
             ctx.rect(x - fontSize, topClipY, wordW + fontSize * 2, splitY - topClipY);
             ctx.clip();
             ctx.fillStyle = '#00F0FF';
-            ctx.fillText(word, x - ghostShift, baselineY);
+            drawWordRuns('fill', x - ghostShift, baselineY);
             if (wStroke > 0) {
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 1.5;
-              ctx.strokeText(word, x + sliceShift, baselineY);
+              drawWordRuns('stroke', x + sliceShift, baselineY);
             }
             ctx.fillStyle = coreCol;
-            ctx.fillText(word, x + sliceShift, baselineY);
+            drawWordRuns('fill', x + sliceShift, baselineY);
             ctx.restore();
 
             ctx.save();
@@ -2525,14 +2701,14 @@ const CaptionRenderer = (() => {
             ctx.rect(x - fontSize, splitY, wordW + fontSize * 2, botClipY - splitY);
             ctx.clip();
             ctx.fillStyle = magentaGhost;
-            ctx.fillText(word, x + ghostShift, baselineY);
+            drawWordRuns('fill', x + ghostShift, baselineY);
             if (wStroke > 0) {
               ctx.strokeStyle = strokeCol;
               ctx.lineWidth = wStroke * 1.5;
-              ctx.strokeText(word, x - sliceShift, baselineY);
+              drawWordRuns('stroke', x - sliceShift, baselineY);
             }
             ctx.fillStyle = coreCol;
-            ctx.fillText(word, x - sliceShift, baselineY);
+            drawWordRuns('fill', x - sliceShift, baselineY);
             ctx.restore();
           } else {
             if (dropShadow > 0) {
@@ -2540,14 +2716,14 @@ const CaptionRenderer = (() => {
               ctx.shadowBlur = dropShadow * 1.5;
               ctx.shadowOffsetY = dropShadow * 0.42;
               ctx.fillStyle = coreCol;
-              ctx.fillText(word, x, baselineY);
+              drawWordRuns('fill', x, baselineY);
             }
             ctx.shadowColor = 'transparent';
             ctx.strokeStyle = strokeCol;
             ctx.lineWidth = Math.max(wStroke * 2, fontSize * 0.06);
-            ctx.strokeText(word, x, baselineY);
+            drawWordRuns('stroke', x, baselineY);
             ctx.fillStyle = coreCol;
-            ctx.fillText(word, x, baselineY);
+            drawWordRuns('fill', x, baselineY);
           }
           ctx.restore();
           x += wordW + spaceW;
@@ -2571,12 +2747,18 @@ const CaptionRenderer = (() => {
           if (isHero) {
             ctx.save();
             const italicFontSize = Math.round(fontSize * 1.10);
-            const heroItalicFont = wordIsIndic
-              ? (makeFontStr
-                  ? makeFontStr(Math.round((fontSize * 1.10) / 1.06), true, word)
-                  : `normal 700 ${italicFontSize}px ${scriptFallbacks}`)
-              : `italic 700 ${italicFontSize}px "Playfair Display", "Montserrat", ${scriptFallbacks}, serif`;
-            ctx.font = heroItalicFont;
+            const heroScriptRuns = splitWordScriptRuns(word);
+            const heroRuns = heroScriptRuns.map(r => {
+              const rf = r.isIndic
+                ? (makeFontStr
+                    ? makeFontStr(italicFontSize, true, r.text)
+                    : `normal 700 ${italicFontSize}px ${scriptFallbacks}`)
+                : `italic 700 ${italicFontSize}px "Playfair Display", "Montserrat", ${scriptFallbacks}, serif`;
+              ctx.font = rf;
+              return { text: r.text, isIndic: r.isIndic, font: rf, width: ctx.measureText(r.text).width };
+            });
+            const heroTotalW = heroRuns.reduce((acc, r) => acc + r.width, 0);
+            ctx.font = heroRuns[0].font;
             ctx.textBaseline = 'alphabetic';
 
             let heroAlpha = 0.35;
@@ -2595,25 +2777,23 @@ const CaptionRenderer = (() => {
               ctx.globalAlpha = heroAlpha * 0.40;
               ctx.shadowColor = glowCol;
               ctx.shadowBlur = glowBlur * glowIntensity * 0.75;
-              ctx.fillText(word, x + fontSize * 0.06, baselineY);
+              drawWordRuns('fill', x + fontSize * 0.06, baselineY, heroRuns);
               ctx.restore();
             }
 
             ctx.save();
-            ctx.font = heroItalicFont;
             ctx.textBaseline = 'alphabetic';
             ctx.shadowColor = 'rgba(0, 0, 0, 0.85)';
             ctx.shadowBlur = 3 * unitScale;
             ctx.shadowOffsetY = 1 * unitScale;
             ctx.fillStyle = '#FFFFFF';
             ctx.globalAlpha = heroAlpha;
-            ctx.fillText(word, x + fontSize * 0.06, baselineY);
+            drawWordRuns('fill', x + fontSize * 0.06, baselineY, heroRuns);
             ctx.restore();
 
             ctx.restore();
 
-            ctx.font = heroItalicFont;
-            const italicW = ctx.measureText(word).width + fontSize * 0.14;
+            const italicW = heroTotalW + fontSize * 0.14;
             ctx.font = font;
             x += italicW + spaceW;
             continue;
@@ -2627,7 +2807,7 @@ const CaptionRenderer = (() => {
           }
 
           ctx.save();
-          ctx.font = wordFont;
+          ctx.font = wordRuns[0].font;
           ctx.textBaseline = 'alphabetic';
           ctx.fillStyle = '#FFFFFF';
           ctx.globalAlpha = wordAlpha;
@@ -2637,7 +2817,7 @@ const CaptionRenderer = (() => {
             ctx.shadowBlur = dropShadow * 1.5;
             ctx.shadowOffsetY = dropShadow * 0.45;
           }
-          ctx.fillText(word, x, baselineY);
+          drawWordRuns('fill', x, baselineY);
           ctx.restore();
 
           x += wordW + spaceW;
@@ -2704,12 +2884,12 @@ const CaptionRenderer = (() => {
           ctx.shadowOffsetX = 0;
           ctx.shadowOffsetY = Math.max(2, dropShadow * 0.38);
           ctx.fillStyle = textFillColor;
-          ctx.fillText(word, x, baselineY);
+          drawWordRuns('fill', x, baselineY);
 
           ctx.shadowColor = 'rgba(0, 0, 0, 0.92)';
           ctx.shadowBlur = Math.max(2, dropShadow * 0.45);
           ctx.shadowOffsetY = Math.max(1.5, dropShadow * 0.20);
-          ctx.fillText(word, x, baselineY);
+          drawWordRuns('fill', x, baselineY);
           ctx.restore();
         }
 
@@ -2722,7 +2902,7 @@ const CaptionRenderer = (() => {
           ctx.lineWidth = wStroke * 2;
           ctx.lineJoin = 'round';
           ctx.lineCap = 'round';
-          ctx.strokeText(word, x, baselineY);
+          drawWordRuns('stroke', x, baselineY);
           ctx.restore();
         }
 
@@ -2731,7 +2911,7 @@ const CaptionRenderer = (() => {
         ctx.shadowColor = 'transparent';
         ctx.shadowBlur = 0;
         ctx.fillStyle = textFillColor;
-        ctx.fillText(word, x, baselineY);
+        drawWordRuns('fill', x, baselineY);
         ctx.restore();
 
         x += wordW + spaceW;
@@ -2803,7 +2983,8 @@ const CaptionRenderer = (() => {
 
     const frameStep = 1.0 / Math.max(24, Number(fps) || 25);
     const minWordDur = Math.min(frameStep, 0.025);
-    const enablePop = style.wordPop !== false;
+    const animPresetLow = String(style.animationPreset || '').trim().toLowerCase();
+    const enablePop = animPresetLow === 'none' ? (style.wordPop === true) : (style.wordPop !== false);
 
     const frames = [];
     let rendered = 0;
@@ -2890,7 +3071,7 @@ const CaptionRenderer = (() => {
                   wStart,
                   wEnd: t1,
                   animProgress: 0.55,
-                  wordScale: 1.03,
+                  wordScale: 1.02,
                   frameTag: `cue_${i}_w${wIdx}_s0.png`,
                   subIndex: 0,
                   totalWords,
@@ -2903,7 +3084,7 @@ const CaptionRenderer = (() => {
                   wStart: t1,
                   wEnd: t2,
                   animProgress: 0.92,
-                  wordScale: 1.05,
+                  wordScale: 1.04,
                   frameTag: `cue_${i}_w${wIdx}_s1.png`,
                   subIndex: 1,
                   totalWords,
@@ -2938,7 +3119,7 @@ const CaptionRenderer = (() => {
                 wStart,
                 wEnd: t1,
                 animProgress: 0.85,
-                wordScale: 1.08,
+                wordScale: 1.04,
                 frameTag: `cue_${i}_w${wIdx}_s0.png`,
                 subIndex: 0,
                 totalWords,
@@ -2966,7 +3147,7 @@ const CaptionRenderer = (() => {
               wStart,
               wEnd,
               animProgress: 1.0,
-              wordScale: enablePop ? 1.06 : 1.00,
+              wordScale: enablePop ? 1.03 : 1.00,
               frameTag: `cue_${i}_w${wIdx}_s0.png`,
               subIndex: 0,
               totalWords,
@@ -3065,6 +3246,7 @@ const CaptionRenderer = (() => {
 
   return {
     renderCueToPng,
+    computeUniformFontSize,
     writePngToDisk,
     renderAllCuesToPngs,
     parseTimeToSeconds,

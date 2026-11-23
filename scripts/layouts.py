@@ -118,6 +118,20 @@ def _is_flashcard_item(item: Any) -> bool:
     return False
 
 
+def _vis_has_real_face_safe(vis: Optional[Dict[str, Any]]) -> bool:
+    fn = getattr(_vision_tracker, "_vis_has_real_face", None)
+    if callable(fn):
+        return bool(fn(vis))
+    if not isinstance(vis, dict) or not vis.get("bbox_norm"):
+        return False
+    if "confidence" in vis:
+        return float(vis.get("confidence") or 0.0) > 0.0
+    faces = vis.get("faces")
+    if isinstance(faces, list) and faces and any(isinstance(f, dict) and "confidence" in f for f in faces):
+        return any(isinstance(f, dict) and float(f.get("confidence") or 0.0) > 0.0 for f in faces)
+    return True
+
+
 def _estimate_clip_head_top_y0(
     clip_path: Union[str, Path],
     fallback_focus: Optional[Sequence[float]] = None,
@@ -129,11 +143,12 @@ def _estimate_clip_head_top_y0(
         canon = canon_fn(p) if callable(canon_fn) else p
         if canon.is_file():
             vis = analyze_clip_vision(canon) or {}
-            bbox = vis.get("bbox_norm")
-            if bbox and len(bbox) >= 4:
-                x0, y0, x1, y1 = [min(1.0, max(0.0, float(v))) for v in bbox[:4]]
-                if x1 > x0 and y1 > y0:
-                    return max(0.04, min(0.65, y0))
+            if _vis_has_real_face_safe(vis):
+                bbox = vis.get("bbox_norm")
+                if bbox and len(bbox) >= 4:
+                    x0, y0, x1, y1 = [min(1.0, max(0.0, float(v))) for v in bbox[:4]]
+                    if x1 > x0 and y1 > y0:
+                        return max(0.04, min(0.65, y0))
     except Exception:
         pass
     if fallback_focus and len(fallback_focus) >= 2:
@@ -223,27 +238,49 @@ def _call_paired_split_crop_filters(
     *,
     live_offset_y: float = 0.0,
     peer_offset_y: float = 0.0,
+    live_is_broll: bool = False,
+    peer_is_broll: bool = False,
+    target_vis_fh: Optional[float] = None,
+    target_ey: Optional[float] = None,
+    live_min_zoom: float = 1.0,
+    peer_min_zoom: float = 1.0,
     **kwargs: Any,
 ) -> Any:
-    """Invoke `compute_paired_split_crop_filters`, passing `live_offset_y` / `peer_offset_y`
+    """Invoke `compute_paired_split_crop_filters`, passing optional alignment kwargs
     when supported by its signature, and falling back safely otherwise.
     """
     live_oy = _parse_offset_y(live_offset_y)
     peer_oy = _parse_offset_y(peer_offset_y)
     fn = compute_paired_split_crop_filters
     accepts_offset = False
+    params: Dict[str, Any] = {}
+    has_var_kw = False
     try:
-        params = inspect.signature(fn).parameters
+        params = dict(inspect.signature(fn).parameters)
+        has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
         accepts_offset = (
             ("live_offset_y" in params and "peer_offset_y" in params)
-            or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            or has_var_kw
         )
     except (TypeError, ValueError):
         accepts_offset = False
 
+    opt_kw: Dict[str, Any] = {
+        "live_is_broll": bool(live_is_broll),
+        "peer_is_broll": bool(peer_is_broll),
+        "target_vis_fh": target_vis_fh,
+        "target_ey": target_ey,
+        "live_min_zoom": float(live_min_zoom or 1.0),
+        "peer_min_zoom": float(peer_min_zoom or 1.0),
+    }
+    fwd_kw = {
+        k: v for k, v in opt_kw.items()
+        if (has_var_kw or k in params) and v is not None
+    }
+
     if accepts_offset:
         try:
-            res = fn(live_offset_y=live_oy, peer_offset_y=peer_oy, **kwargs)
+            res = fn(live_offset_y=live_oy, peer_offset_y=peer_oy, **fwd_kw, **kwargs)
             if isinstance(res, tuple) and len(res) >= 2:
                 lc = dict(res[0])
                 pc = dict(res[1])
@@ -256,7 +293,7 @@ def _call_paired_split_crop_filters(
         except TypeError:
             pass
 
-    res = fn(**kwargs)
+    res = fn(**fwd_kw, **kwargs) if fwd_kw else fn(**kwargs)
     if isinstance(res, tuple) and len(res) >= 2:
         lc = _apply_crop_offset_y_fallback(res[0], live_oy)
         pc = _apply_crop_offset_y_fallback(res[1], peer_oy)
@@ -287,10 +324,17 @@ def _compute_paired_split_crop_filters_for_layout(
     live_offset_y: float = 0.0,
     peer_offset_y: float = 0.0,
     force_flashcards: Optional[bool] = None,
+    live_is_broll: bool = False,
+    peer_is_broll: bool = False,
+    target_vis_fh: Optional[float] = None,
+    target_ey: Optional[float] = None,
+    live_min_zoom: float = 1.0,
+    peer_min_zoom: float = 1.0,
 ) -> Any:
     """Invoke `compute_paired_split_crop_filters`, cleanly raising `split_h` headroom up to
     `0.24` (naturally capped by source clip ceiling so `pad_top == 0` / zero black bars) when
-    `seg` or `plan` carries flashcards, and forwarding per-panel `live_offset_y` / `peer_offset_y`.
+    `seg` or `plan` carries flashcards, and forwarding per-panel `live_offset_y` / `peer_offset_y`
+    plus B-roll guard and slot-wide target scale/eyeline overrides.
     """
     default_hr = round(TARGET_HEADROOM_PCT / 100.0, 4)
     live_oy = _parse_offset_y(live_offset_y)
@@ -301,24 +345,31 @@ def _compute_paired_split_crop_filters_for_layout(
         and has_fc
         and "ZENO_SPLIT_HEADROOM" not in os.environ
     )
+    shared_kw: Dict[str, Any] = {
+        "live_src": live_src,
+        "peer_src": peer_src,
+        "src_w": src_w,
+        "src_h": src_h,
+        "peer_w": peer_w,
+        "peer_h": peer_h,
+        "live_slot_w": live_slot_w,
+        "live_slot_h": live_slot_h,
+        "peer_slot_w": peer_slot_w,
+        "peer_slot_h": peer_slot_h,
+        "live_focus": live_focus,
+        "peer_focus": peer_focus,
+        "return_focus": return_focus,
+        "live_offset_y": live_oy,
+        "peer_offset_y": peer_oy,
+        "live_is_broll": live_is_broll,
+        "peer_is_broll": peer_is_broll,
+        "target_vis_fh": target_vis_fh,
+        "target_ey": target_ey,
+        "live_min_zoom": live_min_zoom,
+        "peer_min_zoom": peer_min_zoom,
+    }
     if not elevate:
-        return _call_paired_split_crop_filters(
-            live_src=live_src,
-            peer_src=peer_src,
-            src_w=src_w,
-            src_h=src_h,
-            peer_w=peer_w,
-            peer_h=peer_h,
-            live_slot_w=live_slot_w,
-            live_slot_h=live_slot_h,
-            peer_slot_w=peer_slot_w,
-            peer_slot_h=peer_slot_h,
-            live_focus=live_focus,
-            peer_focus=peer_focus,
-            return_focus=return_focus,
-            live_offset_y=live_oy,
-            peer_offset_y=peer_oy,
-        )
+        return _call_paired_split_crop_filters(**shared_kw)
 
     target_hr = _natural_flashcard_split_headroom(
         live_src=live_src,
@@ -335,45 +386,13 @@ def _compute_paired_split_crop_filters_for_layout(
         peer_focus=peer_focus,
     )
     if target_hr <= default_hr + 1e-4:
-        return _call_paired_split_crop_filters(
-            live_src=live_src,
-            peer_src=peer_src,
-            src_w=src_w,
-            src_h=src_h,
-            peer_w=peer_w,
-            peer_h=peer_h,
-            live_slot_w=live_slot_w,
-            live_slot_h=live_slot_h,
-            peer_slot_w=peer_slot_w,
-            peer_slot_h=peer_slot_h,
-            live_focus=live_focus,
-            peer_focus=peer_focus,
-            return_focus=return_focus,
-            live_offset_y=live_oy,
-            peer_offset_y=peer_oy,
-        )
+        return _call_paired_split_crop_filters(**shared_kw)
 
     with _SPLIT_HEADROOM_LOCK:
         prev_env = os.environ.get("ZENO_SPLIT_HEADROOM")
         try:
             os.environ["ZENO_SPLIT_HEADROOM"] = f"{target_hr:.4f}"
-            res = _call_paired_split_crop_filters(
-                live_src=live_src,
-                peer_src=peer_src,
-                src_w=src_w,
-                src_h=src_h,
-                peer_w=peer_w,
-                peer_h=peer_h,
-                live_slot_w=live_slot_w,
-                live_slot_h=live_slot_h,
-                peer_slot_w=peer_slot_w,
-                peer_slot_h=peer_slot_h,
-                live_focus=live_focus,
-                peer_focus=peer_focus,
-                return_focus=return_focus,
-                live_offset_y=live_oy,
-                peer_offset_y=peer_oy,
-            )
+            res = _call_paired_split_crop_filters(**shared_kw)
             live_crop, peer_crop = res[0], res[1]
             pad_a = int(live_crop.get("pad_top") or 0)
             pad_b = int(peer_crop.get("pad_top") or 0)
@@ -384,23 +403,7 @@ def _compute_paired_split_crop_filters_for_layout(
             if excess > 0.001:
                 safe_hr = round(max(default_hr, target_hr - excess - 0.002), 4)
                 os.environ["ZENO_SPLIT_HEADROOM"] = f"{safe_hr:.4f}"
-                res = _call_paired_split_crop_filters(
-                    live_src=live_src,
-                    peer_src=peer_src,
-                    src_w=src_w,
-                    src_h=src_h,
-                    peer_w=peer_w,
-                    peer_h=peer_h,
-                    live_slot_w=live_slot_w,
-                    live_slot_h=live_slot_h,
-                    peer_slot_w=peer_slot_w,
-                    peer_slot_h=peer_slot_h,
-                    live_focus=live_focus,
-                    peer_focus=peer_focus,
-                    return_focus=return_focus,
-                    live_offset_y=live_oy,
-                    peer_offset_y=peer_oy,
-                )
+                res = _call_paired_split_crop_filters(**shared_kw)
             return res
         finally:
             if prev_env is None:
@@ -410,7 +413,7 @@ def _compute_paired_split_crop_filters_for_layout(
 
 FORMATS_LAYOUTS_DIR: Path = ROOT / "formats" / "layouts"
 
-_SILENT_CLIP_NAME_RE = re.compile(r"(?:listen|listening|idle|silent|\bsv\b|\bsfv\b|extra)", re.I)
+_SILENT_CLIP_NAME_RE = re.compile(r"(?:listen|listening|idle|silent|\bsv\b|\bsfv\b|without[\s_-]*dialog(?:ue)?|extra)", re.I)
 
 
 def _segment_hold_tail(seg: Optional[Dict[str, Any]]) -> float:
@@ -1983,6 +1986,11 @@ def _split_seg_sig(seg: Dict[str, Any]) -> str:
         _parse_offset_y(peer.get("offset_y")),
         str(seg.get("hold_src") or ""),
         round(float(h_start or 0.0), 3),
+        seg.get("focus"),
+        peer.get("focus"),
+        bool(seg.get("broll") or seg.get("is_broll")),
+        bool(peer.get("broll") or peer.get("is_broll")),
+        _segment_is_muted(seg),
     ], default=str)
 
 
@@ -2092,6 +2100,21 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
             except Exception:
                 pass
 
+    def _valid_focus(val: Any) -> Optional[List[float]]:
+        if isinstance(val, (list, tuple)) and len(val) >= 2:
+            try:
+                return [float(val[0]), float(val[1])]
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _is_explicit_broll(s_dict: Dict[str, Any], p_path: Path, is_muted_seg: bool = False) -> bool:
+        if s_dict.get("broll") or s_dict.get("is_broll"):
+            return True
+        if is_muted_seg and re.search(r"\b(?:b[_-]?roll|cutaway)\b", p_path.stem, re.I):
+            return True
+        return False
+
     for seg in segs:
         lay = normalize_layout_name(seg.get("layout"))
         peer = seg.get("peer") if isinstance(seg.get("peer"), dict) else {}
@@ -2110,6 +2133,10 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
             slot_speakers.setdefault((lay, live_slot), set()).add(live_sp)
         if peer_sp:
             slot_speakers.setdefault((lay, peer_slot), set()).add(peer_sp)
+        live_focus = _valid_focus(seg.get("focus"))
+        peer_focus = _valid_focus(peer.get("focus"))
+        live_broll = _is_explicit_broll(seg, live_src, _segment_is_muted(seg))
+        peer_broll = _is_explicit_broll(peer, peer_src, True)
         hold_part: Optional[Dict[str, Any]] = None
         hold_raw = seg.get("hold_src")
         if hold_raw:
@@ -2125,6 +2152,8 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
                         "role": "hold",
                         "speaker": live_sp,
                         "offset_y_raw": _parse_offset_y(seg.get("offset_y")),
+                        "focus": live_focus,
+                        "is_broll": live_broll,
                     }
                     if live_sp:
                         src_to_speaker.setdefault(str(hold_path), live_sp)
@@ -2142,6 +2171,8 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
                 "role": "live",
                 "speaker": live_sp,
                 "offset_y_raw": _parse_offset_y(seg.get("offset_y")),
+                "focus": live_focus,
+                "is_broll": live_broll,
             },
             "peer": {
                 "slot": peer_slot,
@@ -2151,6 +2182,8 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
                 "role": "peer",
                 "speaker": peer_sp,
                 "offset_y_raw": _parse_offset_y(peer.get("offset_y")),
+                "focus": peer_focus,
+                "is_broll": peer_broll,
             },
             "hold": hold_part,
         }
@@ -2248,7 +2281,8 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
 
     def _bbox(path: Path) -> Optional[List[float]]:
         try:
-            return (analyze_clip_vision(path) or {}).get("bbox_norm")
+            vis = analyze_clip_vision(path) or {}
+            return vis.get("bbox_norm") if _vis_has_real_face_safe(vis) else None
         except Exception:
             return None
 
@@ -2264,6 +2298,9 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
         live_n: Dict[str, int] = {}
         key_to_path: Dict[str, Path] = {}
         key_to_oy: Dict[str, float] = {}
+        key_to_focus: Dict[str, Optional[List[float]]] = {}
+        key_to_broll: Dict[str, bool] = {}
+        key_to_size: Dict[str, Tuple[int, int]] = {}
         order: List[str] = []
         for part in parts:
             k = part["clip_key"]
@@ -2271,7 +2308,14 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
                 first_t[k] = part["t"]
                 key_to_path[k] = part["src"]
                 key_to_oy[k] = float(part.get("offset_y") or 0.0)
+                key_to_focus[k] = part.get("focus")
+                key_to_broll[k] = bool(part.get("is_broll"))
+                key_to_size[k] = part["size"]
                 order.append(k)
+            elif key_to_focus.get(k) is None and part.get("focus") is not None:
+                key_to_focus[k] = part.get("focus")
+            if part.get("is_broll"):
+                key_to_broll[k] = True
             peer_n[k] = peer_n.get(k, 0) + (1 if part["role"] == "peer" else 0)
             live_n[k] = live_n.get(k, 0) + (1 if part["role"] == "live" else 0)
         order.sort(key=lambda q: -peer_n.get(q, 0))  # silent listener clip anchors the panel frame
@@ -2300,6 +2344,11 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
                 if reg is not None:
                     member[(key[0], key[1], k)] = (cl, reg, how)
                     cl["clips"][k] = {"path": path, "t": first_t[k], "live_n": live_n.get(k, 0)}
+                    cl["regs"].append((dims, reg))
+                    if cl.get("focus") is None and key_to_focus.get(k) is not None:
+                        cl["focus"] = key_to_focus.get(k)
+                    if key_to_broll.get(k):
+                        cl["is_broll"] = True
                     placed = True
                     break
             if not placed:
@@ -2309,13 +2358,151 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
                     "bbox": bb,
                     "dims": dims,
                     "geom": None,
+                    "lay": key[0],
                     "slot": key[1],
+                    "slot_size": key_to_size[k],
                     "offset_y": oy_k,
+                    "focus": key_to_focus.get(k),
+                    "is_broll": bool(key_to_broll.get(k)),
+                    "regs": [],
+                    "min_zoom": 1.0,
+                    "is_th": False,
+                    "th_panel": None,
                     "clips": {k: {"path": path, "t": first_t[k], "live_n": live_n.get(k, 0)}},
                     "colour": None,
                 }
                 clusters[key].append(cl)
                 member[(key[0], key[1], k)] = (cl, {"a": 1.0, "tx": 0.0, "ty": 0.0}, "reference")
+
+    # Classify each cluster (talking-head vs B-roll) and compute ORB horizontal slack zoom
+    canon_fn = getattr(_vision_tracker, "_canonical_split_clip", None)
+    is_th_fn = getattr(_vision_tracker, "_is_talking_head_panel", None)
+    group_targets_fn = getattr(_vision_tracker, "compute_split_group_targets", None)
+    all_clusters: Dict[int, Dict[str, Any]] = {}
+    for key, cls_list in clusters.items():
+        for cl in cls_list:
+            all_clusters[id(cl)] = cl
+            rw, rh = cl["dims"]
+            slot_w, slot_h = cl["slot_size"]
+            s0 = max(slot_w / float(max(1, rw)), slot_h / float(max(1, rh)))
+            sw0 = rw * s0
+
+            ref_canon = canon_fn(cl["ref"]) if callable(canon_fn) else cl["ref"]
+            vis_ref: Dict[str, Any] = {}
+            try:
+                p_vis = ref_canon if (isinstance(ref_canon, Path) and ref_canon.is_file()) else cl["ref"]
+                vis_ref = analyze_clip_vision(p_vis) or {}
+                if not _vis_has_real_face_safe(vis_ref) and p_vis != cl["ref"] and cl["ref"].is_file():
+                    vis_orig = analyze_clip_vision(cl["ref"]) or {}
+                    if _vis_has_real_face_safe(vis_orig):
+                        vis_ref = vis_orig
+            except Exception:
+                vis_ref = {}
+            if vis_ref and "aspect_ratio" not in vis_ref and rh > 0:
+                vis_ref = dict(vis_ref, aspect_ratio=round(rw / float(rh), 4))
+
+            fh_val = 0.28
+            fx_val = float(cl["focus"][0]) if cl.get("focus") else 0.5
+            if _vis_has_real_face_safe(vis_ref):
+                bb_r = vis_ref.get("bbox_norm") or []
+                if len(bb_r) >= 4 and float(bb_r[3]) > float(bb_r[1]):
+                    fh_val = float(bb_r[3]) - float(bb_r[1])
+                    cx_r = 0.5 * (float(bb_r[0]) + float(bb_r[2]))
+                    v_f = vis_ref.get("focus")
+                    fx_val = 0.65 * cx_r + 0.35 * float(v_f[0]) if (v_f and len(v_f) >= 2) else cx_r
+
+            if cl["regs"]:
+                max_tx_px = max(
+                    abs((s0 / max(0.01, r_d["a"])) * float(r_d["tx"]))
+                    for _, r_d in cl["regs"]
+                )
+                if max_tx_px > 1.5 and sw0 < slot_w + 2.0 * (max_tx_px + 2.0):
+                    min_edge = max(0.20, min(fx_val, 1.0 - fx_val))
+                    need_sw = (0.5 * slot_w + max_tx_px + 2.0) / min_edge
+                    cl["min_zoom"] = round(min(1.14, max(1.0, need_sw / max(1.0, sw0))), 4)
+
+            is_th = (
+                bool(is_th_fn(vis_ref, fh_val, slot_w, slot_h, is_muted_broll=cl["is_broll"]))
+                if callable(is_th_fn)
+                else (not cl["is_broll"] and _vis_has_real_face_safe(vis_ref) and fh_val >= 0.13)
+            )
+            cl["is_th"] = is_th
+            if is_th:
+                cl["th_panel"] = {
+                    "src": cl["ref"],
+                    "w_in": rw,
+                    "h_in": rh,
+                    "slot_w": slot_w,
+                    "slot_h": slot_h,
+                    "focus": cl.get("focus"),
+                    "is_broll": cl["is_broll"],
+                    "min_zoom": cl["min_zoom"],
+                }
+
+    # Union-Find across paired talking heads AND multiple talking heads sharing the same (lay, slot)
+    uf_parent: Dict[int, int] = {cid: cid for cid, c in all_clusters.items() if c["is_th"]}
+
+    def _uf_find(cid: int) -> int:
+        while uf_parent[cid] != cid:
+            uf_parent[cid] = uf_parent[uf_parent[cid]]
+            cid = uf_parent[cid]
+        return cid
+
+    def _uf_union(c1: int, c2: int) -> None:
+        r1, r2 = _uf_find(c1), _uf_find(c2)
+        if r1 != r2:
+            uf_parent[r2] = r1
+
+    for row in rows:
+        lay = row["lay"]
+        c_l = member[(lay, row["live"]["slot"], row["live"]["clip_key"])][0]
+        c_p = member[(lay, row["peer"]["slot"], row["peer"]["clip_key"])][0]
+        if c_l["is_th"] and c_p["is_th"]:
+            _uf_union(id(c_l), id(c_p))
+
+    for key, cls_list in clusters.items():
+        th_cls = [c for c in cls_list if c["is_th"]]
+        if len(th_cls) >= 2:
+            base_id = id(th_cls[0])
+            for other_c in th_cls[1:]:
+                _uf_union(base_id, id(other_c))
+
+    uf_groups: Dict[int, List[Dict[str, Any]]] = {}
+    for cid in uf_parent:
+        uf_groups.setdefault(_uf_find(cid), []).append(all_clusters[cid])
+
+    group_targets: Dict[int, Tuple[Optional[float], Optional[float]]] = {}
+    if callable(group_targets_fn):
+        for root_id, g_cls in uf_groups.items():
+            if len(g_cls) < 2:
+                continue
+            g_cids = {id(c) for c in g_cls}
+            g_lay = g_cls[0]["lay"]
+            g_has_fc = any(
+                _has_flashcards(r.get("seg") or {}, plan)
+                for r in rows
+                if r["lay"] == g_lay
+                and (
+                    id(member[(g_lay, r["live"]["slot"], r["live"]["clip_key"])][0]) in g_cids
+                    or id(member[(g_lay, r["peer"]["slot"], r["peer"]["clip_key"])][0]) in g_cids
+                )
+            )
+            eff_hr: Optional[float] = None
+            if g_lay == "split_h" and g_has_fc and "ZENO_SPLIT_HEADROOM" not in os.environ:
+                default_hr = round(TARGET_HEADROOM_PCT / 100.0, 4)
+                avails: List[float] = []
+                for c in g_cls:
+                    y0_est = _estimate_clip_head_top_y0(c["ref"], c.get("focus"))
+                    if y0_est is not None:
+                        cw, ch = c["dims"]
+                        sw_s, sh_s = c["slot_size"]
+                        s0_c = max(sw_s / float(max(1, cw)), sh_s / float(max(1, ch)))
+                        hr_r = (ch * s0_c) / float(max(1, sh_s))
+                        avails.append(y0_est * hr_r)
+                if avails:
+                    eff_hr = round(max(default_hr, min(FLASHCARD_SPLIT_HEADROOM, min(avails))), 4)
+            t_vfh, t_ey = group_targets_fn([c["th_panel"] for c in g_cls], common_hr=eff_hr)
+            group_targets[root_id] = (t_vfh, t_ey)
 
     def _geom_crop(lay: str, part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         cl, reg, how = member[(lay, part["slot"], part["clip_key"])]
@@ -2404,6 +2591,11 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
             cluster_has_fc = any(_has_flashcards(r.get("seg") or {}, plan) for r in cluster_rows)
             live_oy = float(cl_live.get("offset_y") or 0.0)
             peer_oy = float(cl_peer.get("offset_y") or 0.0)
+            grp_vfh, grp_ey = (None, None)
+            if cl_live["is_th"] and _uf_find(id(cl_live)) in group_targets:
+                grp_vfh, grp_ey = group_targets[_uf_find(id(cl_live))]
+            elif cl_peer["is_th"] and _uf_find(id(cl_peer)) in group_targets:
+                grp_vfh, grp_ey = group_targets[_uf_find(id(cl_peer))]
             g_live, g_peer = _compute_paired_split_crop_filters_for_layout(
                 lay=lay,
                 seg=row.get("seg"),
@@ -2418,9 +2610,17 @@ def _compute_split_locks(plan: Dict[str, Any], W: int, H: int) -> Dict[str, Any]
                 live_slot_h=row["live"]["size"][1],
                 peer_slot_w=row["peer"]["size"][0],
                 peer_slot_h=row["peer"]["size"][1],
+                live_focus=cl_live.get("focus"),
+                peer_focus=cl_peer.get("focus"),
                 live_offset_y=live_oy,
                 peer_offset_y=peer_oy,
                 force_flashcards=cluster_has_fc,
+                live_is_broll=cl_live["is_broll"],
+                peer_is_broll=cl_peer["is_broll"],
+                target_vis_fh=grp_vfh,
+                target_ey=grp_ey,
+                live_min_zoom=cl_live["min_zoom"],
+                peer_min_zoom=cl_peer["min_zoom"],
             )
             if cl_live.get("geom") is None:
                 cl_live["geom"] = dict(g_live, offset_y=live_oy)
@@ -2717,6 +2917,7 @@ def _build_slot_video_chain(
     speed: float = 1.0,
     src_dur: Optional[float] = None,
     play_frames: Optional[int] = None,
+    max_slot_fill: Optional[float] = None,
 ) -> str:
     """Build an FFmpeg video filter chain scaling and cropping `input_label` into
     `(slot_w, slot_h)` with eye-anchored headroom (`14%`), speed retiming, and sub-pixel zoom.
@@ -2760,15 +2961,25 @@ def _build_slot_video_chain(
             chain.append(prebuilt_crop_filter)
             z_fx, z_fy, z_fx1, z_fy1 = fx, fy, fx1, fy1
         else:
-            crop_info = compute_slot_crop_filter(
-                src_w=src_w,
-                src_h=src_h,
-                slot_w=slot_w,
-                slot_h=slot_h,
-                bbox_norm=bbox_norm,
-                focus=[fx, fy],
-                headroom_pct=headroom_pct,
-            )
+            slot_kw: Dict[str, Any] = {
+                "src_w": src_w,
+                "src_h": src_h,
+                "slot_w": slot_w,
+                "slot_h": slot_h,
+                "bbox_norm": bbox_norm,
+                "focus": [fx, fy],
+                "headroom_pct": headroom_pct,
+            }
+            if max_slot_fill is not None:
+                try:
+                    sc_params = inspect.signature(compute_slot_crop_filter).parameters
+                    if "max_slot_fill" in sc_params or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD for p in sc_params.values()
+                    ):
+                        slot_kw["max_slot_fill"] = float(max_slot_fill)
+                except (TypeError, ValueError):
+                    pass
+            crop_info = compute_slot_crop_filter(**slot_kw)
             chain.append(crop_info["filter"])
             sf = crop_info.get("slot_focus")
             if isinstance(sf, (list, tuple)) and len(sf) >= 2:
@@ -3089,7 +3300,7 @@ def build_segment_ffmpeg_args(
                 _build_slot_video_chain(
                     hold_in_label, "[hold_slot_raw]", hold_w, hold_h, slot_w_e, slot_h_e,
                     fps, hold_dur_exact, [hfx, hfy], 1.0, 1.0,
-                    bbox_norm=hold_vis.get("bbox_norm"),
+                    bbox_norm=(hold_vis.get("bbox_norm") if _vis_has_real_face_safe(hold_vis) else None),
                     exact=exact_fit,
                     zoom_style="none",
                     color_filter=(color_filter if apply_color else None),
@@ -3556,6 +3767,10 @@ def build_segment_ffmpeg_args(
         caller_name = _speaker_display_name(str(seg.get("speaker") or "nova"), plan)
         call_sec = int(round(float(seg.get("_timeline_start", 42.0))))
         timer_str = f"{call_sec // 60:02d}:{call_sec % 60:02d}"
+        vc_live_vis = analyze_clip_vision(src) if src.is_file() else {}
+        vc_peer_vis = analyze_clip_vision(peer_src) if peer_src.is_file() else {}
+        vc_live_bb = vc_live_vis.get("bbox_norm") if _vis_has_real_face_safe(vc_live_vis) else None
+        vc_peer_bb = vc_peer_vis.get("bbox_norm") if _vis_has_real_face_safe(vc_peer_vis) else None
 
         if variant == "gmeet_grid":
             t0_geom, t1_geom = geom["tiles"][0], geom["tiles"][1]
@@ -3578,6 +3793,7 @@ def build_segment_ffmpeg_args(
             fc.append(
                 _build_slot_video_chain(
                     "[0:v]", live_lbl, src_w, src_h, tw, th, fps, play_exact, [fx, fy], z0, z1,
+                    bbox_norm=vc_live_bb, max_slot_fill=0.52,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1], color_filter=color_filter,
                     zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
@@ -3588,6 +3804,7 @@ def build_segment_ffmpeg_args(
             fc.append(
                 _build_slot_video_chain(
                     peer_in_label, "[v_peer]", peer_w, peer_h, tw, th, fps, exact, peer_focus, 1.0, 1.0,
+                    bbox_norm=vc_peer_bb, max_slot_fill=0.52,
                     zoom_style="none",
                 )
             )
@@ -3622,6 +3839,7 @@ def build_segment_ffmpeg_args(
             fc.append(
                 _build_slot_video_chain(
                     "[0:v]", main_lbl, src_w, src_h, W, H, fps, play_exact, [fx, fy], z0, z1,
+                    bbox_norm=vc_live_bb, max_slot_fill=0.58,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1], color_filter=color_filter,
                     zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
@@ -3632,6 +3850,7 @@ def build_segment_ffmpeg_args(
             fc.append(
                 _build_slot_video_chain(
                     peer_in_label, "[v_pip_raw]", peer_w, peer_h, pw, ph, fps, exact, peer_focus, 1.0, 1.0,
+                    bbox_norm=vc_peer_bb, max_slot_fill=0.52,
                     zoom_style="none",
                 )
             )
@@ -3672,11 +3891,13 @@ def build_segment_ffmpeg_args(
         if active_top:
             pip_vis = analyze_clip_vision(src) if src.is_file() else {}
             bg_vis = analyze_clip_vision(peer_src) if peer_src.is_file() else {}
+            pip_bb = pip_vis.get("bbox_norm") if _vis_has_real_face_safe(pip_vis) else None
+            bg_bb = bg_vis.get("bbox_norm") if _vis_has_real_face_safe(bg_vis) else None
             fc.append(
                 _build_slot_video_chain(
                     peer_in_label, "[v_bg]", peer_w, peer_h, W, H, fps, exact, peer_focus, 1.0, 1.0,
                     zoom_style="none",
-                    bbox_norm=bg_vis.get("bbox_norm"), headroom_pct=25.8,
+                    bbox_norm=bg_bb, headroom_pct=25.8, max_slot_fill=0.58,
                 )
             )
             pip_lbl = "[v_pip_pre]" if has_live_hold else "[v_pip_raw]"
@@ -3685,7 +3906,7 @@ def build_segment_ffmpeg_args(
                     "[0:v]", pip_lbl, src_w, src_h, pw, ph, fps, play_exact, [fx, fy], z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1],
-                    bbox_norm=pip_vis.get("bbox_norm"), color_filter=color_filter,
+                    bbox_norm=pip_bb, color_filter=color_filter, max_slot_fill=0.52,
                     zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
@@ -3694,13 +3915,15 @@ def build_segment_ffmpeg_args(
         else:
             bg_vis = analyze_clip_vision(src) if src.is_file() else {}
             pip_vis = analyze_clip_vision(peer_src) if peer_src.is_file() else {}
+            bg_bb = bg_vis.get("bbox_norm") if _vis_has_real_face_safe(bg_vis) else None
+            pip_bb = pip_vis.get("bbox_norm") if _vis_has_real_face_safe(pip_vis) else None
             bg_lbl = "[v_bg_pre]" if has_live_hold else "[v_bg]"
             fc.append(
                 _build_slot_video_chain(
                     "[0:v]", bg_lbl, src_w, src_h, W, H, fps, play_exact, [fx, fy], z0, z1,
                     zoom_style=zoom_style, zoom_at=zoom_at, zoom_dur=zoom_dur,
                     focus_end=[fx1, fy1],
-                    bbox_norm=bg_vis.get("bbox_norm"), color_filter=color_filter, headroom_pct=25.8,
+                    bbox_norm=bg_bb, color_filter=color_filter, headroom_pct=25.8, max_slot_fill=0.58,
                     zoom_peak=zoom_peak, speed=spd, src_dur=src_dur, play_frames=play_frames,
                 )
             )
@@ -3710,7 +3933,7 @@ def build_segment_ffmpeg_args(
                 _build_slot_video_chain(
                     peer_in_label, "[v_pip_raw]", peer_w, peer_h, pw, ph, fps, exact, peer_focus, 1.0, 1.0,
                     zoom_style="none",
-                    bbox_norm=pip_vis.get("bbox_norm"),
+                    bbox_norm=pip_bb, max_slot_fill=0.52,
                 )
             )
 

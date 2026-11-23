@@ -645,7 +645,18 @@ def parse_edl(path_or_text: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
     segments: List[Dict[str, Any]] = []
     marks: List[Dict[str, Any]] = []
     sfx_list: List[Dict[str, Any]] = []
+    seen_sfx: set = set()
     src_dir: str = ""
+
+    def _append_sfx_dedup(item: Dict[str, Any]) -> None:
+        key = (
+            str(item.get("segment") or "").strip(),
+            str(item.get("file") or "").strip().lower(),
+            round(float(item.get("at", 0.0) or 0.0), 2),
+        )
+        if key not in seen_sfx:
+            seen_sfx.add(key)
+            sfx_list.append(item)
 
     header_re = re.compile(
         r"^#\s*(output|script|style|subs|page_wrong|page_right|page|"
@@ -750,6 +761,7 @@ def parse_edl(path_or_text: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
                         m_sy = re.match(r"^split_y=([0-9.]+)%?$", tok, re.I)
                         m_fn = re.match(r"^(?:font|font_family)=(.+)$", tok, re.I)
                         m_wc = re.match(r"^with_cards=(on|off|true|false|1|0)$", tok, re.I)
+                        m_wb = re.match(r"^with_banners=(on|off|true|false|1|0)$", tok, re.I)
                         if m_sz:
                             extra_subs["size"] = float(m_sz.group(1))
                             continue
@@ -763,6 +775,9 @@ def parse_edl(path_or_text: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
                             continue
                         if m_wc:
                             extra_subs["with_cards"] = m_wc.group(1).lower() in ("on", "true", "1")
+                            continue
+                        if m_wb:
+                            extra_subs["with_banners"] = m_wb.group(1).lower() in ("on", "true", "1")
                             continue
                         m_st = re.match(r"^style=(.+)$", tok, re.I)
                         if m_y:
@@ -898,7 +913,7 @@ def parse_edl(path_or_text: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
                             gv = float(sv.lower().rstrip("db").strip())
                             s_entry["gain_db"] = int(gv) if gv.is_integer() else gv
                 if s_entry["segment"]:
-                    sfx_list.append(s_entry)
+                    _append_sfx_dedup(s_entry)
             continue
 
         if line.lower().startswith("mark ") and not _has_top_level_pipe(line):
@@ -987,7 +1002,7 @@ def parse_edl(path_or_text: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
                 if len(pcols) >= 4 and pcols[3]:
                     gv_s = float(_unquote(pcols[3]).lower().rstrip("db").strip())
                     s_row["gain_db"] = int(gv_s) if gv_s.is_integer() else gv_s
-                sfx_list.append(s_row)
+                _append_sfx_dedup(s_row)
                 continue
 
             if len(pcols) >= 3 and re.match(r"^([\d.]+)\s*(?:-|\.\.)\s*([\d.]+)$", pcols[2]):
@@ -1275,7 +1290,7 @@ def parse_edl(path_or_text: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
                 if len(s_parts) >= 3 and s_parts[2]:
                     gv = float(_unquote(s_parts[2]).lower().rstrip("db").strip())
                     s_item["gain_db"] = int(gv) if gv.is_integer() else gv
-                sfx_list.append(s_item)
+                _append_sfx_dedup(s_item)
 
             elif tok_low.startswith(("banner:", "stop:")):
                 rest_b = tok.split(":", 1)[1]
@@ -1473,6 +1488,10 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
                 s_line += " with_cards=on"
             elif subs_val.get("with_cards") is False:
                 s_line += " with_cards=off"
+            if subs_val.get("with_banners") is True:
+                s_line += " with_banners=on"
+            elif subs_val.get("with_banners") is False:
+                s_line += " with_banners=off"
             lines.append(s_line)
 
     if plan_dict.get("cards_off") is True:

@@ -640,6 +640,32 @@ def layout_hint_from_direction(text: str) -> str:
     return ""
 
 
+def _apply_direction_layout(
+    text: str,
+    current_hint: str,
+    current_panels: Dict[str, str],
+) -> Tuple[str, Dict[str, str], bool]:
+    """Extract layout hint & panels from `text` while preserving sticky split state across bare scene shifts."""
+    vis_panels = panels_from_text(text)
+    explicit_split_axis = bool(
+        re.search(r"\b(?:horizontal|vertical|left|right|top|bottom|pip|video\s*call|chat\s*bar|overlay)\b", text or "", re.I)
+    )
+    vis_hint = split_layout_from_panels(vis_panels) or layout_hint_from_direction(text)
+    is_takeover = bool(_FULLSCREEN_HINT_RE.search(text or "") or _TAKEOVER_DIR_RE.match((text or "").strip()))
+    if is_takeover and not vis_hint:
+        return "single", {}, True
+    if vis_hint:
+        if (
+            not vis_panels
+            and not explicit_split_axis
+            and current_hint in ("split_h", "split_v", "top_pip", "video_call", "chat_bar")
+        ):
+            return current_hint, dict(current_panels), False
+        next_panels = vis_panels if vis_panels else (dict(current_panels) if vis_hint == current_hint else {})
+        return vis_hint, next_panels, False
+    return current_hint, dict(current_panels), False
+
+
 def _drop_repeated_dialogue(lines: List[Dict[str, Any]], min_run: int = 3) -> List[Dict[str, Any]]:
     """Deduplicate scripts that paste the dialogue list twice (e.g. scrolling-text preview followed by speaker-labelled lines).
     Retains the run with more named speakers, preserving scene metadata on its lines."""
@@ -754,10 +780,23 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             continue
         if _META_LINE_RE.match(s):
             val_m = s.split(":", 1)[1].strip()
-            if re.match(r"visuals?\b", s, re.I) and val_m and not re.search(r"https?://", val_m, re.I):
+            if re.match(r"visuals?(?:\s+changes?)?\b", s, re.I) and val_m and not re.search(r"https?://", val_m, re.I):
                 meta["concept_brief"] = (meta["concept_brief"] + " | " + val_m).strip(" |")
                 if not current_visual and not meta["scenes"]:
                     current_visual = val_m
+                elif meta["scenes"] and (
+                    re.match(r"visuals?\s+changes?\b", s, re.I) or not meta["scenes"][-1].get("visual")
+                ):
+                    current_visual = val_m
+                    meta["scenes"][-1]["visual"] = val_m
+                current_hint, current_panels, cleared_fc = _apply_direction_layout(
+                    val_m, current_hint, current_panels
+                )
+                if cleared_fc:
+                    current_flashcard = None
+                    card_started = False
+                if meta["scenes"] and current_hint:
+                    meta["scenes"][-1]["layout_hint"] = current_hint
             continue
 
         s_unwrapped = _unwrap_bracketed(s)
@@ -805,8 +844,9 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             m_num = re.search(r"\d+", current_scene)
             scene_no = int(m_num.group()) if m_num else scene_no
             current_visual = (m_scene.group(2) or "").strip()
-            current_panels = panels_from_text(current_visual)
-            current_hint = split_layout_from_panels(current_panels) or layout_hint_from_direction(current_visual)
+            current_hint, current_panels, _ = _apply_direction_layout(
+                current_visual, current_hint, current_panels
+            )
             current_flashcard = None
             card_started = False
             scene_default_speaker = ""
@@ -825,8 +865,9 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             scene_no += 1
             current_scene = f"Scene {scene_no}"
             current_visual = m_scene_dir.group(1).strip(" :-–—") or s_unwrapped
-            current_panels = panels_from_text(current_visual)
-            current_hint = split_layout_from_panels(current_panels) or layout_hint_from_direction(current_visual)
+            current_hint, current_panels, _ = _apply_direction_layout(
+                s_unwrapped, current_hint, current_panels
+            )
             current_flashcard = None
             card_started = False
             scene_default_speaker = ""
@@ -864,7 +905,16 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
             meta["scenes"].append({"scene": current_scene, "visual": current_visual, "layout_hint": current_hint})
             continue
 
-        # 3c. Layout cue note
+        # 3c. Layout cue note (including standalone "Left: ... | Right: ..." / "Top: ... | Bottom: ..." lines)
+        if _PANELS_RE.match(s_unwrapped):
+            p_map = panels_from_text(s_unwrapped)
+            p_hint = split_layout_from_panels(p_map)
+            if p_map and p_hint:
+                current_panels = p_map
+                current_hint = p_hint
+                if meta["scenes"]:
+                    meta["scenes"][-1]["layout_hint"] = current_hint
+                continue
         if _LAYOUT_CUE_RE.match(s) and not re.match(r"^[A-Za-z][A-Za-z0-9_ ]{0,22}:\s", s):
             hint_l = layout_hint_from_direction(s)
             if hint_l:
@@ -912,12 +962,10 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
         if m_vis_dir:
             in_characters_block = False
             current_visual = m_vis_dir.group(1).strip()
-            vis_panels = panels_from_text(current_visual)
-            vis_hint = split_layout_from_panels(vis_panels) or layout_hint_from_direction(current_visual)
-            if vis_hint:
-                current_hint, current_panels = vis_hint, vis_panels
-            elif _FULLSCREEN_HINT_RE.search(current_visual):
-                current_hint, current_panels = "single", {}
+            current_hint, current_panels, cleared_fc = _apply_direction_layout(
+                current_visual, current_hint, current_panels
+            )
+            if cleared_fc:
                 current_flashcard = None
                 card_started = False
             if meta["scenes"]:

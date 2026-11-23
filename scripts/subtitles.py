@@ -1433,33 +1433,48 @@ def _synthesize_words_over_spans(
 # ---------------------------------------------------------------------------
 # Multilingual Phrase Chunking & Strictly Monotonic Cues
 # ---------------------------------------------------------------------------
-def _visual_units(text: str) -> float:
+_WIDE_GEOMETRIC_FONTS = {
+    "montserrat",
+    "outfit",
+    "archivo black",
+    "bungee",
+    "righteous",
+    "poppins",
+    "barlow",
+    "dm sans",
+}
+
+
+def _visual_units(text: str, *, uppercase: bool = False, wide_font: bool = False) -> float:
     """Estimate horizontal rendered width of `text` in normalized character units (~40px at 54px font size).
     Accounts for wider Tamil/Malayalam glyphs (+30%), Devanagari/Bengali/Gurmukhi/Gujarati/Odia/Telugu/Kannada
-    glyphs (+15%), narrow lowercase Latin (-20%), and non-spacing/spacing Indic vowel signs."""
+    glyphs (+15%), uppercase transforms, wide geometric Latin fonts, and Indic vowel signs (`Mc` / `Mn`)."""
     units = 0.0
     for ch in text:
         cat = unicodedata.category(ch)
-        if cat == "Mn":
-            continue
         cp = ord(ch)
+        is_indic_cp = (0x0900 <= cp <= 0x0D7F)
+        if cat == "Mn":
+            if is_indic_cp:
+                units += 0.18
+            continue
         if 0x0B80 <= cp <= 0x0BFF or 0x0D00 <= cp <= 0x0D7F:      # Tamil, Malayalam
             w = 1.30
-        elif (
-            0x0900 <= cp <= 0x097F                                 # Devanagari
-            or 0x0980 <= cp <= 0x09FF                              # Bengali
-            or 0x0A00 <= cp <= 0x0A7F                              # Gurmukhi
-            or 0x0A80 <= cp <= 0x0AFF                              # Gujarati
-            or 0x0B00 <= cp <= 0x0B7F                              # Odia
-            or 0x0C00 <= cp <= 0x0C7F                              # Telugu
-            or 0x0C80 <= cp <= 0x0CFF                              # Kannada
-        ):
+        elif is_indic_cp:                                           # Other Indic scripts
             w = 1.15
         elif cp < 0x0250:                                           # Latin
-            w = 1.0 if (ch.isupper() or ch.isdigit()) else (0.45 if ch in "il.,'!|:;" else 0.80)
+            if uppercase and ch.isalpha():
+                w = 1.0
+            else:
+                w = 1.0 if (ch.isupper() or ch.isdigit()) else (0.45 if ch in "il.,'!|:;" else 0.80)
+            if wide_font:
+                w *= 1.10
         else:
             w = 1.0
-        units += w * (0.5 if cat == "Mc" else 1.0)
+        if cat == "Mc":
+            units += w * (0.65 if is_indic_cp else 0.5)
+        else:
+            units += w
     return units
 
 
@@ -1513,7 +1528,12 @@ def _is_no_start(text: str) -> bool:
     return bool(c) and (c in _NO_START or c.startswith(_NO_START_PREFIX))
 
 
-def _chunk_continuous_phrase(run_words: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+def _chunk_continuous_phrase(
+    run_words: List[Dict[str, Any]],
+    *,
+    uppercase: bool = False,
+    wide_font: bool = False,
+) -> List[List[Dict[str, Any]]]:
     """Partition an unbroken speech run into single-row caption cards via dynamic programming:
     rewards breaks after clause/sentence punctuation, penalizes orphan 1-word cards, numbers split
     from units, possessives/prepositions at card ends, and postpositions/light verbs at card starts."""
@@ -1522,7 +1542,7 @@ def _chunk_continuous_phrase(run_words: List[Dict[str, Any]]) -> List[List[Dict[
         return []
     has_indic = any(INDIC_RE.search(w["text"]) for w in run_words)
     max_w = MAX_WORDS_PER_CUE
-    units = [_visual_units(w["text"]) for w in run_words]
+    units = [_visual_units(w["text"], uppercase=uppercase, wide_font=wide_font) for w in run_words]
     inf = float("inf")
     best = [inf] * (n + 1)
     prev = [0] * (n + 1)
@@ -1571,7 +1591,14 @@ def _chunk_continuous_phrase(run_words: List[Dict[str, Any]]) -> List[List[Dict[
     return [c for c in chunks if c]
 
 
-def _group_segment_words(words: List[Dict[str, Any]], gap_scale: float = 1.0) -> List[List[Dict[str, Any]]]:
+def _group_segment_words(
+    words: List[Dict[str, Any]],
+    gap_scale: float = 1.0,
+    *,
+    strike_wins: Optional[List[Tuple[float, float]]] = None,
+    uppercase: bool = False,
+    wide_font: bool = False,
+) -> List[List[Dict[str, Any]]]:
     if not words:
         return []
     eff_scale = max(1.0, float(gap_scale or 1.0))
@@ -1581,13 +1608,19 @@ def _group_segment_words(words: List[Dict[str, Any]], gap_scale: float = 1.0) ->
     cur_run: List[Dict[str, Any]] = []
     for w in words:
         if cur_run:
-            gap = w["start"] - cur_run[-1]["end"]
+            prev_end = cur_run[-1]["end"]
+            gap = w["start"] - prev_end
+            crosses_strike = bool(strike_wins) and any(
+                prev_end <= w0 + 0.01 and w1 <= w["start"] + 0.01
+                for w0, w1 in strike_wins
+            )
             glued = (
-                gap <= eff_glue_gap
+                not crosses_strike
+                and gap <= eff_glue_gap
                 and (_is_no_end(cur_run[-1]["text"]) or _is_no_start(w["text"]))
                 and not SENTENCE_END.search(cur_run[-1]["text"])
             )
-            if (gap > eff_max_gap and not glued) or SENTENCE_END.search(cur_run[-1]["text"]):
+            if crosses_strike or (gap > eff_max_gap and not glued) or SENTENCE_END.search(cur_run[-1]["text"]):
                 runs.append(cur_run)
                 cur_run = []
         cur_run.append(w)
@@ -1596,7 +1629,7 @@ def _group_segment_words(words: List[Dict[str, Any]], gap_scale: float = 1.0) ->
 
     groups: List[List[Dict[str, Any]]] = []
     for r in runs:
-        groups.extend(_chunk_continuous_phrase(r))
+        groups.extend(_chunk_continuous_phrase(r, uppercase=uppercase, wide_font=wide_font))
     return groups
 
 
@@ -1730,6 +1763,25 @@ def _segment_play_duration(seg: Dict[str, Any]) -> float:
     return src_dur / _segment_speed(seg)
 
 
+def _segment_audio_end(seg: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Return relative segment playback seconds after which audio is muted (`0 < audio_end < seg_play_dur`)."""
+    if not isinstance(seg, dict):
+        return None
+    raw = seg.get("audio_end")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(val) or val <= 0.0:
+        return None
+    play_dur = _segment_play_duration(seg)
+    if play_dur > 0.0 and val >= play_dur:
+        return None
+    return round(val, 4)
+
+
 def _src_to_seg_time(seg: Dict[str, Any], src_t: float) -> float:
     """Map absolute source timestamp `src_t` to clamped segment-relative playback seconds `[0, play_dur]`."""
     play_dur = _segment_play_duration(seg)
@@ -1804,6 +1856,202 @@ def _segment_subs_off(seg: Dict[str, Any], plan_cards_off: bool = False, with_ca
     return False
 
 
+def segment_strikethrough_windows(
+    seg: Dict[str, Any],
+    seg_start: float,
+    seg_dur: float,
+    plan: Optional[Dict[str, Any]] = None,
+    *,
+    with_banners: bool = False,
+) -> List[Tuple[float, float]]:
+    """Return merged timeline intervals `[(t0, t1), ...]` during which bottom subtitles should
+    be suppressed because a strikethrough banner (`banners` / `stop_saying`) or `mark:wrong`
+    strike beat is active on `seg`.
+    """
+    if with_banners or not isinstance(seg, dict) or float(seg_dur) <= 0.0:
+        return []
+    raw_subs = seg.get("subs")
+    subs_on = _flag_truthy(seg.get("subs_on")) or (
+        raw_subs is True or (isinstance(raw_subs, str) and raw_subs.strip().lower() in ("on", "true", "yes", "1"))
+    )
+    if subs_on:
+        return []
+
+    dur_f = max(0.0, float(seg_dur))
+    st_f = float(seg_start)
+    wins: List[Tuple[float, float]] = []
+
+    banners_raw = seg.get("banners") or seg.get("stop_saying")
+    if banners_raw:
+        parsed_banners: List[Tuple[str, float, float, bool]] = []
+        try:
+            from layouts import parse_banners
+
+            parsed_banners = parse_banners(seg, dur_f)
+        except Exception:
+            b_list = [banners_raw] if isinstance(banners_raw, (str, dict)) else list(banners_raw)
+            for b_idx, b_item in enumerate(b_list):
+                if isinstance(b_item, str):
+                    b_txt = b_item
+                    b_at = round(0.15 + b_idx * 0.65, 3)
+                    raw_dur = None
+                elif isinstance(b_item, dict):
+                    b_txt = str(b_item.get("text") or b_item.get("phrase") or "STOP SAYING")
+                    b_at = float(b_item.get("at", round(0.15 + b_idx * 0.65, 3)))
+                    raw_dur = b_item.get("duration")
+                else:
+                    continue
+                is_hdr = b_txt.lower().startswith("header:")
+                b_dur = float(raw_dur) if raw_dur is not None else (
+                    max(0.4, dur_f - b_at) if is_hdr else (0.48 if b_at + 0.48 <= dur_f + 0.02 else max(0.24, dur_f - b_at))
+                )
+                parsed_banners.append((b_txt, b_at, b_dur, is_hdr))
+        for _txt, b_at, b_dur, _is_hdr in parsed_banners:
+            if float(b_dur) <= 0.0:
+                continue
+            w0 = st_f + max(0.0, float(b_at))
+            w1 = st_f + min(dur_f, float(b_at) + float(b_dur))
+            if w1 > w0 + 0.005:
+                wins.append((w0, w1))
+
+    seg_id = str(seg.get("id") or "").strip()
+    mark_items: List[Dict[str, Any]] = []
+    raw_seg_marks = seg.get("marks")
+    if isinstance(raw_seg_marks, dict):
+        mark_items.append(raw_seg_marks)
+    elif isinstance(raw_seg_marks, (list, tuple)):
+        mark_items.extend(m for m in raw_seg_marks if isinstance(m, dict))
+    if isinstance(plan, dict) and seg_id:
+        for mk in (plan.get("marks") or ()):
+            if isinstance(mk, dict) and str(mk.get("segment") or "").strip() == seg_id:
+                mark_items.append(mk)
+
+    for mk in mark_items:
+        m_type = str(mk.get("type") or mk.get("kind") or "").strip().lower()
+        if m_type not in ("wrong", "error", "cross", "x", "red", "false", "no", "incorrect"):
+            continue
+        raw_dur = mk.get("duration")
+        if raw_dur is None:
+            m_dur = 0.48
+        else:
+            try:
+                m_dur = float(raw_dur)
+            except (TypeError, ValueError):
+                m_dur = 0.0
+        if not math.isfinite(m_dur) or m_dur <= 0.0:
+            continue
+        try:
+            m_at = max(0.0, float(mk.get("at") or 0.0))
+        except (TypeError, ValueError):
+            m_at = 0.0
+        w0 = st_f + m_at
+        w1 = st_f + min(dur_f, m_at + m_dur)
+        if w1 > w0 + 0.005:
+            wins.append((w0, w1))
+
+    if not wins:
+        return []
+    wins.sort(key=lambda x: (x[0], x[1]))
+    merged: List[Tuple[float, float]] = [wins[0]]
+    for a, b in wins[1:]:
+        pa, pb = merged[-1]
+        if a <= pb + 0.01:
+            merged[-1] = (pa, max(pb, b))
+        else:
+            merged.append((a, b))
+    return [(round(a, 4), round(b, 4)) for a, b in merged if b > a + 0.005]
+
+
+def _filter_words_for_strike_windows(
+    words: List[Dict[str, Any]],
+    wins: List[Tuple[float, float]],
+) -> List[Dict[str, Any]]:
+    """Suppress words overlapping active strikethrough/wrong-mark windows and clip edge spillovers."""
+    if not words or not wins:
+        return words
+    kept: List[Dict[str, Any]] = []
+    for w in words:
+        ws = float(w["start"])
+        we = float(w["end"])
+        dur = max(0.001, we - ws)
+        mid = 0.5 * (ws + we)
+        drop = False
+        for w0, w1 in wins:
+            if we <= w0 or ws >= w1:
+                continue
+            ov = min(we, w1) - max(ws, w0)
+            if (ws >= w0 - 0.02 and we <= w1 + 0.02) or (w0 <= mid <= w1) or (ov >= 0.5 * dur):
+                drop = True
+                break
+            if ws < w0 < we:
+                we = w0
+            if ws < w1 < we:
+                ws = w1
+            if we - ws < 0.04:
+                drop = True
+                break
+        if not drop and we - ws >= 0.04:
+            nw = dict(w)
+            nw["start"] = ws
+            nw["end"] = we
+            kept.append(nw)
+    return kept
+
+
+def _clip_cues_for_strike_windows(
+    seg_cues: List[Dict[str, Any]],
+    wins: List[Tuple[float, float]],
+) -> List[Dict[str, Any]]:
+    """Ensure cue boundaries never bleed into any suppressed strikethrough window."""
+    if not seg_cues or not wins:
+        return seg_cues
+    out: List[Dict[str, Any]] = []
+    for c in seg_cues:
+        cs = float(c["startTime"])
+        ce = float(c["endTime"])
+        words_c = [dict(cw) for cw in (c.get("words") or [])]
+        drop_cue = False
+        for w0, w1 in wins:
+            if ce <= w0 + 0.0005 or cs >= w1 - 0.0005:
+                continue
+            if cs >= w0 - 0.005 and ce <= w1 + 0.005:
+                drop_cue = True
+                break
+            if cs < w0 < ce:
+                ce = min(ce, round(w0, 3))
+                new_wc = []
+                for cw in words_c:
+                    cws = float(cw["startTime"])
+                    cwe = min(ce, float(cw["endTime"]))
+                    if cws < w0 - 0.01 and cwe - cws >= 0.02:
+                        cw["endTime"] = round(cwe, 3)
+                        new_wc.append(cw)
+                words_c = new_wc
+            if cs < w1 < ce:
+                cs = max(cs, round(w1, 3))
+                new_wc = []
+                for cw in words_c:
+                    cws = max(cs, float(cw["startTime"]))
+                    cwe = float(cw["endTime"])
+                    if cwe > w1 + 0.01 and cwe - cws >= 0.02:
+                        cw["startTime"] = round(cws, 3)
+                        new_wc.append(cw)
+                words_c = new_wc
+            if not words_c or (ce - cs) < 0.04:
+                drop_cue = True
+                break
+        if not drop_cue and words_c and (ce - cs) >= 0.04:
+            c["startTime"] = round(cs, 3)
+            c["endTime"] = round(ce, 3)
+            c["words"] = words_c
+            c["text"] = " ".join(
+                str(cw.get("text") or "").strip() for cw in words_c if str(cw.get("text") or "").strip()
+            )
+            if c["text"]:
+                out.append(c)
+    return out
+
+
 def _seg_inline_words(seg: Dict[str, Any]) -> List[str]:
     """Extract spoken caption words directly from a segment's inline `text` or `dialogue` field."""
     if not isinstance(seg, dict):
@@ -1823,11 +2071,16 @@ def _segment_tl_speech_spans(
 ) -> Tuple[List[Tuple[int, float, float]], float]:
     """Map a segment's active speech windows onto timeline coordinates `(seg_idx, tl_start, tl_end)`."""
     st_k, en_k = float(seg["start"]), float(seg["end"])
+    ae_k = _segment_audio_end(seg)
+    spd_k = _segment_speed(seg)
+    en_eff_k = min(en_k, st_k + ae_k * spd_k) if ae_k is not None else en_k
     t0_k, tl_end_k = tl_bounds
     play_k = _segment_play_duration(seg)
     seg_len_k = max(0.04, tl_end_k - t0_k)
     max_play_k = min(seg_len_k, play_k) if play_k > 0.0 else seg_len_k
-    wins, sp_dur = _active_speech_windows(st_k, en_k, spoken)
+    if ae_k is not None:
+        max_play_k = min(max_play_k, ae_k)
+    wins, sp_dur = _active_speech_windows(st_k, en_eff_k, spoken)
     tl_spans: List[Tuple[int, float, float]] = []
     if sp_dur >= 0.18:
         for wa, wb in wins:
@@ -1860,6 +2113,9 @@ def build_cues(
     work_dir: Optional[Path] = None,
     plan: Optional[Dict[str, Any]] = None,
     with_cards: Optional[bool] = None,
+    with_banners: Optional[bool] = None,
+    style: Optional[Dict[str, Any]] = None,
+    font_family: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Build strictly monotonic timeline caption cues (`cue[k].endTime <= cue[k+1].startTime`)
     with 2-4 words per card (up to 3 for Indic scripts) and zero blank dialogue segments."""
@@ -1876,11 +2132,33 @@ def build_cues(
     else:
         eff_with_cards = False
 
+    if with_banners is not None:
+        eff_with_banners = _flag_truthy(with_banners)
+    elif isinstance(plan, dict) and isinstance(plan.get("subs"), dict):
+        eff_with_banners = _flag_truthy(plan["subs"].get("with_banners"))
+    else:
+        eff_with_banners = False
+
+    eff_style = style
+    if eff_style is None and isinstance(plan, dict) and isinstance(plan.get("subs"), dict) and plan["subs"].get("style"):
+        raw_st = str(plan["subs"]["style"]).strip()
+        if raw_st.lower() != "auto":
+            eff_style = resolve_style(raw_st)
+    eff_uppercase = str((eff_style or {}).get("textTransform") or "").strip().lower() == "uppercase"
+    eff_font_fam = str(
+        font_family
+        or (plan["subs"].get("font") if isinstance(plan, dict) and isinstance(plan.get("subs"), dict) else "")
+        or (eff_style or {}).get("fontFamily")
+        or ""
+    ).strip().lower()
+    eff_wide_font = eff_font_fam in _WIDE_GEOMETRIC_FONTS
+
     line_tokens = _build_line_token_map(script_lines)
     n_segs = len(segs)
     seg_words_list: List[List[Dict[str, Any]]] = [[] for _ in range(n_segs)]
     seg_spoken_list: List[List[Tuple[float, float]]] = [[] for _ in range(n_segs)]
     seg_tl_bounds: List[Tuple[float, float]] = []
+    seg_strike_wins: List[List[Tuple[float, float]]] = [[] for _ in range(n_segs)]
     clip_env_cache: Dict[str, List[Tuple[float, float]]] = {}
 
     # Track straddling boundary words emitted at the tail of a cut so adjacent cuts of the same clip never duplicate them
@@ -1898,6 +2176,20 @@ def build_cues(
             prev_clip_src = None
             prev_emitted_keys = {}
             continue
+
+        seg_dur = max(0.0, tl_end - t0)
+        strike_wins = segment_strikethrough_windows(
+            s,
+            t0,
+            seg_dur,
+            plan=plan,
+            with_banners=eff_with_banners,
+        )
+        seg_strike_wins[i] = strike_wins
+
+        ae_val = _segment_audio_end(s)
+        spd_val = _segment_speed(s)
+        en_spoken = min(en, st + ae_val * spd_val) if ae_val is not None else en
 
         src = s.get("src")
         src_key = str(src or "")
@@ -1952,9 +2244,9 @@ def build_cues(
                 continue
             dur_w = max(0.001, we_raw - ws_raw)
             mid = (ws_raw + we_raw) / 2.0
-            ov = max(0.0, min(we_raw, en) - max(ws_raw, st))
+            ov = max(0.0, min(we_raw, en_spoken) - max(ws_raw, st))
             min_ov = max(0.06, min(0.12, 0.45 * dur_w))
-            if not ((st <= mid <= en) or ov >= min_ov):
+            if not ((st <= mid <= en_spoken) or ov >= min_ov):
                 continue
 
             raw_key = (text.lower(), round(ws_raw, 3), round(we_raw, 3))
@@ -1988,6 +2280,11 @@ def build_cues(
                         if ws + 0.08 < span_end + 0.08 < we:
                             we = span_end + 0.08
 
+            if ae_val is not None:
+                we = min(we, en_spoken)
+                if we - ws < 0.02:
+                    continue
+
             candidates.append({
                 "text": text,
                 "ws_raw": ws_raw,
@@ -2004,9 +2301,9 @@ def build_cues(
         # Edge-only foreign-word guard: inspect only leading/trailing cut-edge words outside [first_target..last_target]
         if candidates and target_ids and line_tokens:
             prev_ids, next_ids = _adjacent_line_ids(target_ids, line_tokens)
-            active_wins, _ = _active_speech_windows(st, en, spoken)
+            active_wins, _ = _active_speech_windows(st, en_spoken, spoken)
             speech_start = active_wins[0][0] if active_wins else st
-            speech_end = active_wins[-1][1] if active_wins else en
+            speech_end = active_wins[-1][1] if active_wins else en_spoken
 
             target_positions = [idx for idx, c in enumerate(candidates) if c["matches_target"]]
             first_t = target_positions[0] if target_positions else len(candidates)
@@ -2018,7 +2315,7 @@ def build_cues(
                     filtered.append(c)
                     continue
                 is_lead_edge = idx < first_t and ((c["ws_raw"] - st) < 0.65 or (c["ws_raw"] - speech_start) < 0.65)
-                is_tail_edge = idx > last_t and ((en - c["we_raw"]) < 0.65 or (speech_end - c["we_raw"]) < 0.65)
+                is_tail_edge = idx > last_t and ((en_spoken - c["we_raw"]) < 0.65 or (speech_end - c["we_raw"]) < 0.65)
                 if is_lead_edge and prev_ids and _foreign_to_line(c["text"], target_ids, line_tokens, similarity, adjacent_lines=prev_ids):
                     continue
                 if is_tail_edge and next_ids and _foreign_to_line(c["text"], target_ids, line_tokens, similarity, adjacent_lines=next_ids):
@@ -2031,6 +2328,8 @@ def build_cues(
         seg_len = max(0.04, tl_end - t0)
         play_len = _segment_play_duration(s)
         max_play = min(seg_len, play_len) if play_len > 0.0 else seg_len
+        if ae_val is not None:
+            max_play = min(max_play, ae_val)
         for c in candidates:
             rel_s = _src_to_seg_time(s, c["ws"])
             rel_e = min(max_play, max(rel_s + 0.02, _src_to_seg_time(s, c["we"])))
@@ -2060,7 +2359,9 @@ def build_cues(
             processed_backfill.add(idx)
             if _segment_subs_off(s, plan_cards_off=plan_cards_off, with_cards=eff_with_cards):
                 continue
-            if _cut_is_silent_in_env(float(s["start"]), float(s["end"]), seg_spoken_list[idx], clip_env_cache.get(str(s.get("src") or ""), [])):
+            ae_k = _segment_audio_end(s)
+            en_k_spoken = min(float(s["end"]), float(s["start"]) + ae_k * _segment_speed(s)) if ae_k is not None else float(s["end"])
+            if _cut_is_silent_in_env(float(s["start"]), en_k_spoken, seg_spoken_list[idx], clip_env_cache.get(str(s.get("src") or ""), [])):
                 continue
             if len(seg_words_list[idx]) == 0:
                 inline_words = _seg_inline_words(s)
@@ -2071,6 +2372,8 @@ def build_cues(
                         play_k = _segment_play_duration(s)
                         seg_len_k = max(0.0, tl_end_k - t0_k)
                         max_play_k = min(seg_len_k, play_k) if play_k > 0.0 else seg_len_k
+                        if ae_k is not None:
+                            max_play_k = min(max_play_k, ae_k)
                         if max_play_k >= 0.18:
                             seg_spans = [(idx, t0_k, t0_k + max_play_k)]
                             seg_sp_dur = max_play_k
@@ -2100,7 +2403,9 @@ def build_cues(
                 sk = segs[k]
                 if _segment_subs_off(sk, plan_cards_off=plan_cards_off, with_cards=eff_with_cards):
                     continue
-                if _cut_is_silent_in_env(float(sk["start"]), float(sk["end"]), seg_spoken_list[k], clip_env_cache.get(str(sk.get("src") or ""), [])):
+                ae_k = _segment_audio_end(sk)
+                en_k_spoken = min(float(sk["end"]), float(sk["start"]) + ae_k * _segment_speed(sk)) if ae_k is not None else float(sk["end"])
+                if _cut_is_silent_in_env(float(sk["start"]), en_k_spoken, seg_spoken_list[k], clip_env_cache.get(str(sk.get("src") or ""), [])):
                     continue
                 if len(seg_words_list[k]) == 0:
                     inline_words = _seg_inline_words(sk)
@@ -2119,7 +2424,8 @@ def build_cues(
             tl_sp, sp_dur = _segment_tl_speech_spans(k, sk, seg_tl_bounds[k], seg_spoken_list[k])
             seg_spans_map[k] = tl_sp
             seg_sp_dur_map[k] = sp_dur
-            fallback_w = max(0.04, _segment_play_duration(sk))
+            ae_k = _segment_audio_end(sk)
+            fallback_w = max(0.04, ae_k if ae_k is not None else _segment_play_duration(sk))
             seg_weight_map[k] = sp_dur if sp_dur >= 0.18 else fallback_w
 
         # Proportionally slice `expected` across multi-cut segments sharing this line ID
@@ -2146,7 +2452,9 @@ def build_cues(
             sk = segs[k]
             if _segment_subs_off(sk, plan_cards_off=plan_cards_off, with_cards=eff_with_cards):
                 continue
-            if _cut_is_silent_in_env(float(sk["start"]), float(sk["end"]), seg_spoken_list[k], clip_env_cache.get(str(sk.get("src") or ""), [])):
+            ae_k = _segment_audio_end(sk)
+            en_k_spoken = min(float(sk["end"]), float(sk["start"]) + ae_k * _segment_speed(sk)) if ae_k is not None else float(sk["end"])
+            if _cut_is_silent_in_env(float(sk["start"]), en_k_spoken, seg_spoken_list[k], clip_env_cache.get(str(sk.get("src") or ""), [])):
                 continue
             seg_spans = seg_spans_map[k]
             seg_sp_dur = seg_sp_dur_map[k]
@@ -2162,24 +2470,42 @@ def build_cues(
                 seg_words_list[k] = synthesized.get(k, [])
 
     # Group words into rhythmic cues and bridge tiny intra-sentence gaps without overlapping
+    # or leaking into suppressed strikethrough / wrong-mark animation windows.
     cues: List[Dict[str, Any]] = []
     for i, words in enumerate(seg_words_list):
         if not words:
             continue
         t0, tl_end = seg_tl_bounds[i]
+        strike_wins = seg_strike_wins[i]
+        if strike_wins:
+            words = _filter_words_for_strike_windows(words, strike_wins)
+            if not words:
+                continue
         spd_i = _segment_speed(segs[i])
         gap_scale = 1.0 / min(1.0, spd_i) if spd_i < 1.0 else 1.0
         eff_bridge_gap = BRIDGE_GAP_MAX * gap_scale
         words.sort(key=lambda x: (x["start"], x["end"]))
-        groups = _group_segment_words(words, gap_scale=gap_scale)
+        groups = _group_segment_words(
+            words,
+            gap_scale=gap_scale,
+            strike_wins=strike_wins,
+            uppercase=eff_uppercase,
+            wide_font=eff_wide_font,
+        )
         seg_cues = [_cue(g, max_end=tl_end) for g in groups if g]
+        if strike_wins:
+            seg_cues = _clip_cues_for_strike_windows(seg_cues, strike_wins)
         for k, c in enumerate(seg_cues):
             c["segIndex"] = i
             if k + 1 < len(seg_cues):
                 next_st = seg_cues[k + 1]["startTime"]
                 last_word_end = c["words"][-1]["endTime"]
                 gap = next_st - last_word_end
-                if 0.0 <= gap <= eff_bridge_gap and not SENTENCE_END.search(c["words"][-1]["text"]):
+                crosses_strike = bool(strike_wins) and any(
+                    min(next_st, w1) - max(last_word_end, w0) > -0.01
+                    for w0, w1 in strike_wins
+                )
+                if not crosses_strike and 0.0 <= gap <= eff_bridge_gap and not SENTENCE_END.search(c["words"][-1]["text"]):
                     c["endTime"] = round(next_st, 3)
                     c["words"][-1]["endTime"] = round(next_st, 3)
                 elif c["endTime"] > next_st:
@@ -2193,6 +2519,8 @@ def build_cues(
                     for cw in c["words"]:
                         if cw["endTime"] > c["endTime"]:
                             cw["endTime"] = c["endTime"]
+        if strike_wins:
+            seg_cues = _clip_cues_for_strike_windows(seg_cues, strike_wins)
         cues.extend(seg_cues)
 
     # Global non-overlap invariant across segment boundaries
@@ -2610,11 +2938,36 @@ def resolve_safe_y_percent(
     raw_y = spec.get("y")
     explicit_y = raw_y is not None and str(raw_y).strip().lower() not in ("", "auto", "none")
     is_square = abs(width - height) <= width * 0.15
-    base_single_y = float(raw_y) if explicit_y else (82.0 if is_square else SINGLE_Y)
+    try:
+        parsed_raw_y = float(raw_y) if explicit_y else None
+    except (TypeError, ValueError):
+        parsed_raw_y = None
+        explicit_y = False
+
+    has_split_v = any(_is_split_v_segment(s) for s in segs)
+    has_non_split_v = any(not _is_split_v_segment(s) for s in segs)
+
     try:
         seam_y = float(spec.get("split_y")) if spec.get("split_y") is not None else SEAM_Y
     except (TypeError, ValueError):
         seam_y = SEAM_Y
+
+    # Micronarrative / mixed timelines often carry `#subs auto y=50` intended for the `split_v` seam.
+    # Keep `base_single_y = 65.0` for `single` / `split_h` cuts and apply `50.0` strictly to `split_v`.
+    if (
+        has_split_v
+        and has_non_split_v
+        and not is_square
+        and parsed_raw_y is not None
+        and 46.0 <= parsed_raw_y <= 54.0
+    ):
+        if spec.get("split_y") is None:
+            seam_y = parsed_raw_y
+        base_single_y = SINGLE_Y
+        explicit_single_y = False
+    else:
+        base_single_y = parsed_raw_y if parsed_raw_y is not None else (82.0 if is_square else SINGLE_Y)
+        explicit_single_y = parsed_raw_y is not None
 
     split_v_dur = 0.0
     measured_dur = 0.0
@@ -2651,12 +3004,21 @@ def resolve_safe_y_percent(
         if seg_idx is None:
             mid_t = 0.5 * (float(c["startTime"]) + float(c["endTime"]))
             seg_idx = 0
+            matched_strict = False
             for idx in range(len(segs)):
                 t0 = float(starts[idx]) if idx < len(starts) else 0.0
                 t1 = float(starts[idx + 1]) if idx + 1 < len(starts) else float(total)
-                if t0 - 0.05 <= mid_t <= t1 + 0.05:
+                if t0 <= mid_t <= t1:
                     seg_idx = idx
+                    matched_strict = True
                     break
+            if not matched_strict:
+                for idx in range(len(segs)):
+                    t0 = float(starts[idx]) if idx < len(starts) else 0.0
+                    t1 = float(starts[idx + 1]) if idx + 1 < len(starts) else float(total)
+                    if t0 - 0.05 <= mid_t <= t1 + 0.05:
+                        seg_idx = idx
+                        break
         if not (0 <= seg_idx < len(segs)):
             continue
 
@@ -2727,7 +3089,7 @@ def resolve_safe_y_percent(
             not overlay_dodged
             and not is_square
             and _is_single_fullframe_segment(seg)
-            and (not explicit_y or abs(cue_y - SINGLE_Y) <= 5.0)
+            and (not explicit_single_y or abs(cue_y - SINGLE_Y) <= 5.0)
             and 55.0 <= cue_y <= 73.0
         ):
             face_boxes = _segment_face_boxes(seg, width, height, face_cache)
@@ -3126,10 +3488,17 @@ def build_overlay(
         pad_scale = 0.86
     else:
         pad_scale = 1.0
+    custom_font: Optional[str] = None
+    if spec.get("font"):
+        custom_font = resolve_font(spec["font"])
+        if custom_font is None:
+            print(f"  [SUBS] Unknown font '{spec['font']}'; keeping style default '{style.get('fontFamily', 'Montserrat')}'.")
+
     global MAX_VISUAL_UNITS
     _units_before = MAX_VISUAL_UNITS
     MAX_VISUAL_UNITS = _units_before * size_scale * pad_scale
     eff_with_cards = _flag_truthy(spec.get("with_cards"))
+    eff_with_banners = _flag_truthy(spec.get("with_banners"))
     try:
         cues = build_cues(
             segs,
@@ -3138,6 +3507,9 @@ def build_overlay(
             work_dir=cache_hint,
             plan=plan,
             with_cards=eff_with_cards,
+            with_banners=eff_with_banners,
+            style=style,
+            font_family=custom_font,
         )
     finally:
         MAX_VISUAL_UNITS = _units_before
@@ -3145,11 +3517,27 @@ def build_overlay(
         plan_cards_off = _plan_cards_off(plan)
         suppressed_all = any(
             not (_segment_is_beat(s) or _segment_is_muted(s))
-            and _segment_subs_off(s, plan_cards_off=plan_cards_off, with_cards=eff_with_cards)
-            for s in segs
+            and (
+                _segment_subs_off(s, plan_cards_off=plan_cards_off, with_cards=eff_with_cards)
+                or bool(
+                    segment_strikethrough_windows(
+                        s,
+                        float(starts[i]) if i < len(starts) else 0.0,
+                        max(
+                            0.0,
+                            (float(starts[i + 1]) - float(starts[i]))
+                            if (i + 1 < len(starts))
+                            else segment_duration(s),
+                        ),
+                        plan=plan,
+                        with_banners=eff_with_banners,
+                    )
+                )
+            )
+            for i, s in enumerate(segs)
         )
         if suppressed_all:
-            print("  [SUBS] All spoken segments suppressed by flashcards or subs=off; skipping bottom subtitles.")
+            print("  [SUBS] All spoken segments suppressed by flashcards, strikethrough banners, or subs=off; skipping bottom subtitles.")
         else:
             print("  [SUBS] No spoken words found for subtitles.")
         return None
@@ -3195,12 +3583,6 @@ def build_overlay(
             shutil.rmtree(out_dir / "probe", ignore_errors=True)
         except Exception as exc:  # noqa: BLE001
             print(f"  [SUBS] Could not sample background colors, keeping default style palette: {exc}")
-
-    custom_font: Optional[str] = None
-    if spec.get("font"):
-        custom_font = resolve_font(spec["font"])
-        if custom_font is None:
-            print(f"  [SUBS] Unknown font '{spec['font']}'; keeping style default '{style.get('fontFamily', 'Montserrat')}'.")
 
     manifest = render_frames(
         cues,

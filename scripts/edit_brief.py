@@ -135,6 +135,25 @@ _STOP_SAYING_PHRASES = (
     "(x sign",
     "strike_text=",
 )
+_SPLIT_LAYOUT_SET = {"split_h", "split_v", "video_call", "top_pip"}
+_SPLIT_EXPLICIT_STOP_CUES = (
+    "stop saying",
+    "never say",
+    "never to say",
+    "struck out",
+    "strikethrough",
+    "strike-through",
+    "strike through",
+    "red x",
+    "x sign",
+    "strike_text=",
+)
+_FULLSCREEN_TAKEOVER_RE = re.compile(
+    r"\bfull[\s-]*screen\b|\btakes?\s+over(?:\s+the)?\s+(?:full\s+)?screen|\bgoes?\s+full[\s-]*screen\b"
+    r"|\bselfie\b|\btalking\s+to\s+camera\b|\bstraight\s+to\s+camera\b|\btalking\s+head\b"
+    r"|\baddresses\s+the\s+camera\b|\blooking\s+at\s+the\s+camera\b",
+    re.I,
+)
 _NEVER_EVER_SAY_RE = re.compile(r"(?<![a-z0-9])never(?:,\s*ever|\s+ever)?\s+(?:to\s+)?say(?![a-z0-9])")
 _STRIKE_CUES_RE = re.compile(r"strikethrough|strike[\s-]+through|struck[\s-]+out|red\s+x|x\s+sign|strike_text=")
 _WRONG_MARK_TAG_RE = re.compile(r"(?:\[\s*wrong\s*\]|mark:wrong\b|\u274c)", re.I)
@@ -394,6 +413,28 @@ def _builtin_detect_format(
             return "realistic_to_3d"
 
     segs = [s for s in (plan.get("segments") or []) if isinstance(s, dict)]
+    seg_layouts = [str(s.get("layout") or "single").split(":")[0].strip().lower() for s in segs]
+    has_split_segs = any(lay in _SPLIT_LAYOUT_SET for lay in seg_layouts)
+    all_split_segs = bool(seg_layouts) and all(lay in _SPLIT_LAYOUT_SET for lay in seg_layouts)
+    has_split_words = (
+        any(_has_phrase(blob, p) for p in (
+            "split screen",
+            "horizontal split",
+            "vertical split",
+            "left screen",
+            "right screen",
+            "top screen",
+            "bottom screen",
+            "side by side",
+            "side-by-side",
+            "top_pip",
+            "top pip",
+        ))
+        or (bool(re.search(r"\btop\s*:", blob)) and bool(re.search(r"\bbottom\s*:", blob)))
+        or (bool(re.search(r"\bleft\s*:", blob)) and bool(re.search(r"\bright\s*:", blob)))
+    )
+    has_split = has_split_segs or has_split_words
+
     has_flashcards = (
         bool(meta.get("flashcards"))
         or any(isinstance(ln_obj, dict) and ln_obj.get("flashcard") for ln_obj in (meta.get("lines") or []))
@@ -425,14 +466,22 @@ def _builtin_detect_format(
     )
     wrong_indicators = max(wrong_mark_lines, len(_WRONG_MARK_TAG_RE.findall(blob)))
     has_teaching_cue = any(_has_phrase(blob, p) for p in _TEACHING_CORRECTION_CUES)
-    if "stop_saying" not in Exclude and (
-        any(_has_phrase(blob, p) for p in _STOP_SAYING_PHRASES)
-        or bool(_NEVER_EVER_SAY_RE.search(blob))
-        or strike_hits >= 2
-        or cross_hits >= 2
-        or wrong_mark_lines >= 3
-        or (wrong_indicators >= 2 and has_teaching_cue)
-    ):
+    if has_split:
+        is_stop_saying = (
+            any(_has_phrase(blob, p) for p in _SPLIT_EXPLICIT_STOP_CUES)
+            or bool(_NEVER_EVER_SAY_RE.search(blob))
+            or strike_hits >= 1
+        )
+    else:
+        is_stop_saying = (
+            any(_has_phrase(blob, p) for p in _STOP_SAYING_PHRASES)
+            or bool(_NEVER_EVER_SAY_RE.search(blob))
+            or strike_hits >= 2
+            or cross_hits >= 2
+            or wrong_mark_lines >= 3
+            or (wrong_indicators >= 2 and has_teaching_cue)
+        )
+    if "stop_saying" not in Exclude and is_stop_saying:
         return "stop_saying"
 
     chars = meta.get("characters") if isinstance(meta.get("characters"), dict) else {}
@@ -447,12 +496,37 @@ def _builtin_detect_format(
     ):
         return "street_interview"
 
+    scenes = [sc for sc in (meta.get("scenes") or []) if isinstance(sc, dict)]
+    scene_hints = [str(sc.get("layout_hint") or "").lower() for sc in scenes]
+    scene_is_split = [
+        h in _SPLIT_LAYOUT_SET or any(k in str(sc.get("visual") or "").lower() for k in ("split", "video call", "left:", "top:"))
+        for sc, h in zip(scenes, scene_hints)
+    ]
+    all_scenes_split = bool(scenes) and all(scene_is_split)
+    has_fullscreen_takeover = any(
+        h == "single" or bool(_FULLSCREEN_TAKEOVER_RE.search(str(sc.get("visual") or "")))
+        for sc, h in zip(scenes, scene_hints)
+    ) or bool(re.search(r"\b(?:takes?\s+over(?:\s+the)?\s+(?:full\s+)?screen|goes?\s+full[\s-]*screen)\b", blob, re.I))
+    has_non_split_opening = any(not is_sp for is_sp in scene_is_split[: scene_is_split.index(True)]) if any(scene_is_split) else False
+    if "split_screen" not in Exclude and (
+        all_split_segs
+        or all_scenes_split
+        or (
+            (_has_phrase(header_blob, "split screen") or (_has_phrase(blob, "split screen") and not has_non_split_opening))
+            and not has_fullscreen_takeover
+        )
+        or (_has_phrase(blob, "video call") and not scenes and not has_split_words)
+    ):
+        return "split_screen"
+
     # Score against `formats/registry.json` names and keywords (never match bare "interview" -> street_interview)
     best_id = ""
     best_score = 0.0
     for entry in _load_registry():
         fid = str(entry.get("id") or "")
         if not fid or fid in Exclude or fid == "skit":
+            continue
+        if fid == "live_conversation" and has_split:
             continue
         score = 0.0
         for name in entry.get("names") or []:

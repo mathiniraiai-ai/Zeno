@@ -95,6 +95,19 @@ function snapFontWeight(family, requestedWeight) {
 
 const { CaptionRenderer } = require('./caption-renderer.js');
 
+const INDIC_FAMILY_NAMES = new Set([
+  'noto sans kannada', 'anek kannada', 'noto serif kannada', 'tiro kannada', 'baloo tamma 2',
+  'noto sans tamil', 'hind madurai', 'mukta malar', 'anek tamil', 'baloo thambi 2', 'catamaran', 'coiny', 'kavivanar',
+  'noto sans telugu', 'hind guntur', 'anek telugu', 'noto serif telugu', 'ramabhadra', 'gidugu',
+  'noto sans malayalam', 'manjari', 'anek malayalam', 'noto serif malayalam', 'baloo chettan 2', 'chilanka',
+  'noto sans devanagari', 'hind', 'mukta', 'teko', 'anek devanagari', 'baloo 2', 'noto serif devanagari', 'kalam', 'modak', 'rozha one',
+  'noto sans bengali', 'hind siliguri', 'anek bangla', 'baloo da 2', 'noto serif bengali', 'atma', 'galada',
+  'noto sans gujarati', 'hind vadodara', 'mukta vaani', 'anek gujarati', 'baloo bhai 2', 'mogra',
+  'noto sans gurmukhi', 'mukta mahee', 'anek gurmukhi', 'baloo paaji 2',
+  'noto sans oriya', 'baloo bhaina 2', 'anek odia', 'noto serif oriya',
+  'nirmala ui', 'nirmala text',
+]);
+
 (async () => {
   const job = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
   const styles = JSON.parse(fs.readFileSync(path.join(here, 'styles.json'), 'utf8'));
@@ -104,7 +117,8 @@ const { CaptionRenderer } = require('./caption-renderer.js');
   const fps = Math.max(24, Number(job.fps) || 25);
   const defaultPosY = job.positionY !== undefined ? Number(job.positionY) : (base.positionY !== undefined ? Number(base.positionY) : 65);
   const style = { ...base, positionY: defaultPosY };
-  if (job.fontFamily && String(job.fontFamily).trim()) {
+  const hasExplicitJobFont = Boolean(job.fontFamily && String(job.fontFamily).trim());
+  if (hasExplicitJobFont) {
     const resolvedFam = resolveRegisteredFamily(job.fontFamily);
     style.fontFamily = resolvedFam;
     style.fontWeight = snapFontWeight(resolvedFam, job.fontWeight || style.fontWeight || 700);
@@ -117,6 +131,20 @@ const { CaptionRenderer } = require('./caption-renderer.js');
   style.singleLine = job.singleLine !== false && style.maxLines !== 2;   // one row only (owner's rule)
 
   const cues = Array.isArray(job.cues) ? job.cues : [];
+  const jobHasIndic = cues.some(hasIndicCueText);
+  if (jobHasIndic) {
+    // When auto-selected style on an Indic bilingual reel uses a pure-Latin geometric font,
+    // harmonize Latin glyphs to Noto Sans (matches Indic Noto Sans stroke geometry & x-height 1:1).
+    if (!hasExplicitJobFont && !INDIC_FAMILY_NAMES.has(String(style.fontFamily || '').trim().toLowerCase())) {
+      const notoLat = resolveRegisteredFamily('Noto Sans');
+      if (notoLat) style.fontFamily = notoLat;
+    }
+    // Lock bold weight to 700 at the JOB level so English-only, mixed, and Indic-only cues share exact weight.
+    if (Number(style.fontWeight || 700) >= 700) {
+      style.fontWeight = snapFontWeight(style.fontFamily, 700);
+    }
+  }
+  style._jobHasIndic = jobHasIndic;
   const cropBand = job.cropBand !== false;
 
   let bandY0 = 0;
@@ -152,18 +180,29 @@ const { CaptionRenderer } = require('./caption-renderer.js');
     bandHeight = Math.max(2, Math.min(fullHeight - bandY0, rawH));
   }
 
+  // Job-level uniform font-size pre-pass across normal cues so cues never jump sizes frame-to-frame.
+  if (cues.length > 0 && typeof CaptionRenderer.computeUniformFontSize === 'function') {
+    style.fontSize = CaptionRenderer.computeUniformFontSize({
+      cues,
+      width: fullWidth,
+      height: bandHeight,
+      fullHeight,
+      style,
+    });
+  }
+
   // Render cue-by-cue so every caption can carry scene-adapted colours & per-cue safe Y while sharing the job-constant band.
   const frames = [];
   for (let i = 0; i < cues.length; i++) {
     const cue = cues[i];
-    const cueStyle = { ...style, ...(cue.style || {}) };
+    const cueStyle = { ...style, ...(cue.style || {}), _jobHasIndic: jobHasIndic };
     if (cue.style && cue.style.fontFamily && String(cue.style.fontFamily).trim()) {
       const resolvedCueFam = resolveRegisteredFamily(cue.style.fontFamily);
       cueStyle.fontFamily = resolvedCueFam;
       cueStyle.fontWeight = snapFontWeight(resolvedCueFam, cueStyle.fontWeight || style.fontWeight || 700);
     }
-    if (hasIndicCueText(cue) && Number(cueStyle.fontWeight || 700) >= 700) {
-      cueStyle.fontWeight = 700;
+    if (jobHasIndic && Number(cueStyle.fontWeight || 700) >= 700) {
+      cueStyle.fontWeight = snapFontWeight(cueStyle.fontFamily, 700);
     }
     const res = await CaptionRenderer.renderAllCuesToPngs({
       cues: [cue],
@@ -179,6 +218,9 @@ const { CaptionRenderer } = require('./caption-renderer.js');
       f.captionIndex = i;
       f.bandY0 = bandY0;
       f.bandHeight = bandHeight;
+      f.fontFamily = cueStyle.fontFamily;
+      f.fontWeight = cueStyle.fontWeight;
+      f.fontSize = cueStyle.fontSize;
       frames.push(f);
     }
   }
@@ -187,6 +229,8 @@ const { CaptionRenderer } = require('./caption-renderer.js');
     style: style.name,
     styleId: style.id,
     fontFamily: style.fontFamily,
+    fontWeight: style.fontWeight,
+    fontSize: style.fontSize,
     width: fullWidth,
     height: fullHeight,
     bandY0,

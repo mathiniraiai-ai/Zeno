@@ -324,8 +324,8 @@ def _calibrate_sfx_gain_db(
     cat = (category or "").strip().lower()
     if cat == "mark":
         def_db = default_gain_db if default_gain_db is not None else 0.5
-        floor_db, ceil_db = -4.0, 3.0
-        if raw_gain_db is None or float(raw_gain_db) <= -6.0:
+        floor_db, ceil_db = -7.0, 3.0
+        if raw_gain_db is None or float(raw_gain_db) <= -9.0:
             return round(max(floor_db, min(ceil_db, float(def_db))), 2)
         return round(max(floor_db, min(ceil_db, float(raw_gain_db))), 2)
 
@@ -347,7 +347,15 @@ def _calibrate_sfx_gain_db(
             g = -2.5
         return round(max(floor_db, min(ceil_db, g)), 2)
 
-    if any(k in nm for k in ("punch", "wrong", "buzzer", "right", "correct", "ding")):
+    if any(k in nm for k in ("wrong", "buzzer")):
+        def_db = default_gain_db if default_gain_db is not None else -4.5
+        floor_db, ceil_db = -7.0, 2.5
+        g = float(def_db if raw_gain_db is None else raw_gain_db)
+        if g <= -9.0:
+            g = -4.5
+        return round(max(floor_db, min(ceil_db, g)), 2)
+
+    if any(k in nm for k in ("punch", "right", "correct", "ding")):
         def_db = default_gain_db if default_gain_db is not None else -1.5
         floor_db, ceil_db = -3.5, 2.5
         g = float(def_db if raw_gain_db is None else raw_gain_db)
@@ -1831,7 +1839,7 @@ def main() -> None:
             wrong_default_gain = (
                 float(explicit_wrong_gain)
                 if explicit_wrong_gain is not None
-                else float(plan_tuning.get("wrong_sfx_gain_db", 1.0)) - 2.5
+                else float(plan_tuning.get("wrong_sfx_gain_db", 1.0)) - 5.5
             )
             default_gain = float(
                 wrong_default_gain
@@ -1990,6 +1998,20 @@ def main() -> None:
         f"{''.join(dlg_inputs)}amix=inputs={len(dlg_inputs)}:normalize=0:dropout_transition=0:duration=first,"
         f"atrim=0:{total:.4f},asetpts=PTS-STARTPTS[adlg]"
     )
+
+    # Deduplicate overlapping identical SFX (keeping the first/higher-priority entry within 80ms)
+    if sfx_list:
+        deduped_sfx: List[Tuple[Path, float, float]] = []
+        for fpath, t_sfx, g_sfx in sfx_list:
+            fname_low = _redirect_broken_sfx(fpath).name.lower()
+            t_val = float(t_sfx)
+            if any(
+                _redirect_broken_sfx(kf).name.lower() == fname_low and abs(t_val - float(kt)) <= 0.08
+                for kf, kt, _ in deduped_sfx
+            ):
+                continue
+            deduped_sfx.append((fpath, t_val, float(g_sfx)))
+        sfx_list = deduped_sfx
 
     # Stem 1 (`[asfx]`): 32-bit float peak-calibrated SFX stem (unity mono->stereo pan, zero pcm_s16le pre-clipping)
     if sfx_list:
