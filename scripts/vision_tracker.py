@@ -1470,18 +1470,23 @@ def analyze_clip_vision(
     video_path: Union[str, Path],
     speech_spans: Optional[Sequence[Any]] = None,
     sample_count: int = 5,
+    start_sec: Optional[float] = None,
+    end_sec: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Sample frames from `video_path` to measure face count, shot type, baked split seams,
     peripheral camera motion, safe-zoom focus windows (`1.05`, `1.08`, `1.10`), eye-anchored
     focus (`14%` headroom, `38%` eyeline), and mouth-closed idle windows.
     """
     resolved = resolve(video_path)
-    cache_key = str(resolved)
+    win_tag = ""
+    if start_sec is not None or end_sec is not None:
+        win_tag = f"|{round(float(start_sec or 0.0), 2)}-{round(float(end_sec or 0.0), 2)}"
+    cache_key = f"{resolved}{win_tag}"
     if cache_key in _VISION_CACHE and speech_spans is None:
         return dict(_VISION_CACHE[cache_key])
 
     disk_cache_file: Optional[Path] = None
-    if resolved.is_file() and speech_spans is None:
+    if resolved.is_file() and speech_spans is None and not win_tag:
         disk_cache_file = clip_work_dir(resolved) / f"vision_{_clip_file_hash8(resolved)}.json"
         if disk_cache_file.is_file():
             try:
@@ -1491,6 +1496,7 @@ def analyze_clip_vision(
                     and cached.get("bbox_norm")
                     and "baked_split" in cached
                     and "seam_frac" in cached
+                    and "mixed_framing" in cached
                 ):
                     _VISION_CACHE[cache_key] = cached
                     return dict(cached)
@@ -1527,9 +1533,18 @@ def analyze_clip_vision(
         if cap.isOpened():
             fps = float(cap.get(cv2.CAP_PROP_FPS) or info.get("fps") or 24.0) or 24.0
             total_frames = max(1, int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or round(dur * fps)))
-            n_samples = max(1, min(sample_count, total_frames))
+            f_lo = 0
+            f_hi = total_frames
+            if start_sec is not None or end_sec is not None:
+                s_lo = max(0.0, float(start_sec or 0.0))
+                s_hi = min(dur, float(end_sec if end_sec is not None else dur))
+                if s_hi > s_lo + 0.05:
+                    f_lo = min(total_frames - 1, max(0, int(round(s_lo * fps))))
+                    f_hi = max(f_lo + 1, min(total_frames, int(round(s_hi * fps))))
+            span_frames = max(1, f_hi - f_lo)
+            n_samples = max(1, min(sample_count, span_frames))
             indices = [
-                min(total_frames - 1, max(0, int(round((i + 0.5) / n_samples * total_frames))))
+                min(f_hi - 1, max(f_lo, f_lo + int(round((i + 0.5) / n_samples * span_frames))))
                 for i in range(n_samples)
             ]
             for sample_ord, f_idx in enumerate(indices, 1):
@@ -1682,6 +1697,13 @@ def analyze_clip_vision(
 
     primary_face = rep_faces[0]
     idle_info = find_listening_idle_window(resolved, speech_spans=speech_spans, duration=dur)
+    has_mixed_seams = bool(baked_seams and frames_sampled > 1 and len(baked_seams) < frames_sampled)
+    has_mixed_faces = bool(
+        sampled_faces
+        and any(len(fl) >= 2 for fl in sampled_faces)
+        and any(len(fl) == 1 for fl in sampled_faces)
+    )
+    mixed_framing = has_mixed_seams or has_mixed_faces
 
     result: Dict[str, Any] = {
         "path": str(resolved),
@@ -1694,6 +1716,7 @@ def analyze_clip_vision(
         "face_count": face_count,
         "shot_type": shot_type,
         "baked_split": baked_split,
+        "mixed_framing": mixed_framing,
         "seam_frac": seam_frac,
         "seam_band_frac": seam_band_frac,
         "camera_motion": cam_motion,
@@ -1711,7 +1734,7 @@ def analyze_clip_vision(
     }
     if speech_spans is None:
         _VISION_CACHE[cache_key] = result
-        if disk_cache_file is not None:
+        if disk_cache_file is not None and not win_tag:
             try:
                 write_json(disk_cache_file, result)
                 write_json(disk_cache_file.parent / "vision.json", result)

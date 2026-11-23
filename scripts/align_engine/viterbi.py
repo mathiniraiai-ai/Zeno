@@ -23,8 +23,10 @@ def _numpy_vectorized_viterbi(
     """Vectorized NumPy CTC Viterbi trellis alignment over `log_probs` `[T, VocabSize]`."""
     T = log_probs.shape[0]
     U = len(targets)
-    if U == 0 or T == 0:
+    if U == 0:
         return []
+    if T < U:
+        raise ValueError("Unreachable CTC trellis for slice")
 
     L = 2 * U + 1
     ext_targets = np.full(L, blank_id, dtype=np.int32)
@@ -66,6 +68,8 @@ def _numpy_vectorized_viterbi(
 
     final_states = [L - 1, L - 2] if L > 1 else [0]
     best_final_s = final_states[int(np.argmax([trellis[T - 1, s] for s in final_states]))]
+    if not np.isfinite(trellis[T - 1, best_final_s]):
+        raise ValueError("Unreachable CTC trellis for slice")
 
     path = np.zeros(T, dtype=np.int32)
     curr_s = best_final_s
@@ -140,6 +144,9 @@ class ViterbiAligner:
         word_spans_meta: List[Dict[str, Any]],
         time_per_frame: float,
     ) -> List[Dict[str, Any]]:
+        if log_probs.shape[0] < len(token_ids):
+            raise ValueError("Unreachable CTC trellis for slice")
+
         token_spans = None
         if HAS_TORCH_ALIGN:
             try:
@@ -147,7 +154,9 @@ class ViterbiAligner:
                 targets = torch.tensor([token_ids], dtype=torch.int32)
                 aligned_tokens, scores = F.forced_align(lp_tensor.cpu(), targets, blank=self.blank_id)
                 spans_raw = F.merge_tokens(aligned_tokens[0], scores[0])
-                token_spans = [{"start": sp.start, "end": sp.end, "score": sp.score} for sp in spans_raw]
+                cand_spans = [{"start": sp.start, "end": sp.end, "score": sp.score} for sp in spans_raw]
+                if len(cand_spans) == len(token_ids) and all(np.isfinite(sp["score"]) for sp in cand_spans):
+                    token_spans = cand_spans
             except Exception:
                 token_spans = None
 
@@ -158,14 +167,20 @@ class ViterbiAligner:
         token_idx = 0
 
         for w_meta in word_spans_meta:
-            num_tokens = w_meta["num_chars"]
             w_str = w_meta["word"]
-
-            if num_tokens <= 0:
-                continue
-
-            word_spans = token_spans[token_idx : token_idx + num_tokens]
-            token_idx += num_tokens
+            if "tok_start" in w_meta and "tok_end" in w_meta:
+                t_start = int(w_meta["tok_start"])
+                t_end = int(w_meta["tok_end"])
+                if t_end <= t_start:
+                    continue
+                word_spans = token_spans[t_start:t_end]
+                token_idx = max(token_idx, t_end)
+            else:
+                num_tokens = int(w_meta.get("num_chars", 0))
+                if num_tokens <= 0:
+                    continue
+                word_spans = token_spans[token_idx : token_idx + num_tokens]
+                token_idx += num_tokens
 
             if word_spans:
                 first_sp = word_spans[0]

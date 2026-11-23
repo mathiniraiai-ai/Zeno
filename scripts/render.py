@@ -324,8 +324,8 @@ def _calibrate_sfx_gain_db(
     cat = (category or "").strip().lower()
     if cat == "mark":
         def_db = default_gain_db if default_gain_db is not None else 0.5
-        floor_db, ceil_db = -1.5, 3.0
-        if raw_gain_db is None or float(raw_gain_db) <= -3.5:
+        floor_db, ceil_db = -4.0, 3.0
+        if raw_gain_db is None or float(raw_gain_db) <= -6.0:
             return round(max(floor_db, min(ceil_db, float(def_db))), 2)
         return round(max(floor_db, min(ceil_db, float(raw_gain_db))), 2)
 
@@ -1823,10 +1823,33 @@ def main() -> None:
             sfx_path = resolve_mark_sfx(mtype, sfx=sfx_override, pack=sfx_pack)
             if sfx_path:
                 sfx_path = _redirect_broken_sfx(sfx_path)
+            explicit_wrong_gain = (
+                (plan.get("tuning") or {}).get("wrong_sfx_gain_db")
+                if isinstance(plan.get("tuning"), dict)
+                else None
+            )
+            wrong_default_gain = (
+                float(explicit_wrong_gain)
+                if explicit_wrong_gain is not None
+                else float(plan_tuning.get("wrong_sfx_gain_db", 1.0)) - 2.5
+            )
             default_gain = float(
-                plan_tuning.get("wrong_sfx_gain_db", 1.0)
+                wrong_default_gain
                 if mtype == "wrong"
                 else plan_tuning.get("right_sfx_gain_db", 0.5)
+            )
+            seg_for_mk = seg_by_id.get(m["segment"])
+            seg_has_speech = not (
+                seg_for_mk is not None
+                and (
+                    bool(getattr(common, "segment_is_muted", lambda s: bool(s.get("mute")))(seg_for_mk))
+                    or bool(getattr(common, "segment_is_beat", lambda s: bool(s.get("beat")))(seg_for_mk))
+                )
+            )
+            min_sfx_t = (
+                max(0.0, seg_start[m["segment"]] + float(m.get("at", 0.0) or 0.0))
+                if seg_has_speech
+                else max(0.0, seg_start[m["segment"]])
             )
             if sfx_path and sfx_path.is_file():
                 gain_db = _calibrate_sfx_gain_db(
@@ -1835,7 +1858,7 @@ def main() -> None:
                     category="mark",
                     default_gain_db=default_gain,
                 )
-                t_sfx = max(0.0, t - _mark_sfx_preroll(sfx_path))
+                t_sfx = max(min_sfx_t, t - _mark_sfx_preroll(sfx_path))
                 sfx_list.append((sfx_path, t_sfx, gain_db))
             if is_fullframe_strobe:
                 layer_name = str(
@@ -1848,7 +1871,7 @@ def main() -> None:
                     extra_sfx = _redirect_broken_sfx(extra_sfx)
                 if extra_sfx and extra_sfx.is_file() and (not sfx_path or extra_sfx.resolve() != sfx_path.resolve()):
                     layer_gain = default_gain if mtype == "wrong" else max(-2.0, default_gain - 2.0)
-                    t_layer = max(0.0, t - _mark_sfx_preroll(extra_sfx))
+                    t_layer = max(min_sfx_t, t - _mark_sfx_preroll(extra_sfx))
                     sfx_list.append((extra_sfx, t_layer, layer_gain))
         log_fx.append((t, f"{mtype.upper()} mark ({pos_desc}, {dur:.2f}s)"))
 

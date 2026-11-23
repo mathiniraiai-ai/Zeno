@@ -59,15 +59,32 @@ def _free_gpu_cache(dev: Any) -> None:
 
 
 class AcousticModel:
-    """CTC log-probability emission extractor backed by Meta Wav2Vec2 Base (95M parameters)."""
+    """CTC log-probability emission extractor backed by Meta Wav2Vec2 Base (95M parameters) or optional MMS_FA."""
 
     def __init__(self, device: Optional[str] = None, use_fp16: bool = False):
-        self.sample_rate = 16000
         self.torch_model = None
         self.device = device or _pick_device()
         self.use_fp16 = use_fp16 and ("cuda" in str(self.device))
-        labels = bundle.get_labels()
-        self.dictionary: Dict[str, int] = {c: i for i, c in enumerate(labels)}
+        model_choice = os.getenv("ZENO_ALIGN_MODEL", "").strip().lower()
+        self._use_mms_fa = False
+        active_bundle = bundle
+        if model_choice == "mms_fa":
+            try:
+                from torchaudio.pipelines import MMS_FA
+
+                active_bundle = MMS_FA
+                self._use_mms_fa = True
+            except Exception:
+                active_bundle = bundle
+        self._bundle = active_bundle
+        self.sample_rate = int(getattr(active_bundle, "sample_rate", 16000) or 16000)
+        labels = active_bundle.get_labels(star=None) if self._use_mms_fa else active_bundle.get_labels()
+        self.dictionary: Dict[str, int] = {}
+        for i, c in enumerate(labels):
+            self.dictionary[c] = i
+            if c.isalpha():
+                self.dictionary[c.upper()] = i
+                self.dictionary[c.lower()] = i
         self.blank_id = self.dictionary.get("-", 0)
 
     def _ensure_model_loaded(self) -> None:
@@ -84,18 +101,19 @@ class AcousticModel:
                 torch.hub.set_dir(str(hub_dir))
             except Exception:
                 pass
-        print(f"[Zeno Aligner] Loading Meta wav2vec2 base 95M (device: {self.device})...")
+        model_label = "MMS_FA" if self._use_mms_fa else "Meta wav2vec2 base 95M"
+        print(f"[Zeno Aligner] Loading {model_label} (device: {self.device})...")
         dtype = torch.float16 if self.use_fp16 else torch.float32
         dev = torch.device(self.device)
         prev_ctx = ssl._create_default_https_context
         ssl._create_default_https_context = _certifi_ssl_context
         try:
-            model = bundle.get_model()
+            model = self._bundle.get_model(with_star=False) if self._use_mms_fa else self._bundle.get_model()
         finally:
             ssl._create_default_https_context = prev_ctx
         self.torch_model = model.to(device=dev, dtype=dtype)
         self.torch_model.eval()
-        print(f"[Zeno Aligner] Acoustic model ready (vocab size: {len(self.dictionary)}).")
+        print(f"[Zeno Aligner] Acoustic model ready (vocab size: {len(self._bundle.get_labels(star=None) if self._use_mms_fa else self._bundle.get_labels())}).")
 
     def unload_model(self) -> None:
         """Unload PyTorch weights and release cached memory back to the OS."""
@@ -131,12 +149,18 @@ class AcousticModel:
         dev = next(self.torch_model.parameters()).device
         dtype = next(self.torch_model.parameters()).dtype
 
-        tensor_wave = torch.from_numpy(raw_waveform).unsqueeze(0).to(device=dev, dtype=dtype)
+        wf_t = torch.from_numpy(np.asarray(raw_waveform, dtype=np.float32))
+        if wf_t.numel() > 1:
+            wf_t = (wf_t - wf_t.mean()) / wf_t.std().clamp(min=1e-5)
+        tensor_wave = wf_t.unsqueeze(0).to(device=dev, dtype=dtype)
         with torch.inference_mode():
             logits, _ = self.torch_model(tensor_wave)
-            log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)[0].cpu().numpy()
+            if self._use_mms_fa:
+                log_probs = logits.float()[0].cpu().numpy()
+            else:
+                log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)[0].cpu().numpy()
 
-        del tensor_wave, logits
+        del wf_t, tensor_wave, logits
         _free_gpu_cache(dev)
 
         num_frames = log_probs.shape[0]
@@ -200,12 +224,18 @@ class AcousticModel:
         dev = next(self.torch_model.parameters()).device
         dtype = next(self.torch_model.parameters()).dtype
 
-        tensor_wave = torch.from_numpy(raw_waveform).unsqueeze(0).to(device=dev, dtype=dtype)
+        wf_t = torch.from_numpy(np.asarray(raw_waveform, dtype=np.float32))
+        if wf_t.numel() > 1:
+            wf_t = (wf_t - wf_t.mean()) / wf_t.std().clamp(min=1e-5)
+        tensor_wave = wf_t.unsqueeze(0).to(device=dev, dtype=dtype)
         with torch.inference_mode():
             logits, _ = self.torch_model(tensor_wave)
-            log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)[0].cpu().numpy()
+            if self._use_mms_fa:
+                log_probs = logits.float()[0].cpu().numpy()
+            else:
+                log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)[0].cpu().numpy()
 
-        del tensor_wave, logits
+        del wf_t, tensor_wave, logits
         _free_gpu_cache(dev)
 
         num_frames = log_probs.shape[0]

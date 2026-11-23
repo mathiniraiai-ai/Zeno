@@ -47,54 +47,76 @@ class AcousticOnsetVerifier:
         waveform: np.ndarray,
         duration_sec: float,
     ) -> List[Dict[str, Any]]:
-        """Snap early candidate word starts forward out of leading silence onto vocal attack."""
+        """Snap early candidate word starts forward out of leading silence onto vocal attack in dB space."""
         if not words or len(waveform) == 0:
             return words
 
         rms_env, rms_times = self.compute_energy_envelope(waveform)
+        if len(rms_env) == 0:
+            return words
+        db_env = 20.0 * np.log10(np.maximum(rms_env, 1e-6))
+        clip_bg_db = min(float(np.percentile(db_env, 15)), -35.0)
         refined_words: List[Dict[str, Any]] = []
 
         for i, w in enumerate(words):
-            raw_start = w["start"]
-            raw_end = w["end"]
+            raw_start = float(w["start"])
+            raw_end = float(w["end"])
 
             if raw_start < 0.05:
                 refined_words.append({**w, "onset_confidence": 0.95})
                 continue
 
             window_min = max(0.0, raw_start - 0.08)
-            window_max = min(duration_sec, raw_start + 0.35)
+            window_max = min(duration_sec, raw_start + 0.12)
+            ctx_min = max(0.0, raw_start - 0.30)
+            ctx_max = min(duration_sec, raw_start + 0.12)
 
             mask = (rms_times >= window_min) & (rms_times <= window_max)
+            ctx_mask = (rms_times >= ctx_min) & (rms_times <= ctx_max)
             win_times = rms_times[mask]
             win_rms = rms_env[mask]
+            win_db = db_env[mask]
+            ctx_db = db_env[ctx_mask]
 
-            if len(win_rms) < 3:
+            if len(win_db) < 3:
                 refined_words.append({**w, "onset_confidence": 0.80})
                 continue
 
-            bg_floor = np.percentile(win_rms, 20)
-            voice_threshold = bg_floor + 0.15 * (np.max(win_rms) - bg_floor)
-            exceeding_indices = np.where(win_rms >= voice_threshold)[0]
+            local_p20 = float(np.percentile(ctx_db if len(ctx_db) >= 3 else win_db, 20))
+            bg_db = min(local_p20, clip_bg_db + 6.0, -35.0)
+            voice_threshold_db = bg_db + 8.0
 
-            if len(exceeding_indices) > 0:
-                onset_idx = exceeding_indices[0]
-                detected_onset_sec = float(win_times[onset_idx])
-
-                if onset_idx > 0:
-                    gradient = win_rms[onset_idx] - win_rms[onset_idx - 1]
-                    onset_conf = min(1.0, float(0.7 + gradient))
+            raw_idx = int(np.argmin(np.abs(win_times - raw_start)))
+            if win_db[raw_idx] < voice_threshold_db:
+                # Candidate start sits inside leading silence: advance up to +0.12s onto first >= bg_db + 8 dB frame
+                fwd_rel = np.where(win_db[raw_idx:] >= voice_threshold_db)[0]
+                if len(fwd_rel) > 0:
+                    onset_idx = raw_idx + int(fwd_rel[0])
+                    detected_onset_sec = float(win_times[onset_idx])
+                    gradient = float(win_rms[onset_idx] - win_rms[max(0, onset_idx - 1)])
+                    onset_conf = min(1.0, float(0.75 + gradient))
                 else:
-                    onset_conf = 0.85
-
-                prev_start = refined_words[i - 1]["start"] if i > 0 else 0.0
-                clamped_start = max(prev_start + 0.04, min(detected_onset_sec, raw_end - 0.05))
+                    detected_onset_sec = raw_start
+                    onset_conf = 0.70
+            elif win_db[0] < voice_threshold_db:
+                # Vocal attack after silence began slightly before raw_start (soft consonant/vowel attack)
+                exceeding_indices = np.where(win_db >= voice_threshold_db)[0]
+                onset_idx = int(exceeding_indices[0])
+                prev_end = float(refined_words[i - 1]["end"]) if i > 0 else 0.0
+                detected_onset_sec = max(prev_end - 0.01, float(win_times[onset_idx]))
+                gradient = float(win_rms[onset_idx] - win_rms[max(0, onset_idx - 1)])
+                onset_conf = min(1.0, float(0.75 + gradient))
             else:
-                clamped_start = raw_start
-                onset_conf = 0.70
+                # Continuous speech across boundary: keep CTC boundary without pulling into previous word
+                detected_onset_sec = raw_start
+                onset_conf = 0.90
+
+            prev_start = float(refined_words[i - 1]["start"]) if i > 0 else 0.0
+            clamped_start = max(prev_start + 0.04, min(detected_onset_sec, raw_end - 0.05))
 
             refined_words.append(
                 {
+                    **w,
                     "word": w["word"],
                     "start": round(clamped_start, 3),
                     "end": round(raw_end, 3),
@@ -178,40 +200,88 @@ class AcousticOnsetVerifier:
         words: List[Dict[str, Any]],
         waveform: np.ndarray,
         max_extend_sec: float = 0.35,
-        drop_db: float = 24.0,
+        drop_db: float = 30.0,
     ) -> List[Dict[str, Any]]:
-        """Extend CTC word end timestamps to cover full syllable coda decay without overlapping the next word."""
+        """Extend CTC word end timestamps to cover full syllable coda decay and post-closure bursts."""
         if not words or len(waveform) == 0:
             return words
         rms, _ = self.compute_energy_envelope(waveform)
         if len(rms) < 5:
             return words
-        db = 20.0 * np.log10(np.maximum(rms, 1e-5))
+        db = 20.0 * np.log10(np.maximum(rms, 1e-6))
         hop = float(self.hop_length) / float(self.sample_rate)
+        clip_bg_db = min(float(np.percentile(db, 15)), -35.0)
+        sil_runs = self.silent_runs(waveform, min_run_sec=0.28)
         out: List[Dict[str, Any]] = []
         for i, w in enumerate(words):
+            s = float(w["start"])
             e = float(w["end"])
             nxt = float(words[i + 1]["start"]) if i + 1 < len(words) else float("inf")
-            a = max(0, int(max(float(w["start"]), e - 0.30) / hop))
+            a = max(0, int(max(s, e - 0.30) / hop))
             b = min(len(db) - 1, int(e / hop))
             if b <= a:
                 out.append(dict(w))
                 continue
+            ctx_lo = max(0, int((s - 0.60) / hop))
+            ctx_hi = min(len(db) - 1, int((e + 0.80) / hop))
+            bg_db = min(float(np.percentile(db[ctx_lo : ctx_hi + 1], 15)), clip_bg_db + 6.0, -35.0)
             level = float(np.percentile(db[a : b + 1], 85))
+
+            is_pre_pause = (
+                i + 1 == len(words)
+                or (nxt - e >= 0.22)
+                or str(w.get("word", "")).rstrip().endswith((".", "?", "!", ",", ";", ":", "\u2026", "\u0964", "\u0965"))
+            )
+            eff_extend = max(max_extend_sec, 0.65) if is_pre_pause else max_extend_sec
+            max_time = min((len(db) - 1) * hop, e + eff_extend)
+            if np.isfinite(nxt):
+                max_time = min(max_time, max(e, nxt - 0.02))
+            for sa, _sb in sil_runs:
+                if sa >= e - 0.02:
+                    max_time = min(max_time, max(e, sa + 0.02))
+                    break
+            limit = min(len(db) - 1, int(max_time / hop))
+
+            speech_thresh = max(level - drop_db, bg_db + 6.0)
+            rebound_thresh = bg_db + 8.0
             k = b
-            limit = min(len(db) - 1, int((e + max_extend_sec) / hop))
-            while k < limit and db[k + 1] >= level - drop_db:
-                k += 1
+            while k < limit:
+                if db[k + 1] >= speech_thresh:
+                    k += 1
+                    continue
+                # Bridge across < 0.18s (up to 18 frames @ 10 ms) geminate / plosive stop-closure dips
+                max_look = min(limit, k + 18)
+                rebound_idx = None
+                for m in range(k + 1, max_look + 1):
+                    if db[m] >= rebound_thresh and (m == limit or db[min(limit, m + 1)] >= rebound_thresh - 2.0):
+                        rebound_idx = m
+                        break
+                if rebound_idx is not None:
+                    k = rebound_idx
+                    rebound_win = db[rebound_idx : min(limit + 1, rebound_idx + 20)]
+                    if len(rebound_win) > 0:
+                        reb_level = float(np.percentile(rebound_win, 85))
+                        speech_thresh = min(speech_thresh, max(reb_level - drop_db, bg_db + 6.0))
+                else:
+                    break
+
             target = max(e, k * hop + 0.045)
-            end = min(target, nxt) if nxt - target < 0.015 else min(target, nxt - 0.015)
-            out.append({**w, "end": round(max(float(w["start"]) + 0.05, end), 3)})
+            if np.isfinite(nxt):
+                end = min(target, max(s + 0.05, nxt - 0.02))
+            else:
+                end = target
+            final_end = round(max(s + 0.05, end), 3)
+            nw: Dict[str, Any] = {**w, "end": final_end}
+            if k > b or db[b] >= rebound_thresh:
+                nw["energy_verified_end"] = final_end
+            out.append(nw)
         return out
 
     def silent_runs(
         self,
         waveform: np.ndarray,
         floor_db: float = -58.0,
-        min_run_sec: float = 0.12,
+        min_run_sec: float = 0.28,
     ) -> List[Tuple[float, float]]:
         """Return contiguous intervals at least `min_run_sec` long whose RMS energy stays below `floor_db`."""
         rms, _ = self.compute_energy_envelope(waveform)
@@ -241,27 +311,46 @@ class AcousticOnsetVerifier:
         extra_runs: Optional[List[Tuple[float, float]]] = None,
     ) -> List[Dict[str, Any]]:
         """Clamp word start and end timestamps out of confirmed silence intervals; flag words lying wholly in silence."""
-        runs = sorted(set(self.silent_runs(waveform)) | set(extra_runs or []))
+        raw_runs = sorted(list(self.silent_runs(waveform)) + list(extra_runs or []))
+        runs: List[Tuple[float, float]] = []
+        for ra, rb in raw_runs:
+            if rb <= ra:
+                continue
+            if runs and ra <= runs[-1][1] + 1e-4:
+                runs[-1] = (runs[-1][0], max(runs[-1][1], float(rb)))
+            else:
+                runs.append((float(ra), float(rb)))
         if not runs or not words:
             return words
         out = []
         for w in words:
             s, e = float(w["start"]), float(w["end"])
+            dur = max(1e-4, e - s)
             ns, ne = s, e
+            wholly_silent = False
             for a, b in runs:
                 if b <= s or a >= e:
                     continue
-                if a <= s + 0.10 and b < e - 0.05:
+                overlap = min(e, b) - max(s, a)
+                if a <= s + 0.03 and b >= e - 0.03 and overlap >= 0.85 * dur:
+                    wholly_silent = True
+                    break
+                if a <= s + 0.04 and s < b < e - 0.05:
+                    # Left-edge silence smear before real speech at b: snap start forward and keep ne intact
                     ns = max(ns, b - 0.02)
-                elif a > s and b >= e - 0.10:
+                elif s < a and b < e:
+                    # Internal dip (e.g. geminate/stop closure inside word): never truncate or split!
+                    continue
+                elif a > max(ns + 0.05, s + 0.04) and b >= e:
+                    # Trailing silence extending all the way past word end
                     ne = min(ne, a + 0.04)
-                elif a <= s + 0.10 and b >= e - 0.10:
-                    ns, ne = s, s
             nw = dict(w)
-            if ne - ns < 0.03 and any(a <= s and e <= b for a, b in runs):
+            if wholly_silent:
                 nw["no_sound"] = True
             else:
                 nw["start"], nw["end"] = round(ns, 3), round(max(ne, ns + 0.03), 3)
+                if "energy_verified_end" in nw and ne < e - 0.02:
+                    nw["energy_verified_end"] = nw["end"]
                 if abs(ns - s) > 0.02 or abs(ne - e) > 0.02:
                     nw["sound_clamp"] = [round(ns - s, 3), round(ne - e, 3)]
             out.append(nw)

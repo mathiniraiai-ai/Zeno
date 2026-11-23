@@ -1552,6 +1552,17 @@ def _render_cards_into_dir(
             )
             card["png"] = str(target.resolve())
 
+        try:
+            import subtitles as _subs_mod
+            qc = _subs_mod.detect_tofu_boxes_in_png(target)
+            if qc.get("tofu_count", 0) > 0:
+                print(
+                    f"  [CARDS WARN] Detected {qc['tofu_count']} hollow tofu box(es) in rendered flashcard "
+                    f"'{card.get('en') or ''} | {card.get('native') or ''}' ({target.name})"
+                )
+        except Exception:
+            pass
+
 
 def place_timeline_flashcards(
     plan: Optional[Dict[str, Any]],

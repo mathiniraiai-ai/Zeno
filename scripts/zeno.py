@@ -493,12 +493,13 @@ def run_inspect(
     style: str = "",
     name: str = "",
     compact: bool = False,
+    project_name: Optional[str] = None,
 ) -> Path:
     clips = expand_clip_inputs(raw_inputs)
     if not clips:
         raise FileNotFoundError(f"No video clips found in: {raw_inputs}")
 
-    project_name = common.resolve_user_project_name(script_path.stem)
+    project_name = project_name or common.resolve_user_project_name(script_path.stem)
     work_dir = WORK / project_name
     common.stamp_job_owner(work_dir)
     _archive_call("mark_started", work_dir)
@@ -578,6 +579,100 @@ def print_inspect_guide(plan_path: Path, name: str = "") -> None:
         f"[TURN 4] Inspect {target_dl}review_sheet.jpg once, then start next video.",
     ]
     print("\n".join(guide), flush=True)
+
+
+def _snapshot_clip_diags(proj_dir: Path) -> Optional[List[Dict[str, Any]]]:
+    if not proj_dir.is_dir():
+        return None
+    try:
+        import edit_packet
+
+        return edit_packet.clip_diagnostics(proj_dir)
+    except Exception:
+        return None
+
+
+def _clip_has_incomplete_issue(d: Dict[str, Any]) -> bool:
+    status = str(d.get("status") or "").lower()
+    if status in ("incomplete", "quota_exceeded", "cloud_failed"):
+        return True
+    unc = d.get("uncovered_spans") or []
+    return any((b - a) >= 2.0 for a, b in unc) or sum(max(0.0, b - a) for a, b in unc) >= 2.0
+
+
+def _report_inspect_completeness(
+    proj_dir: Path,
+    before: Optional[List[Dict[str, Any]]] = None,
+    retry_mode: bool = False,
+) -> None:
+    try:
+        import edit_packet
+
+        after = edit_packet.clip_diagnostics(proj_dir)
+    except Exception:
+        return
+    if not after:
+        return
+
+    rel_dir = _rel_workspace_path(proj_dir)
+    py_cmd = _venv_py_cmd()
+
+    if retry_mode:
+        prev_map = {d["display_name"]: d for d in (before or [])}
+        ok_cnt = sum(1 for d in after if not _clip_has_incomplete_issue(d))
+        retry_targets = [
+            x.strip() for x in os.environ.get("ZENO_RETRY_CLIPS", "").split(",") if x.strip()
+        ]
+        target_set = {x.lower() for x in retry_targets}
+        changes: List[str] = []
+        preserved = 0
+        for d in after:
+            name = d["display_name"]
+            prev = prev_map.get(name)
+            was_bad = bool(prev and _clip_has_incomplete_issue(prev))
+            is_bad = _clip_has_incomplete_issue(d)
+            targeted = bool(target_set and (name.lower() in target_set or Path(name).stem.lower() in target_set))
+            if prev is not None and not was_bad and not is_bad and not targeted:
+                preserved += 1
+                continue
+            if prev is not None and (was_bad or is_bad or targeted or prev["words_count"] != d["words_count"] or prev["status"] != d["status"]):
+                prev_cov = f"{round(prev['speech_coverage'] * 100):.0f}%" if prev.get("speech_coverage") is not None else "?%"
+                now_cov = f"{round(d['speech_coverage'] * 100):.0f}%" if d.get("speech_coverage") is not None else "?%"
+                changes.append(
+                    f"  • {name}: {prev['status']} ({prev['words_count']}w, {prev_cov}) -> {d['status']} ({d['words_count']}w, {now_cov})"
+                )
+            elif prev is None and (is_bad or targeted):
+                now_cov = f"{round(d['speech_coverage'] * 100):.0f}%" if d.get("speech_coverage") is not None else "?%"
+                changes.append(f"  • {name}: {d['status']} ({d['words_count']}w, {now_cov})")
+        pres_note = f"; {preserved} healthy clip cache(s) preserved" if preserved else ""
+        print(f"\n[RETRY SUMMARY] {ok_cnt}/{len(after)} clip(s) ok{pres_note}:", flush=True)
+        for ch in changes:
+            print(ch, flush=True)
+
+    bad = [d for d in after if _clip_has_incomplete_issue(d)]
+    if bad:
+        parts: List[str] = []
+        for d in bad[:4]:
+            unc = d.get("uncovered_spans") or []
+            details: List[str] = []
+            if d["status"] in ("quota_exceeded", "cloud_failed"):
+                details.append(d["status"])
+            if unc:
+                spans_s = ", ".join(f"{a:.1f}-{b:.1f}s" for a, b in unc[:2])
+                if len(unc) > 2:
+                    spans_s += f" +{len(unc) - 2}"
+                details.append(f"uncovered {spans_s}")
+            if d.get("cooldown_sec"):
+                details.append(f"cooldown ~{int(round(float(d['cooldown_sec'])))}s")
+            elif not details:
+                details.append(d["status"])
+            parts.append(f"{d['display_name']} ({', '.join(details)})")
+        more = f" (+{len(bad) - 4} more)" if len(bad) > 4 else ""
+        print(
+            f"[INCOMPLETE CLIPS] {'; '.join(parts)}{more} — run `{py_cmd} scripts/zeno.py {rel_dir} --retry-incomplete --compact` "
+            f"(or `{py_cmd} scripts/edit_packet.py {rel_dir} --diagnose`) before planning.",
+            flush=True,
+        )
 
 
 def _segment_duration(seg: Dict[str, Any]) -> float:
@@ -757,6 +852,9 @@ def run_execute_and_deliver(
     moved = script_order.snap_cuts(plan)
     if moved:
         print(f"[SNAP] {moved} cut boundary(s) snapped to quietest breath gap.", flush=True)
+    kept = script_order.protect_tails(plan)
+    if kept:
+        print(f"[SNAP] {kept} cut(s) widened so no word's fade-out or onset is chopped.", flush=True)
     script_path = _resolve_plan_script_path(plan, p_path)
     fc_fn = getattr(script_order, "calibrate_flashcards", None)
     cards_calibrated = (
@@ -774,8 +872,18 @@ def run_execute_and_deliver(
     )
     if calibrated:
         print(f"[BEATS] {calibrated} post-word beat(s) calibrated.", flush=True)
-    if moved or cards_calibrated or calibrated:
+    if moved or kept or cards_calibrated or calibrated:
         p_path.write_text(edl_parser.format_edl(plan), encoding="utf-8")
+
+    try:
+        tight_notes = script_order.tight_report(plan)
+        pause_risks = [ln for ln in tight_notes if "pause between" in ln and (": 0.6" in ln or ": 0.7" in ln or ": 0.8" in ln or ": 0.9" in ln or re.search(r": [1-9]\.\d+s pause between", ln))]
+        if pause_risks:
+            print(f"[PAUSE RISK] {len(pause_risks)} internal pause(s) >=0.60s may fail deep QC cuts check:", flush=True)
+            for pr_ln in pause_risks[:4]:
+                print(f"             {pr_ln}", flush=True)
+    except Exception:
+        pass
 
     print("[PLAN PASS] Every line present, once, in script order; no cut inside a word; voices match.", flush=True)
     print(build_editorial_pitch_card(p_path.parent, p_path), flush=True)
@@ -943,6 +1051,10 @@ def run_queue(
                 compact=compact,
             )
             proj_dir = plan_path.parent
+            _report_inspect_completeness(
+                proj_dir,
+                retry_mode=bool(os.environ.get("ZENO_RETRY_INCOMPLETE") or os.environ.get("ZENO_RETRY_CLIPS")),
+            )
             proj_rel = _rel_workspace_path(proj_dir)
             plan_rel = _rel_workspace_path(plan_path)
             rel_pkt = _rel_workspace_path(_packet_path(proj_dir))
@@ -1019,6 +1131,90 @@ def run_queue(
 # ============================================================================
 # CLI Entrypoint
 # ============================================================================
+def _resolve_retry_project_context(args: argparse.Namespace) -> Tuple[List[str], str, str, str, str, str, Optional[str]]:
+    """Recover `(inputs, script, name, style, preset, mark_pack, project_name)` from `work/<project>` when retrying."""
+    proj_dir: Optional[Path] = None
+    pos_is_proj = False
+    if getattr(args, "project", None):
+        cand = common.resolve(args.project)
+        proj_dir = cand if cand.is_dir() else (WORK / args.project)
+    elif getattr(args, "plan", None):
+        proj_dir = common.resolve(args.plan).parent
+    elif len(args.inputs or []) == 1:
+        cand = common.resolve(args.inputs[0])
+        if cand.is_dir() and (
+            (cand / "plan.edl").is_file()
+            or (cand / "clip_caches.json").is_file()
+            or (cand / "facts.md").is_file()
+        ):
+            proj_dir = cand
+            pos_is_proj = True
+
+    if proj_dir is None:
+        return (
+            list(args.inputs or []),
+            args.script or "",
+            args.name,
+            args.style,
+            args.preset,
+            args.mark_pack,
+            None,
+        )
+    if not proj_dir.is_dir():
+        raise FileNotFoundError(f"Project directory not found: {proj_dir}")
+
+    plan_edl = proj_dir / "plan.edl"
+    plan_json = proj_dir / "plan.json"
+    plan: Dict[str, Any] = {}
+    if plan_edl.is_file():
+        try:
+            plan = load_edl(plan_edl)
+        except Exception:
+            plan = {}
+    if not plan and plan_json.is_file():
+        raw = common.read_json(plan_json)
+        if isinstance(raw, dict):
+            plan = raw
+
+    script_arg = (args.script or str(plan.get("script") or "")).strip()
+    if not script_arg and plan_json.is_file():
+        raw = common.read_json(plan_json)
+        if isinstance(raw, dict):
+            script_arg = str(raw.get("script") or "").strip()
+
+    raw_inputs = list(args.inputs or []) if (args.inputs and not pos_is_proj) else []
+    if not raw_inputs and plan_edl.is_file():
+        try:
+            import edit_packet
+
+            src_dir = edit_packet._extract_src_dir(plan_edl.read_text(encoding="utf-8"), proj_dir)
+            if src_dir is not None and src_dir.is_dir() and expand_clip_inputs([str(src_dir)]):
+                raw_inputs = [str(src_dir)]
+        except Exception:
+            pass
+    if not raw_inputs and (proj_dir / "clip_caches.json").is_file():
+        try:
+            import edit_packet
+
+            caches_raw = common.read_json(proj_dir / "clip_caches.json")
+            seen_paths: set = set()
+            for _dname, cname, _meta in edit_packet._parse_clip_caches(caches_raw):
+                cdir = edit_packet._resolve_cache_dir(proj_dir, cname)
+                info = common.read_json(cdir / "info.json") if (cdir and (cdir / "info.json").is_file()) else {}
+                p_str = str(info.get("path") or "").strip() if isinstance(info, dict) else ""
+                if p_str and Path(p_str).is_file() and p_str not in seen_paths:
+                    seen_paths.add(p_str)
+                    raw_inputs.append(p_str)
+        except Exception:
+            pass
+
+    eff_name = args.name or (_infer_video_name(plan, plan_edl) if plan_edl.is_file() else "")
+    eff_style = args.style or str(plan.get("style") or "")
+    eff_preset = args.preset if args.preset != "auto" else str(plan.get("preset") or "auto")
+    eff_mark_pack = args.mark_pack if args.mark_pack != "flash" else str(plan.get("mark_pack") or "flash")
+    return raw_inputs, script_arg, eff_name, eff_style, eff_preset, eff_mark_pack, proj_dir.name
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Zeno — Unified Host-AI Direct & Multi-Video Queue Editor")
     ap.add_argument("inputs", nargs="*", help="Raw footage folder or clip paths")
@@ -1054,12 +1250,44 @@ def main() -> None:
     ap.add_argument("--login", action="store_true", help="Sign in to Zeno Cloud via Google OAuth")
     ap.add_argument("--whoami", action="store_true", help="Show active Zeno Cloud session")
     ap.add_argument("--fresh", action="store_true", help="Rebuild cached transcripts and alignments")
+    ap.add_argument(
+        "--retry-incomplete",
+        action="store_true",
+        help="Re-transcribe only incomplete, failed, or uncovered-speech clips without wiping healthy caches",
+    )
+    ap.add_argument(
+        "--clip",
+        action="append",
+        default=None,
+        metavar="CLIP",
+        help="Re-transcribe/inspect specific clip filename(s) only",
+    )
+    ap.add_argument(
+        "--project",
+        default=None,
+        metavar="PROJECT_DIR",
+        help="Existing work/<project> directory for --retry-incomplete or --clip",
+    )
     ap.add_argument("--skip-preflight", action="store_true", help="Development only: skip preflight checks")
     ap.add_argument("--compact", action="store_true", help="Concise console output; full subprocess logs saved to work/_logs/")
     args = ap.parse_args()
 
+    retry_mode = bool(args.retry_incomplete or args.clip)
+    if args.retry_incomplete:
+        os.environ["ZENO_RETRY_INCOMPLETE"] = "1"
+    if args.clip:
+        retry_clips = [
+            Path(c.strip()).name if ("/" in c or "\\" in c) else c.strip()
+            for c in args.clip
+            if c and c.strip()
+        ]
+        if retry_clips:
+            os.environ["ZENO_RETRY_CLIPS"] = ",".join(retry_clips)
     if args.fresh:
-        os.environ["ZENO_FRESH"] = "1"
+        if retry_mode:
+            print("[WARNING] --retry-incomplete/--clip preserves healthy caches; ignoring --fresh.", flush=True)
+        else:
+            os.environ["ZENO_FRESH"] = "1"
 
     if args.login:
         import auth_session
@@ -1084,6 +1312,8 @@ def main() -> None:
         or args.pitch
         or args.execute
         or args.inspect
+        or args.retry_incomplete
+        or args.clip
         or (args.inputs and args.script)
     )
     if has_action:
@@ -1164,37 +1394,48 @@ def main() -> None:
         )
         sys.exit(rc)
 
-    if args.inspect or (args.inputs and args.script):
-        if not args.inputs or not args.script:
-            ap.error("Provide <footage_dir_or_clips> and --script <path_or_gdoc_tab_url>")
-        common.job_begin(identity=json.dumps([args.script, args.name, args.inputs], ensure_ascii=False))
+    if args.inspect or retry_mode or (args.inputs and args.script):
+        try:
+            eff_inputs, eff_script, eff_name, eff_style, eff_preset, eff_mark_pack, eff_project = (
+                _resolve_retry_project_context(args)
+            )
+        except Exception as exc:
+            print(f"\n[BLOCKED] Could not resolve project for retry: {exc}", flush=True)
+            sys.exit(2)
+        if not eff_inputs or not eff_script:
+            ap.error("Provide <footage_dir_or_clips> and --script <path_or_gdoc_tab_url> (or existing work/<project> with --retry-incomplete/--clip)")
+        common.job_begin(identity=json.dumps([eff_script, eff_name, eff_inputs], ensure_ascii=False))
         ok_sys, sys_reason = run_system_preflight(skip=args.skip_preflight)
         if not ok_sys:
-            _archive_call("archive_blocked", "preflight", sys_reason, script_arg=args.script, inputs=args.inputs)
+            _archive_call("archive_blocked", "preflight", sys_reason, script_arg=eff_script, inputs=eff_inputs)
             print(f"\n[BLOCKED] Live system check failed: {sys_reason}", flush=True)
             sys.exit(2)
         try:
-            script_path, inp_err = validate_job_inputs(args.inputs, args.script, skip=args.skip_preflight)
+            script_path, inp_err = validate_job_inputs(eff_inputs, eff_script, skip=args.skip_preflight)
         except Exception as exc:
-            _archive_call("archive_blocked", "inputs", str(exc), script_arg=args.script, inputs=args.inputs)
+            _archive_call("archive_blocked", "inputs", str(exc), script_arg=eff_script, inputs=eff_inputs)
             print(f"\n[BLOCKED] Script error: {exc}", flush=True)
             sys.exit(2)
         if inp_err:
-            _archive_call("archive_blocked", "inputs", inp_err, script_arg=args.script, inputs=args.inputs)
+            _archive_call("archive_blocked", "inputs", inp_err, script_arg=eff_script, inputs=eff_inputs)
             print(f"\n[BLOCKED] Input validation failed: {inp_err}", flush=True)
             sys.exit(2)
         print("\n[GATE PASSED] System and inputs verified. Starting Zeno.", flush=True)
+        target_proj_name = eff_project or common.resolve_user_project_name(script_path.stem)
+        before_diag = _snapshot_clip_diags(WORK / target_proj_name) if retry_mode else None
         plan_path = run_inspect(
-            raw_inputs=args.inputs,
+            raw_inputs=eff_inputs,
             script_path=script_path,
             lang=args.lang,
-            preset=args.preset,
-            mark_pack=args.mark_pack,
-            style=args.style,
-            name=args.name,
+            preset=eff_preset,
+            mark_pack=eff_mark_pack,
+            style=eff_style,
+            name=eff_name,
             compact=args.compact,
+            project_name=eff_project,
         )
-        print_inspect_guide(plan_path, name=args.name)
+        print_inspect_guide(plan_path, name=eff_name)
+        _report_inspect_completeness(plan_path.parent, before=before_diag, retry_mode=retry_mode)
         sys.exit(0)
 
     ap.print_help()

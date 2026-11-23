@@ -119,7 +119,8 @@ def _natural_clip_sort_key(p: Path) -> Tuple[int, int, str]:
 
 
 def _clean_token(w: str) -> str:
-    return re.sub(r"[^\w\u0900-\u0D7F']", "", str(w or "").lower()).strip()
+    norm = str(w or "").replace("\u2019", "'").replace("\u2018", "'").lower()
+    return re.sub(r"[^\w\u0900-\u0D7F']", "", norm).strip("'_")
 
 
 def _phonetic_token(w: str) -> str:
@@ -178,16 +179,38 @@ def _word_similarity(w1: str, w2: str) -> float:
         if (len(sk1) >= 2 and len(sk2) >= 2 and sk1 != u1)
         else 0.0
     )
-    # Also compare vowel-skeleton lowered forms
+    # Also compare vowel-skeleton lowered forms (only when leading phonetic consonant aligns)
+    same_onset = bool(p1 and p2) and (
+        p1[0] == p2[0]
+        or (p1[0], p2[0]) in {
+            ("k", "g"), ("g", "k"), ("c", "j"), ("j", "c"),
+            ("t", "d"), ("d", "t"), ("p", "b"), ("b", "p"),
+            ("p", "f"), ("f", "p"), ("v", "b"), ("b", "v"),
+            ("v", "w"), ("w", "v"), ("s", "z"), ("z", "s"),
+        }
+    )
     c1 = re.sub(r"[aeiou]", "a", p1) if len(p1) >= 4 else p1
     c2 = re.sub(r"[aeiou]", "a", p2) if len(p2) >= 4 else p2
-    sim_c = SequenceMatcher(None, c1, c2).ratio() * 0.92 if (c1 and c2) else 0.0
-    best = max(sim_u, sim_p * 0.95, sim_sk, sim_c)
-    # Compound word check
-    if best < 0.72 and len(p1) >= 3 and len(p2) >= 3 and (len(p1) >= 7 or len(p2) >= 7):
-        short_p, long_p = (p1, p2) if len(p1) <= len(p2) else (p2, p1)
-        if len(short_p) >= 3 and (long_p.startswith(short_p[:3]) or long_p.endswith(short_p[-3:])):
-            best = max(best, 0.74)
+    cons1, cons2 = re.sub(r"[aeiou]", "", p1), re.sub(r"[aeiou]", "", p2)
+    cons_sim = SequenceMatcher(None, cons1, cons2).ratio() if (cons1 and cons2) else 0.0
+    sim_c = (
+        SequenceMatcher(None, c1, c2).ratio() * (0.92 if same_onset else 0.78)
+        if (c1 and c2 and cons_sim >= 0.75)
+        else 0.0
+    )
+    both_indic_diff_root = (sk1 != u1 and sk2 != u2 and not same_onset and sk1[:1] != sk2[:1])
+    u_weight = 0.90 if both_indic_diff_root else 1.0
+    p_weight = 0.82 if both_indic_diff_root else 0.95
+    best = max(sim_u * u_weight, sim_p * p_weight, sim_sk * u_weight, sim_c)
+    # Stem-prefix check (require >=5 shared romanized prefix chars covering >=72% of longer word; never suffix)
+    if best < 0.70 and len(p1) >= 5 and len(p2) >= 5:
+        cp = 0
+        for ch1, ch2 in zip(p1, p2):
+            if ch1 != ch2:
+                break
+            cp += 1
+        if cp >= 5 and cp >= 0.72 * max(len(p1), len(p2)):
+            best = max(best, 0.70)
     return best
 
 
@@ -355,6 +378,34 @@ def _unwrap_bracketed(text: str) -> str:
     if len(s) >= 2 and ((s[0] == "[" and s[-1] == "]") or (s[0] == "(" and s[-1] == ")")):
         return s[1:-1].strip()
     return s
+
+
+_LANG_BY_WORD = {"telugu": "te", "kannada": "kn", "malayalam": "ml", "tamil": "ta", "hindi": "hi", "bengali": "bn", "bangla": "bn",
+                 "marathi": "mr", "gujarati": "gu", "punjabi": "pa", "odia": "or", "oriya": "or"}
+_SCRIPT_BLOCKS = {"te": (0x0C00, 0x0C7F), "kn": (0x0C80, 0x0CFF), "ml": (0x0D00, 0x0D7F), "ta": (0x0B80, 0x0BFF), "hi": (0x0900, 0x097F),
+                  "bn": (0x0980, 0x09FF), "gu": (0x0A80, 0x0AFF), "pa": (0x0A00, 0x0A7F), "or": (0x0B00, 0x0B7F)}
+
+
+def infer_language(video_name: str = "", script_text: str = "") -> str:
+    """The spoken language of a video, so the transcription prompt names it instead of guessing ("auto").
+    Two clues: the language word in the Notion video name ("W47 - Telugu - ...") and the script the lines are written in.
+    They must agree (Hindi and Marathi share one script); when they disagree, or neither says, the answer stays "auto"."""
+    words = {_LANG_BY_WORD[w] for w in re.findall(r"[a-z]+", str(video_name or "").lower()) if w in _LANG_BY_WORD}
+    from_name = next(iter(words)) if len(words) == 1 else ""
+    counts = {code: 0 for code in _SCRIPT_BLOCKS}
+    for ch in str(script_text or ""):
+        o = ord(ch)
+        for code, (lo, hi) in _SCRIPT_BLOCKS.items():
+            if lo <= o <= hi:
+                counts[code] += 1
+                break
+    total = sum(counts.values())
+    top = max(counts, key=lambda c: counts[c])
+    from_text = top if total >= 40 and counts[top] >= 0.8 * total else ""
+    if from_name and from_text:
+        same = from_name == from_text or {from_name, from_text} <= {"hi", "mr"}
+        return from_name if same else "auto"
+    return from_name or from_text or "auto"
 
 
 def _apply_explicit_title(meta: Dict[str, Any], explicit_name: str) -> None:
@@ -1126,6 +1177,140 @@ def _is_quota_error_text(text: str) -> bool:
     )
 
 
+_VAD_MOD: Any = None
+_VAD_MOD_LOADED = False
+
+
+def _load_vad_module() -> Any:
+    """Load `align_engine.vad` safely even when optional heavy alignment packages are absent."""
+    global _VAD_MOD, _VAD_MOD_LOADED
+    if _VAD_MOD_LOADED:
+        return _VAD_MOD
+    _VAD_MOD_LOADED = True
+    try:
+        from align_engine import vad as _vad_mod
+
+        _VAD_MOD = _vad_mod
+        return _VAD_MOD
+    except Exception:
+        pass
+    try:
+        import importlib.util
+
+        vad_path = ROOT / "scripts" / "align_engine" / "vad.py"
+        if vad_path.is_file():
+            spec = importlib.util.spec_from_file_location("align_engine_vad_standalone", str(vad_path))
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                _VAD_MOD = mod
+    except Exception:
+        _VAD_MOD = None
+    return _VAD_MOD
+
+
+def _clear_incomplete_clip_caches(work_dir: Path) -> None:
+    """Clear clip-level stale transcript outputs while preserving completed chunk caches."""
+    for fname in (
+        "gemini_transcript.json",
+        "words.json",
+        "hq_words.json",
+        "align.json",
+        "alignment.json",
+        "transcript.txt",
+        "facts_pending",
+    ):
+        fp = work_dir / fname
+        if fp.is_file():
+            try:
+                fp.unlink()
+            except OSError:
+                pass
+    chunks_dir = work_dir / "chunks"
+    if chunks_dir.is_dir():
+        for sub in chunks_dir.iterdir():
+            if not sub.is_dir():
+                continue
+            gf = sub / "gemini_transcript.json"
+            drop_sub = not gf.is_file()
+            if not drop_sub:
+                try:
+                    data = json.loads(gf.read_text(encoding="utf-8"))
+                    drop_sub = (
+                        not isinstance(data, dict)
+                        or not (data.get("words") or [])
+                        or bool(data.get("incomplete"))
+                        or str(data.get("warning") or "").strip().lower().startswith("incomplete")
+                    )
+                except Exception:
+                    drop_sub = True
+            if drop_sub:
+                shutil.rmtree(sub, ignore_errors=True)
+
+
+def _compute_clip_transcript_meta(
+    work_dir: Path,
+    duration_sec: float,
+    spoken_spans: List[Tuple[float, float]],
+    words_list: List[Dict[str, Any]],
+    existing_meta: Optional[Dict[str, Any]] = None,
+    override_status: str = "",
+    warning_msg: str = "",
+) -> Dict[str, Any]:
+    """Compute and normalize `transcript_meta.json` fields for a clip cache directory."""
+    vad_mod = _load_vad_module()
+    active_speech_sec = round(sum(max(0.0, float(b) - float(a)) for a, b in spoken_spans), 3)
+    words_count = len(words_list)
+    if vad_mod is not None and spoken_spans:
+        uncov_12 = vad_mod.uncovered_speech_spans(spoken_spans, words_list, min_gap_sec=1.2)
+        uncov_all_sec = sum(
+            e - s for s, e in vad_mod.uncovered_speech_spans(spoken_spans, words_list, min_gap_sec=0.05)
+        )
+        covered_speech_sec = round(max(0.0, active_speech_sec - uncov_all_sec), 3)
+        speech_coverage = round(covered_speech_sec / active_speech_sec, 3) if active_speech_sec > 0 else (1.0 if words_count else 0.0)
+    else:
+        uncov_12 = [[round(float(a), 3), round(float(b), 3)] for a, b in spoken_spans] if (spoken_spans and not words_list) else []
+        covered_speech_sec = 0.0
+        speech_coverage = 1.0 if words_count else 0.0
+
+    ex = existing_meta if isinstance(existing_meta, dict) else {}
+    chunks_total = int(ex.get("chunks_total") or (1 if words_count else 0))
+    chunks_done = int(ex.get("chunks_done") or (1 if words_count else 0))
+    uncov_total = sum(float(u[1]) - float(u[0]) for u in uncov_12)
+    has_big_uncov = any((float(u[1]) - float(u[0])) >= 1.5 for u in uncov_12)
+
+    if override_status in ("quota_exceeded", "cloud_failed", "no_speech", "incomplete"):
+        status = override_status
+    elif words_count == 0 and active_speech_sec >= 0.8:
+        status = "incomplete"
+    elif words_count == 0:
+        status = "no_speech"
+    elif (active_speech_sec >= 4.0 and speech_coverage < 0.45) or uncov_total >= 3.0 or (has_big_uncov and speech_coverage < 0.70):
+        status = "incomplete"
+    else:
+        status = "ok"
+
+    warn_out = str(warning_msg or ex.get("warning") or "").strip()
+    if status == "incomplete" and not warn_out:
+        warn_out = (
+            f"incomplete transcript: {words_count} words covering {covered_speech_sec:.1f}s/{active_speech_sec:.1f}s "
+            f"({speech_coverage:.0%}) of detected speech"
+        )
+
+    return {
+        "status": status,
+        "duration_sec": round(float(duration_sec or 0.0), 3),
+        "active_speech_sec": active_speech_sec,
+        "covered_speech_sec": covered_speech_sec,
+        "speech_coverage": speech_coverage,
+        "words_count": words_count,
+        "uncovered_spans": [[round(float(u[0]), 3), round(float(u[1]), 3)] for u in uncov_12],
+        "chunks_total": chunks_total,
+        "chunks_done": chunks_done,
+        "warning": warn_out,
+    }
+
+
 def ensure_clip_transcribed(
     clip_stem: str,
     clip_src: str,
@@ -1146,6 +1331,7 @@ def ensure_clip_transcribed(
     hq_path = work_dir / "hq_words.json"
     words_path = work_dir / "words.json"
     align_path = work_dir / "align.json"
+    meta_path = work_dir / "transcript_meta.json"
 
     resolved_src = resolve(clip_src)
     if info_path.is_file():
@@ -1165,6 +1351,7 @@ def ensure_clip_transcribed(
     if isinstance(info, dict):
         info.pop("_transcript_error", None)
         info.pop("_transcript_status", None)
+        info.pop("_transcript_warning", None)
 
     hq_words: List[Dict[str, Any]] = []
     base_words: List[Dict[str, Any]] = []
@@ -1199,12 +1386,94 @@ def ensure_clip_transcribed(
     if not wav_path.is_file() and resolved_src.is_file() and info.get("has_audio", True):
         ffmpeg("-i", resolved_src, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav_path)
 
-    # Measure VAD speech spans up front so an empty cached transcript on a clip with real speech (>= 0.8s) is never trusted
+    # Measure VAD speech spans up front so incomplete or empty caches on real speech are never trusted
     spoken_spans = _speech_spans_of({"work_dir": work_dir}) if wav_path.is_file() else []
     active_speech_sec = sum(max(0.0, float(b) - float(a)) for a, b in spoken_spans)
+    vad_mod = _load_vad_module()
+    existing_meta: Optional[Dict[str, Any]] = None
+    if meta_path.is_file():
+        try:
+            mdata = read_json(meta_path)
+            if isinstance(mdata, dict):
+                existing_meta = mdata
+        except Exception:
+            existing_meta = None
+
+    retry_incomplete = os.environ.get("ZENO_RETRY_INCOMPLETE", "").strip() == "1"
+    retry_clips_raw = os.environ.get("ZENO_RETRY_CLIPS", "").strip()
+    retry_clips = {t.strip().lower() for t in retry_clips_raw.split(",") if t.strip()} if retry_clips_raw else set()
+    clip_names_low = {
+        clip_stem.strip().lower(),
+        Path(str(clip_src)).name.strip().lower(),
+        Path(str(clip_src)).stem.strip().lower(),
+    }
+    clip_matches_retry = bool(retry_clips & clip_names_low) if retry_clips else False
+    skip_due_to_retry_filter = bool(retry_clips and not clip_matches_retry)
+
+    force_retry_clip = False
+    if clip_matches_retry:
+        force_retry_clip = True
+    elif retry_incomplete and not skip_due_to_retry_filter:
+        cached_words = hq_words or base_words
+        meta_status = str((existing_meta or {}).get("status") or "").strip().lower()
+        meta_uncov = (existing_meta or {}).get("uncovered_spans") or []
+        has_meta_uncov = any(
+            (float(u[1]) - float(u[0])) >= 1.5
+            for u in meta_uncov
+            if isinstance(u, (list, tuple)) and len(u) >= 2
+        )
+        live_uncov = (
+            vad_mod.uncovered_speech_spans(spoken_spans, cached_words, min_gap_sec=1.5)
+            if (vad_mod is not None and spoken_spans and cached_words)
+            else []
+        )
+        if vad_mod is not None and spoken_spans and active_speech_sec > 0.0:
+            uncov_sec = (
+                sum(e - s for s, e in vad_mod.uncovered_speech_spans(spoken_spans, cached_words, min_gap_sec=0.05))
+                if cached_words
+                else active_speech_sec
+            )
+            live_cov = max(0.0, active_speech_sec - uncov_sec) / active_speech_sec
+        else:
+            live_cov = 1.0 if cached_words else 0.0
+        ev_marker: Dict[str, Any] = {}
+        marker_path = work_dir / "engine_version.json"
+        if marker_path.is_file():
+            try:
+                ev_raw = read_json(marker_path)
+                if isinstance(ev_raw, dict):
+                    ev_marker = ev_raw
+            except Exception:
+                pass
+        force_retry_clip = (
+            meta_status in ("incomplete", "quota_exceeded", "cloud_failed")
+            or has_meta_uncov
+            or bool(live_uncov)
+            or (active_speech_sec >= 0.8 and not cached_words)
+            or (active_speech_sec >= 4.0 and live_cov < 0.45)
+            or ev_marker.get("transcript") == "incomplete"
+        )
+
+    if force_retry_clip:
+        print(f"  [{clip_stem}] retrying incomplete/targeted clip (preserving completed chunks)")
+        _clear_incomplete_clip_caches(work_dir)
+        hq_words = []
+        base_words = []
+        existing_meta = None
+
+    if skip_remote_transcription and not hq_words and not base_words:
+        if not info.get("has_audio", True):
+            return info, [], []
+        if wav_path.is_file() and clip_has_no_sound(wav_path):
+            print(f"  [{clip_stem}] no sound in this clip: skipping transcription")
+            return info, [], []
+        info["_transcript_status"] = "quota_skipped"
+        info["_transcript_error"] = skip_reason or "skipped by quota circuit-breaker (Gemini quota exceeded)"
+        print(f"  [{clip_stem}] skipped remote transcription (quota circuit-breaker active)")
+        return info, [], []
 
     gem_cache_path = work_dir / "gemini_transcript.json"
-    if not hq_words and not base_words and active_speech_sec >= 0.8:
+    if not hq_words and not base_words and active_speech_sec >= 0.8 and not skip_due_to_retry_filter:
         for stale_empty in (align_path, hq_path, words_path, gem_cache_path):
             if stale_empty.is_file():
                 try:
@@ -1212,40 +1481,76 @@ def ensure_clip_transcribed(
                 except OSError:
                     pass
 
-    # Skip transcription on clips with no real sound so the transcriber cannot hallucinate script lines over silence
+    # Skip transcription on clips with verified zero speech + low voiced energy or no sound
+    rms_env_check = (
+        compute_10ms_rms_envelope(wav_path)
+        if (not hq_words and not base_words and wav_path.is_file() and active_speech_sec < 0.8)
+        else []
+    )
+    vad_avail = bool(vad_mod is not None and vad_mod.available())
+    low_voiced_zero_speech = (
+        vad_avail
+        and active_speech_sec == 0.0
+        and not voiced_spans(rms_env_check, floor_db=-34.0)
+    )
     no_sound = (
         not hq_words
         and not base_words
         and wav_path.is_file()
         and active_speech_sec < 0.8
-        and clip_has_no_sound(wav_path)
+        and (low_voiced_zero_speech or clip_has_no_sound(wav_path, rms_env_check))
     )
     if no_sound:
         print(f"  [{clip_stem}] no sound in this clip: skipping transcription")
 
     transcript_err = ""
     transcript_status = ""
-    confirmed_no_speech = False
-    if not hq_words and not base_words and wav_path.is_file() and not no_sound:
+    transcript_warn = ""
+    confirmed_no_speech = no_sound
+    res_meta: Optional[Dict[str, Any]] = None
+    res_incomplete = False
+    align_engine_attempted = False
+
+    if (
+        not hq_words
+        and not base_words
+        and wav_path.is_file()
+        and not no_sound
+        and not skip_due_to_retry_filter
+    ):
         max_tries = 2 if active_speech_sec >= 0.8 else 1
         for attempt in range(max_tries):
             if align_engine is not None and hasattr(align_engine, "transcribe_and_align_clip"):
+                align_engine_attempted = True
                 try:
                     if attempt > 0 and gem_cache_path.is_file():
                         try:
                             gem_cache_path.unlink()
                         except OSError:
                             pass
+                    effective_script_path = (
+                        None
+                        if (vad_avail and float(info.get("duration") or 0.0) >= 2.0 and active_speech_sec < 0.6)
+                        else script_path
+                    )
                     res = align_engine.transcribe_and_align_clip(
                         wav_path,
                         work_dir=work_dir,
                         lang=lang,
-                        script_path=script_path,
+                        script_path=effective_script_path,
                     )
                     if isinstance(res, list):
                         hq_words = res
                     elif isinstance(res, dict):
                         res_status = str(res.get("status") or "").strip().lower()
+                        transcript_warn = str(res.get("warning") or "").strip()
+                        res_incomplete = (
+                            bool(res.get("incomplete"))
+                            or transcript_warn.lower().startswith("incomplete")
+                            or res_status == "incomplete"
+                        )
+                        if isinstance(res.get("transcript_meta"), dict):
+                            res_meta = dict(res["transcript_meta"])
                         if "words" in res:
                             hq_words = res["words"] or []
                         if res_status in ("cloud_failed", "quota_exceeded"):
@@ -1256,16 +1561,14 @@ def ensure_clip_transcribed(
                                 else "cloud_failed"
                             )
                             break
-                        if res_status == "success" and not hq_words:
-                            # Gemini genuinely listened and obeyed Rule 3 ZERO-SPEECH GUARD (e.g. music/laughter/noise):
-                            # do not delete cache, retry a 2nd time, or spawn scripts/transcribe.py for a 3rd redundant call.
+                        if res_status in ("success", "no_speech") and not hq_words and active_speech_sec < 0.8 and not res_incomplete:
                             confirmed_no_speech = True
                             transcript_status = "success"
                             print(f"  [{clip_stem}] confirmed non-speech / zero spoken words (skipping redundant retries)")
                             break
                     if hq_words:
                         transcript_err = ""
-                        transcript_status = "success"
+                        transcript_status = "incomplete" if res_incomplete else "success"
                         write_json(hq_path, hq_words)
                         write_json(words_path, hq_words)
                         break
@@ -1282,7 +1585,7 @@ def ensure_clip_transcribed(
                     f"  [WARN] {clip_stem}: empty words returned despite {active_speech_sec:.2f}s of active speech; retrying transcription..."
                 )
 
-        if not hq_words and not base_words and not transcript_err and not confirmed_no_speech:
+        if not hq_words and not base_words and not transcript_err and not confirmed_no_speech and not align_engine_attempted:
             transcribe_script = ROOT / "scripts" / "transcribe.py"
             if transcribe_script.is_file():
                 venv_py = find_venv_python()
@@ -1300,7 +1603,7 @@ def ensure_clip_transcribed(
                     transcript_err = f"{type(exc).__name__}: {exc}"
                     transcript_status = "quota_exceeded" if _is_quota_error_text(transcript_err) else "cloud_failed"
 
-        if not hq_words and not base_words and not confirmed_no_speech and (active_speech_sec >= 0.8 or transcript_err):
+        if not hq_words and not base_words and not confirmed_no_speech and (active_speech_sec >= 0.8 or transcript_err or res_incomplete):
             print(
                 f"  [WARN] {clip_stem}: 0 words transcribed"
                 + (f" ({transcript_err[:120]})" if transcript_err else f" despite {active_speech_sec:.2f}s of active speech")
@@ -1320,13 +1623,8 @@ def ensure_clip_transcribed(
             if isinstance(ev, dict):
                 ev["transcript"] = "incomplete"
                 write_json(marker, ev)
-        if not hq_words and not base_words and transcript_err:
             if not transcript_status:
-                transcript_status = "quota_exceeded" if _is_quota_error_text(transcript_err) else "cloud_failed"
-            info["_transcript_status"] = transcript_status
-            info["_transcript_error"] = transcript_err
-        elif confirmed_no_speech:
-            info["_transcript_status"] = "success"
+                transcript_status = "incomplete"
 
     if not hq_words:
         hq_words = base_words
@@ -1362,6 +1660,48 @@ def ensure_clip_transcribed(
     hq_words = _norm_w(hq_words)
     base_words = _norm_w(base_words)
 
+    # Persist / verify `transcript_meta.json` and propagate status cleanly
+    dur_val = float((info or {}).get("duration") or 0.0)
+    if res_meta is not None:
+        final_meta = res_meta
+    else:
+        meta_override = ""
+        if transcript_status in ("quota_exceeded", "cloud_failed"):
+            meta_override = transcript_status
+        elif no_sound or (confirmed_no_speech and active_speech_sec < 0.8):
+            meta_override = "no_speech"
+        elif res_incomplete:
+            meta_override = "incomplete"
+        final_meta = _compute_clip_transcript_meta(
+            work_dir=work_dir,
+            duration_sec=dur_val,
+            spoken_spans=spoken_spans,
+            words_list=hq_words,
+            existing_meta=existing_meta,
+            override_status=meta_override,
+            warning_msg=transcript_err or transcript_warn,
+        )
+    if wav_path.is_file() or res_meta is not None or transcript_status or existing_meta is not None:
+        write_json(meta_path, final_meta)
+
+    if isinstance(info, dict):
+        if transcript_err:
+            if not transcript_status:
+                transcript_status = "quota_exceeded" if _is_quota_error_text(transcript_err) else "cloud_failed"
+            info["_transcript_status"] = transcript_status
+            info["_transcript_error"] = transcript_err
+        elif final_meta["status"] == "incomplete":
+            info["_transcript_status"] = "incomplete"
+            if final_meta.get("warning"):
+                info["_transcript_warning"] = final_meta["warning"]
+            if hq_words:
+                print(
+                    f"  [WARN] {clip_stem}: sparse/incomplete transcript ({len(hq_words)} words, "
+                    f"coverage={final_meta['speech_coverage']:.0%}); set ZENO_RETRY_INCOMPLETE=1 to recover missing speech"
+                )
+        elif confirmed_no_speech or final_meta["status"] in ("ok", "no_speech"):
+            info["_transcript_status"] = "success"
+
     return info, hq_words, base_words
 
 
@@ -1389,6 +1729,40 @@ def clip_is_silent(c: Dict[str, Any]) -> bool:
     """Return True when a clip contains no meaningful speech (including stationary ambient noise)."""
     ws = c.get("hq_words") or []
     dur = float((c.get("info") or {}).get("duration") or 1.0)
+    active_speech_sec = 0.0
+    if c.get("active_speech_sec") is not None:
+        try:
+            active_speech_sec = float(c["active_speech_sec"])
+        except (TypeError, ValueError):
+            active_speech_sec = 0.0
+    else:
+        spans = c.get("speech_spans")
+        if spans is None:
+            wdir_raw = c.get("work_dir")
+            wdir = Path(wdir_raw) if wdir_raw else (clip_work_dir(resolve(c["src"])) if c.get("src") else None)
+            if wdir and (wdir / "speech_spans.json").is_file():
+                try:
+                    sdata = read_json(wdir / "speech_spans.json")
+                    spans = sdata.get("spans") if isinstance(sdata, dict) else sdata
+                except Exception:
+                    spans = None
+            if spans is None and wdir and (wdir / "audio16k.wav").is_file():
+                spans = _speech_spans_of({"work_dir": wdir})
+            if spans is None and wdir and (wdir / "transcript_meta.json").is_file():
+                try:
+                    tmeta = read_json(wdir / "transcript_meta.json")
+                    if isinstance(tmeta, dict) and tmeta.get("active_speech_sec") is not None:
+                        active_speech_sec = float(tmeta["active_speech_sec"])
+                except Exception:
+                    pass
+        if isinstance(spans, (list, tuple)):
+            active_speech_sec = sum(
+                max(0.0, float(sp[1]) - float(sp[0]))
+                for sp in spans
+                if isinstance(sp, (list, tuple)) and len(sp) >= 2
+            )
+    if active_speech_sec >= 1.5:
+        return False
     dbs = sorted(db for _, db in (c.get("rms_env") or []))
     if dbs:
         p50, p90 = dbs[len(dbs) // 2], dbs[min(len(dbs) - 1, int(len(dbs) * 0.90))]
@@ -1697,7 +2071,22 @@ def format_facts(clips_data: List[Dict[str, Any]], script_lines: Optional[List[D
             [
                 w
                 for w in ws
-                if not any(a - 0.08 <= 0.5 * (float(w["start"]) + float(w["end"])) <= b + 0.08 for a, b in spoken)
+                if not any(
+                    float(w["start"]) <= float(b) + 0.10 and float(w["end"]) >= float(a) - 0.10
+                    for a, b in spoken
+                )
+                and (
+                    not env
+                    or max(
+                        (
+                            db
+                            for tt, db in env
+                            if float(w["start"]) - 0.05 <= tt <= float(w["end"]) + 0.05
+                        ),
+                        default=-140.0,
+                    )
+                    < -45.0
+                )
             ]
             if spoken
             else []
@@ -1723,9 +2112,7 @@ def format_facts(clips_data: List[Dict[str, Any]], script_lines: Optional[List[D
                 w_txt = str(w.get("w") or "")
                 w_end = float(w["end"])
                 phrase.append(f"{float(w['start']):.2f} {w_txt}")
-                core_txt = w_txt.rstrip('"\'”’)]}')
-                has_punct = bool(core_txt) and core_txt[-1] in ".?!।,;:"
-                if i + 1 == len(ws) or float(ws[i + 1]["start"]) - w_end >= 0.12 or has_punct:
+                if i + 1 == len(ws) or float(ws[i + 1]["start"]) - w_end >= 0.30:
                     out.append("  " + " ".join(phrase) + f" |{w_end:.2f}")
                     phrase = []
             pauses = [f"{float(s['start']):.2f}-{float(s['end']):.2f}" for s in c.get("macro_silences") or []]
@@ -2111,6 +2498,14 @@ def main() -> None:
     meta, script_lines = parse_script_file(script_path)
     if args.name:
         _apply_explicit_title(meta, args.name)
+    if args.lang == "auto" and str(meta.get("language") or "auto").lower() == "auto":
+        try:
+            guessed = infer_language(args.name or meta.get("title") or "", script_path.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            guessed = "auto"
+        if guessed != "auto":
+            meta["language"] = guessed
+            print(f"  Language: {guessed} (from the video name and script), so the transcription prompt names it")
     resolve_proj_fn = getattr(common, "resolve_user_project_name", None)
     raw_proj = meta.get("project_name") or script_path.stem
     project_name = args.project or (resolve_proj_fn(raw_proj) if callable(resolve_proj_fn) else raw_proj)

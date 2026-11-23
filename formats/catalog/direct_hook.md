@@ -11,13 +11,13 @@ Header line 1 of `script_analysis.md`: `Format: direct_hook (1.2 Direct Hook Mic
 
 ## Layouts & Footage Handling
 - **Scene 1 Hook (`layout=single`)**:
-  - Full-frame selfie cut with `0.02-0.05s` word guards and `0.06-0.15s` joins; trim every `! REPEAT / STUMBLE` false start.
+  - Full-frame selfie cut keeping every spoken sentence complete (`start - 0.05s` through `end + 0.06-0.10s`, verified against `pauses:` in `editing_packet.md`) with `0.06-0.15s` turn joins; trim every `! REPEAT / STUMBLE` false start.
   - Open with kinetic hook energy: use opening `z=zoom_out[:1.10]` reveal or `z=sudden_in:1.08@t` hook punch (`0.05s` before the first stressed hook word), and smooth `z=zoom_in[:1.08]` (`1.0->1.06`) push on setup sentences (`>=2.5s`) with measured `focus=x,y`, resetting cleanly to `z=1` on cuts.
-  - Split internal monologue pauses `>0.25s` into `L1a`/`L1b` masked with a `1.08` step punch-in; zero continuous BGM by default.
+  - Never cut `<0.45s` mid-sentence breaths or commas; trim only genuine dead-air pauses `>=0.50s`, and for `1.08` punch-in emphasis either punch in at a real `>=0.45s` pause in `pauses:` or use `z=sudden_in:1.08@t` inside the continuous cut without slicing the audio; zero continuous BGM by default.
 - **Scene 2 Split Drill (`layout=split_h` or `split_v`)**:
   - Default `layout=split_h` (teacher `left`, human `right`), or `layout=split_v` when the script explicitly specifies `Top:`/`Bottom:`.
   - If raw footage is a pre-stitched Google Flow split, use `layout=single slot=left|right z=1` (never double-composite).
-  - Lock `z=1` on every split segment (`14%` headroom, matched fixed framing). Supply a continuous silent listener `peer="Name:clip.mp4"@in-out@side` advancing across turns (`>=0.50s` internal pauses cut).
+  - Lock `z=1` on every split segment (`14%` headroom, matched fixed framing). Supply a continuous silent listener `peer="Name:clip.mp4"@in-out@side` advancing across turns (`>=0.55s` internal dead-air pauses cut).
 - **Scene 3 CTA**:
   - Stay in the split through the CTA unless a separate full-frame CTA clip exists (`layout=single`, calm `z=1` or subtle `z=zoom_in[:1.06]`); never burn in fake CTA buttons (keep bottom `20-25%` clean).
 

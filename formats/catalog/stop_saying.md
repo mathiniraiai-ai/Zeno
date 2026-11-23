@@ -16,7 +16,7 @@ Header line 1 of `script_analysis.md`: `Format: stop_saying (1.4 Stop Saying / N
   - Preserve calibrated post-word `0.48s` beat + ~30%-reduced hollow outer vignette (`#mark_pack vignette`, live non-frozen visuals, no dialogue overlap): scripted `wrong`/`strike_text` lines auto-attach outer vignette + strip slash + buzzer (`sn_wrong.wav`) over live non-frozen video (manual `mark:wrong@t/0.48@style=vignette` optional; never freeze).
   - On multi-phrase single-cut hooks, stack `banner:"Phrase 1"` (auto-staggers without `@t`, or pass `@t` for exact onset); keep `z=1.0` across banner stacks and moving shots.
 - **Bridge, Return & CTA (`layout=single`)**:
-  - Steady presenter cuts may use `z=zoom_in[:1.08]` (`1.0->1.06`) push or `sudden_in:1.08@t` (`focus=x,y`); split steady pauses `>0.25s` with `1.08` step punch-in (`z=1.0` if camera moves).
+  - Keep sentences complete (`start - 0.05s` to `end + 0.06-0.10s` via `pauses:`); never cut `<0.45s` breaths/commas (trim dead-air `>=0.50s`, `>=0.55s` in splits). Steady cuts may use `z=zoom_in[:1.08]` (`1.0->1.06`) or `z=sudden_in:1.08@t` (or `1.08` punch-in at real `>=0.45s` pause without slicing audio; `z=1.0` if camera moves).
 - **Split Drill (`layout=split_h` or `split_v`)**:
   - Use `split_h` (`Left:`/`Right:`) or `split_v` (`Top:`/`Bottom:`) at `z=1` (`14%` headroom), advancing `peer="Name:clip.mp4"@in-out@side` across turns (`layout=single slot=... z=1` if pre-stitched).
   - Proactively add green outer glow (`mark:right@t/0.48` + ding) on correct drill answers (and red glow + boom on split wrong examples) over live non-frozen visuals without dialogue overlap even when script omits `✅`/`❌`; zero BGM (dry dialogue + surgical SFX only).

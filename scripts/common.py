@@ -5,6 +5,7 @@ Bytecode writing is disabled at import time so running via a symlinked `.venv` n
 """
 from __future__ import annotations
 
+import ast
 import os
 import sys
 
@@ -507,7 +508,7 @@ DERIVED_BY_ALIGN = ("words.json", "hq_words.json", "align.json")
 _engine_versions: Dict[str, str] = {}
 
 
-def _source_digest(paths) -> str:
+def _source_digest(paths, extra_chunks: Optional[List[str]] = None) -> str:
     """Hash of source files ignoring blank lines and `#` comments so comment edits do not invalidate caches."""
     h = hashlib.sha1()
     for p in sorted(str(x) for x in paths):
@@ -520,14 +521,41 @@ def _source_digest(paths) -> str:
             if t and not t.startswith("#"):
                 h.update(t.encode("utf-8"))
         h.update(b"\0")
+    for chunk in extra_chunks or ():
+        for line in str(chunk).splitlines():
+            t = line.strip()
+            if t and not t.startswith("#"):
+                h.update(t.encode("utf-8"))
+        h.update(b"\0")
     return h.hexdigest()[:10]
+
+
+def _extract_prompt_source(gt_path: Path) -> str:
+    """Extract only prompt/lang-normalization definitions from `gemini_transcriber.py`.
+
+    Retry, timeout, and HTTP transport edits do not change transcription semantics and
+    must not invalidate existing cached transcripts across workspaces.
+    """
+    try:
+        src = gt_path.read_text(encoding="utf-8", errors="ignore")
+        tree = ast.parse(src)
+        parts: List[str] = []
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name in ("build_transcribe_prompt", "normalize_lang_code"):
+                seg = ast.get_source_segment(src, node)
+                if seg:
+                    parts.append(seg)
+        return "\n".join(parts)
+    except Exception:
+        return ""
 
 
 def engine_versions() -> Dict[str, str]:
     """Return content digests for transcript, alignment, and vision engines for automatic cache invalidation."""
     if not _engine_versions:
         ae = ROOT / "scripts" / "align_engine"
-        transcript = [ae / "gemini_transcriber.py", ae / "guardian.py", ae / "lexicon.py", *ae.glob("lexicons/*.py")]
+        transcript_paths = [ae / "guardian.py", ae / "lexicon.py", *ae.glob("lexicons/*.py")]
+        prompt_slice = _extract_prompt_source(ae / "gemini_transcriber.py")
         align = [
             ae / "acoustic.py",
             ae / "viterbi.py",
@@ -537,7 +565,7 @@ def engine_versions() -> Dict[str, str]:
             *ae.glob("phonetics/*.py"),
         ]
         _engine_versions.update({
-            "transcript": _source_digest(transcript),
+            "transcript": _source_digest(transcript_paths, extra_chunks=[prompt_slice] if prompt_slice else None),
             "align": _source_digest(align),
             "vision": _source_digest([ROOT / "scripts" / "vision_tracker.py"]),
         })
@@ -556,14 +584,15 @@ def ensure_cache_current(wdir: Path | str) -> List[str]:
     except (OSError, ValueError):
         old = None
     drop = set()
-    if os.environ.get("ZENO_FRESH") == "1":
-        drop.update(DERIVED_BY_TRANSCRIPT + DERIVED_BY_ALIGN)
-    elif old is not None:
-        if old.get("transcript") != now["transcript"]:
-            drop.update(DERIVED_BY_TRANSCRIPT + DERIVED_BY_ALIGN)
-        elif old.get("align") != now["align"]:
-            drop.update(DERIVED_BY_ALIGN)
-    vision_stale = os.environ.get("ZENO_FRESH") == "1" or old is None or old.get("vision") != now.get("vision")
+    fresh = os.environ.get("ZENO_FRESH") == "1"
+    transcript_changed = old is not None and old.get("transcript") != now["transcript"]
+    if fresh:
+        drop.update(DERIVED_BY_TRANSCRIPT + DERIVED_BY_ALIGN + ("transcript_meta.json",))
+    elif transcript_changed:
+        drop.update(DERIVED_BY_TRANSCRIPT + DERIVED_BY_ALIGN + ("transcript_meta.json",))
+    elif old is not None and old.get("align") != now["align"]:
+        drop.update(DERIVED_BY_ALIGN)
+    vision_stale = fresh or old is None or old.get("vision") != now.get("vision")
     removed_vision: List[str] = []
     if vision_stale:
         for f in wdir.glob("vision_*.json"):
@@ -582,6 +611,11 @@ def ensure_cache_current(wdir: Path | str) -> List[str]:
         if f.is_file():
             f.unlink()
             removed.append(name)
+    if fresh or transcript_changed:
+        chunks_dir = wdir / "chunks"
+        if chunks_dir.is_dir():
+            shutil.rmtree(chunks_dir, ignore_errors=True)
+            removed.append("chunks")
     removed += removed_vision
     if old != now or removed:
         write_json(marker, now)

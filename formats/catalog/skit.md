@@ -14,7 +14,7 @@ Header line 1 of `script_analysis.md`: `Format: skit (1.1 Skit-Based Micro-Narra
 1. **Separate HeyGen / Single-Person Clips (`split_h` or `split_v`)**:
    - Two characters arrive as separate single-person `.mp4` files (ideally 2 talking + 2 silent listener clips).
    - Composite with `layout=split_h` (`Left:`/`Right:`) or `layout=split_v` (`Top:`/`Bottom:`), `z=1` always (`14%` headroom).
-   - Pair active speaker with continuous live silent listener `peer="Name:clip.mp4"@in-out@side`, advancing across turns and `>=0.50s` internal pause splits (`L4a`/`L4b`).
+   - Pair active speaker with live silent listener `peer="Name:clip.mp4"@in-out@side`, advancing across turns and `>=0.55s` dead-air pauses (keep sentences complete `start - 0.05s`..`end + 0.06-0.10s` via `pauses:`; never cut `<0.45s` breaths).
 2. **Google Flow Pre-Stitched Split (`layout=single` + `slot=`)**:
    - Raw `.mp4` already has both panels stitched inside one `9:16` frame (`720x1280` or `1080x1920`).
    - Never apply `split_h`/`split_v` or `peer=` (prevents double-cropping). Cut sequentially with `layout=single slot=left|right|top|bottom z=1` and `0.06-0.15s` turn joins.
@@ -37,7 +37,7 @@ Header line 1 of `script_analysis.md`: `Format: skit (1.1 Skit-Based Micro-Narra
 - **Feedback & Audio**: Optional single green outer vignette (`mark:right`) + chime on `"Perfect."` drill success with live non-frozen visuals during post-word marks/SFX without dialogue overlap; zero BGM (dry/diegetic dialogue + surgical SFX only).
 
 ## Zoom, Transitions, Marks & Subtitles
-- **Zoom**: Emotion zooms in live full-frame scenes (`z=zoom_in[:1.08]` / `1.0->1.06` push on turns `>=2.5s`, `z=zoom_out[:1.10]` opening reveal, `sudden_in:1.08@t` / `sudden_out:1.08@t` on humiliation/punchlines, `1.08` step punch-in on `>0.25s` monologue pauses, `bell:1.20->1.55->1.0` on slo-mo hooks, max one `flash_zoom:1.12@t`, `>=25%` calm `1.0` cuts); all splits and holograms stay `z=1`.
+- **Zoom**: Emotion zooms in live full-frame scenes (`z=zoom_in[:1.08]` / `1.0->1.06` on turns `>=2.5s`, `z=zoom_out[:1.10]` reveal, `sudden_in:1.08@t` / `sudden_out:1.08@t` without slicing audio, `1.08` punch-in only on `>=0.45s` `pauses:`, `bell:1.20->1.55->1.0` slo-mo hooks, max 1 `flash_zoom:1.12@t`, `>=25%` `1.0` cuts); splits & holograms stay `z=1`.
 - **Transitions** (`max_transitions: null`, story-driven only):
   - Allowed: `whip_left`, `whip_right`, `slide_up`, `slide_down`, `split_reveal`, `dip_to_black`, `dissolve`, `fade`, `zoom_burst`, `zoom_in`, `zoom_out`, `zoom_blur`, `warm_flash_punch` (plus aliases `whip_up`, `whip_down`, `smoothleft`, `smoothright`, `smoothup`, `smoothdown`).
   - Script-cued flashes (max 1): `warm_flash`, `warm_flash_punch`, `dip_to_white`, `flash_zoom` (`warm_flash` also pairs with `split_reveal` when entering/leaving a split).

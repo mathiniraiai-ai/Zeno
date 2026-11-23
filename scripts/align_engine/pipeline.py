@@ -13,7 +13,7 @@ import sys
 import time
 import unicodedata
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Ensure PyTorch Hub model cache resolves to Zeno/models/torch before loading acoustic modules.
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -245,6 +245,7 @@ class ZenoAcousticPipeline:
 
         token_ids: List[int] = []
         word_spans_meta: List[Dict[str, Any]] = []
+        sep_id = getattr(self.acoustic_model, "dictionary", {}).get("|")
 
         for clean_idx, orig_idx in enumerate(clean_indices):
             orig_w = input_words[orig_idx]
@@ -252,17 +253,24 @@ class ZenoAcousticPipeline:
             rw = romanized_words[clean_idx] if clean_idx < len(romanized_words) else clean_w
 
             phonetic_tokens = self._word_to_phonetic_tokens(orig_w, clean_w, rw, language_code)
+            tok_start = len(token_ids)
             valid_chars = 0
             for c in phonetic_tokens:
                 if c in self.acoustic_model.dictionary:
                     token_ids.append(self.acoustic_model.dictionary[c])
                     valid_chars += 1
+            tok_end = len(token_ids)
 
             if valid_chars > 0:
+                if sep_id is not None:
+                    token_ids.append(sep_id)
                 word_spans_meta.append(
                     {
                         "word": orig_w,
                         "num_chars": valid_chars,
+                        "phonetic_len": len(phonetic_tokens),
+                        "tok_start": tok_start,
+                        "tok_end": tok_end,
                         "orig_idx": orig_idx,
                     }
                 )
@@ -272,19 +280,36 @@ class ZenoAcousticPipeline:
 
         log_probs, raw_waveform, duration_sec, time_per_frame = self.acoustic_model.extract_emissions(audio_path)
 
-        # Bound active speech window when short transcripts sit inside much longer audio buffers
+        vad_spans: List[Tuple[float, float]] = []
+        try:
+            from . import vad
+
+            vad_spans = vad.speech_spans(raw_waveform, getattr(self.acoustic_model, "sample_rate", 16000))
+        except Exception:
+            vad_spans = []
+
+        min_keep_frame = 0
+        if vad_spans and len(log_probs) > 0 and time_per_frame > 0:
+            min_keep_sec = max(float(e) for _, e in vad_spans) + 1.0
+            min_keep_frame = min(len(log_probs), int(min_keep_sec / time_per_frame))
+
+        # Bound active speech window when short transcripts sit inside much longer audio buffers,
+        # while NEVER truncating below Silero VAD's last detected speech span.
         if max_audio_sec is not None and max_audio_sec > 0 and len(log_probs) > 0:
-            cutoff_frame = min(len(log_probs), max(1, int(max_audio_sec / time_per_frame)))
+            cutoff_frame = min(len(log_probs), max(1, min_keep_frame, int(max_audio_sec / time_per_frame)))
             log_probs_for_viterbi = log_probs[:cutoff_frame]
         else:
             expected_max_sec = len(clean_words) * 0.85 + 3.5
             if duration_sec > expected_max_sec * 1.5 and len(log_probs) > 0:
-                bounded_frames = min(len(log_probs), int((expected_max_sec * 1.3) / time_per_frame))
+                bounded_frames = min(
+                    len(log_probs),
+                    max(min_keep_frame, int((expected_max_sec * 1.3) / time_per_frame)),
+                )
                 non_blank_prob = 1.0 - np.exp(log_probs[:, self.viterbi.blank_id])
                 active_idx = np.where(non_blank_prob > 0.15)[0]
                 if len(active_idx) > 0:
                     active_end_frame = int(np.percentile(active_idx, 98)) + int(1.5 / time_per_frame)
-                    cutoff_frame = min(len(log_probs), max(bounded_frames, active_end_frame))
+                    cutoff_frame = min(len(log_probs), max(bounded_frames, active_end_frame, min_keep_frame))
                     log_probs_for_viterbi = log_probs[:cutoff_frame]
                 else:
                     log_probs_for_viterbi = log_probs[:bounded_frames]
@@ -292,12 +317,13 @@ class ZenoAcousticPipeline:
                 log_probs_for_viterbi = log_probs
 
         silent = self.onset_verifier.silent_runs(raw_waveform)
-        try:
-            from . import vad
+        if vad_spans:
+            try:
+                from . import vad
 
-            silent = vad.merge_runs(silent, vad.nonspeech_runs(vad.speech_spans(raw_waveform), duration_sec))
-        except Exception:
-            pass
+                silent = vad.merge_runs(silent, vad.nonspeech_runs(vad_spans, duration_sec))
+            except Exception:
+                pass
         viterbi_words = self.viterbi.align(
             log_probs_for_viterbi,
             token_ids,
@@ -317,20 +343,27 @@ class ZenoAcousticPipeline:
         )
 
         final_words: List[Dict[str, Any]] = []
-        active_map = {word_spans_meta[i]["orig_idx"]: refined_active_words[i] for i in range(len(refined_active_words))}
+        active_map = {
+            word_spans_meta[i]["orig_idx"]: (refined_active_words[i], word_spans_meta[i])
+            for i in range(len(refined_active_words))
+        }
 
         last_known_start = 0.0
         last_known_end = 0.1
 
         for idx, orig_w in enumerate(input_words):
             if idx in active_map:
-                w_res = active_map[idx]
+                w_res, w_meta = active_map[idx]
                 w_start = float(w_res["start"])
                 w_end = float(w_res["end"])
 
-                max_natural_duration = min(2.5, max(0.35, len(orig_w) * 0.08 + 0.35))
+                phonetic_len = int(w_meta.get("phonetic_len", w_meta.get("num_chars", len(orig_w))))
+                max_natural_duration = min(3.5, max(1.20, phonetic_len * 0.14 + 0.65))
                 if w_end - w_start > max_natural_duration:
-                    w_end = w_start + max_natural_duration
+                    capped_end = w_start + max_natural_duration
+                    if w_res.get("energy_verified_end") is not None:
+                        capped_end = max(capped_end, float(w_res["energy_verified_end"]))
+                    w_end = min(w_end, capped_end)
 
                 last_known_start = w_start
                 last_known_end = w_end
@@ -374,7 +407,7 @@ class ZenoAcousticPipeline:
         verify_onsets: bool = True,
         total_duration_sec: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Align multi-sentence clips locally within each cue's `[start - 0.35s, end + 0.35s]` window."""
+        """Align multi-sentence clips locally within VAD-expanded cue windows without slicing active speech."""
         self.acoustic_model._ensure_model_loaded()
         t0 = time.time()
 
@@ -407,6 +440,97 @@ class ZenoAcousticPipeline:
         unique_romanized = self.batch_romanize_words(unique_clean) if unique_clean else []
         rom_map = dict(zip(unique_clean, unique_romanized))
 
+        clip_sr = int(getattr(self.acoustic_model, "sample_rate", 16000) or 16000)
+        probed_dur = float(total_duration_sec or 0.0)
+        if probed_dur <= 0.0:
+            try:
+                import soundfile as sf
+
+                probed_dur = float(sf.info(audio_path).duration)
+            except Exception:
+                probed_dur = 0.0
+
+        # Extract full-clip emissions ONCE for normal clips (<= 180s) and slice in memory;
+        # fall back to extract_emissions_range for > 180s clips or unit-test mocks without extract_emissions.
+        full_log_probs: Optional[np.ndarray] = None
+        full_waveform: Optional[np.ndarray] = None
+        full_dur: float = 0.0
+        full_tpf: float = 0.02
+        if (probed_dur <= 0.0 or probed_dur <= 180.0) and callable(
+            getattr(self.acoustic_model, "extract_emissions", None)
+        ):
+            try:
+                em_res = self.acoustic_model.extract_emissions(audio_path)
+                if (
+                    isinstance(em_res, tuple)
+                    and len(em_res) == 4
+                    and isinstance(em_res[0], np.ndarray)
+                    and isinstance(em_res[1], np.ndarray)
+                ):
+                    full_log_probs = em_res[0]
+                    full_waveform = em_res[1]
+                    full_dur = float(em_res[2])
+                    full_tpf = float(em_res[3]) if float(em_res[3]) > 0 else 0.02
+            except Exception:
+                full_log_probs = None
+                full_waveform = None
+
+        total_dur = full_dur if full_dur > 0.0 else probed_dur
+
+        # Compute Silero VAD speech_spans once across the clip waveform when available
+        clip_vad_spans: List[Tuple[float, float]] = []
+        vad_wf = full_waveform
+        if vad_wf is None and audio_path:
+            try:
+                import soundfile as sf
+
+                if os.path.isfile(audio_path):
+                    y_tmp, sr_tmp = sf.read(audio_path, dtype="float32")
+                    if y_tmp.ndim > 1:
+                        y_tmp = np.mean(y_tmp, axis=1)
+                    if sr_tmp == clip_sr:
+                        vad_wf = y_tmp
+                        if total_dur <= 0.0:
+                            total_dur = len(vad_wf) / float(clip_sr)
+            except Exception:
+                vad_wf = None
+        if vad_wf is not None and len(vad_wf) > 0:
+            try:
+                from . import vad
+
+                clip_vad_spans = vad.speech_spans(vad_wf, clip_sr)
+            except Exception:
+                clip_vad_spans = []
+
+        def _get_slice(win_s: float, win_e: float) -> Tuple[np.ndarray, np.ndarray, float, float, float]:
+            ws_clamped = max(0.0, float(win_s))
+            we_clamped = min(total_dur, float(win_e)) if total_dur > 0.0 else float(win_e)
+            if we_clamped <= ws_clamped + 0.10:
+                we_clamped = ws_clamped + 0.50
+                if total_dur > 0.50 and we_clamped > total_dur:
+                    we_clamped = total_dur
+                    ws_clamped = max(0.0, we_clamped - 0.50)
+
+            if full_log_probs is not None and full_waveform is not None and len(full_log_probs) > 0:
+                f0 = max(0, min(len(full_log_probs) - 1, int(ws_clamped / full_tpf)))
+                f1 = max(f0 + 1, min(len(full_log_probs), int(np.ceil(we_clamped / full_tpf))))
+                act_s = f0 * full_tpf
+                act_e = min(full_dur, f1 * full_tpf)
+                s0 = max(0, min(len(full_waveform), int(round(act_s * clip_sr))))
+                s1 = max(s0, min(len(full_waveform), int(round(act_e * clip_sr))))
+                wf_sl = full_waveform[s0:s1]
+                sl_dur = len(wf_sl) / float(clip_sr) if len(wf_sl) > 0 else max(0.02, (f1 - f0) * full_tpf)
+                return full_log_probs[f0:f1], wf_sl, sl_dur, full_tpf, act_s
+
+            return self.acoustic_model.extract_emissions_range(
+                audio_path=audio_path,
+                start_sec=ws_clamped,
+                end_sec=we_clamped,
+                pad_sec=0.0,
+                total_duration=total_dur if total_dur > 0.0 else total_duration_sec,
+            )
+
+        sep_id = getattr(self.acoustic_model, "dictionary", {}).get("|")
         aligned_cues_out: List[Dict[str, Any]] = []
         all_aligned_words_out: List[Dict[str, Any]] = []
 
@@ -431,17 +555,24 @@ class ZenoAcousticPipeline:
 
                 rw = rom_map.get(clean_w, clean_w)
                 phonetic_tokens = self._word_to_phonetic_tokens(orig_w, clean_w, rw, language_code)
+                tok_start = len(token_ids)
                 valid_chars = 0
                 for c in phonetic_tokens:
                     if c in self.acoustic_model.dictionary:
                         token_ids.append(self.acoustic_model.dictionary[c])
                         valid_chars += 1
+                tok_end = len(token_ids)
 
                 if valid_chars > 0:
+                    if sep_id is not None:
+                        token_ids.append(sep_id)
                     word_spans_meta.append(
                         {
                             "word": orig_w,
                             "num_chars": valid_chars,
+                            "phonetic_len": len(phonetic_tokens),
+                            "tok_start": tok_start,
+                            "tok_end": tok_end,
                             "orig_idx": idx,
                         }
                     )
@@ -471,23 +602,100 @@ class ZenoAcousticPipeline:
                 all_aligned_words_out.extend(fallback_words)
                 continue
 
+            c_start_bound = c_start
+            c_end_bound = c_end
+            if total_dur > 0.2:
+                c_start_bound = max(0.0, min(c_start, total_dur - 0.15))
+                c_end_bound = max(c_start_bound + 0.15, min(c_end, total_dur))
+
+            prev_cue_end: Optional[float] = None
+            if c_idx > 0:
+                p_cue = cues[c_idx - 1]
+                p_s = float(p_cue.get("start", p_cue.get("startTime", 0.0)))
+                prev_cue_end = max(p_s, float(p_cue.get("end", p_cue.get("endTime", p_s))))
+
+            next_cue_start: Optional[float] = None
+            if c_idx + 1 < len(cues):
+                n_cue = cues[c_idx + 1]
+                next_cue_start = float(n_cue.get("start", n_cue.get("startTime", c_end_bound)))
+
+            if cue.get("_vad_chunk"):
+                # Chunk boundaries come directly from Silero VAD silence splits: keep tight +/-0.10s
+                # margins inside the silence seam so adjacent chunks never steal words from one another.
+                win_start = max(0.0, c_start_bound - 0.10)
+                win_end = min(total_dur, c_end_bound + 0.10) if total_dur > 0.0 else (c_end_bound + 0.10)
+            else:
+                win_start = max(0.0, c_start_bound - 1.2)
+                win_end = min(total_dur, c_end_bound + 2.0) if total_dur > 0.0 else (c_end_bound + 2.0)
+
+                for sp0, sp1 in clip_vad_spans:
+                    if sp0 - 0.35 <= c_end_bound <= sp1 + 0.35:
+                        cand_end = sp1 + 0.35
+                        if next_cue_start is not None:
+                            cand_end = min(cand_end, max(c_end_bound + 1.2, next_cue_start + 1.2))
+                        win_end = max(win_end, cand_end)
+                    if sp0 <= c_start_bound <= sp1:
+                        cand_start = max(0.0, sp0 - 0.25)
+                        if prev_cue_end is not None:
+                            cand_start = max(cand_start, min(c_start_bound - 0.6, prev_cue_end - 0.6))
+                        win_start = min(win_start, cand_start)
+
+                win_start = max(0.0, win_start)
+                win_end = max(win_end, c_end_bound + 1.2)
+                if total_dur > 0.0:
+                    win_end = min(total_dur, win_end)
+
+            req_frames = (
+                len(token_ids)
+                + sum(1 for k in range(1, len(token_ids)) if token_ids[k] == token_ids[k - 1])
+                + 4
+            )
+
             try:
-                log_probs, raw_waveform, slice_dur, time_per_frame, actual_slice_start = (
-                    self.acoustic_model.extract_emissions_range(
-                        audio_path=audio_path,
-                        start_sec=c_start,
-                        end_sec=c_end,
-                        pad_sec=0.35,
-                        total_duration=total_duration_sec,
+                log_probs, raw_waveform, slice_dur, time_per_frame, actual_slice_start = _get_slice(win_start, win_end)
+                if len(log_probs) < req_frames:
+                    widen_s = max(0.0, min(win_start, c_start_bound - 3.5))
+                    widen_e = max(win_end, c_end_bound + 3.5)
+                    if total_dur > 0.0:
+                        widen_e = min(total_dur, widen_e)
+                    log_probs, raw_waveform, slice_dur, time_per_frame, actual_slice_start = _get_slice(
+                        widen_s, widen_e
                     )
-                )
+                if len(log_probs) < req_frames:
+                    full_e = total_dur if total_dur > 0.0 else max(win_end, c_end_bound + 8.0)
+                    log_probs, raw_waveform, slice_dur, time_per_frame, actual_slice_start = _get_slice(0.0, full_e)
+
+                silent = self.onset_verifier.silent_runs(raw_waveform) if len(raw_waveform) > 0 else []
+                if clip_vad_spans:
+                    try:
+                        from . import vad
+
+                        local_vad = [
+                            (max(0.0, round(sp0 - actual_slice_start, 3)), min(slice_dur, round(sp1 - actual_slice_start, 3)))
+                            for sp0, sp1 in clip_vad_spans
+                            if sp1 > actual_slice_start and sp0 < actual_slice_start + slice_dur
+                        ]
+                        local_vad = [(a, b) for a, b in local_vad if b > a + 1e-4]
+                        silent = vad.merge_runs(silent, vad.nonspeech_runs(local_vad, slice_dur))
+                    except Exception:
+                        pass
+                elif len(raw_waveform) > 0:
+                    try:
+                        from . import vad
+
+                        silent = vad.merge_runs(
+                            silent,
+                            vad.nonspeech_runs(vad.speech_spans(raw_waveform, clip_sr), slice_dur),
+                        )
+                    except Exception:
+                        pass
 
                 viterbi_words = self.viterbi.align(
                     log_probs,
                     token_ids,
                     word_spans_meta,
                     time_per_frame,
-                    silent_spans=self.onset_verifier.silent_runs(raw_waveform) if len(raw_waveform) > 0 else None,
+                    silent_spans=silent or None,
                 )
 
                 if verify_onsets and len(raw_waveform) > 0:
@@ -497,33 +705,46 @@ class ZenoAcousticPipeline:
                 else:
                     refined_active = viterbi_words
 
-                active_map = {word_spans_meta[i]["orig_idx"]: refined_active[i] for i in range(len(refined_active))}
+                if len(raw_waveform) > 0:
+                    refined_active = self.onset_verifier.clamp_words_to_sound(
+                        refined_active, raw_waveform, extra_runs=silent
+                    )
 
-                last_w_start = c_start
-                last_w_end = c_start + 0.1
+                active_map = {
+                    word_spans_meta[i]["orig_idx"]: (refined_active[i], word_spans_meta[i])
+                    for i in range(len(refined_active))
+                }
+
+                last_w_start = c_start_bound
+                last_w_end = c_start_bound + 0.1
                 cue_aligned_words = []
 
                 for idx, w_info in enumerate(c_words_info):
                     orig_w = w_info["orig"]
                     if idx in active_map:
-                        w_res = active_map[idx]
+                        w_res, w_meta = active_map[idx]
                         w_s = actual_slice_start + float(w_res["start"])
                         w_e = actual_slice_start + float(w_res["end"])
 
-                        max_natural = min(2.5, max(0.35, len(orig_w) * 0.08 + 0.35))
+                        phonetic_len = int(w_meta.get("phonetic_len", w_meta.get("num_chars", len(orig_w))))
+                        max_natural = min(3.5, max(1.20, phonetic_len * 0.14 + 0.65))
                         if w_e - w_s > max_natural:
-                            w_e = w_s + max_natural
+                            capped_e = w_s + max_natural
+                            if w_res.get("energy_verified_end") is not None:
+                                capped_e = max(capped_e, actual_slice_start + float(w_res["energy_verified_end"]))
+                            w_e = min(w_e, capped_e)
 
                         last_w_start = w_s
                         last_w_end = w_e
-                        cue_aligned_words.append(
-                            {
-                                "word": orig_w,
-                                "start": round(w_s, 3),
-                                "end": round(w_e, 3),
-                                "confidence": round(w_res.get("confidence", 0.95), 3),
-                            }
-                        )
+                        word_entry: Dict[str, Any] = {
+                            "word": orig_w,
+                            "start": round(w_s, 3),
+                            "end": round(w_e, 3),
+                            "confidence": round(w_res.get("confidence", 0.95), 3),
+                        }
+                        if w_res.get("no_sound"):
+                            word_entry["no_sound"] = True
+                        cue_aligned_words.append(word_entry)
                     else:
                         cue_aligned_words.append(
                             {
@@ -538,21 +759,12 @@ class ZenoAcousticPipeline:
                     cur_w = cue_aligned_words[w_i]
                     if w_i + 1 < len(cue_aligned_words):
                         nxt_w = cue_aligned_words[w_i + 1]
-                        gap = nxt_w["start"] - cur_w["start"]
-                        if gap > 7.0:
-                            cur_w["end"] = round(cur_w["start"] + 7.0, 3)
-                        elif nxt_w["start"] > cur_w["start"]:
+                        if nxt_w["start"] > cur_w["start"] and cur_w["end"] > nxt_w["start"]:
                             cur_w["end"] = round(nxt_w["start"], 3)
-                        else:
-                            cur_w["end"] = round(max(cur_w["end"], cur_w["start"] + 0.1), 3)
-                    else:
-                        cur_w["end"] = round(
-                            min(c_end if c_end > cur_w["start"] else (cur_w["start"] + 0.6), cur_w["start"] + 7.0),
-                            3,
-                        )
+                    cur_w["end"] = round(max(cur_w["start"] + 0.04, min(cur_w["end"], cur_w["start"] + 3.5)), 3)
 
-                c_actual_start = cue_aligned_words[0]["start"] if cue_aligned_words else c_start
-                c_actual_end = cue_aligned_words[-1]["end"] if cue_aligned_words else c_end
+                c_actual_start = cue_aligned_words[0]["start"] if cue_aligned_words else c_start_bound
+                c_actual_end = cue_aligned_words[-1]["end"] if cue_aligned_words else c_end_bound
 
                 cue_copy = dict(cue)
                 cue_copy["start"] = c_actual_start
@@ -565,11 +777,11 @@ class ZenoAcousticPipeline:
 
             except Exception as cue_err:
                 print(f"[Zeno Aligner] Cue {c_idx + 1} local alignment fallback: {cue_err}")
-                dur = max(0.2, c_end - c_start)
+                dur = max(0.2, c_end_bound - c_start_bound)
                 step = dur / max(1, len(c_words_info))
                 fallback_words = []
                 for idx, w_info in enumerate(c_words_info):
-                    w_s = c_start + idx * step
+                    w_s = c_start_bound + idx * step
                     w_e = w_s + step
                     fallback_words.append(
                         {
@@ -580,23 +792,32 @@ class ZenoAcousticPipeline:
                         }
                     )
                 cue_copy = dict(cue)
-                cue_copy["start"] = round(c_start, 3)
-                cue_copy["end"] = round(c_end, 3)
-                cue_copy["startTime"] = round(c_start, 3)
-                cue_copy["endTime"] = round(c_end, 3)
+                cue_copy["start"] = round(c_start_bound, 3)
+                cue_copy["end"] = round(c_end_bound, 3)
+                cue_copy["startTime"] = round(c_start_bound, 3)
+                cue_copy["endTime"] = round(c_end_bound, 3)
                 cue_copy["words"] = fallback_words
                 aligned_cues_out.append(cue_copy)
                 all_aligned_words_out.extend(fallback_words)
 
         processing_time = round(time.time() - t0, 3)
-        return {
+        resolved_duration = float(total_dur or total_duration_sec or 0.0)
+        if resolved_duration <= 0.0:
+            resolved_duration = float(all_aligned_words_out[-1]["end"]) if all_aligned_words_out else 0.0
+        out_payload: Dict[str, Any] = {
             "status": "success",
             "engine": "Zeno Acoustic Engine (Anchor-Based)",
             "language": language_code,
             "processing_time_sec": processing_time,
+            "duration_sec": round(resolved_duration, 2),
             "cues": aligned_cues_out,
             "words": all_aligned_words_out,
         }
+        if full_waveform is not None and full_log_probs is not None:
+            out_payload["_raw_waveform"] = full_waveform
+            out_payload["_log_probs"] = full_log_probs
+            out_payload["_time_per_frame"] = full_tpf
+        return out_payload
 
 
 # Backward-compatible aliases

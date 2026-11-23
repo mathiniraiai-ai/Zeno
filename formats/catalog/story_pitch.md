@@ -13,7 +13,7 @@ Declare on line 1 of `script_analysis.md`: `Format: story_pitch (Direct pitch)`
 
 ## Pacing, Zooms & Cuts
 - **Teaching & story blocks**: Use slow, composed `z=1.0->1.06` pushes across longer spoken blocks (`>=2.5s`), alternating with calm `z=1.0` beats so movement retains weight.
-- **Pause punch-ins**: Cut internal monologue pauses longer than `0.25s` (`0.06–0.15s` breath joins) and mask same-shot pause cuts with a `1.08` step punch-in; use `sudden_in:1.08@t` (`0.05s` before the stressed word) on emotional turning points.
+- **Sentence integrity & punch-ins**: Keep every spoken sentence complete (`start - 0.05s` through `end + 0.06–0.10s`, verified against `pauses:` in `editing_packet.md`; `0.06–0.15s` turn joins) and never cut `<0.45s` mid-sentence breaths or commas. Trim only genuine dead-air pauses `>=0.50s`; for `1.08` emphasis, either punch in at a real `>=0.45s` pause in `pauses:` or use `z=sudden_in:1.08@t` (`0.05s` before the stressed word) inside the continuous cut without slicing the audio.
 - **Hologram & moving-camera rule**: Keep any shot featuring an in-frame 3D hologram or baked camera pan/dolly locked at `z=1.0`.
 
 ## Marks, Graphics & Sound

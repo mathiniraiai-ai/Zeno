@@ -760,11 +760,22 @@ def _resolve_active_slot(seg: Optional[Dict[str, Any]], default: str = "") -> st
 
 
 def _load_clip_vision_meta(src: Optional[Path], seg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Load vision metadata for `src`, merging any explicit `vision.json` sidecar override."""
+    """Load vision metadata for `src`, refining to segment `[start, end]` when `mixed_framing` is True."""
     vis: Dict[str, Any] = {}
     if src is not None and src.is_file():
         try:
             vis = dict(analyze_clip_vision(src) or {})
+            if vis.get("mixed_framing") and isinstance(seg, dict):
+                try:
+                    st_s = float(seg.get("start") or 0.0)
+                    en_s = float(seg.get("end") or 0.0)
+                    file_dur = float(vis.get("duration") or 0.0)
+                    if en_s > st_s + 0.1 and (file_dur <= 0.0 or (en_s - st_s) < file_dur * 0.85):
+                        vis_win = analyze_clip_vision(src, start_sec=st_s, end_sec=en_s) or {}
+                        if vis_win:
+                            vis = dict(vis_win)
+                except (TypeError, ValueError):
+                    pass
         except Exception:
             vis = {}
     if src is not None:

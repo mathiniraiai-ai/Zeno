@@ -50,6 +50,7 @@ FLASHCARD_RENDERER_JS: Path = ROOT / "subtitles" / "render_flashcard.js"
 MARKS_DIR: Path = getattr(_common, "MARKS_DIR", ROOT / "assets" / "marks")
 OVERLAYS_DIR: Path = getattr(_common, "OVERLAYS_DIR", ROOT / "assets" / "overlays")
 UI_CACHE_DIR: Path = WORK / "_ui_cache"
+_CACHE_VERSION: str = "v3_indic_nirmala"
 
 
 def _normalize_mark_type(mark_type: Optional[str]) -> str:
@@ -137,39 +138,50 @@ _SCRIPT_FONT_CANDIDATES: Dict[str, List[str]] = {
         "/System/Library/Fonts/Supplemental/Kannada Sangam MN.ttc",
         "C:/Windows/Fonts/NirmalaB.ttf",
         "C:/Windows/Fonts/Nirmala.ttf",
+        "C:/Windows/Fonts/Nirmala.ttc",
+        "C:/Windows/Fonts/Tunga.ttf",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     ],
     "tamil": [
         str(SUBTITLE_FONTS_DIR / "NotoSansTamil-700.ttf"),
         str(SUBTITLE_FONTS_DIR / "AnekTamil-Bold.ttf"),
         str(SUBTITLE_FONTS_DIR / "NotoSansTamil-500.ttf"),
+        str(SUBTITLE_FONTS_DIR / "NotoSansTamil-400.ttf"),
         "/System/Library/Fonts/Supplemental/Tamil MN.ttc",
         "/System/Library/Fonts/Supplemental/Tamil Sangam MN.ttc",
         "/System/Library/Fonts/Kohinoor.ttc",
         "C:/Windows/Fonts/NirmalaB.ttf",
         "C:/Windows/Fonts/Nirmala.ttf",
+        "C:/Windows/Fonts/Nirmala.ttc",
+        "C:/Windows/Fonts/latha.ttf",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     ],
     "telugu": [
         str(SUBTITLE_FONTS_DIR / "NotoSansTelugu-700.ttf"),
         str(SUBTITLE_FONTS_DIR / "AnekTelugu-Bold.ttf"),
         str(SUBTITLE_FONTS_DIR / "NotoSansTelugu-500.ttf"),
+        str(SUBTITLE_FONTS_DIR / "NotoSansTelugu-400.ttf"),
         "/System/Library/Fonts/KohinoorTelugu.ttc",
         "/System/Library/Fonts/Supplemental/Telugu MN.ttc",
         "/System/Library/Fonts/Supplemental/Telugu Sangam MN.ttc",
         "C:/Windows/Fonts/NirmalaB.ttf",
         "C:/Windows/Fonts/Nirmala.ttf",
+        "C:/Windows/Fonts/Nirmala.ttc",
+        "C:/Windows/Fonts/gautami.ttf",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     ],
     "devanagari": [
         str(SUBTITLE_FONTS_DIR / "NotoSansDevanagari-700.ttf"),
         str(SUBTITLE_FONTS_DIR / "AnekDevanagari-Bold.ttf"),
         str(SUBTITLE_FONTS_DIR / "NotoSansDevanagari-500.ttf"),
+        str(SUBTITLE_FONTS_DIR / "NotoSansDevanagari-400.ttf"),
         "/System/Library/Fonts/Kohinoor.ttc",
         "/System/Library/Fonts/Supplemental/Devanagari Sangam MN.ttc",
         "/System/Library/Fonts/Supplemental/ITFDevanagari.ttc",
         "C:/Windows/Fonts/NirmalaB.ttf",
         "C:/Windows/Fonts/Nirmala.ttf",
+        "C:/Windows/Fonts/Nirmala.ttc",
+        "C:/Windows/Fonts/mangal.ttf",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     ],
     "malayalam": [
@@ -180,32 +192,50 @@ _SCRIPT_FONT_CANDIDATES: Dict[str, List[str]] = {
         "/System/Library/Fonts/Supplemental/Malayalam Sangam MN.ttc",
         "C:/Windows/Fonts/NirmalaB.ttf",
         "C:/Windows/Fonts/Nirmala.ttf",
+        "C:/Windows/Fonts/Nirmala.ttc",
+        "C:/Windows/Fonts/kartika.ttf",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     ],
     "bengali": [
         str(SUBTITLE_FONTS_DIR / "NotoSansBengali-700.ttf"),
         str(SUBTITLE_FONTS_DIR / "AnekBangla-Bold.ttf"),
         str(SUBTITLE_FONTS_DIR / "NotoSansBengali-400.ttf"),
+        "/System/Library/Fonts/KohinoorBangla.ttc",
         "C:/Windows/Fonts/NirmalaB.ttf",
+        "C:/Windows/Fonts/Nirmala.ttf",
+        "C:/Windows/Fonts/Nirmala.ttc",
+        "C:/Windows/Fonts/vrinda.ttf",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     ],
     "gujarati": [
         str(SUBTITLE_FONTS_DIR / "NotoSansGujarati-700.ttf"),
         str(SUBTITLE_FONTS_DIR / "AnekGujarati-Bold.ttf"),
         str(SUBTITLE_FONTS_DIR / "NotoSansGujarati-400.ttf"),
+        "/System/Library/Fonts/KohinoorGujarati.ttc",
         "C:/Windows/Fonts/NirmalaB.ttf",
+        "C:/Windows/Fonts/Nirmala.ttf",
+        "C:/Windows/Fonts/Nirmala.ttc",
+        "C:/Windows/Fonts/shruti.ttf",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     ],
     "gurmukhi": [
         str(SUBTITLE_FONTS_DIR / "NotoSansGurmukhi-Bold.ttf"),
         str(SUBTITLE_FONTS_DIR / "AnekGurmukhi-Bold.ttf"),
+        str(SUBTITLE_FONTS_DIR / "NotoSansGurmukhi-400.ttf"),
         "C:/Windows/Fonts/NirmalaB.ttf",
+        "C:/Windows/Fonts/Nirmala.ttf",
+        "C:/Windows/Fonts/Nirmala.ttc",
+        "C:/Windows/Fonts/raavi.ttf",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     ],
     "odia": [
         str(SUBTITLE_FONTS_DIR / "NotoSansOriya-700.ttf"),
         str(SUBTITLE_FONTS_DIR / "AnekOdia-Bold.ttf"),
+        str(SUBTITLE_FONTS_DIR / "NotoSansOriya-400.ttf"),
         "C:/Windows/Fonts/NirmalaB.ttf",
+        "C:/Windows/Fonts/Nirmala.ttf",
+        "C:/Windows/Fonts/Nirmala.ttc",
+        "C:/Windows/Fonts/kalinga.ttf",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     ],
     "latin_bold": [
@@ -219,6 +249,7 @@ _SCRIPT_FONT_CANDIDATES: Dict[str, List[str]] = {
         "C:/Windows/Fonts/arialbd.ttf",
         "C:/Windows/Fonts/segoeuib.ttf",
         "C:/Windows/Fonts/NirmalaB.ttf",
+        "C:/Windows/Fonts/Nirmala.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     ],
     "latin_regular": [
@@ -231,9 +262,52 @@ _SCRIPT_FONT_CANDIDATES: Dict[str, List[str]] = {
         "C:/Windows/Fonts/segoeui.ttf",
         "C:/Windows/Fonts/arial.ttf",
         "C:/Windows/Fonts/Nirmala.ttf",
+        "C:/Windows/Fonts/Nirmala.ttc",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ],
 }
+
+
+def _sample_script_chars(text: str, script: str) -> List[str]:
+    """Extract up to 3 representative non-whitespace characters for glyph cmap checking."""
+    indic_chars: List[str] = []
+    other_chars: List[str] = []
+    seen: set[str] = set()
+    for ch in text or "":
+        if ch.isspace() or ch in seen:
+            continue
+        seen.add(ch)
+        cp = ord(ch)
+        if 0x0900 <= cp <= 0x0D7F:
+            indic_chars.append(ch)
+            if len(indic_chars) >= 3:
+                break
+        elif cp >= 0x21:
+            if len(other_chars) < 2:
+                other_chars.append(ch)
+    if script != "latin" and indic_chars:
+        return indic_chars
+    return indic_chars or other_chars
+
+
+def _font_supports_chars(font: ImageFont.FreeTypeFont, chars: List[str]) -> bool:
+    """Verify `font` has real glyph coverage (not `.notdef` tofu boxes) for `chars`."""
+    if not chars:
+        return True
+    try:
+        notdef_mask = font.getmask("\uffff")
+        notdef_bbox = notdef_mask.getbbox()
+        notdef_bytes = bytes(notdef_mask) if notdef_bbox is not None else None
+        for ch in chars:
+            m = font.getmask(ch)
+            bb = m.getbbox()
+            if bb is None:
+                return False
+            if notdef_bytes is not None and bytes(m) == notdef_bytes:
+                return False
+        return True
+    except Exception:
+        return False
 
 
 def load_ui_font(
@@ -256,15 +330,27 @@ def load_ui_font(
     candidates.extend(_SCRIPT_FONT_CANDIDATES["latin_bold"])
 
     px_size = max(8, int(size))
+    sample_chars = _sample_script_chars(text, script)
+    first_openable: Optional[ImageFont.FreeTypeFont] = None
     for cand in candidates:
         if not cand:
             continue
         p = Path(cand)
-        if p.is_file():
+        if not p.is_file():
+            continue
+        indices = (1, 0) if (bold and p.suffix.lower() == ".ttc" and "nirmala" in p.name.lower()) else (0,)
+        for idx in indices:
             try:
-                return ImageFont.truetype(str(p), size=px_size)
+                font = ImageFont.truetype(str(p), size=px_size, index=idx)
             except Exception:
                 continue
+            if first_openable is None:
+                first_openable = font
+            if _font_supports_chars(font, sample_chars):
+                return font
+
+    if first_openable is not None:
+        return first_openable
 
     try:
         return ImageFont.load_default(size=px_size)  # type: ignore[return-value]
@@ -425,6 +511,7 @@ def render_chat_overlay_png(
 
     payload_key = json.dumps(
         {
+            "v": _CACHE_VERSION,
             "msgs": norm_msgs,
             "w": width,
             "h": height,
@@ -832,6 +919,7 @@ def render_video_call_chrome_png(
 
     payload_key = json.dumps(
         {
+            "v": _CACHE_VERSION,
             "w": W0,
             "h": H0,
             "caller": caller,
@@ -1104,7 +1192,7 @@ def render_stop_saying_banner_png(
     style_key = (
         f"{label}|{font_px}->{fit_font_px}|{box_h}|{pad_x}->{fit_pad_x}|"
         f"{box_w}x{canvas_w}|max{int(max_canvas_w)}|{radius}|"
-        f"{strike_overshoot}|{strike_px}|{with_strike}|{dashed_strike}|{cross_icon}|v2"
+        f"{strike_overshoot}|{strike_px}|{with_strike}|{dashed_strike}|{cross_icon}|{_CACHE_VERSION}"
     )
     digest = hashlib.sha1(style_key.encode("utf-8")).hexdigest()[:14]
     UI_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1351,7 +1439,7 @@ def ensure_mark_png(
 # ---------------------------------------------------------------------------
 # 5. Bilingual Flashcard Renderer (`render_flashcard_png` & `render_flashcards_batch`)
 # ---------------------------------------------------------------------------
-_FLASHCARD_CACHE_VERSION = "v1"
+_FLASHCARD_CACHE_VERSION = _CACHE_VERSION
 
 
 def _normalize_flashcard_style(style: Optional[str]) -> str:
@@ -1446,13 +1534,28 @@ def _invoke_flashcard_renderer_batch(misses: List[Dict[str, Any]]) -> Dict[str, 
             raise RuntimeError(
                 f"render_flashcard.js exited with code {proc.returncode}: {err_tail}"
             )
+        pango_warns = _subtitles.check_pango_warnings(proc.stderr or "")
+        if pango_warns:
+            print(f"  [CARDS WARN] Pango font warning(s) in render_flashcard.js: {pango_warns[0]}")
+            for entry in misses:
+                out_p = Path(str(entry.get("out") or ""))
+                if out_p.is_file():
+                    qc = _subtitles.detect_tofu_boxes_in_png(out_p)
+                    if qc.get("tofu_count", 0) > 0:
+                        raise RuntimeError(
+                            f"render_flashcard.js hit font load failure ({pango_warns[0]}) "
+                            f"and produced {qc['tofu_count']} tofu box(es) in {out_p.name}"
+                        )
         out_line = (proc.stdout or "").strip().splitlines()
         if out_line:
             try:
-                return json.loads(out_line[-1])
+                res_obj = json.loads(out_line[-1])
+                if pango_warns and isinstance(res_obj, dict):
+                    res_obj["pango_warnings"] = pango_warns
+                return res_obj
             except json.JSONDecodeError:
                 pass
-        return {"ok": True, "count": len(misses)}
+        return {"ok": True, "count": len(misses), **({"pango_warnings": pango_warns} if pango_warns else {})}
     finally:
         if tmp_manifest is not None:
             try:

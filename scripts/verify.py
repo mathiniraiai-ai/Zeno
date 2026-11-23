@@ -418,8 +418,8 @@ def _subtract_intervals(
 
 
 DEAD_AIR_THRESHOLD = 0.60
-CLIPPED_WORD_MARGIN_SEC = 0.07
-CLIPPED_WORD_RMS_FLOOR_DB = -28.0
+CLIPPED_WORD_MARGIN_SEC = 0.035
+CLIPPED_WORD_RMS_FLOOR_DB = -42.0
 
 
 def _resolve_clip_cache_dir(src: Any, plan: Optional[Dict[str, Any]] = None) -> Path:
@@ -550,27 +550,89 @@ def check_cuts_and_pauses(plan: Dict[str, Any], mp4_path: Optional[Path] = None)
             except Exception:
                 pass
 
-        # Check if cut boundary slices through the middle of a kept word
+        # Check if cut boundary (including active audio_end boundary) slices through a kept word or continuous VAD speech
+        en_audio = en
+        if s.get("audio_end") is not None and not isinstance(s.get("audio_end"), bool):
+            try:
+                ae_val = float(s["audio_end"])
+                if ae_val > 0.0:
+                    en_audio = min(en, st + ae_val * spd)
+            except (TypeError, ValueError):
+                pass
+        audio_bounds: List[float] = [st, en_audio]
         words_path = wdir / "hq_words.json"
         if not words_path.is_file():
             words_path = wdir / "words.json"
-        if words_path.is_file() and compute_10ms_rms_envelope is not None:
+        sp_path = wdir / "speech_spans.json"
+        wav_path = wdir / "audio16k.wav"
+        if (words_path.is_file() or sp_path.is_file()) and compute_10ms_rms_envelope is not None and wav_path.is_file():
             try:
-                words = read_json(words_path)
-                rms = compute_10ms_rms_envelope(wdir / "audio16k.wav")
-                for boundary_t in (st, en):
+                rms = compute_10ms_rms_envelope(wav_path)
+                words = read_json(words_path) if words_path.is_file() else []
+                if not isinstance(words, list):
+                    words = []
+                ghost_word_ids = (
+                    {id(gw) for gw in _words_in_silence(words, rms)}
+                    if (_words_in_silence is not None and words and rms)
+                    else set()
+                )
+                live_words = sorted(
+                    (
+                        w
+                        for w in words
+                        if isinstance(w, dict) and not w.get("no_sound") and id(w) not in ghost_word_ids
+                    ),
+                    key=lambda w: (float(w.get("start", 0.0)), float(w.get("end", 0.0))),
+                )
+                vad_spans: List[Tuple[float, float]] = []
+                if sp_path.is_file():
+                    sdata = read_json(sp_path)
+                    raw_sp = sdata.get("spans") if isinstance(sdata, dict) else sdata
+                    if isinstance(raw_sp, list):
+                        vad_spans = [
+                            (float(p[0]), float(p[1]))
+                            for p in raw_sp
+                            if isinstance(p, (list, tuple)) and len(p) >= 2 and float(p[1]) > float(p[0])
+                        ]
+
+                for boundary_t in audio_bounds:
                     if boundary_t <= 0.05:
                         continue
-                    crossing = any(
-                        float(w.get("start", 0.0)) + CLIPPED_WORD_MARGIN_SEC
-                        < boundary_t
-                        < float(w.get("end", 0.0)) - CLIPPED_WORD_MARGIN_SEC
-                        for w in words
-                    )
+                    crossing = False
+                    for w in live_words:
+                        w_s = float(w.get("start", 0.0))
+                        w_e = float(w.get("end", 0.0))
+                        w_dur = max(0.0, w_e - w_s)
+                        if w_dur <= 0.02:
+                            continue
+                        w_margin = (
+                            min(CLIPPED_WORD_MARGIN_SEC, 0.25 * w_dur)
+                            if w_dur < 0.14
+                            else CLIPPED_WORD_MARGIN_SEC
+                        )
+                        if w_s + w_margin < boundary_t < w_e - w_margin:
+                            crossing = True
+                            break
                     if crossing and rms:
-                        near_db = [db for t, db in rms if abs(t - boundary_t) <= 0.02]
+                        near_db = [db for t, db in rms if abs(t - boundary_t) <= 0.025]
                         if near_db and max(near_db) > CLIPPED_WORD_RMS_FLOOR_DB:
                             clipped_words += 1
+                            continue
+                    if vad_spans and rms:
+                        in_vad_interior = any(
+                            sp0 + 0.12 < boundary_t < sp1 - 0.20
+                            for sp0, sp1 in vad_spans
+                        )
+                        if in_vad_interior:
+                            near_db_vad = [db for t, db in rms if abs(t - boundary_t) <= 0.025]
+                            if near_db_vad and max(near_db_vad) > -38.0:
+                                in_verified_gap = any(
+                                    float(live_words[k]["end"]) - 0.02 <= boundary_t <= float(live_words[k + 1]["start"]) + 0.02
+                                    and (float(live_words[k + 1]["start"]) - float(live_words[k]["end"])) <= 0.85
+                                    for k in range(len(live_words) - 1)
+                                )
+                                if not in_verified_gap:
+                                    clipped_words += 1
             except Exception:
                 pass
 
@@ -1033,39 +1095,67 @@ def check_script_coverage(
     all_notes_norm = all_notes.replace("_", " ")
     all_explicit_lids = {lid_item for grp in explicit_by_seg for lid_item in grp}
 
+    def _calc_recall(have_toks: List[str], need_toks: List[str]) -> float:
+        if not need_toks or not have_toks:
+            return 0.0
+        if _so is not None and hasattr(_so, "_multiset_recall"):
+            try:
+                return max(
+                    float(_so._multiset_recall(have_toks, need_toks)),
+                    float(_so.recall(have_toks, need_toks)),
+                )
+            except Exception:
+                pass
+        hits_val = sum(
+            1.0
+            for st in need_toks
+            if max((_word_similarity(st, ct) for ct in have_toks), default=0.0) >= 0.64
+        )
+        return hits_val / len(need_toks)
+
     covered = 0
     last_seg_idx = 0
     for sline in script_lines:
         lid = sline["id"]
         stokens = sline["tokens"]
-        if lid in accepted:
+        if lid in accepted or _is_accepted_ref(lid):
             covered += 1
             continue
         matched_seg = None
+        claiming_idxs: List[int] = []
         for idx in range(last_seg_idx, len(segs)):
             is_mb_idx = _segment_is_muted(segs[idx]) or _segment_is_beat(segs[idx])
             sid_str = str(segs[idx].get("id", ""))
             note_str = "" if is_mb_idx else str(segs[idx].get("note", ""))
             sid_note_norm = (sid_str + " " + note_str).replace("_", " ")
             if lid in explicit_by_seg[idx] or re.search(rf"\b{re.escape(lid)}(?:[a-z]\d*)?\b", sid_note_norm):
-                matched_seg = idx
-                break
-            stoks_seg = seg_word_slices[idx]
-            if stokens and stoks_seg:
-                hits = sum(1.0 for st in stokens if max((_word_similarity(st, ct) for ct in stoks_seg), default=0.0) >= 0.64)
-                if hits / len(stokens) >= 0.35:
+                claiming_idxs.append(idx)
+
+        if claiming_idxs:
+            if any(_is_accepted_ref(str(segs[j].get("id", ""))) for j in claiming_idxs):
+                matched_seg = claiming_idxs[0]
+            else:
+                claimed_toks = [t for j in claiming_idxs for t in seg_word_slices[j]]
+                if not stokens or not claimed_toks:
+                    matched_seg = claiming_idxs[0]
+                elif _calc_recall(claimed_toks, stokens) >= 0.50:
+                    matched_seg = claiming_idxs[0]
+
+        if matched_seg is None:
+            claiming_set = set(claiming_idxs)
+            for idx in range(last_seg_idx, len(segs)):
+                if idx in claiming_set:
+                    continue
+                stoks_seg = seg_word_slices[idx]
+                if stokens and stoks_seg and _calc_recall(stoks_seg, stokens) >= 0.50:
                     matched_seg = idx
                     break
+
         if matched_seg is not None:
             covered += 1
             last_seg_idx = matched_seg
-        elif stokens and all_kept_tokens:
-            hits = sum(1.0 for st in stokens if max((_word_similarity(st, ct) for ct in all_kept_tokens), default=0.0) >= 0.64)
-            if (
-                hits / len(stokens) >= 0.35
-                or lid in all_explicit_lids
-                or re.search(rf"\b{re.escape(lid)}(?:[a-z]\d*)?\b", all_notes_norm)
-            ):
+        elif not claiming_idxs and stokens and all_kept_tokens:
+            if _calc_recall(all_kept_tokens, stokens) >= 0.50:
                 covered += 1
 
     total_lines = len(script_lines)
@@ -1076,7 +1166,7 @@ def check_script_coverage(
         rep = script_order.check_order([(str(s.get("id", "")), seg_word_slices[i]) for i, s in enumerate(segs)], script_lines)
         accepted_ord = script_order.read_accepted(Path(plan["_plan_dir"])) if plan.get("_plan_dir") else {}
         wrong = [
-            m for m in rep["out_of_order"] + rep["repeated"]
+            m for m in rep["out_of_order"] + rep["repeated"] + rep["missing"]
             if not any(
                 re.search(rf"\b{re.escape(k)}(?:[a-z]\d*)?\b", m)
                 or re.search(rf"\b{re.escape(k)}(?:[a-z]\d*)?\b", m.replace("_", " "))

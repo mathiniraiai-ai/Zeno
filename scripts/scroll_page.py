@@ -186,12 +186,24 @@ def render_page_image(paras: List[Dict[str, Any]], width: int, cfg: Dict[str, An
         capture_output=True,
         text=True,
         encoding="utf-8",
+        errors="replace",
         timeout=600,
     )
     if r.returncode != 0:
         raise RuntimeError(f"page renderer failed: {(r.stderr or r.stdout).strip()[-400:]}")
+    pango_warns = subtitles.check_pango_warnings(r.stderr)
+    if pango_warns:
+        print(f"  [PAGE WARN] Pango font warning(s): {pango_warns[0]}")
+        tofu_res = subtitles.detect_tofu_boxes_in_png(job["out"])
+        if tofu_res.get("tofu_count", 0) > 0:
+            raise RuntimeError(
+                f"page renderer hit font load failure ({pango_warns[0]}) and produced "
+                f"{tofu_res['tofu_count']} tofu box(es) in {job['out']}"
+            )
     layout = json.loads([ln for ln in r.stdout.splitlines() if ln.startswith("{")][-1])
     layout["png"] = job["out"]
+    if pango_warns:
+        layout["pango_warnings"] = pango_warns
     return layout
 
 
@@ -338,6 +350,7 @@ def build_page_video(
             "page_height": layout["height"],
             "words": len(layout["words"]),
             "geometry": geo,
+            **({"pango_warnings": layout["pango_warnings"]} if layout.get("pango_warnings") else {}),
         }),
         encoding="utf-8",
     )

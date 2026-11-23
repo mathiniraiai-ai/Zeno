@@ -596,12 +596,21 @@ class _Gemini:
                 headers={"Retry-After": "10"},
             )
         try:
-            eff_dur = (
-                min(float(duration), max(float(speech_seconds), 1.0))
-                if (speech_seconds is not None and float(speech_seconds) > 0)
-                else float(duration)
-            )
-            min_words = int(0.4 * eff_dur) if eff_dur >= 8 else 1
+            sp_sec: Optional[float] = None
+            if speech_seconds is not None:
+                try:
+                    sp_v = float(speech_seconds)
+                    if sp_v > 0 and math.isfinite(sp_v):
+                        sp_sec = sp_v
+                except (TypeError, ValueError):
+                    pass
+            dur_f = float(duration)
+            if sp_sec is not None and sp_sec > 0:
+                eff_dur = min(dur_f, max(sp_sec, 1.0)) if dur_f > 0 else max(sp_sec, 1.0)
+                min_words = max(2, int(0.85 * eff_dur)) if eff_dur >= 4.0 else 1
+            else:
+                eff_dur = dur_f
+                min_words = int(0.4 * eff_dur) if eff_dur >= 8 else 1
             best: Optional[Dict[str, Any]] = None
             count = lambda d: len(d.get("words") or str(d.get("full_transcript", "")).split())
             now = time.time()
@@ -741,7 +750,9 @@ class _Gemini:
                             return data
                         if foreign:
                             break   # a different model may keep to the right script
-                        log.info("incomplete transcript from %s: %d words for %.0fs of speech (%.0fs audio)", model, count(data), eff_dur, duration)
+                        if trace is not None:
+                            trace.append(f"{model}: incomplete ({count(data)}<{min_words} words for {eff_dur:.1f}s speech)")
+                        log.info("incomplete transcript from %s: %d words for %.0fs of speech (%.0fs audio, min=%d)", model, count(data), eff_dur, duration, min_words)
                         break   # a different model may do better
                     except Exception as exc:
                         self.mark_failure(k_idx, model, exc)
@@ -1182,10 +1193,17 @@ def transcribe(
     ])
     result = None
     trace: List[str] = []
+    req_min_words = (
+        (max(2, int(0.85 * min(float(duration), max(sp_sec, 1.0)))) if min(float(duration), max(sp_sec, 1.0)) >= 4.0 else 1)
+        if (sp_sec is not None and sp_sec > 0)
+        else (int(0.4 * float(duration)) if float(duration) >= 8 else 1)
+    )
     try:
         cached = store().get_cached_transcript(cache_key)
         if cached:   # same audio, prompt and script lines: no Gemini call, no tokens
-            result = {**cached, "cached": True, "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}}
+            cached_wc = len(cached.get("words") or str(cached.get("full_transcript", "")).split())
+            if cached_wc >= req_min_words:
+                result = {**cached, "cached": True, "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}}
     except Exception:
         log.exception("transcript cache unavailable")
     if result is None:

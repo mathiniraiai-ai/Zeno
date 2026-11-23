@@ -549,7 +549,7 @@ def match_clips_to_script(
         candidates: List[Dict[str, Any]] = []
 
         for idx in range(len(utterances)):
-            for span_len in range(1, min(7, len(utterances) - idx + 1)):
+            for span_len in range(1, min(16, len(utterances) - idx + 1)):
                 if idx + span_len > len(utterances):
                     continue
                 sub_utts = utterances[idx : idx + span_len]

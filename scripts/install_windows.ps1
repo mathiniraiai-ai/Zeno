@@ -80,9 +80,11 @@ if (Test-Path ".venv\Scripts\python.exe") {
 if ($LASTEXITCODE -ne 0) { Write-Host "      Package install reported a problem (see above)."; }
 
 # 3b. Captions need Node.js: use the PC's own, else a portable copy in tools\node (checked against nodejs.org, no admin),
-#     plus the caption renderer package, so the first video already has subtitles.
+#     plus the caption renderer package, and per-user Windows fonts so Indic scripts never fall back to tofu boxes.
 & .venv\Scripts\python.exe scripts\subtitles.py --ensure
 if ($LASTEXITCODE -ne 0) { Write-Host "      Captions are not ready yet; Zeno will try again on the first render." }
+& .venv\Scripts\python.exe scripts\subtitles.py --ensure-fonts
+if ($LASTEXITCODE -ne 0) { Write-Host "      User font registration reported a warning; system Nirmala fallback remains active." }
 
 # 4. .env from the template (never overwrites an existing one)
 if (Test-Path ".env") {

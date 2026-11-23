@@ -157,13 +157,11 @@ class V2CleanImportsTests(unittest.TestCase):
         import prompt as service_prompt_mod
         import app as service_app_mod
 
-        expected_top3 = ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3-flash-preview"]
+        expected_top3 = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
         with mock.patch.dict(os.environ, {"GEMINI_FORCE_MODEL": ""}, clear=False):
             gt = GeminiTranscriber(api_keys=[])
         self.assertEqual(gt.models[:3], expected_top3)
-        self.assertNotIn("gemini-3.5-flash-lite", gt.models)
         self.assertEqual(service_app_mod.MODELS[:3], expected_top3)
-        self.assertNotIn("gemini-3.5-flash-lite", service_app_mod.MODELS)
 
         sample_lines = [
             'Female Robot: No! Say: "I\'m Rahul."',
@@ -305,10 +303,11 @@ class V2CleanImportsTests(unittest.TestCase):
                 ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite"],
             )
 
-            gem.record_call(0, "gemini-3.5-flash")
+            gem.record_call(0, "gemini-3.1-flash-lite")
             ordered_full = gem.candidate_models()
-            self.assertEqual(ordered_full[0], "gemini-3.6-flash")
-            self.assertLess(ordered_full.index("gemini-3.5-flash"), ordered_full.index("gemini-3.1-flash-lite"))
+            self.assertEqual(ordered_full[0], "gemini-2.5-flash")
+            self.assertLess(ordered_full.index("gemini-2.5-flash"), ordered_full.index("gemini-3.5-flash-lite"))
+            self.assertLess(ordered_full.index("gemini-3.5-flash-lite"), ordered_full.index("gemini-3.1-flash-lite"))
 
             # All-cooled soonest > 20s raises HTTPException(429) immediately without calling upstream Gemini.
             now = time.time()
@@ -394,13 +393,13 @@ class V2CleanImportsTests(unittest.TestCase):
                         wf.writeframes(b"\xa0\x0f" * 8000)
                     return wdir
 
-                # Rule 3 non-speech: {"status": "success", "words": []} -> 1 call only, no retry, no transcribe.py spawn
+                # Rule 3 genuine non-speech (<0.8s VAD): {"status": "success", "words": []} -> 1 call only, no retry, no transcribe.py spawn
                 wdir_rule3 = _make_clip_work("music_clip")
                 mock_transcribe = mock.Mock(return_value={"status": "success", "words": []})
                 fake_align = types.SimpleNamespace(transcribe_and_align_clip=mock_transcribe)
                 with (
                     mock.patch.object(prepare, "align_engine", fake_align),
-                    mock.patch.object(prepare, "_speech_spans_of", return_value=[(0.1, 1.6)]),
+                    mock.patch.object(prepare, "_speech_spans_of", return_value=[(0.1, 0.5)]),
                     mock.patch.object(
                         prepare.subprocess,
                         "run",
@@ -421,6 +420,31 @@ class V2CleanImportsTests(unittest.TestCase):
                 self.assertEqual(base_r3, [])
                 ev_r3 = json.loads((wdir_rule3 / "engine_version.json").read_text(encoding="utf-8"))
                 self.assertNotEqual(ev_r3.get("transcript"), "incomplete")
+
+                # Active human speech (>=0.8s VAD) with empty words MUST NOT cache confirmed_no_speech:
+                wdir_speech_empty = _make_clip_work("spoken_empty_clip")
+                mock_transcribe_speech = mock.Mock(return_value={"status": "success", "words": []})
+                fake_align_speech = types.SimpleNamespace(transcribe_and_align_clip=mock_transcribe_speech)
+                with (
+                    mock.patch.object(prepare, "align_engine", fake_align_speech),
+                    mock.patch.object(prepare, "_speech_spans_of", return_value=[(0.1, 1.6)]),
+                    mock.patch.object(
+                        prepare.subprocess,
+                        "run",
+                        side_effect=AssertionError("transcribe.py must not be spawned"),
+                    ),
+                ):
+                    _info_se, hq_se, _base_se = prepare.ensure_clip_transcribed(
+                        "spoken_empty_clip",
+                        str(td_path / "missing_src_se.mp4"),
+                        wdir_speech_empty,
+                        "kn",
+                        None,
+                    )
+                self.assertEqual(mock_transcribe_speech.call_count, 2)
+                self.assertEqual(hq_se, [])
+                meta_se = json.loads((wdir_speech_empty / "transcript_meta.json").read_text(encoding="utf-8"))
+                self.assertEqual(meta_se.get("status"), "incomplete")
 
                 # Circuit-breaker: skip_remote_transcription=True -> quota_skipped without calling align_engine
                 wdir_skip = _make_clip_work("queued_clip")

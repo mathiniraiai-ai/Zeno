@@ -10,10 +10,15 @@ from typing import Dict, List, Tuple
 
 # Common Indic phonetic substitutions to align Romanized Indian spellings
 # to English acoustic token representations without losing phoneme attack onsets.
+_GEMINATE_STOP_COLLAPSE: List[Tuple[str, str]] = [
+    (r'([ktpcdbg])\1+', r'\1'),           # Collapse single-closure geminate plosives/affricates (kk, tt, pp, cc, dd, bb, gg)
+]
+
 INDIC_PHONETIC_RULES: Dict[str, List[Tuple[str, str]]] = {
     # Telugu phonetic mapping rules
     "te": [
         (r'([aeiou])\1+', r'\1'),           # Long vowels: aa->a, ee->e, oo->o
+        (r'chh', 'c'),
         (r'bh', 'b'),                         # Aspirated voiced bilabial -> b
         (r'dh', 'd'),                         # Aspirated dental -> d
         (r'gh', 'g'),                         # Aspirated velar -> g
@@ -26,10 +31,8 @@ INDIC_PHONETIC_RULES: Dict[str, List[Tuple[str, str]]] = {
         (r'zh', 'l'),                         # Retroflex lateral -> l
         (r'tx', 't'), (r'dx', 'd'),           # Retroflex stops -> t/d
         (r'nx', 'n'), (r'lx', 'l'),           # Retroflex nasals/laterals -> n/l
-        (r'(\w)nn(\w)', r'\1n\2'),            # Geminate consonants -> single
-        (r'(\w)tt(\w)', r'\1t\2'),
-        (r'(\w)pp(\w)', r'\1p\2'),
-        (r'(\w)kk(\w)', r'\1k\2'),
+        (r'(\w)nn(\w)', r'\1n\2'),            # Geminate nasal -> single
+        *_GEMINATE_STOP_COLLAPSE,
     ],
     # Tamil phonetic mapping rules
     "ta": [
@@ -37,16 +40,22 @@ INDIC_PHONETIC_RULES: Dict[str, List[Tuple[str, str]]] = {
         (r'rr', 'r'),                         # Alveolar trill -> r
         (r'nn', 'n'),                         # Alveolar/retroflex nasal -> n
         (r'll', 'l'),                         # Retroflex lateral -> l
+        (r'chh', 'c'),
+        (r'ch', 'c'),
         (r'th', 't'),                         # Interdental stop -> t
         (r'dh', 'd'),
         (r'bh', 'b'),
+        (r'kh', 'k'),
+        (r'gh', 'g'),
         (r'sh', 's'),
         (r'([aeiou])\1+', r'\1'),
+        *_GEMINATE_STOP_COLLAPSE,
     ],
     # Hindi phonetic mapping rules
     "hi": [
         (r'([aeiou])\1+', r'\1'),
         (r'chh', 'c'),
+        (r'ch', 'c'),
         (r'kh', 'k'),
         (r'gh', 'g'),
         (r'jh', 'j'),
@@ -56,30 +65,41 @@ INDIC_PHONETIC_RULES: Dict[str, List[Tuple[str, str]]] = {
         (r'sh', 's'),
         (r'ph', 'f'),
         (r'ah$', 'a'),                        # Word-final visarga / aspiration
+        *_GEMINATE_STOP_COLLAPSE,
     ],
     # Malayalam phonetic mapping rules
     "ml": [
         (r'zh', 'l'),
         (r'rr', 'r'),
         (r'nn', 'n'),
-        (r'th', 't'),
-        (r'dh', 'd'),
-        (r'bh', 'b'),
-        (r'([aeiou])\1+', r'\1'),
-    ],
-    # Kannada phonetic mapping rules
-    "kn": [
-        (r'([aeiou])\1+', r'\1'),
+        (r'chh', 'c'),
+        (r'ch', 'c'),
         (r'th', 't'),
         (r'dh', 'd'),
         (r'bh', 'b'),
         (r'kh', 'k'),
         (r'gh', 'g'),
         (r'sh', 's'),
+        (r'([aeiou])\1+', r'\1'),
+        *_GEMINATE_STOP_COLLAPSE,
+    ],
+    # Kannada phonetic mapping rules
+    "kn": [
+        (r'([aeiou])\1+', r'\1'),
+        (r'chh', 'c'),
+        (r'ch', 'c'),
+        (r'th', 't'),
+        (r'dh', 'd'),
+        (r'bh', 'b'),
+        (r'kh', 'k'),
+        (r'gh', 'g'),
+        (r'sh', 's'),
+        *_GEMINATE_STOP_COLLAPSE,
     ],
     # Bengali phonetic mapping rules
     "bn": [
         (r'([aeiou])\1+', r'\1'),
+        (r'chh', 'c'),
         (r'bh', 'b'),
         (r'dh', 'd'),
         (r'gh', 'g'),
@@ -90,6 +110,7 @@ INDIC_PHONETIC_RULES: Dict[str, List[Tuple[str, str]]] = {
         (r'ch', 'c'),
         (r'sh', 's'),
         (r'rh', 'r'),
+        *_GEMINATE_STOP_COLLAPSE,
     ],
     # Generic English / fallback
     "en": [
@@ -118,13 +139,28 @@ INDIC_CONSONANTS: Dict[int, str] = {
 }
 
 INDIC_VOWELS: Dict[int, str] = {
-    0x01: 'n',  0x02: 'm',  0x03: 'h',
     0x05: 'a',  0x06: 'aa', 0x07: 'i',  0x08: 'ee', 0x09: 'u',  0x0A: 'oo',
     0x0B: 'ri', 0x0E: 'e',  0x0F: 'e',  0x10: 'ai', 0x12: 'o',  0x13: 'o',  0x14: 'au',
     0x3E: 'aa', 0x3F: 'i',  0x40: 'ee', 0x41: 'u',  0x42: 'oo', 0x43: 'ri',
     0x46: 'e',  0x47: 'e',  0x48: 'ai', 0x4A: 'o',  0x4B: 'o',  0x4C: 'au',
     0x55: 'e',  0x56: 'ai', 0x57: 'au',
     0x7A: 'n',  0x7B: 'n',  0x7C: 'r',  0x7D: 'l',  0x7E: 'l',  0x7F: 'k'
+}
+
+# Syllable-closing nasal/aspiration diacritics (candrabindu, anusvara/bindi, visarga, and Gurmukhi tippi).
+# Kept separate from INDIC_VOWELS so a preceding bare consonant retains its inherent 'a' vowel before the coda.
+INDIC_CODA_MARKS: Dict[int, str] = {
+    0x01: '',   # candrabindu (ँ / ঁ / ઁ / ਁ): vowel nasalization without stop closure
+    0x02: 'm',  # anusvara / bindi (ं / ং / ਂ / ં / ಂ / ం / ം)
+    0x03: 'h',  # visarga (ः / ঃ / ઃ / ಃ / ః / ഃ)
+}
+BASE_EXTRA_CODA_MARKS: Dict[int, Dict[int, str]] = {
+    0x0A00: {0x70: 'n'},  # Gurmukhi tippi (ੰ)
+}
+NON_A_VOWEL_OFFSETS = {
+    0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14,
+    0x3E, 0x3F, 0x40, 0x41, 0x42, 0x43, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x4B, 0x4C,
+    0x55, 0x56, 0x57,
 }
 
 # Script blocks handled by the transliterator (Devanagari, Bengali/Assamese, Gurmukhi, Gujarati, Odia, Tamil, Telugu, Kannada, Malayalam).
@@ -139,7 +175,7 @@ BASE_EXTRA_CONSONANTS: Dict[int, Dict[int, str]] = {
 }
 BASE_EXTRA_VOWELS: Dict[int, Dict[int, str]] = {
     0x0900: {0x0D: 'e', 0x11: 'o', 0x45: 'e', 0x49: 'o', 0x72: 'a'},      # candra e / o (English loanwords), Marathi candra a
-    0x0A00: {0x70: 'n', 0x72: 'i', 0x73: 'u'},                             # tippi, iri, ura
+    0x0A00: {0x72: 'i', 0x73: 'u'},                                        # iri, ura (tippi 0x70 moved to BASE_EXTRA_CODA_MARKS)
     0x0A80: {0x0D: 'e', 0x11: 'o', 0x45: 'e', 0x49: 'o'},                 # Gujarati candra e / o
 }
 # Consonant + nukta (0x3C) sounds, by the consonant's offset.
@@ -260,6 +296,34 @@ class IndicPhoneticMapper:
                 return False
             return (0x01 <= off <= 0x63) or (0x70 <= off <= 0x7F)
 
+        def resolve_coda_mark(base_blk: int, coda_off: int, coda_idx: int, after_non_a_vowel: bool) -> str:
+            if coda_off == 0x01:
+                return ""
+            if coda_off == 0x03:
+                return "h"
+            at_end = not is_indic_word_char(coda_idx + 1)
+            next_char_off = -1
+            if not at_end:
+                nxt_cp = ord(text[coda_idx + 1])
+                if base_blk <= nxt_cp <= base_blk + 0x7F:
+                    next_char_off = nxt_cp - base_blk
+            if base_blk == 0x0A00 and coda_off == 0x70:  # Gurmukhi tippi
+                if after_non_a_vowel and at_end:
+                    return ""
+                if 0x2A <= next_char_off <= 0x2E:
+                    return "m"
+                return "n"
+            if coda_off == 0x02:  # anusvara / bindi
+                if base_blk in schwa_drop_bases and after_non_a_vowel and at_end:
+                    return ""
+                if not at_end:
+                    if 0x15 <= next_char_off <= 0x29:
+                        return "n"
+                    if base_blk in schwa_drop_bases and 0x36 <= next_char_off <= 0x39:
+                        return "n"
+                return "m"
+            return BASE_EXTRA_CODA_MARKS.get(base_blk, {}).get(coda_off, INDIC_CODA_MARKS.get(coda_off, ""))
+
         res = []
         i = 0
         while i < n:
@@ -282,8 +346,14 @@ class IndicPhoneticMapper:
                     next_offset = ord(text[j]) - base if base <= ord(text[j]) <= base + 0x7F else -1
                     is_chillu = base == 0x0D00 and 0x7A <= next_offset <= 0x7F
                     extra_v = BASE_EXTRA_VOWELS.get(base, {}).get(next_offset)
+                    is_coda = next_offset in INDIC_CODA_MARKS or next_offset in BASE_EXTRA_CODA_MARKS.get(base, {})
                     if next_offset == 0x4D:                      # virama / halant: bare consonant
                         res.append(cons)
+                        i = j + 1
+                        continue
+                    if is_coda:                                  # consonant + coda mark: keep inherent 'a' + coda
+                        coda_snd = resolve_coda_mark(base, next_offset, j, after_non_a_vowel=False)
+                        res.append(cons + 'a' + coda_snd)
                         i = j + 1
                         continue
                     if not is_chillu and (extra_v or next_offset in INDIC_VOWELS):
@@ -301,6 +371,15 @@ class IndicPhoneticMapper:
                 else:
                     res.append(cons + 'a')
                 i = j
+                continue
+
+            if offset in INDIC_CODA_MARKS or offset in BASE_EXTRA_CODA_MARKS.get(base, {}):
+                prev_off = (ord(text[i - 1]) - base) if (i > 0 and base <= ord(text[i - 1]) <= base + 0x7F) else -1
+                after_non_a = prev_off in NON_A_VOWEL_OFFSETS
+                coda_snd = resolve_coda_mark(base, offset, i, after_non_a_vowel=after_non_a)
+                if coda_snd:
+                    res.append(coda_snd)
+                i += 1
                 continue
 
             vowel = BASE_EXTRA_VOWELS.get(base, {}).get(offset) or INDIC_VOWELS.get(offset)

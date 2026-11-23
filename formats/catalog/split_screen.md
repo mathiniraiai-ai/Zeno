@@ -13,6 +13,7 @@ Declare on line 1 of `script_analysis.md`: `Format: split_screen (<sub-format>)`
 - Put the speaking character in their assigned `slot=left|right` (`split_h`) or `slot=top|bottom` (`split_v`) and attach the silent partner via `peer="Name:silent_clip.mp4"@start-end@slot`.
 - Advance the silent listener window sequentially across turns so reactions look natural; if no dedicated listener clip exists, use a live quiet closed-mouth stretch (`<1.0s`, non-frozen) and note the fallback in `decisions.txt`.
 - If source footage already contains a baked split seam, keep `layout=single slot=... z=1` and never composite it twice.
+- **B-Roll / "Describe This Scene" Overlays (`clip` on top, characters below)**: Put muted B-roll directly in `plan.edl` via `layout=split_v mute=1` or `layout=top_pip` (`peer=` muted B-roll in `slot=top`) — never manually pre-bake composite MP4s or custom caption scripts outside `zeno.py --execute`.
 
 ## Framing, Captions & Pacing
 - **`z=1` always** on every split segment — zero pushes, pulls, or punch-ins. Maintain one fixed frame per character, matched backgrounds, and **14% headroom**.

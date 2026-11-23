@@ -115,3 +115,64 @@ jobs:
 
           print("[OK] Zeno v2.0.0 doc sync, required markers, and artifact hygiene verified.")
           PY
+
+  windows-fonts-smoke:
+    name: Windows Indic Subtitles & Flashcard Font Smoke (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: subtitles/package-lock.json
+
+      - name: Install subtitle dependencies & Windows user fonts
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pillow numpy opencv-python-headless
+          npm --prefix subtitles ci --no-audit --no-fund
+          python scripts/subtitles.py --ensure-fonts
+
+      - name: Verify 9-script Indic subtitle & flashcard rendering (0 Pango warnings, 0 tofu boxes)
+        shell: pwsh
+        run: |
+          @'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "scripts")
+          import subtitles
+          import ui_generator
+
+          ok, msg = subtitles.verify_indic_render_probe()
+          assert ok, f"Indic preflight probe failed on Windows: {msg}"
+
+          samples = [
+              ("kannada", "ನನ್ನನ್ನು ನಂಬು please wait"),
+              ("hindi", "यह सही है listen carefully"),
+              ("tamil", "இங்கே வாருங்கள் thank you"),
+              ("telugu", "నమస్కారం let us begin"),
+              ("malayalam", "നമസ്കാരം welcome back"),
+              ("bengali", "নমস্কার please stay"),
+              ("gujarati", "નમસ્તે thank you"),
+              ("punjabi", "ਸਤ ਸ੍ਰੀ ਅਕਾਲ welcome"),
+              ("odia", "ନମସ୍କାର welcome"),
+          ]
+          for lang, text in samples:
+              res = subtitles.probe_text_render(text, style_id=4)
+              assert res["ok"], f"Windows {lang} render failed: {res}"
+              f_path, _ = ui_generator.load_ui_font(lang, 48, bold=True)
+              assert f_path is not None, f"ui_generator failed to load font for {lang}"
+          print(f"[OK] Windows Indic probe + all {len(samples)} Indic scripts passed with 0 Pango warnings and 0 tofu boxes.")
+          '@ | python -

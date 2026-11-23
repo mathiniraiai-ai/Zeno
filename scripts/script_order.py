@@ -260,7 +260,8 @@ _ACTIVE_WORK_DIR: Optional[Path] = None
 
 
 def _fallback_clean_token(word: str) -> str:
-    return _FALLBACK_CLEAN_RE.sub("", str(word or "").strip().lower()).strip("'_")
+    norm = str(word or "").replace("\u2019", "'").replace("\u2018", "'").strip().lower()
+    return _FALLBACK_CLEAN_RE.sub("", norm).strip("'_")
 
 
 @lru_cache(maxsize=200000)
@@ -324,8 +325,10 @@ def _repeat_tok_sim(a: str, b: str) -> float:
         return 0.0
     seq_r = SequenceMatcher(None, na, nb).ratio()
     if max(len(na), len(nb)) <= 4:
-        return seq_r
-    return max(seq_r, _sim(a, b) if na[:2] == nb[:2] else 0.0)
+        return seq_r if seq_r >= 0.82 else 0.0
+    sim_ab = _sim(na, nb)
+    best_r = max(seq_r, sim_ab if (na[:2] == nb[:2] and sim_ab >= 0.82) else 0.0)
+    return best_r if best_r >= 0.82 else 0.0
 
 
 def _ngram_occurrences(gram: List[str], toks: List[str]) -> int:
@@ -367,19 +370,52 @@ def _repeat_tokens(words: List[str]) -> List[str]:
 
 
 _CONTRACTION_EXPANSION = {
-    "i'm": ("i", "am"), "you're": ("you", "are"), "we're": ("we", "are"), "they're": ("they", "are"),
-    "he's": ("he", "is"), "she's": ("she", "is"), "it's": ("it", "is"), "that's": ("that", "is"),
-    "i've": ("i", "have"), "we've": ("we", "have"), "you've": ("you", "have"), "they've": ("they", "have"),
-    "i'll": ("i", "will"), "you'll": ("you", "will"), "we'll": ("we", "will"), "they'll": ("they", "will"),
-    "i'd": ("i", "would"), "let's": ("let", "us"),
+    "i'm": ("i", "am"),
+    "don't": ("do", "not"),
+    "doesn't": ("does", "not"),
+    "can't": ("cannot",),
+    "won't": ("will", "not"),
+    "didn't": ("did", "not"),
+    "isn't": ("is", "not"),
+    "aren't": ("are", "not"),
+    "wasn't": ("was", "not"),
+    "weren't": ("were", "not"),
+    "haven't": ("have", "not"),
+    "hasn't": ("has", "not"),
+    "hadn't": ("had", "not"),
+    "couldn't": ("could", "not"),
+    "wouldn't": ("would", "not"),
+    "shouldn't": ("should", "not"),
+    "it's": ("it", "is"),
+    "that's": ("that", "is"),
+    "what's": ("what", "is"),
+    "there's": ("there", "is"),
+    "here's": ("here", "is"),
+    "he's": ("he", "is"),
+    "she's": ("she", "is"),
+    "let's": ("let", "us"),
+    "i've": ("i", "have"),
+    "i'll": ("i", "will"),
+    "i'd": ("i", "would"),
+    "you're": ("you", "are"),
+    "you've": ("you", "have"),
+    "you'll": ("you", "will"),
+    "you'd": ("you", "would"),
+    "we're": ("we", "are"),
+    "we've": ("we", "have"),
+    "we'll": ("we", "will"),
+    "they're": ("they", "are"),
+    "they've": ("they", "have"),
+    "they'll": ("they", "will"),
 }
 
 
 def _expand_contractions(toks: List[str]) -> List[str]:
-    """Spell out contractions so a scripted "I'm" also covers a spoken "I am" (and vice versa for repeats)."""
+    """Spell out contractions so a scripted "I'm" covers a spoken "I am" and vice versa."""
     out: List[str] = []
     for t in toks:
-        out.extend(_CONTRACTION_EXPANSION.get(str(t).replace("\u2019", "'"), (t,)))
+        norm_t = str(t or "").replace("\u2019", "'").replace("\u2018", "'").lower()
+        out.extend(_CONTRACTION_EXPANSION.get(norm_t, (norm_t if norm_t else t,)))
     return out
 
 
@@ -564,15 +600,69 @@ def find_unscripted_repeats(
 
 
 def _hits(need: List[str], have: List[str]) -> float:
-    """Share of tokens in `need` matched in `have`."""
+    """Share of contraction-expanded tokens in `need` matched in `have`."""
     if not need or not have:
         return 0.0
-    pool = set(have)
+    need_exp = _expand_contractions(need)
+    have_exp = _expand_contractions(have)
+    if not need_exp or not have_exp:
+        return 0.0
+    pool = set(have_exp)
     found = 0
-    for t in need:
+    for t in need_exp:
         if t in pool or max(_sim(t, h) for h in pool) >= WORD_MATCH:
             found += 1
-    return found / len(need)
+    return found / len(need_exp)
+
+
+def _multiset_recall(cand_toks: List[str], lt: List[str]) -> float:
+    """1-to-1 multiplicity-aware token recall so repeated words in `lt` require distinct matches in `cand_toks`."""
+    c_exp = _expand_contractions(cand_toks)
+    l_exp = _expand_contractions(lt)
+    if not l_exp or not c_exp:
+        return 0.0
+    pairs: List[Tuple[float, int, int, int]] = []
+    for li, l_tok in enumerate(l_exp):
+        for ci, c_tok in enumerate(c_exp):
+            sv = 1.0 if l_tok == c_tok else _sim(l_tok, c_tok)
+            if sv >= WORD_MATCH:
+                pairs.append((sv, -abs(li - ci), li, ci))
+    if not pairs:
+        return 0.0
+    pairs.sort(reverse=True)
+    used_l: set = set()
+    used_c: set = set()
+    matched = 0
+    for _sv, _dist, li, ci in pairs:
+        if li in used_l or ci in used_c:
+            continue
+        used_l.add(li)
+        used_c.add(ci)
+        matched += 1
+        if matched == len(l_exp):
+            break
+    return matched / len(l_exp)
+
+
+def _ordered_line_coverage(cand_toks: List[str], lt: List[str]) -> float:
+    """Monotonic 1-to-1 DP coverage of `lt` across `cand_toks` (contraction-aware, multiplicity-preserving)."""
+    c_exp = _expand_contractions(cand_toks)
+    l_exp = _expand_contractions(lt)
+    if not l_exp or not c_exp:
+        return 0.0
+    m_c = len(c_exp)
+    dp = [0] * (m_c + 1)
+    for l_tok in l_exp:
+        ndp = [0] * (m_c + 1)
+        for j, c_tok in enumerate(c_exp, 1):
+            best = dp[j] if dp[j] >= ndp[j - 1] else ndp[j - 1]
+            if l_tok == c_tok or _sim(l_tok, c_tok) >= WORD_MATCH:
+                cand_v = dp[j - 1] + 1
+                if cand_v > best:
+                    best = cand_v
+            ndp[j] = best
+        dp = ndp
+    return dp[m_c] / len(l_exp)
 
 
 def fit(tokens: List[str], line_tokens: List[str]) -> float:
@@ -2726,14 +2816,58 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
                 src_path = _resolve_seg_media_path(seg.get("src", ""), plan, work_dir)
                 src_exists = src_path.is_file()
 
+                had_audio_end = seg.get("audio_end") is not None and not isinstance(seg.get("audio_end"), bool)
+                en_spoken_cap = _effective_audio_end_src(seg, st, en) if had_audio_end else en
+                word_end_src = (
+                    min(en, max(float(w.get("end", st)) for w in words))
+                    if words
+                    else en_spoken_cap
+                )
+                base_spoken_en = word_end_src if had_audio_end else max(en, word_end_src)
+                safe_src_limit = (
+                    _real_speech_bounds_after(seg, word_end_src, src_path, segs, idx, plan, work_dir)
+                    if src_exists
+                    else en
+                )
+                env_beat = _env_of(seg)
+                spoken_beat = _speech_spans_for(seg)
+                scan_limit = min(safe_src_limit, max(base_spoken_en, word_end_src) + 0.55)
+                vad_end = max(
+                    (
+                        float(sp1)
+                        for sp0, sp1 in spoken_beat
+                        if float(sp0) <= word_end_src + 0.05 < float(sp1) <= scan_limit + 0.02
+                    ),
+                    default=None,
+                )
+                voice_end: Optional[float] = None
+                if env_beat:
+                    quiet_b = _quiet_level(env_beat)
+                    step_b = (env_beat[1][0] - env_beat[0][0]) if len(env_beat) > 1 else 0.01
+                    t_scan, q_run = word_end_src, 0
+                    while t_scan <= scan_limit:
+                        idx_env = min(len(env_beat) - 1, max(0, int(round((t_scan - env_beat[0][0]) / step_b))))
+                        is_active = (env_beat[idx_env][1] >= quiet_b) or (vad_end is not None and t_scan < vad_end)
+                        q_run = 0 if is_active else (q_run + 1)
+                        if q_run >= QUIET_FRAMES:
+                            voice_end = t_scan - (QUIET_FRAMES - 1) * step_b
+                            break
+                        t_scan += step_b
+
+                if env_beat and voice_end is not None:
+                    speech_end_src = min(safe_src_limit, max(base_spoken_en, word_end_src, voice_end))
+                    audio_gate_src = min(safe_src_limit, max(base_spoken_en, word_end_src + 0.08, voice_end + 0.025))
+                    target_audio_end_rel = round(max(0.0, _src_to_seg_time(seg, audio_gate_src)), 3)
+                else:
+                    speech_end_src = min(
+                        safe_src_limit,
+                        max(base_spoken_en, word_end_src, vad_end if vad_end is not None else word_end_src),
+                    )
+                    speech_end_rel_base = max(0.0, _src_to_seg_time(seg, speech_end_src))
+                    target_audio_end_rel = round(speech_end_rel_base + 0.12, 3)
+
                 # Priority 1: Live source tail extension on seg["src"] before falling back to hold_src/freeze
                 if needed_hold > 0.015 and src_exists and not seg.get("hold_src"):
-                    speech_end_src = (
-                        min(en, max(float(w.get("end", st)) for w in words))
-                        if words
-                        else en
-                    )
-                    speech_end_rel = round(max(0.0, _src_to_seg_time(seg, speech_end_src)), 3)
                     safe_src_limit = _real_speech_bounds_after(
                         seg, speech_end_src, src_path, segs, idx, plan, work_dir
                     )
@@ -2743,12 +2877,27 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
                         en = round(target_en, 3)
                         seg["end"] = en
                         raw_dur = max(0.08, _segment_play_duration(seg))
-                        if raw_dur - speech_end_rel >= 0.08 and seg.get("audio_end") is None:
-                            seg["audio_end"] = round(speech_end_rel + 0.05, 3)
                         needed_hold = round(max(0.0, latest_beat_end - raw_dur), 3)
                         if needed_hold <= 0.015 and existing_hold > 0.0:
                             seg["hold_tail"] = 0.0
                             existing_hold = 0.0
+                        changed += 1
+
+                # Always calibrate/refresh seg["audio_end"] when live tail extends past speech (never leave stale early mutes)
+                speech_end_rel = round(max(0.0, _src_to_seg_time(seg, speech_end_src)), 3)
+                clamped_ae = round(min(raw_dur, target_audio_end_rel), 3)
+                if not seg.get("hold_src") and raw_dur - speech_end_rel >= 0.08 and raw_dur - clamped_ae >= 0.04:
+                    prev_ae = seg.get("audio_end")
+                    if prev_ae is None or isinstance(prev_ae, bool) or abs(float(prev_ae) - clamped_ae) > 0.005:
+                        seg["audio_end"] = clamped_ae
+                        changed += 1
+                elif had_audio_end:
+                    prev_ae_f = float(seg["audio_end"])
+                    if prev_ae_f < clamped_ae - 0.01:
+                        if raw_dur - clamped_ae >= 0.04:
+                            seg["audio_end"] = clamped_ae
+                        else:
+                            seg.pop("audio_end", None)
                         changed += 1
 
                 # Priority 2: Live silent clip or idle window for any remaining shortfall
@@ -2825,6 +2974,10 @@ def full_gate(plan: Dict[str, Any], script_path: Any, work_dir: Path, plan_path:
             calibrated = 0
             try:
                 moved = snap_cuts(plan)
+            except Exception:
+                pass
+            try:
+                moved += protect_tails(plan)
             except Exception:
                 pass
             try:
@@ -2934,10 +3087,17 @@ def format_gate(g: Dict[str, Any]) -> str:
 def _word_matches_line(wtoks_item: List[str], lt_pool: set) -> bool:
     if not wtoks_item or not lt_pool:
         return False
-    for t in wtoks_item:
+    for t in _expand_contractions(wtoks_item):
         if t in lt_pool or max((_sim(t, p) for p in lt_pool), default=0.0) >= WORD_MATCH:
             return True
     return False
+
+
+def _cand_recall_score(cand_toks: List[str], lt: List[str]) -> Tuple[float, float]:
+    """Return `(combined_multiplicity_recall, ordered_coverage)` for candidate window ranking."""
+    ord_cov = _ordered_line_coverage(cand_toks, lt)
+    mult_r = _multiset_recall(cand_toks, lt)
+    return round(0.35 * mult_r + 0.65 * ord_cov, 4), ord_cov
 
 
 def _trim_edge_stumbles(
@@ -2948,18 +3108,20 @@ def _trim_edge_stumbles(
     lt: List[str],
     ref_text: Union[str, List[str]],
 ) -> Tuple[float, int, int, List[Dict[str, Any]]]:
-    """Trim leading false starts and trailing restarted repeats from `words[i..j]` while maintaining line recall."""
+    """Trim leading false starts and trailing restarted repeats from `words[i..j]` with strictly ZERO recall loss."""
     cur_i, cur_j = i, j
     base_toks = [t for k in range(cur_i, cur_j + 1) for t in wtoks[k]]
-    cur_r = recall(base_toks, lt)
+    cur_r, cur_ord = _cand_recall_score(base_toks, lt)
+    cur_set_r = recall(base_toks, lt)
     for _ in range(3):
         sub_ws = words[cur_i : cur_j + 1]
         reps = find_unscripted_repeats(sub_ws, ref_text)
         if not reps:
             return cur_r, cur_i, cur_j, []
         tok_to_off: List[int] = []
-        for off in range(len(sub_ws)):
-            for _ in _repeat_tokens(wtoks[cur_i + off]):
+        for off, sw in enumerate(sub_ws):
+            raw_sw = str(sw.get("w") or sw.get("word") or sw.get("text") or "").strip() if isinstance(sw, dict) else ""
+            for _ in _repeat_tokens(raw_sw.split()):
                 tok_to_off.append(off)
         if not tok_to_off:
             return cur_r, cur_i, cur_j, reps
@@ -2968,18 +3130,22 @@ def _trim_edge_stumbles(
         if first_rep["first_idx"] == 0 and first_rep["second_idx"] < len(tok_to_off):
             cand_i = cur_i + tok_to_off[first_rep["second_idx"]]
             if cand_i <= cur_j:
-                cand_r = recall([t for k in range(cand_i, cur_j + 1) for t in wtoks[k]], lt)
-                if cand_r >= cur_r - 0.05 and cand_r >= 0.5:
-                    cur_i, cur_r, changed = cand_i, cand_r, True
+                c_toks = [t for k in range(cand_i, cur_j + 1) for t in wtoks[k]]
+                cand_r, cand_ord = _cand_recall_score(c_toks, lt)
+                cand_set_r = recall(c_toks, lt)
+                if cand_r >= cur_r and cand_ord >= cur_ord and cand_set_r >= cur_set_r and cand_r >= 0.5:
+                    cur_i, cur_r, cur_ord, cur_set_r, changed = cand_i, cand_r, cand_ord, cand_set_r, True
         if not changed:
             last_rep = reps[-1]
             end_tok = last_rep["second_idx"] + last_rep["size"]
             if end_tok >= len(tok_to_off) and last_rep["second_idx"] > 0:
                 cand_j = cur_i + tok_to_off[last_rep["second_idx"] - 1]
                 if cur_i <= cand_j < cur_j:
-                    cand_r = recall([t for k in range(cur_i, cand_j + 1) for t in wtoks[k]], lt)
-                    if cand_r >= cur_r - 0.05 and cand_r >= 0.5:
-                        cur_j, cur_r, changed = cand_j, cand_r, True
+                    c_toks = [t for k in range(cur_i, cand_j + 1) for t in wtoks[k]]
+                    cand_r, cand_ord = _cand_recall_score(c_toks, lt)
+                    cand_set_r = recall(c_toks, lt)
+                    if cand_r >= cur_r and cand_ord >= cur_ord and cand_set_r >= cur_set_r and cand_r >= 0.5:
+                        cur_j, cur_r, cur_ord, cur_set_r, changed = cand_j, cand_r, cand_ord, cand_set_r, True
         if not changed:
             return cur_r, cur_i, cur_j, reps
     sub_ws = words[cur_i : cur_j + 1]
@@ -2992,22 +3158,27 @@ def _candidate_windows(
     ref_text: Union[str, List[str], None] = None,
     fallback_toks: Optional[List[str]] = None,
 ) -> List[Tuple[float, int, int, List[Dict[str, Any]]]]:
-    """Return non-overlapping tight candidate windows `(recall, i, j, internal_repeats)` ranked cleanest and latest first."""
+    """Return non-overlapping complete candidate windows `(recall, i, j, internal_repeats)` preferring full start+end anchored spans."""
     n = len(words)
     if not n or not lt:
         return []
     wtoks: List[List[str]] = []
+    wtoks_exp: List[List[str]] = []
     for idx, w in enumerate(words):
         wt = clean(str(w.get("w") or w.get("word") or w.get("text") or "").split()) if isinstance(w, dict) else []
         if not wt and fallback_toks and len(fallback_toks) == n:
             wt = [fallback_toks[idx]] if fallback_toks[idx] else []
         wtoks.append(wt)
-    lt_pool = set(lt)
-    flat_match = [_word_matches_line(wt, lt_pool) for wt in wtoks]
+        wtoks_exp.append(_expand_contractions(wt))
+    lt_exp = _expand_contractions(lt)
+    if not lt_exp:
+        return []
+    lt_pool = set(lt_exp)
+    flat_match = [_word_matches_line(wt, lt_pool) for wt in wtoks_exp]
     ref_arg: Union[str, List[str]] = ref_text if ref_text else lt
-    max_span = max(4, int(len(lt) * 2.0) + 3)
+    max_span = max(4, int(len(lt_exp) * 2.0) + 4)
 
-    scored: List[Tuple[Tuple[float, bool, float, int, int], float, int, int, List[Dict[str, Any]]]] = []
+    scored: List[Tuple[Tuple[Any, ...], float, int, int, List[Dict[str, Any]]]] = []
     seen_spans: set = set()
     for i in range(n):
         if not flat_match[i]:
@@ -3015,21 +3186,39 @@ def _candidate_windows(
         acc: List[str] = []
         j_lim = min(n, i + max_span)
         for j in range(i, j_lim):
-            acc.extend(wtoks[j])
+            acc.extend(wtoks_exp[j])
             if not flat_match[j]:
                 continue
-            r = recall(acc, lt)
-            if r < 0.5:
+            r_quick = recall(acc, lt_exp)
+            if r_quick < 0.5:
                 continue
             tr_r, tr_i, tr_j, reps = _trim_edge_stumbles(words, wtoks, i, j, lt, ref_arg)
+            if tr_r < 0.5:
+                continue
             if (tr_i, tr_j) in seen_spans:
                 continue
             seen_spans.add((tr_i, tr_j))
-            tok_cnt = sum(len(wtoks[k]) for k in range(tr_i, tr_j + 1))
-            excess = max(0, tok_cnt - len(lt))
+            cand_toks = [t for k in range(tr_i, tr_j + 1) for t in wtoks_exp[k]]
+            ord_cov = _ordered_line_coverage(cand_toks, lt_exp)
+            tok_cnt = len(cand_toks)
+            missing = max(0, len(lt_exp) - tok_cnt)
+            excess = max(0, tok_cnt - len(lt_exp))
+            len_err = missing * 2 + excess
+            start_anchor = bool(wtoks_exp[tr_i] and any(_sim(t, lt_exp[0]) >= WORD_MATCH for t in wtoks_exp[tr_i]))
+            end_anchor = bool(wtoks_exp[tr_j] and any(_sim(t, lt_exp[-1]) >= WORD_MATCH for t in wtoks_exp[tr_j]))
             rep_pen = (0.06 + 0.02 * (len(reps) - 1)) if reps else 0.0
-            eff_r = tr_r - rep_pen
-            key = (round(eff_r, 2), len(reps) == 0, round(tr_r, 2), -excess, tr_i)
+            eff_r = max(0.0, tr_r - rep_pen)
+            key = (
+                round(eff_r, 3),
+                start_anchor and end_anchor,
+                end_anchor,
+                start_anchor,
+                len(reps) == 0,
+                round(ord_cov, 3),
+                -len_err,
+                tr_j - tr_i,
+                -tr_i,
+            )
             scored.append((key, tr_r, tr_i, tr_j, reps))
 
     if not scored:
@@ -3065,7 +3254,7 @@ def _best_window(words: List[Dict[str, Any]], toks: List[str], lt: List[str]) ->
 
 
 def _filter_live_clip_words(c: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Filter out zero-energy and VAD-silent ghost words before candidate windowing."""
+    """Filter out zero-energy and VAD-silent ghost words before candidate windowing while keeping soft real speech."""
     from prepare import _speech_spans_of, words_in_silence
 
     raw_ws = [
@@ -3078,14 +3267,25 @@ def _filter_live_clip_words(c: Dict[str, Any]) -> List[Dict[str, Any]]:
     env = c.get("rms_env") or []
     bad_ids = {id(w) for w in words_in_silence(raw_ws, env)} if env else set()
     spoken = _speech_spans_of(c) if c.get("work_dir") else []
+    dbs = sorted(db for _, db in env) if env else []
+    stationary_noise = bool(dbs) and (
+        (dbs[min(len(dbs) - 1, int(len(dbs) * 0.90))] - dbs[len(dbs) // 2]) <= 4.2
+        and sum(1 for db in dbs if db > -28.0) / len(dbs) >= 0.90
+    )
+    quiet_floor = _quiet_level(env) if env else -42.0
     kept: List[Dict[str, Any]] = []
     for w in raw_ws:
         if id(w) in bad_ids or w.get("no_sound"):
             continue
         if spoken:
             ws0, ws1 = float(w.get("start", 0.0)), float(w.get("end", 0.0))
-            if not any(min(ws1, b + 0.08) > max(ws0, a - 0.06) for a, b in spoken):
-                continue
+            in_vad = any(min(ws1, float(b) + 0.10) >= max(ws0, float(a) - 0.10) for a, b in spoken)
+            if not in_vad:
+                if stationary_noise or not env:
+                    continue
+                peak_db = max((db for tt, db in env if ws0 - 0.05 <= tt <= ws1 + 0.05), default=-140.0)
+                if peak_db < -45.0 or peak_db < quiet_floor + 3.0:
+                    continue
         kept.append(w)
     return kept
 
@@ -3142,12 +3342,19 @@ def _incomplete_clip_names(clips: List[Dict[str, Any]]) -> List[str]:
 
 def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], limit: int = 4, style: str = "") -> str:
     """Build `line_map.md` listing every script line in order and its ranked `CAND` source stretches."""
+    from prepare import _speech_spans_of
+
     _ = style  # Preserved for signature compatibility; style routing lives in edit_brief.py
     incomplete_clips = _incomplete_clip_names(clips)
     prep = []
     for c in clips:
         ws = _filter_live_clip_words(c)
-        prep.append((c, ws, [t for w in ws for t in clean(str(w.get("w") or w.get("word") or "").split())]))
+        spoken_c = (
+            [tuple(x) for x in c["speech_spans"]]
+            if c.get("speech_spans")
+            else (_speech_spans_of(c) if c.get("work_dir") else _speech_spans_for({"src": c.get("src", "")}))
+        )
+        prep.append((c, ws, [t for w in ws for t in clean(str(w.get("w") or w.get("word") or "").split())], spoken_c))
     named: set = set()
     out = [
         "# LINE MAP: script lines in order with candidate source windows (`CAND <clip> <start>-<end> heard=<recall>`).",
@@ -3165,35 +3372,81 @@ def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], lim
         who = f" [{l['speaker']}]" if l.get("speaker") else ""
         out.append(f"{l['id']}{who} {l.get('text', '')}" + (f"  ({'; '.join(tags)})" if tags else ""))
         lt = l.get("tokens") or []
-        if not lt:
+        lt_exp = _expand_contractions(lt)
+        if not lt_exp:
             out.append("  silent beat: choose a silent clip from the clip sheet")
             continue
         cands = []
         ref_line = l.get("text") or lt
-        for idx_c, (c, ws, toks) in enumerate(prep):
+        for idx_c, (c, ws, toks, spoken_c) in enumerate(prep):
             if not ws:
                 continue
-            wtoks_c = [clean(str(w.get("w") or w.get("word") or "").split()) for w in ws]
+            wtoks_exp_c = [_expand_contractions(clean(str(w.get("w") or w.get("word") or "").split())) for w in ws]
+            clip_dur = float((c.get("info") or {}).get("duration") or 0.0) if isinstance(c.get("info"), dict) else 0.0
             win_list = _candidate_windows(ws, lt, ref_text=ref_line, fallback_toks=toks)
             for r, i, j, reps in win_list:
                 if r >= 0.5:
                     j_clamped = min(j, len(ws) - 1)
                     w_start = float(ws[i]["start"])
                     w_end = float(ws[j_clamped]["end"])
+                    if spoken_c:
+                        prev_word_end = float(ws[i - 1]["end"]) if i > 0 else -1.0
+                        next_word_start = (
+                            float(ws[j_clamped + 1]["start"])
+                            if j_clamped + 1 < len(ws)
+                            else (clip_dur if clip_dur > w_end else w_end + 10.0)
+                        )
+                        for sp0_raw, sp1_raw in spoken_c:
+                            sp0, sp1 = float(sp0_raw), float(sp1_raw)
+                            if sp0 - 0.02 <= w_end < sp1 and (sp1 - w_end) <= 0.50:
+                                if j_clamped + 1 >= len(ws) or sp1 <= next_word_start + 0.02:
+                                    ext_b = min(sp1, next_word_start - 0.03, w_end + 0.45)
+                                    if clip_dur > 0.0:
+                                        ext_b = min(ext_b, clip_dur)
+                                    if ext_b > w_end:
+                                        w_end = ext_b
+                            if sp0 < w_start <= sp1 + 0.02 and (w_start - sp0) <= 0.20:
+                                if i == 0 or sp0 >= prev_word_end - 0.02:
+                                    prev_bound = (prev_word_end + 0.03) if i > 0 else 0.0
+                                    ext_a = max(0.0, sp0, prev_bound, w_start - 0.15)
+                                    if ext_a < w_start:
+                                        w_start = ext_a
+
                     rep_pen = (0.06 + 0.02 * (len(reps) - 1)) if reps else 0.0
-                    stoks = [t for k in range(i, j_clamped + 1) for t in wtoks_c[k]]
-                    f_sc = fit(stoks, lt)
+                    eff_r = max(0.0, r - rep_pen)
+                    stoks_exp = [t for k in range(i, j_clamped + 1) for t in wtoks_exp_c[k]]
+                    ord_cov = _ordered_line_coverage(stoks_exp, lt_exp)
+                    tok_cnt = len(stoks_exp)
+                    missing = max(0, len(lt_exp) - tok_cnt)
+                    excess = max(0, tok_cnt - len(lt_exp))
+                    len_err = missing * 2 + excess
+                    start_anchor = bool(wtoks_exp_c[i] and any(_sim(t, lt_exp[0]) >= WORD_MATCH for t in wtoks_exp_c[i]))
+                    end_anchor = bool(wtoks_exp_c[j_clamped] and any(_sim(t, lt_exp[-1]) >= WORD_MATCH for t in wtoks_exp_c[j_clamped]))
+                    f_sc = fit(stoks_exp, lt_exp)
+                    sort_key = (
+                        round(eff_r, 3),
+                        start_anchor and end_anchor,
+                        end_anchor,
+                        start_anchor,
+                        len(reps) == 0,
+                        round(ord_cov, 3),
+                        -len_err,
+                        round(f_sc, 3),
+                        -idx_c,
+                        -w_start,
+                    )
                     cands.append((
-                        (round(r - rep_pen, 2), len(reps) == 0, round(f_sc, 2), round(r, 2), idx_c, w_start),
+                        sort_key,
                         r,
                         Path(str(c["src"])).name,
                         w_start,
                         w_end,
                         reps,
                         c,
+                        eff_r,
                     ))
-        cands.sort(key=lambda x: (-x[0][0], not x[0][1], -x[0][2], -x[0][3], x[0][4], -x[0][5]))
-        for _sk, r, name, a, b, _reps, c in cands:
+        cands.sort(key=lambda x: x[0], reverse=True)
+        for _sk, r, name, a, b, _reps, c, _eff_r in cands:
             named.add(id(c))
         # Surface each source file's best take first before secondary retakes in the same file
         diverse, seen_sources = [], set()
@@ -3203,7 +3456,7 @@ def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], lim
                 seen_sources.add(candidate[2])
         selected = diverse + [c for c in cands if c not in diverse]
         shown = selected[: max(limit, len(diverse))]
-        for _sk, r, name, a, b, reps, c_obj in shown:
+        for _sk, r, name, a, b, reps, c_obj, eff_r in shown:
             voice_note = ""
             vh = c_obj.get("clip_voice_hint") if isinstance(c_obj, dict) else None
             if isinstance(vh, dict):
@@ -3234,7 +3487,12 @@ def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], lim
                     f"  [REPEAT @ {rp0['first_start']:.2f}s — split cut around stumble "
                     f"('{rp0['phrase']}' {rp0['first_start']:.2f}-{rp0['first_end']:.2f} & {rp0['second_start']:.2f}-{rp0['second_end']:.2f})]"
                 )
-            out.append(f"  CAND {name} {float(a):.2f}-{float(b):.2f} heard={r:.2f}{voice_note}{rep_note}")
+            partial_note = (
+                f"  [PARTIAL r={eff_r:.2f} — verify full sentence before cutting]"
+                if eff_r < 0.85
+                else ""
+            )
+            out.append(f"  CAND {name} {float(a):.2f}-{float(b):.2f} heard={r:.2f}{voice_note}{rep_note}{partial_note}")
         if len(cands) > len(shown):
             out.append(f"  +{len(cands) - len(shown)} alternate candidates (use `edit_packet.py <project> --line {l['id']}`)")
         if not cands:
@@ -3247,7 +3505,7 @@ def build_line_map(lines: List[Dict[str, Any]], clips: List[Dict[str, Any]], lim
                 )
             else:
                 out.append("  NO CLIP says this line (inspect measured footage; report reshoot need or record `accept` if non-spoken)")
-    spare = [(c, ws) for c, ws, _ in prep if id(c) not in named and ws and not c.get("is_listening")]
+    spare = [(c, ws) for c, ws, _, _ in prep if id(c) not in named and ws and not c.get("is_listening")]
     if spare:
         out += ["", "## UNMATCHED SPEECH (slate, ad-lib, or noisy transcript)"]
         for c, ws in spare:
@@ -3349,6 +3607,9 @@ def cut_problems(plan: Dict[str, Any]) -> List[str]:
         spoken = _speech_spans_for(s)
         if not ws and not spoken:
             continue
+        st_val = float(s["start"])
+        en_val = _effective_audio_end_src(s, st_val, float(s["end"]))
+        bounds = (("start", st_val), ("end", en_val))
         env = None
         ghost_ids: Optional[set] = None
         flagged_bounds: set = set()
@@ -3357,16 +3618,17 @@ def cut_problems(plan: Dict[str, Any]) -> List[str]:
                 if w.get("no_sound"):
                     continue
                 a, b = float(w["start"]), float(w["end"])
-                for name, t in (("start", float(s["start"])), ("end", float(s["end"]))):
+                for name, t in bounds:
                     if a + 0.035 < t < b - 0.035:
-                        if spoken and not any(x0 - 0.03 <= t <= x1 + 0.03 for x0, x1 in spoken):
-                            continue
                         if env is None:
                             env = _env_of(s)
                             ghost_ids = {id(gw) for gw in words_in_silence(ws, env)} if env else set()
                         if ghost_ids and id(w) in ghost_ids:
                             continue
-                        loud = max((db for tt, db in env if t - 0.03 <= tt <= t + 0.03), default=-140.0)
+                        loud = max((db for tt, db in env if t - 0.03 <= tt <= t + 0.03), default=-140.0) if env else 0.0
+                        if spoken and not any(x0 - 0.03 <= t <= x1 + 0.03 for x0, x1 in spoken):
+                            if not env or loud < -45.0:
+                                continue
                         if env and loud < -50.0:
                             continue
                         flagged_bounds.add((name, round(t, 4)))
@@ -3387,29 +3649,69 @@ def cut_problems(plan: Dict[str, Any]) -> List[str]:
                 ),
                 key=lambda w: (float(w.get("start", 0.0)), float(w.get("end", 0.0))),
             )
-            for name, t in (("start", float(s["start"])), ("end", float(s["end"]))):
+            for name, t in bounds:
                 if (name, round(t, 4)) in flagged_bounds:
                     continue
-                hit_span = next(((sp0, sp1) for sp0, sp1 in spoken if sp0 + 0.08 < t < sp1 - 0.08), None)
+                hit_span = next(((float(sp0), float(sp1)) for sp0, sp1 in spoken if float(sp0) + 0.08 < t < float(sp1) - 0.08), None)
                 if hit_span is None:
                     continue
+                sp0, sp1 = hit_span
+                in_word_gap = any(
+                    float(live_ws[i]["end"]) - 0.02 <= t <= float(live_ws[i + 1]["start"]) + 0.02
+                    and (float(live_ws[i + 1]["start"]) - float(live_ws[i]["end"])) <= 0.80
+                    for i in range(len(live_ws) - 1)
+                )
+                if in_word_gap:
+                    continue
+
+                if name == "end":
+                    has_next_word_gap = any(
+                        t + 0.04 <= float(w["start"]) <= t + 0.65
+                        for w in live_ws
+                    )
+                    at_word_edge = any(
+                        float(w["end"]) - 0.02 <= t <= float(w["end"]) + 0.08
+                        for w in live_ws
+                    ) and ((sp1 - t) <= 0.18 or has_next_word_gap)
+                    if at_word_edge:
+                        continue
+                    tail_loud = (
+                        max((db for tt, db in env if t - 0.03 <= tt <= min(sp1, t + 0.30)), default=-140.0)
+                        if env
+                        else 0.0
+                    )
+                    if (sp1 - t) > 0.22 and (not env or tail_loud >= -44.0) and not has_next_word_gap:
+                        out.append(
+                            f"{s.get('id')} {name} {t:.2f} cuts inside continuous VAD speech ({sp0:.2f}-{sp1:.2f}) — "
+                            "sentence truncated or untranscribed tail"
+                        )
+                        continue
+                else:
+                    has_prev_word_gap = any(
+                        t - 0.65 <= float(w["end"]) <= t - 0.04
+                        for w in live_ws
+                    )
+                    at_word_edge = any(
+                        float(w["start"]) - 0.08 <= t <= float(w["start"]) + 0.02
+                        for w in live_ws
+                    ) and ((t - sp0) <= 0.18 or has_prev_word_gap)
+                    if at_word_edge:
+                        continue
+                    head_loud = (
+                        max((db for tt, db in env if max(sp0, t - 0.30) <= tt <= t + 0.03), default=-140.0)
+                        if env
+                        else 0.0
+                    )
+                    if (t - sp0) > 0.22 and (not env or head_loud >= -44.0) and not has_prev_word_gap:
+                        out.append(
+                            f"{s.get('id')} {name} {t:.2f} cuts inside continuous VAD speech ({sp0:.2f}-{sp1:.2f}) — "
+                            "sentence truncated or untranscribed lead"
+                        )
+                        continue
+
                 loud = max((db for tt, db in env if t - 0.03 <= tt <= t + 0.03), default=-140.0) if env else 0.0
                 if env and loud < -50.0:
                     continue
-                # Clean inter-word gap or immediate guard around a live transcribed word is safe
-                in_word_gap = any(
-                    float(live_ws[i]["end"]) - 0.02 <= t <= float(live_ws[i + 1]["start"]) + 0.02
-                    and (float(live_ws[i + 1]["start"]) - float(live_ws[i]["end"])) < 1.2
-                    for i in range(len(live_ws) - 1)
-                )
-                at_word_edge = any(
-                    (float(w["start"]) - 0.08 <= t <= float(w["start"]) + 0.02)
-                    or (float(w["end"]) - 0.02 <= t <= float(w["end"]) + 0.08)
-                    for w in live_ws
-                )
-                if in_word_gap or at_word_edge:
-                    continue
-                sp0, sp1 = hit_span
                 out.append(
                     f"{s.get('id')} {name} {t:.2f} cuts inside active VAD speech ({sp0:.2f}-{sp1:.2f}; run --retry-incomplete if untranscribed)"
                 )
@@ -3879,8 +4181,8 @@ def _snap_target(env: List[Tuple[float, float]], lo: float, hi: float, anchor: f
 
 
 def snap_cuts(plan: Dict[str, Any]) -> int:
-    """Nudge inter-word cuts and minor word-edge grazes (<=0.08s) onto the quietest 10ms point in the adjacent gap."""
-    from prepare import compute_10ms_rms_envelope
+    """Nudge inter-word cuts and minor word-edge grazes (<=0.08s) outward onto the quietest 10ms point in the adjacent gap."""
+    from prepare import words_in_silence
 
     moved = 0
     for s in plan.get("segments", []):
@@ -3888,15 +4190,43 @@ def snap_cuts(plan: Dict[str, Any]) -> int:
             continue
         if _segment_is_muted(s) or _segment_is_beat(s):
             continue
-        ws = _words_of(s)
-        wav = _resolve_clip_cache_dir(s.get("src", "")) / "audio16k.wav"
-        if not ws or not wav.is_file():
+        raw_ws = _words_of(s)
+        if not raw_ws:
             continue
-        env = compute_10ms_rms_envelope(wav)
+        env = _env_of(s)
+        if not env:
+            continue
+        ghost_ids = {id(w) for w in words_in_silence(raw_ws, env)}
+        ws = sorted(
+            (
+                w
+                for w in raw_ws
+                if isinstance(w, dict) and not w.get("no_sound") and id(w) not in ghost_ids
+            ),
+            key=lambda w: (float(w.get("start", 0.0)), float(w.get("end", 0.0))),
+        )
+        if not ws:
+            continue
         spoken = _speech_spans_for(s)
         dur_clip = max((t for t, _ in env), default=float(ws[-1]["end"]) + 0.5)
+        st_init, en_init = float(s["start"]), float(s["end"])
+        cut_ws = [
+            w
+            for w in ws
+            if (
+                st_init - 0.02 <= 0.5 * (float(w["start"]) + float(w["end"])) <= en_init + 0.02
+                or (
+                    min(float(w["end"]), en_init) - max(float(w["start"]), st_init)
+                    >= min(0.04, 0.35 * max(0.02, float(w["end"]) - float(w["start"])))
+                )
+            )
+        ]
+        first_live_start = float(cut_ws[0]["start"]) if cut_ws else None
+        last_live_end = float(cut_ws[-1]["end"]) if cut_ws else None
+
         for key in ("start", "end"):
             t = float(s[key])
+            other = float(s["end"]) if key == "start" else float(s["start"])
             local_cands = [db for tt, db in env if t - 0.02 <= tt <= t + 0.02]
             local_db = max(local_cands) if local_cands else None
             snapped = False
@@ -3904,62 +4234,236 @@ def snap_cuts(plan: Dict[str, Any]) -> int:
                 a, b = float(w0["end"]), float(w1["start"])
                 if a <= t <= b and b - a >= 0.03:
                     if local_db is not None and local_db <= -42.0:
-                        snapped = True
-                        break
+                        if key == "start" and first_live_start is not None and t > first_live_start - 0.04:
+                            pass
+                        elif key == "end" and last_live_end is not None and t < last_live_end + 0.05:
+                            pass
+                        else:
+                            snapped = True
+                            break
                     mid_ab = 0.5 * (a + b)
-                    gap_lo = min(mid_ab, a + 0.03)
-                    gap_hi = max(mid_ab, b - 0.03)
+                    if key == "start":
+                        gap_lo = min(mid_ab, a + 0.03)
+                        gap_hi = b - 0.04 if (b - a >= 0.07) else mid_ab
+                    else:
+                        gap_lo = a + 0.05 if (b - a >= 0.08) else mid_ab
+                        gap_hi = max(mid_ab, b - 0.03)
+                    if gap_lo > gap_hi:
+                        gap_lo = gap_hi = mid_ab
                     lo, hi = max(gap_lo, t - SNAP_REACH_SEC), min(gap_hi, t + SNAP_REACH_SEC)
                     if lo > hi:
-                        lo = hi = mid_ab
+                        lo = hi = gap_hi if key == "start" else gap_lo
                     new_t, min_db = _snap_target(env, lo, hi, t)
                     new = round(float(new_t), 2)
+                    # Outward-only speech guard: never push start past first_live_word.start - 0.04 or pull end before last_live_word.end + 0.05
+                    if key == "start" and first_live_start is not None and new > round(first_live_start - 0.04, 3) and new > round(t, 2):
+                        snapped = True
+                        break
+                    if key == "end" and last_live_end is not None and new < round(last_live_end + 0.05, 3) and new < round(t, 2):
+                        snapped = True
+                        break
                     if new != round(t, 2) and (local_db is None or min_db < local_db - 2.0):
-                        s[key] = new
-                        moved += 1
+                        if (key == "start" and new < other - 0.05) or (key == "end" and new > other + 0.05):
+                            s[key] = new
+                            moved += 1
                     snapped = True
                     break
             if snapped:
                 continue
             for idx_w, w in enumerate(ws):
                 wa, wb = float(w["start"]), float(w["end"])
-                if not (wa < t < wb) or (wb - wa) < EDGE_GRAZE_MAX_SEC:
-                    continue
-                if spoken and not any(x0 - 0.03 <= t <= x1 + 0.03 for x0, x1 in spoken):
+                if not (wa < t < wb):
                     continue
                 if env and max((db for tt, db in env if t - 0.03 <= tt <= t + 0.03), default=-140.0) < -50.0:
                     continue
-                other = float(s["end"]) if key == "start" else float(s["start"])
                 dist_a = t - wa
                 dist_b = wb - t
-                near_left = dist_a <= EDGE_GRAZE_MAX_SEC
-                near_right = dist_b <= EDGE_GRAZE_MAX_SEC
-                if near_left and (not near_right or dist_a <= dist_b):
+                # Strictly outward-only word-edge graze repair:
+                # - "start" may ONLY move earlier (near_left), NEVER later across a short word!
+                # - "end" may ONLY move later (near_right), NEVER earlier across a short word!
+                if key == "start" and dist_a <= EDGE_GRAZE_MAX_SEC:
                     prev_end = float(ws[idx_w - 1]["end"]) if idx_w > 0 else 0.0
                     if prev_end <= wa:
                         mid_gap = 0.5 * (prev_end + wa) if idx_w > 0 else 0.0
-                        hi = max(mid_gap, wa - 0.03)
+                        hi = max(mid_gap, wa - 0.04) if (idx_w == 0 or wa - prev_end >= 0.07) else mid_gap
                         safe_prev = min(mid_gap, prev_end + 0.03) if idx_w > 0 else 0.0
                         lo = min(hi, max(safe_prev, wa - SNAP_REACH_SEC))
                         new = round(float(_snap_target(env, lo, hi, t)[0]) if env and hi > lo else hi, 2)
-                        if (key == "start" and new < other - 0.05) or (key == "end" and new > other + 0.05):
-                            if new != round(t, 2):
-                                s[key] = new
-                                moved += 1
+                        if new <= round(t, 2) and new < other - 0.05:
+                            if first_live_start is None or new <= round(first_live_start - 0.04, 2) or new < round(t, 2):
+                                if new != round(t, 2):
+                                    s[key] = new
+                                    moved += 1
                     break
-                if near_right:
+                if key == "end" and dist_b <= EDGE_GRAZE_MAX_SEC:
                     next_start = float(ws[idx_w + 1]["start"]) if idx_w + 1 < len(ws) else dur_clip
                     if wb <= next_start:
                         mid_gap = 0.5 * (wb + next_start) if idx_w + 1 < len(ws) else dur_clip
-                        lo = min(mid_gap, wb + 0.03)
+                        lo = min(mid_gap, wb + 0.05) if (idx_w + 1 >= len(ws) or next_start - wb >= 0.08) else mid_gap
                         safe_next = max(mid_gap, next_start - 0.03) if idx_w + 1 < len(ws) else dur_clip
                         hi = max(lo, min(safe_next, wb + SNAP_REACH_SEC))
                         new = round(float(_snap_target(env, lo, hi, t)[0]) if env and hi > lo else lo, 2)
-                        if (key == "start" and new < other - 0.05) or (key == "end" and new > other + 0.05):
-                            if new != round(t, 2):
-                                s[key] = new
-                                moved += 1
+                        if new >= round(t, 2) and new > other + 0.05:
+                            if last_live_end is None or new >= round(last_live_end + 0.05, 2) or new > round(t, 2):
+                                if new != round(t, 2):
+                                    s[key] = new
+                                    moved += 1
                     break
+    return moved
+
+
+TAIL_REACH_SEC = 0.55     # Max a cut may move past the aligner's word end to keep the voice's natural fade-out / VAD tail
+ONSET_REACH_SEC = 0.30    # Max a cut may move before the aligner's word start to keep the voice's onset
+QUIET_FRAMES = 5          # 50 ms below the clip's quiet level counts as silence
+
+
+def _quiet_level(env: List[Tuple[float, float]]) -> float:
+    """Clip silence floor: 2nd-percentile dBFS + 8.0 dB, capped at -38.0 dB (safe even on 98%-speech clips)."""
+    dbs = sorted(db for _, db in env)
+    if not dbs:
+        return -42.0
+    return min(-38.0, dbs[max(0, int(len(dbs) * 0.02))] + 8.0)
+
+
+def protect_tails(plan: Dict[str, Any]) -> int:
+    """Keep every spoken word whole at the cut. Filters ghost words first, extends `seg['end']` across audible RMS
+    fade-outs (`db >= quiet`) AND active VAD `speech_spans` (up to +0.55s, bounded by `next_live_word.start - 0.04`
+    and clip duration) with >= 0.06s tail guard after the last word, and protects `seg['start']` onsets."""
+    from prepare import find_rms_minimum, words_in_silence
+
+    moved = 0
+    cache: Dict[str, List[Tuple[float, float]]] = {}
+    for s in plan.get("segments", []):
+        if not isinstance(s, dict) or "start" not in s or "end" not in s:
+            continue
+        if _segment_is_muted(s) or _segment_is_beat(s):
+            continue
+        raw_ws = _words_of(s)
+        spoken = _speech_spans_for(s)
+        if not raw_ws and not spoken:
+            continue
+        key = str(s.get("src", ""))
+        if key not in cache:
+            cache[key] = _env_of(s)
+        env = cache[key]
+        if not env:
+            continue
+        ghost_ids = {id(w) for w in words_in_silence(raw_ws, env)} if raw_ws else set()
+        ws = sorted(
+            (
+                w
+                for w in raw_ws
+                if isinstance(w, dict) and not w.get("no_sound") and id(w) not in ghost_ids
+            ),
+            key=lambda w: (float(w.get("start", 0.0)), float(w.get("end", 0.0))),
+        )
+        if not ws and not spoken:
+            continue
+        quiet = _quiet_level(env)
+        step = (env[1][0] - env[0][0]) if len(env) > 1 else 0.01
+        clip_end = env[-1][0]
+        db_at = lambda tt: env[min(len(env) - 1, max(0, int(round((tt - env[0][0]) / step))))][1]
+        st, en = float(s["start"]), float(s["end"])
+        has_live_beat_tail = s.get("audio_end") is not None and _effective_audio_end_src(s, st, en) < en - 0.05
+
+        # 1) end: protect last live word fade-out and any active VAD span continuing past seg["end"]
+        if not has_live_beat_tail:
+            before = [w for w in ws if float(w["start"]) < en - 0.02]
+            if before:
+                w = before[-1]
+                w_end = float(w["end"])
+                after = [x for x in ws if float(x["start"]) >= max(w_end - 0.01, float(w["start"]) + 0.02) and x is not w]
+                nxt = float(after[0]["start"]) if after else clip_end
+                if en >= w_end - EDGE_GRAZE_MAX_SEC:
+                    scan_from = max(en, w_end)
+                    limit = min(max(w_end, en) + TAIL_REACH_SEC, w_end + TAIL_REACH_SEC, (nxt - 0.04) if after else clip_end, clip_end)
+                    vad_tail = max(
+                        (
+                            float(sp1)
+                            for sp0, sp1 in spoken
+                            if float(sp0) <= max(en, w_end) + 0.04
+                            and float(sp1) > scan_from
+                            and (not after or float(sp1) <= nxt + 0.02)
+                            and (float(sp1) - scan_from) <= TAIL_REACH_SEC + 0.05
+                        ),
+                        default=None,
+                    )
+                    t, run, voice_end = scan_from, 0, None
+                    while t <= limit:
+                        is_active = (db_at(t) >= quiet) or (vad_tail is not None and t < min(vad_tail, limit))
+                        run = 0 if is_active else (run + 1)
+                        if run >= QUIET_FRAMES:
+                            voice_end = t - (QUIET_FRAMES - 1) * step
+                            break
+                        t += step
+                    if voice_end is not None:
+                        target = voice_end + 0.04
+                    elif vad_tail is not None and vad_tail <= limit + 0.02:
+                        target = min(limit, vad_tail + 0.04)
+                    else:
+                        target = float(find_rms_minimum(env, scan_from, limit)[0]) if limit > scan_from else en
+                    min_tail_guard = min(limit, w_end + 0.06)
+                    target = round(min(max(target, min_tail_guard), limit), 2)
+                    if target > en + 0.01 and target - st > 0.1:
+                        s["end"] = target
+                        en = target
+                        moved += 1
+            elif spoken:
+                vad_only_end = max(
+                    (
+                        float(sp1)
+                        for sp0, sp1 in spoken
+                        if float(sp0) <= en + 0.02 < float(sp1) and (float(sp1) - en) <= TAIL_REACH_SEC
+                    ),
+                    default=None,
+                )
+                if vad_only_end is not None:
+                    nxt_w = min((float(x["start"]) for x in ws if float(x["start"]) > en + 0.02), default=clip_end)
+                    limit = min(en + TAIL_REACH_SEC, (nxt_w - 0.04) if nxt_w < clip_end else clip_end, clip_end)
+                    target = round(min(vad_only_end + 0.04, limit), 2)
+                    if target > en + 0.01 and target - st > 0.1:
+                        s["end"] = target
+                        en = target
+                        moved += 1
+
+        # 2) start: protect first live word onset (and any leading VAD onset right before it)
+        later = [w for w in ws if float(w["end"]) > st + 0.02]
+        if later:
+            w = later[0]
+            w_start = float(w["start"])
+            prior = [x for x in ws if float(x["end"]) <= w_start + 0.01 and x is not w]
+            prev_end = float(prior[-1]["end"]) if prior else 0.0
+            if st <= w_start + EDGE_GRAZE_MAX_SEC:
+                limit = max(w_start - ONSET_REACH_SEC, (prev_end + 0.04) if prior else 0.0, 0.0)
+                vad_head = min(
+                    (
+                        float(sp0)
+                        for sp0, sp1 in spoken
+                        if float(sp0) < min(st, w_start) <= float(sp1) + 0.04
+                        and (not prior or float(sp0) >= prev_end - 0.02)
+                        and (w_start - float(sp0)) <= ONSET_REACH_SEC + 0.05
+                    ),
+                    default=None,
+                )
+                t, run, onset = min(st, w_start), 0, None
+                while t >= limit:
+                    is_active = (db_at(t) >= quiet) or (vad_head is not None and t > max(vad_head, limit))
+                    run = 0 if is_active else (run + 1)
+                    if run >= QUIET_FRAMES:
+                        onset = t + (QUIET_FRAMES - 1) * step
+                        break
+                    t -= step
+                if onset is not None:
+                    max_start_guard = max(limit, w_start - 0.04)
+                    target = round(max(min(onset - 0.03, max_start_guard), limit), 2)
+                    if target < st - 0.01 and float(s["end"]) - target > 0.1:
+                        s["start"] = target
+                        moved += 1
+                elif st > w_start - 0.04 and limit <= w_start - 0.04:
+                    target = round(max(limit, w_start - 0.04), 2)
+                    if target < st - 0.01 and float(s["end"]) - target > 0.1:
+                        s["start"] = target
+                        moved += 1
     return moved
 
 

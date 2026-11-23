@@ -1,51 +1,43 @@
 # Core Editing Rules
 
 ## 1. Script Order & Speakers
-- Play every spoken line once, in order.
-- Verify words in `line_map.md` & `facts.md`.
-- Set `sp="ExactSpeaker"`; report missing takes.
-- Unspoken notes in `decisions.txt`: `accept L2 <why>`.
+- Play every spoken line once, in order; verify words in `line_map.md` & `facts.md`.
+- Set `sp="ExactSpeaker"`; report missing takes; unspoken notes in `decisions.txt`: `accept L2 <why>`.
 
-## 2. Word Bounds & Pauses
-- Guard speech `0.02-0.05s`; join turns `0.06-0.15s`.
-- Trim `! REPEAT / STUMBLE` & cross-join repeats.
-- Keep scripted laughs/cries `<=1.2s`.
-- `single` pause `>0.25s`: split (`L4a`/`L4b`) + `1.08` punch-in.
-- Split pause `>=0.50s`: cut & advance `peer=`.
+## 2. Word Bounds, Sentence Integrity & Pauses
+- Keep every sentence complete (`start - 0.05s` to `end + 0.06-0.10s`, checked via `pauses:`); join turns `0.06-0.15s`.
+- NEVER cut `<0.45s` mid-sentence breaths/commas; trim `! REPEAT / STUMBLE` & keep scripted laughs/cries `<=1.2s`.
+- Trim only dead-air pauses `>=0.50s` (`>=0.55s` inside `split_h`/`split_v`, advancing `peer=`).
+- `single` `1.08` punch-in: use `z=sudden_in:1.08@t` inside the continuous cut or cut only at a `>=0.45s` `pauses:` gap.
 
 ## 3. Split-Screen Invariants
-- `Left:`/`Right:` = `split_h`; `Top:`/`Bottom:` = `split_v`.
-- `split_h`, `split_v`, `top_pip`, baked splits: ALWAYS `z=1`.
-- Fixed frame, matched bg, `14%` headroom.
-- Advance silent `peer="Name:clip.mp4"@in-out@side`.
-- Baked split: `single` + `slot=left|right|top|bottom z=1` (no re-split).
+- `Left:`/`Right:` = `split_h`; `Top:`/`Bottom:` = `split_v`; `split_h`, `split_v`, `top_pip`, baked splits: ALWAYS `z=1` (`14%` headroom).
+- Advance silent `peer="Name:clip.mp4"@in-out@side`; baked split: `single` + `slot=left|right|top|bottom z=1`.
 
 ## 4. Full-Frame Zoom & Slo-Mo (`single`)
-- `1.0` on calm cuts (`>=25%`), pans, edge 2-shots, holograms; reset cleanly to `z=1` on speaker/clip cuts.
-- Smooth push/pull: `z=zoom_in[:1.08]` (or `1.0->1.06` on turns `>=2.5s`), `z=zoom_out[:1.10]` (smooth reveal pullback).
-- Emphasis punches (`0.05s` early, Hook/Climax): `z=sudden_in:1.08@t` (3-5f silent punch-in, `<=16/min`, no repeat), `z=sudden_out:1.08@t` (recoil pullback).
-- Action/slo-mo reveal: `z=bell:1.20->1.55->1.0` (bell curve); max 1 `flash_zoom:1.12@t`; pass `focus=x,y` from `facts.md`.
-- Slo-Mo Hook: when script calls for a slo-mo opening hook before live dialogue, use `speed=0.45 mute` (or `speed=0.5 mute beat`) + `z=bell:1.20->1.55->1.0` + whoosh SFX.
+- `1.0` on calm cuts (`>=25%`), pans, edge 2-shots, holograms; reset to `z=1` on speaker/clip cuts; pass `focus=x,y`.
+- Push/pull: `z=zoom_in[:1.08]` (`1.0->1.06` on turns `>=2.5s`), `z=zoom_out[:1.10]`.
+- Punches (`0.05s` early): `z=sudden_in:1.08@t` (`<=16/min`, no repeat), `z=sudden_out:1.08@t`; max 1 `flash_zoom:1.12@t`.
+- Slo-Mo Hook: `speed=0.45 mute` (or `speed=0.5 mute beat`) + `z=bell:1.20->1.55->1.0` + whoosh SFX.
 
 ## 5. Story-Only Transitions
-- Add `+1-2` tasteful beats per reel on real shifts; keep majority of dialogue cuts as crisp hard cuts; zero intra-split, same-shot, or mid-line transitions.
-- Scene switches & story->CTA: `tr=whip_left`/`whip_right` (`0.34s`), `tr=slide_up`/`slide_down` (`0.36s`), `tr=zoom_burst` (`0.36s`; aliases `whip_up`, `whip_down`, `smooth*`).
-- Time/location jumps: `tr=dip_to_black`, `tr=dissolve`, `tr=fade` (`0.30s`); hook/emphasis/split entry: `tr=zoom_in`, `tr=zoom_out`, `tr=zoom_blur`, `tr=split_reveal@0.40`.
-- Act pivot / seamless AI stitch mask (flashes, max 1): `tr=warm_flash_punch` (`0.34s`), `warm_flash` (`0.375s`), `dip_to_white` (`0.30s`), `flash_zoom` (`0.36s`). Kinetic/flash transitions auto-attach calibrated whoosh SFX.
+- `+1-2` beats/reel on real shifts; dialogue hard-cut; zero intra-split, same-shot, or mid-line transitions.
+- Scene/CTA: `whip_left`/`whip_right` (`0.34s`), `slide_up`/`slide_down` (`0.36s`), `zoom_burst` (`0.36s`); time: `dip_to_black`, `dissolve`, `fade` (`0.30s`); hook/split: `zoom_in`, `zoom_out`, `zoom_blur`, `split_reveal@0.40`.
+- Act/flash (max 1): `warm_flash_punch` (`0.34s`), `warm_flash` (`0.375s`), `dip_to_white` (`0.30s`), `flash_zoom` (`0.36s`) (auto whoosh SFX).
 
 ## 6. Marks, Audio & Calibrated SFX
-- Audio: zero continuous BGM by default (clean dry/diegetic dialogue + surgical SFX only, mastered to `-10.5 LUFS`).
+- Audio: zero continuous BGM by default (dry dialogue + surgical SFX, `-10.5 LUFS`).
 - Packs: `#mark_pack flash|vignette|default|glossy|supernova|kn20228|w42`; `#sfx_pack default|supernova|kn20228|w42`.
-- Scripted `wrong`/`strike_text` & `right` lines auto-attach post-word `0.48s` outer vignette + strip slash + SFX over live non-frozen video visuals without dialogue overlap (`mark:wrong|right@t/0.48`, never freeze):
-  - Wrong (`+1dB`): `sn_wrong.wav`, `buzzer.wav`, `w42_wrong.wav`, `kn20228_wrong_core.mp3`.
+- Scripted `wrong`/`strike_text` & `right` auto-attach post-word `0.48s` vignette + slash + SFX over live non-frozen video without dialogue overlap (`mark:wrong|right@t/0.48`, never freeze):
+  - Wrong (`-1.5dB`): `sn_wrong.wav`, `buzzer.wav`, `w42_wrong.wav`, `kn20228_wrong_core.mp3`.
   - Right (`+0.5dB`): `correct_ding.wav`, `sn_correct.wav`, `w42_right.wav`, `kn20228_correct.mp3`, `ding.wav`.
 - SFX (`-4..0dB`, 1/beat, `<=40%`/file): UI `pop.wav`, `click.wav`, `sn_click.mp3`, `kn20228_click.wav`, `sn_punch_1.wav`, `sn_punch_2.wav`, `sn_riser_1.wav`; Whoosh `whoosh.wav`, `sn_swish_1.wav`, `w42_swoosh.wav`, `w42_transition.wav`, `kn20228_swoosh.wav`.
 
 ## 7. Subtitles & CTA Safety
-- `#subs auto y=65` (strict single-line only, `54px` at `1080w`; `y=50` on `split_v`). `#page scroll` replaces `#subs`, banners, marks, & SFX.
-- Flashcards: scripted `Flashcard Text:` auto-attaches `card:"English | Native"` (face-safe; never `banner:`, which is Stop-Saying strikethrough; opt out via `card:none`/`#cards off`).
-- 1:1 Square (`--square`): always derived directly from the completed 9:16 reel (2 layers: 1:1 center-cropped ~7% [5-10%] Gaussian blur background + centered full 9:16 reel on top; never generate separate 1:1 images, cards, timestamps, or subtitles).
-- Never add burned-in fake `"Install Now"` CTA buttons; keep bottom `20-25%` clean for platform ad buttons.
+- `#subs auto y=65` (strict single-line, `54px` at `1080w`; `y=50` on `split_v`). `#page scroll` replaces `#subs`, banners, marks, & SFX.
+- `Flashcard Text:` auto-attaches `card:"English | Native"` (face-safe; never `banner:`; opt out `card:none`/`#cards off`).
+- `--square` 1:1: 2-layer ~7% (`5-10%`) Gaussian blur wrap of the 9:16 reel (never separate 1:1 cards/subs).
+- Never add fake `"Install Now"` buttons; keep bottom `20-25%` clean.
 
 ## 8. `script_analysis.md` & `plan.edl`
 - `script_analysis.md` L1: `Format: <id> (<title>)`, 1 row/line.

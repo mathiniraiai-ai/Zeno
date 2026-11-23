@@ -411,6 +411,20 @@ def check_transcription_auth() -> List[Check]:
 check_server = check_transcription_auth
 
 
+def check_indic_subtitle_fonts() -> Check:
+    """Ensure Windows user fonts (when on Windows) and verify Indic rendering via Node probe."""
+    try:
+        import subtitles
+
+        subtitles.ensure_windows_user_fonts(quiet=True)
+        if not subtitles.available():
+            return None, "Indic subtitle font probe", "skipped (Node subtitle renderer unavailable)"
+        ok, detail = subtitles.verify_indic_render_probe()
+        return ok, "Indic subtitle font probe", detail
+    except Exception as exc:
+        return False, "Indic subtitle font probe", f"{type(exc).__name__}: {str(exc)[:160]}"
+
+
 def run_system_checks() -> List[Check]:
     """Run all live preflight checks in deterministic order."""
     checks: List[Check] = [
@@ -419,6 +433,7 @@ def run_system_checks() -> List[Check]:
         check_opencv(),
         check_pytorch_audio(),
         check_subtitle_renderer(),
+        check_indic_subtitle_fonts(),
     ]
     checks.extend(check_transcription_auth())
     return checks

@@ -193,6 +193,13 @@ def verify_assets() -> bool:
             rel_disp = path
         print(f"  [{status}] {label:<38}: {rel_disp}")
 
+    try:
+        import subtitles as _subtitles
+        fonts_ok = _subtitles.ensure_windows_user_fonts(quiet=False)
+        all_ok = all_ok and fonts_ok
+    except Exception as exc:
+        print(f"  [WARN] Windows user font registration skipped: {exc}")
+
     return all_ok
 
 
@@ -278,6 +285,19 @@ def smoke_test() -> bool:
         detail = "not signed in yet. Run: python3 scripts/setup.py --login"
     print(f"  [{'OK' if has_key else 'FAIL'}] Transcription access: {detail}")
     ok = ok and has_key
+
+    try:
+        import subtitles as _subtitles
+        _subtitles.ensure_windows_user_fonts(quiet=True)
+        if _subtitles.available():
+            probe_ok, probe_detail = _subtitles.verify_indic_render_probe()
+            print(f"  [{'OK' if probe_ok else 'FAIL'}] Indic font render probe: {probe_detail}")
+            ok = ok and probe_ok
+        else:
+            print("  [i] Indic font render probe skipped (Node subtitle renderer not installed)")
+    except Exception as exc:
+        print(f"  [FAIL] Indic font render probe error: {exc}")
+        ok = False
     return ok
 
 
