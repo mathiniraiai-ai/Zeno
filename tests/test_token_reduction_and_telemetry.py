@@ -65,6 +65,8 @@ class StrictV2110EditPurityTests(unittest.TestCase):
     """Ensure core v2.1.10 editing/alignment/cut/render modules are untouched and cut/pause behavior is unchanged."""
 
     def test_frozen_v2110_modules_have_empty_git_diff(self) -> None:
+        if not (ROOT / ".git").exists():
+            self.skipTest("No .git repository metadata in extracted OTA bundle")
         proc = subprocess.run(
             [
                 "git",
