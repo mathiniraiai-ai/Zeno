@@ -1118,12 +1118,14 @@ class KeyStore:
                 "zeno_version", "version_seen_at", "client_platform")
         return [dict(zip(cols, r)) for r in rows]
 
-    def usage_runs(self, since: float = 0.0, limit: int = 5000) -> List[Dict[str, Any]]:
-        """Only the numbers of each run (no plan files, no per-clip detail): what the Usage page needs, kept small."""
+    def usage_runs(self, since: float = 0.0, limit: int = 5000, slim: bool = False) -> List[Dict[str, Any]]:
+        """Only the numbers of each run (no plan files, no per-clip detail): what the Usage page needs, kept small.
+        `slim` leaves out each run's job report, which is the big part and which the Usage page no longer reads."""
         rows = self._run(
             """SELECT id, editor_name, user_email, project, language, agent_name, agent_model, clips_count, video_seconds,
                       transcribe_in_tokens, transcribe_out_tokens, transcribe_total_tokens,
-                      agent_in_tokens, agent_cached_tokens, agent_out_tokens, agent_total_tokens, grand_total_tokens, created_at, job_report_json
+                      agent_in_tokens, agent_cached_tokens, agent_out_tokens, agent_total_tokens, grand_total_tokens, created_at, """
+            + ("'{}'" if slim else "job_report_json") + """
                FROM zeno_runs WHERE created_at >= %s ORDER BY id DESC LIMIT %s""",
             (float(since), int(limit)),
             "all",

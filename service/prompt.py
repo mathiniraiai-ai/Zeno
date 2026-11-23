@@ -18,7 +18,7 @@ def build_transcribe_prompt(target_script_lines: Optional[List[str]] = None, lan
                 continue
             seen_lines.add(key_l)
             clean_lines.append(s_line)
-            if len(clean_lines) >= 40:
+            if len(clean_lines) >= 80:
                 break
         if clean_lines:
             joined_script = "\n".join(f"- {line}" for line in clean_lines)
@@ -66,7 +66,7 @@ def build_transcribe_prompt(target_script_lines: Optional[List[str]] = None, lan
 Transcribe ONLY the intelligible words actually spoken aloud in THIS audio clip, 100% verbatim.
 {lang_note}{script_context}
 Rules:
-1. TRUE VERBATIM CHRONOLOGICAL ORDER: Include EVERY word actually spoken aloud in this audio, including genuine audible retakes, repeated words, stutters, false starts, and restarted phrases (e.g. "Almost... Almost", "I want... I want to go", "ನಾನು ನಾನು"). NEVER collapse or clean up a genuine audible repeat/stutter just because the reference shows it once — if the speaker audibly says a word or phrase twice in THIS audio, output it twice.
+1. TRUE VERBATIM CHRONOLOGICAL ORDER & FULL-CLIP PAUSE CONTINUATION: Include EVERY word actually spoken aloud in this audio from 0.0s through the final second, including genuine audible retakes, repeated words, stutters, false starts, and restarted phrases (e.g. "Almost... Almost", "I want... I want to go", "ನಾನು ನಾನು"). NEVER collapse or clean up a genuine audible repeat/stutter just because the reference shows it once — if the speaker audibly says a word or phrase twice in THIS audio, output it twice. Audio clips up to 90s frequently contain 1 to 5 second silent pauses, breath gaps, reaction holds, or multiple consecutive lines or takes by the same speaker — NEVER stop transcribing at a pause! Always listen past every silent gap all the way to the final second of the audio and transcribe EVERY spoken utterance in chronological order.
 2. STRICT ANTI-ECHO & SINGLE-CLIP GUARD: NEVER copy, auto-complete, or borrow unspoken lines from the reference script! Especially in teaching / mock-interview / call-and-response scripts where Character A says `Say: "<sentence>"` and Character B repeats `<sentence>` on the next line, those turns are recorded in SEPARATE clips. If THIS audio only speaks a sentence ONCE, transcribe it ONLY ONCE — never emit a second copy from another speaker's script line, and never fabricate neighboring lines or unspoken turns.
 3. ZERO-SPEECH GUARD: If the audio contains zero intelligible human speech (only silence, room tone, SFX, background noise, or music), return `"full_transcript": ""` and `"cues": []` — NEVER hallucinate or copy reference script lines onto silent or non-speech audio!
 4. AI GIBBERISH GUARD: If the clip ends with unintelligible AI gibberish/babble after the real sentence concludes, DO NOT transcribe the unintelligible gibberish.

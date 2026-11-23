@@ -28,11 +28,13 @@ Environment:
 Audio is processed in memory and never written to disk.
 """
 import base64
+import gzip
 import hashlib
 import hmac
 import io
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -231,6 +233,9 @@ class _Gemini:
         self.key_idx = 0
         self.model_idx = 0
         self.cooldowns: Dict[Tuple[int, str], float] = {}
+        self._daily_cooldowns: Dict[Tuple[int, str], float] = {}
+        self._dead_models: Dict[str, float] = {}
+        self._no_thinking_budget_models: set[str] = set()
         self._tpm_window: deque = deque()
         self._model_rpm_windows: Dict[Tuple[int, str], deque] = defaultdict(deque)
         self._model_tpm_windows: Dict[Tuple[int, str], deque] = defaultdict(deque)
@@ -443,6 +448,17 @@ class _Gemini:
         is_transient = is_quota or "503" in low or "unavailable" in low or "504" in low or "deadline" in low or "timed out" in low or "timeout" in low
         return is_quota, is_transient
 
+    @staticmethod
+    def _is_not_found(exc: BaseException) -> bool:
+        msg = f"{type(exc).__name__} {exc}"
+        low = msg.lower()
+        return "404" in msg or "not_found" in low or "no longer available" in low
+
+    def _is_model_dead_locked(self, model: str, now: float, n_keys: int) -> bool:
+        if self._dead_models.get(model, 0.0) > now:
+            return True
+        return all((self.cooldowns.get((ki, model), 0.0) - now) > 3600.0 for ki in range(n_keys))
+
     def cooldown_until(self, key_idx: int, model: str) -> float:
         with self.lock:
             return float(self.cooldowns.get((key_idx, model), 0.0))
@@ -450,41 +466,63 @@ class _Gemini:
     def mark_ok(self, key_idx: int, model: str) -> None:
         with self.lock:
             self.cooldowns.pop((key_idx, model), None)
+            self._daily_cooldowns.pop((key_idx, model), None)
+            self._dead_models.pop(model, None)
 
     def mark_failure(self, key_idx: int, model: str, exc: BaseException) -> float:
         """Cooldown exhausted/retired `(key_idx, model)` pairs so requests route straight to healthy buckets."""
         msg = f"{type(exc).__name__} {exc}"
         low = msg.lower()
         parsed_delay = self._parse_retry_after(exc)
-        if "404" in msg or "not_found" in low or "no longer available" in low or "403" in msg or "401" in msg:
+        is_not_found = self._is_not_found(exc)
+        is_daily = self._is_daily_quota(exc)
+        if is_not_found:
+            ttl = 86400.0
+        elif "403" in msg or "401" in msg:
             ttl = 3600.0
-        elif self._is_daily_quota(exc):
+        elif is_daily:
             ttl = max(300.0, min(1800.0, parsed_delay or 300.0))
         elif "429" in msg or "resource_exhausted" in low:
             ttl = max(15.0, min(60.0, parsed_delay or 20.0))
         else:
             ttl = 20.0
         until = time.time() + ttl
+        n_keys = max(1, len(_gemini_keys()), key_idx + 1)
         with self.lock:
-            self.cooldowns[(key_idx, model)] = until
+            if is_not_found:
+                for ki in range(n_keys):
+                    self.cooldowns[(ki, model)] = until
+                    self._daily_cooldowns.pop((ki, model), None)
+                self._dead_models[model] = until
+            else:
+                self.cooldowns[(key_idx, model)] = until
+                if is_daily:
+                    self._daily_cooldowns[(key_idx, model)] = until
+                else:
+                    self._daily_cooldowns.pop((key_idx, model), None)
         return ttl
 
     def candidate_models(self, models: Optional[List[str]] = None) -> List[str]:
-        """Return ready Full Flash models first (shortest wait first), then ready Lite, then cooled by earliest expiry."""
+        """Return ready Full Flash models first (wait <= 2s ahead of > 10s), then ready Lite, then cooled, then 404-dead."""
         pool = list(models or MODELS)
         if len(pool) <= 1:
             return pool
         now = time.time()
         n_keys = max(1, len(_gemini_keys()))
         with self.lock:
-            flash_ready: List[Tuple[bool, float, int, str]] = []
-            lite_ready: List[Tuple[bool, float, int, str]] = []
+            flash_ready: List[Tuple[bool, bool, float, int, str]] = []
+            lite_ready: List[Tuple[bool, bool, float, int, str]] = []
             cooled: List[Tuple[float, int, str]] = []
+            dead: List[Tuple[float, int, str]] = []
             for priority_idx, m in enumerate(pool):
+                if self._is_model_dead_locked(m, now, n_keys):
+                    earliest_dead = min(self.cooldowns.get((ki, m), 0.0) for ki in range(n_keys))
+                    dead.append((earliest_dead, priority_idx, m))
+                    continue
                 ready_keys = [ki for ki in range(n_keys) if self.cooldowns.get((ki, m), 0.0) <= now]
                 if ready_keys:
                     wait_sec = min(self._compute_wait_locked(now, ki, m) for ki in ready_keys)
-                    item = (wait_sec > 0.25, round(wait_sec, 1), priority_idx, m)
+                    item = (wait_sec > 2.0, wait_sec > 10.0, round(wait_sec, 1), priority_idx, m)
                     if "lite" in m.lower():
                         lite_ready.append(item)
                     else:
@@ -495,11 +533,24 @@ class _Gemini:
             flash_ready.sort()
             lite_ready.sort()
             cooled.sort()
-        return [m for *_, m in flash_ready] + [m for *_, m in lite_ready] + [m for *_, m in cooled]
+            dead.sort()
+        return (
+            [m for *_, m in flash_ready]
+            + [m for *_, m in lite_ready]
+            + [m for *_, m in cooled]
+            + [m for *_, m in dead]
+        )
 
     @staticmethod
-    def _gen_config(types_mod: Any, json_mode: bool = True, use_thinking_budget: bool = True) -> Any:
+    def _gen_config(
+        types_mod: Any,
+        json_mode: bool = True,
+        use_thinking_budget: bool = True,
+        max_output_tokens: Optional[int] = 8192,
+    ) -> Any:
         kw: Dict[str, Any] = {"temperature": 0.0}
+        if max_output_tokens is not None and max_output_tokens > 0:
+            kw["max_output_tokens"] = max_output_tokens
         if json_mode:
             kw["response_mime_type"] = "application/json"
         if use_thinking_budget and hasattr(types_mod, "ThinkingConfig"):
@@ -521,7 +572,16 @@ class _Gemini:
             res = json.loads(m.group(1))
         return res if isinstance(res, dict) else {"words": res if isinstance(res, list) else []}
 
-    def transcribe(self, audio: bytes, prompt: str, duration: float, trace: Optional[List[str]] = None, language: str = "auto", owner: str = "anon") -> Dict[str, Any]:
+    def transcribe(
+        self,
+        audio: bytes,
+        prompt: str,
+        duration: float,
+        trace: Optional[List[str]] = None,
+        language: str = "auto",
+        owner: str = "anon",
+        speech_seconds: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """Try active healthy models first (bounded fair queue + per-model sliding windows + cooldown skip + jittered backoff)."""
         from google import genai
         from google.genai import types
@@ -536,7 +596,12 @@ class _Gemini:
                 headers={"Retry-After": "10"},
             )
         try:
-            min_words = int(0.4 * duration) if duration >= 8 else 1
+            eff_dur = (
+                min(float(duration), max(float(speech_seconds), 1.0))
+                if (speech_seconds is not None and float(speech_seconds) > 0)
+                else float(duration)
+            )
+            min_words = int(0.4 * eff_dur) if eff_dur >= 8 else 1
             best: Optional[Dict[str, Any]] = None
             count = lambda d: len(d.get("words") or str(d.get("full_transcript", "")).split())
             now = time.time()
@@ -546,18 +611,37 @@ class _Gemini:
                 for m in ordered_models
             )
             if all_ready_empty:
-                soonest = min(
-                    self.cooldown_until(ki, m) - now
-                    for m in ordered_models
-                    for ki in range(len(keys))
-                )
-                if soonest > 20.0:
-                    wait_hdr = str(int(max(5, min(60, soonest))))
-                    raise HTTPException(
-                        429,
-                        "All Gemini models are temporarily in cooldown; retry shortly",
-                        headers={"Retry-After": wait_hdr},
+                with self.lock:
+                    non_dead = [
+                        m for m in ordered_models
+                        if not self._is_model_dead_locked(m, now, len(keys))
+                    ]
+                    check_models = non_dead or ordered_models
+                    soonest = min(
+                        self.cooldowns.get((ki, m), 0.0) - now
+                        for m in check_models
+                        for ki in range(len(keys))
                     )
+                    daily_exhausted = bool(non_dead) and all(
+                        self._daily_cooldowns.get((ki, m), 0.0) > now
+                        and self.cooldowns.get((ki, m), 0.0) > now
+                        for m in non_dead
+                        for ki in range(len(keys))
+                    )
+                if soonest > 20.0:
+                    wait_sec_int = int(max(5, min(1800, round(soonest))))
+                    headers = {
+                        "Retry-After": str(wait_sec_int),
+                        "X-Zeno-Cooldown-Seconds": str(wait_sec_int),
+                    }
+                    if daily_exhausted:
+                        headers["X-Zeno-Daily-Exhausted"] = "1"
+                    detail = (
+                        f"Gemini daily quota exhausted across models (cooldown ~{wait_sec_int}s)"
+                        if daily_exhausted
+                        else "All Gemini models are temporarily in cooldown; retry shortly"
+                    )
+                    raise HTTPException(429, detail, headers=headers)
                 if soonest > 0.0:
                     time.sleep(soonest + 0.25)
                 ordered_models = self.candidate_models()
@@ -566,9 +650,11 @@ class _Gemini:
             cfg_no_tb = self._gen_config(types, json_mode=True, use_thinking_budget=False)
             est_tokens = int(max(0.0, float(duration)) * 32) + max(400, len(prompt) // 3)
             saw_quota = False
+            saw_daily = False
             saw_transient = False
             skipped_cooled = False
             soonest_skip: Optional[float] = None
+            skipped_wait: Optional[float] = None
             min_retry_after: Optional[float] = None
             transient_streak = 0
             for model in ordered_models:
@@ -597,18 +683,29 @@ class _Gemini:
                         with self.lock:
                             self.key_idx = (k_idx + 1) % len(keys)
                         continue
+                    wait_needed = self.model_wait_seconds(k_idx, model, est_tokens)
+                    if wait_needed > 25.0:
+                        skipped_wait = wait_needed if skipped_wait is None else min(skipped_wait, wait_needed)
+                        if trace is not None:
+                            trace.append(f"{model}: rate-limit wait {wait_needed:.0f}s > 25s (skipped)")
+                        continue
                     try:
                         self._wait(k_idx, model, est_tokens)
                         client = genai.Client(api_key=keys[k_idx], http_options=types.HttpOptions(timeout=60000))
+                        with self.lock:
+                            skip_tb = model in self._no_thinking_budget_models
+                        active_cfg = cfg_no_tb if skip_tb else cfg
                         try:
                             resp = client.models.generate_content(
                                 model=model,
                                 contents=[types.Part.from_bytes(data=audio, mime_type="audio/wav"), prompt],
-                                config=cfg,
+                                config=active_cfg,
                             )
                         except Exception as tb_exc:
-                            if "400" in str(tb_exc) or "INVALID_ARGUMENT" in str(tb_exc):
-                                self._wait(k_idx, model, est_tokens)
+                            if not skip_tb and ("400" in str(tb_exc) or "INVALID_ARGUMENT" in str(tb_exc)):
+                                with self.lock:
+                                    self._no_thinking_budget_models.add(model)
+                                # Immediate fallback without thinking_budget; never double-wait on the same call
                                 resp = client.models.generate_content(
                                     model=model,
                                     contents=[types.Part.from_bytes(data=audio, mime_type="audio/wav"), prompt],
@@ -640,10 +737,11 @@ class _Gemini:
                                             (len(foreign) == int(best.get("foreign_script_words") or 0) and count(data) > count(best))):
                             best = data
                         if count(data) >= min_words and count(data) and not foreign:
+                            data["incomplete"] = False
                             return data
                         if foreign:
                             break   # a different model may keep to the right script
-                        log.info("incomplete transcript from %s: %d words for %.0fs of audio", model, count(data), duration)
+                        log.info("incomplete transcript from %s: %d words for %.0fs of speech (%.0fs audio)", model, count(data), eff_dur, duration)
                         break   # a different model may do better
                     except Exception as exc:
                         self.mark_failure(k_idx, model, exc)
@@ -652,15 +750,17 @@ class _Gemini:
                         if trace is not None:
                             trace.append(f"{model}: {_why(exc)}")
                         is_q, is_t = self._is_rate_or_overload(exc)
+                        is_daily = self._is_daily_quota(exc)
                         saw_quota = saw_quota or is_q
+                        saw_daily = saw_daily or is_daily
                         saw_transient = saw_transient or is_t
                         ra = self._parse_retry_after(exc)
                         if ra is not None:
                             min_retry_after = ra if min_retry_after is None else min(min_retry_after, ra)
-                        msg = str(exc)
-                        permanent_or_daily = ("404" in msg or "NOT_FOUND" in msg or self._is_daily_quota(exc))
-                        if permanent_or_daily and len(keys) == 1:
-                            break   # do not hit the same exhausted/retired single-key model twice
+                        if self._is_not_found(exc):
+                            break   # retired/404 model cooled across all keys; skip remaining keys immediately
+                        if is_daily and len(keys) == 1:
+                            break   # do not hit the same exhausted single-key model twice
                         if is_q:
                             # Per-model quota hit: cooled above; brief jitter before failing over to next healthy model
                             time.sleep(random.uniform(0.25, 0.75))
@@ -674,28 +774,56 @@ class _Gemini:
             if best is not None:
                 if best.get("foreign_script_words"):
                     best["warning"] = f"wrong script: {best['foreign_script_words']} word(s) are not in the clip's language"
+                    best["incomplete"] = False
                 else:
-                    best["warning"] = f"incomplete: {count(best)} words for {duration:.0f}s of audio"
+                    best["warning"] = f"incomplete: {count(best)} words for {eff_dur:.0f}s of audio"
+                    best["incomplete"] = True
                 return best
-            if saw_quota:
-                wait_sec = str(int(max(5, min(60, min_retry_after or 15))))
-                raise HTTPException(
-                    429,
-                    "Gemini quota temporarily exhausted across models; retry shortly",
-                    headers={"Retry-After": wait_sec},
-                )
+            if saw_quota or (not saw_transient and (skipped_cooled or skipped_wait is not None)):
+                now_end = time.time()
+                with self.lock:
+                    non_dead = [
+                        m for m in ordered_models
+                        if not self._is_model_dead_locked(m, now_end, len(keys))
+                    ]
+                    check_models = non_dead or ordered_models
+                    all_cooled_now = bool(check_models) and all(
+                        self.cooldowns.get((ki, m), 0.0) > now_end
+                        for m in check_models
+                        for ki in range(len(keys))
+                    )
+                    soonest_cd = min(
+                        (max(0.0, self.cooldowns.get((ki, m), 0.0) - now_end) for m in check_models for ki in range(len(keys))),
+                        default=0.0,
+                    )
+                    all_daily_now = bool(non_dead) and all_cooled_now and all(
+                        self._daily_cooldowns.get((ki, m), 0.0) > now_end
+                        for m in non_dead
+                        for ki in range(len(keys))
+                    )
+                if all_cooled_now and soonest_cd > 0:
+                    raw_wait = soonest_cd
+                else:
+                    candidates = [v for v in (skipped_wait, soonest_skip, min_retry_after) if v is not None and v > 0]
+                    raw_wait = min(candidates) if candidates else 15.0
+                wait_sec_int = int(max(5, min(1800, round(raw_wait))))
+                headers = {
+                    "Retry-After": str(wait_sec_int),
+                    "X-Zeno-Cooldown-Seconds": str(wait_sec_int),
+                }
+                if all_daily_now:
+                    headers["X-Zeno-Daily-Exhausted"] = "1"
+                    detail = f"Gemini daily quota exhausted across models (cooldown ~{wait_sec_int}s)"
+                elif saw_quota:
+                    detail = "Gemini quota temporarily exhausted across models; retry shortly"
+                else:
+                    detail = "All Gemini models are temporarily in cooldown; retry shortly"
+                raise HTTPException(429, detail, headers=headers)
             if saw_transient:
                 raise HTTPException(
                     503,
                     "Gemini transcription temporarily busy upstream; retry shortly",
                     headers={"Retry-After": "10"},
-                )
-            if skipped_cooled:
-                wait_sec = str(int(max(5, min(60, soonest_skip or 15))))
-                raise HTTPException(
-                    429,
-                    "All Gemini models are temporarily in cooldown; retry shortly",
-                    headers={"Retry-After": wait_sec},
                 )
             raise HTTPException(502, "Transcription failed upstream")
         finally:
@@ -856,6 +984,7 @@ def _gemini_ping() -> Dict[str, Any]:
             failed = []
             answered = False
             cfg = _gemini._gen_config(types, json_mode=False)
+            cfg_no_tb = _gemini._gen_config(types, json_mode=False, use_thinking_budget=False)
             pool = _gemini.candidate_models()
             non_cooled = [
                 m for m in pool
@@ -881,7 +1010,18 @@ def _gemini_ping() -> Dict[str, Any]:
                         try:
                             _gemini.record_call(k_idx, model)
                             client = genai.Client(api_key=keys[k_idx], http_options=types.HttpOptions(timeout=15000))
-                            reply = client.models.generate_content(model=model, contents="Reply with the single word: ok", config=cfg)
+                            with _gemini.lock:
+                                skip_tb = model in _gemini._no_thinking_budget_models
+                            active_cfg = cfg_no_tb if skip_tb else cfg
+                            try:
+                                reply = client.models.generate_content(model=model, contents="Reply with the single word: ok", config=active_cfg)
+                            except Exception as tb_exc:
+                                if not skip_tb and ("400" in str(tb_exc) or "INVALID_ARGUMENT" in str(tb_exc)):
+                                    with _gemini.lock:
+                                        _gemini._no_thinking_budget_models.add(model)
+                                    reply = client.models.generate_content(model=model, contents="Reply with the single word: ok", config=cfg_no_tb)
+                                else:
+                                    raise
                             if (reply.text or "").strip():
                                 _gemini.mark_ok(k_idx, model)
                                 with _gemini.lock:
@@ -893,6 +1033,8 @@ def _gemini_ping() -> Dict[str, Any]:
                                 break
                         except Exception as exc:
                             _gemini.mark_failure(k_idx, model, exc)
+                            if _gemini._is_not_found(exc):
+                                break
                             time.sleep(1.0)
                             continue
                     if answered:
@@ -940,7 +1082,16 @@ _inflight_lock = threading.Lock()
 _inflight: Dict[str, Dict[str, Any]] = {}
 
 
-def _transcribe_singleflight(cache_key: str, audio: bytes, lines: List[str], language_hint: str, duration: float, trace: List[str], name: str) -> Dict[str, Any]:
+def _transcribe_singleflight(
+    cache_key: str,
+    audio: bytes,
+    lines: List[str],
+    language_hint: str,
+    duration: float,
+    trace: List[str],
+    name: str,
+    speech_seconds: Optional[float] = None,
+) -> Dict[str, Any]:
     """Deduplicate concurrent identical transcription uploads so only one hits the Gemini queue."""
     with _inflight_lock:
         entry = _inflight.get(cache_key)
@@ -962,7 +1113,14 @@ def _transcribe_singleflight(cache_key: str, audio: bytes, lines: List[str], lan
     try:
         prompt = build_transcribe_prompt(lines, language_hint=language_hint or "auto")
         # Keep positional-arg compatibility with tests that patch `_gemini.transcribe(audio, prompt, duration, trace, language)`
-        res = _gemini.transcribe(audio, prompt, duration, trace, language_hint or "auto", owner=name) if getattr(_gemini.transcribe, "__code__", None) and "owner" in _gemini.transcribe.__code__.co_varnames else _gemini.transcribe(audio, prompt, duration, trace, language_hint or "auto")
+        code_obj = getattr(_gemini.transcribe, "__code__", None)
+        varnames = getattr(code_obj, "co_varnames", ()) if code_obj else ()
+        kwargs: Dict[str, Any] = {}
+        if "owner" in varnames:
+            kwargs["owner"] = name
+        if "speech_seconds" in varnames:
+            kwargs["speech_seconds"] = speech_seconds
+        res = _gemini.transcribe(audio, prompt, duration, trace, language_hint or "auto", **kwargs)
         entry["result"] = res
         return res
     except Exception as exc:
@@ -982,6 +1140,7 @@ def transcribe(
     file: UploadFile = File(...),
     language_hint: str = Form("auto"),
     target_script_lines: str = Form("[]"),
+    speech_seconds: Optional[float] = Form(None),
     authorization: Optional[str] = Header(None),
 ) -> Dict[str, Any]:
     name, key_id = authenticate(authorization)
@@ -1003,9 +1162,18 @@ def transcribe(
     if duration < 0.5:
         raise HTTPException(400, "Audio is too short")
     try:
-        lines = [str(x) for x in json.loads(target_script_lines)][:40]
+        lines = [str(x) for x in json.loads(target_script_lines)][:80]
     except Exception:
         raise HTTPException(400, "target_script_lines must be a JSON list of strings")
+
+    sp_sec: Optional[float] = None
+    if speech_seconds is not None:
+        try:
+            sp_val = float(speech_seconds)
+            if math.isfinite(sp_val) and sp_val > 0:
+                sp_sec = min(float(duration), sp_val)
+        except (TypeError, ValueError):
+            pass
 
     started = time.time()
     cache_key = "|".join([
@@ -1022,7 +1190,16 @@ def transcribe(
         log.exception("transcript cache unavailable")
     if result is None:
         try:
-            result = _transcribe_singleflight(cache_key, audio, lines, language_hint or "auto", duration, trace, name)
+            result = _transcribe_singleflight(
+                cache_key,
+                audio,
+                lines,
+                language_hint or "auto",
+                duration,
+                trace,
+                name,
+                speech_seconds=sp_sec,
+            )
         except HTTPException as exc:
             log.info("user=%s bytes=%d status=%d seconds=%.1f", name, len(audio), exc.status_code, time.time() - started)
             _log_transcription(key_id, name, status="failed", http_status=exc.status_code, failed_models="; ".join(trace), audio_seconds=duration,
@@ -1034,6 +1211,7 @@ def transcribe(
                 store().put_cached_transcript(cache_key, result)
             except Exception:
                 log.exception("could not cache transcript")
+    result["incomplete"] = bool(result.get("warning") and str(result["warning"]).startswith("incomplete"))
     usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
     in_tok = int(usage.get("input_tokens") or 0)
     out_tok = int(usage.get("output_tokens") or 0)
@@ -1778,19 +1956,32 @@ def _check_viewer(authorization: Optional[str], x_admin_password: Optional[str] 
     raise HTTPException(401, "Sign in with your company Google account")
 
 
+_USAGE_CACHE: Dict[str, Any] = {"at": 0.0, "raw": b"", "gz": b""}
+USAGE_CACHE_SECONDS = 30   # every admin who opens the page inside this window gets the same already-built answer
+
+
 @app.get("/api/usage")
-def usage_log(authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None)) -> JSONResponse:
-    """Every editor's runs as plain numbers, plus each key's server-counted totals. No plan files and no secrets."""
+def usage_log(request: Request, fresh: int = 0, authorization: Optional[str] = Header(None), x_admin_password: Optional[str] = Header(None)) -> Response:
+    """Every editor's runs as plain numbers, plus each key's server-counted totals. No plan files and no secrets.
+    Built once per 30 seconds and sent compressed, so the page opens fast; `?fresh=1` (the Refresh button) builds it again."""
     _check_viewer(authorization, x_admin_password)
-    ks = store()
-    keep = ("name", "email", "created_at", "last_used_at", "revoked_at", "requests", "audio_seconds", "input_tokens", "output_tokens", "total_tokens",
-            "zeno_version", "version_seen_at")
-    return JSONResponse(
-        {"keys": [{k: row.get(k) for k in keep} for row in ks.list()], "runs": ks.usage_runs(), "now": time.time(),
-         "transcriptions": ks.transcription_events(since=time.time() - 30 * 86400),
-         "gemini": ks.gemini_usage(since=time.time() - 30 * 86400)},
-        headers=NO_STORE,
-    )
+    now = time.time()
+    if fresh or not _USAGE_CACHE["raw"] or now - float(_USAGE_CACHE["at"]) > USAGE_CACHE_SECONDS:
+        ks = store()
+        keep = ("name", "email", "created_at", "last_used_at", "revoked_at", "requests", "audio_seconds", "input_tokens", "output_tokens", "total_tokens",
+                "zeno_version", "version_seen_at", "client_platform")
+        body = {"keys": [{k: row.get(k) for k in keep} for row in ks.list()], "runs": ks.usage_runs(), "now": now,
+                "transcriptions": ks.transcription_events(since=now - 30 * 86400),
+                "gemini": ks.gemini_usage(since=now - 30 * 86400),
+                "latest_version": str((ks.latest_release_meta() or {}).get("version") or "")}
+        raw = json.dumps(body, default=str, separators=(",", ":")).encode("utf-8")
+        _USAGE_CACHE.update({"at": now, "raw": raw, "gz": gzip.compress(raw, 5)})
+    headers = dict(NO_STORE)
+    if "gzip" in (request.headers.get("accept-encoding") or "").lower():
+        headers["Content-Encoding"] = "gzip"
+        headers["Vary"] = "Accept-Encoding"
+        return Response(content=_USAGE_CACHE["gz"], media_type="application/json", headers=headers)
+    return Response(content=_USAGE_CACHE["raw"], media_type="application/json", headers=headers)
 
 
 @app.get("/api/jobs")

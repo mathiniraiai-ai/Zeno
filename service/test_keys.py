@@ -294,7 +294,7 @@ check("script check: English and the clip's own script pass", service._foreign_s
 check("script check: unknown or auto language is never judged", service._foreign_script_words(["নমস্কার"], "auto") == [] and service._foreign_script_words(["নমস্কার"], "xx") == [])
 check("script check: Hindi in Devanagari passes", service._foreign_script_words(["नमस्ते", "hello"], "hi") == [])
 check("monitoring: events carry no audio or transcript text", all(set(e) <= set(service.store()._TX_COLS) for e in events))
-check("monitoring: the usage API returns the events", client.get("/api/usage", headers=basic("admin-pw")).json().get("transcriptions"))
+check("monitoring: the usage API returns the events", client.get("/api/usage?fresh=1", headers=basic("admin-pw")).json().get("transcriptions"))
 
 # Per-job format observations -> candidates -> approval -> approved recipes
 def observe(script_hash, verified=True, seconds=2.5, fmt="split_h"):

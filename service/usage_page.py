@@ -1,4 +1,4 @@
-"""The admin Usage log: a React page of who used what.
+"""The admin Usage page: a React page of who edited what, when, and what Gemini cost.
 
 Every editor and every run, with the editor's e-mail: coding agent, model, tokens in / cached / out, Gemini transcription tokens, video
 length and an estimated cost. The page holds no data. It asks for a company Google sign-in (any account of the allowed domain, no admin
@@ -81,6 +81,53 @@ tr.total td{font-weight:600}
 select.dt{padding:4px 8px}
 .pill.ok2{background:rgba(70,150,100,.28);color:#8fd6ac}
 
+main{max-width:none;margin:0;padding:24px 28px 60px}
+.controls{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:center;margin:0 0 16px;padding:10px 14px;background:#202020;border:1px solid #2f2f2f;border-radius:8px}
+.controls .bar{margin:0}
+.dash{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:14px;align-items:stretch}
+.c{background:#202020;border:1px solid #2f2f2f;border-radius:8px;padding:16px 18px;min-width:0}
+.c h3{margin:0;font-size:13.5px;font-weight:600;color:#cfcfcf}
+.s2{grid-column:span 2}.s3{grid-column:span 3}.s4{grid-column:span 4}.s6{grid-column:span 6}.s8{grid-column:span 8}.s12{grid-column:span 12}
+.kpi{display:flex;flex-direction:column;justify-content:center;padding:18px}
+.kpi b{font-size:32px;font-weight:700;line-height:1.1;letter-spacing:-.5px}
+.kpi span{color:#9b9b9b;font-size:13px;margin-top:6px}
+.sechead{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;margin:0 0 12px}
+.note{color:#9b9b9b;font-size:12.5px;margin:-6px 0 10px}
+.seg{display:flex;gap:2px}
+.chart{width:100%;max-height:300px;display:block}
+.pad{padding:14px 0;margin:0}
+.blist{display:flex;flex-direction:column;gap:9px}
+.brow{display:grid;grid-template-columns:minmax(80px,32%) 1fr auto;align-items:center;gap:10px;font-size:13.5px}
+.bname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.btrack{height:10px;background:#2a2a2a;border-radius:5px;overflow:hidden}
+.bfill{height:100%;border-radius:5px}
+.bval{color:#9b9b9b;font-variant-numeric:tabular-nums}
+table.grid td.cell{min-width:46px;text-align:center}
+td.cell.sel{outline:1px solid #7fb2ff;outline-offset:-1px}
+button:disabled{opacity:.5;cursor:default}
+.dt[type=number]{width:84px}
+.chartbox{position:relative}
+.tip{position:absolute;z-index:6;background:#111;border:1px solid #3a3a3a;border-radius:8px;padding:9px 12px;font-size:12.5px;pointer-events:none;min-width:190px;max-width:360px;box-shadow:0 8px 24px rgba(0,0,0,.45)}
+.tiptitle{font-weight:600;margin:0 0 6px;color:#ebebeb}
+.tiprow{margin:0 0 4px}
+.tipline{display:flex;align-items:center;gap:7px}
+.tipline i{width:9px;height:9px;border-radius:2px;flex:none}
+.tipline span{flex:1;color:#cfcfcf}
+.tipline b{font-variant-numeric:tabular-nums}
+.tipsub{color:#9b9b9b;font-size:12px;margin:1px 0 0 16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tiptotal{border-top:1px solid #2f2f2f;margin-top:6px;padding-top:6px}
+.legend + .note{margin-top:8px}
+.minis{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px}
+.mini{border:1px solid #2f2f2f;border-radius:6px;padding:6px 12px;min-width:120px;background:#1c1c1c}
+.mini b{display:block;font-size:17px;font-weight:600}
+.mini span{color:#9b9b9b;font-size:12px}
+.legacy h1{font-size:15px;font-weight:600;margin:0 0 6px;letter-spacing:0}
+.legacy h2{font-size:14px;margin:18px 0 6px}
+.legacy .stats{margin:6px 0 12px}
+.c th:first-child,.c td:first-child{background:#202020}
+.c tbody tr:hover td:first-child{background:#262626}
+@media(max-width:1000px){.s2,.s3,.s4{grid-column:span 6}.s6,.s8{grid-column:span 12}}
+@media(max-width:560px){.s2,.s3,.s4{grid-column:span 12}}
 @media(max-width:600px){main{padding:24px 14px 60px}h1{font-size:24px}}
 """
 
@@ -91,6 +138,151 @@ USAGE_PAGE = """<!doctype html><html lang="en"><head>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
 <script>
+const {useState, useEffect, useRef, useMemo} = React;
+const h = React.createElement;
+const TOKEN_KEY = "zeno_usage_session";
+const PRICE_KEY = "zeno_gemini_prices_v2";
+const COLORS = ["#7fb2ff", "#3d9a6b", "#d9a441", "#d4574b", "#b48ead", "#5fc3c8", "#e08e45", "#9aa5b1"];
+const MODELS_IN_USE = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"];  // keep in step with GEMINI_MODELS on the server
+// USD per million tokens, audio-input rate (Zeno sends audio) and output rate, from Google's Gemini API price list (23 Nov 2026). Editable on the Gemini page.
+const DEFAULT_PRICES = {"gemini-3.1-flash-lite": {i: 0.5, o: 1.5}, "gemini-3.5-flash-lite": {i: 0.3, o: 2.5}, "gemini-2.5-flash": {i: 1, o: 2.5}};
+const TABS = [["overview", "Overview"], ["videos", "Videos"], ["renders", "Renders"], ["gemini", "Gemini"], ["tokens", "Tokens and cost"], ["editors", "Editors"], ["health", "Health"]];
+
+const fmtNum = x => n(x).toLocaleString();
+const fmtBig = x => { x = n(x); return x >= 1e9 ? (x / 1e9).toFixed(2) + "B" : x >= 1e6 ? (x / 1e6).toFixed(1) + "M" : x >= 1e4 ? Math.round(x / 1e3) + "k" : fmtNum(x); };
+const pad2 = x => String(x).padStart(2, "0");
+const keyOf = d => d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate());
+const parseKey = k => new Date(k + "T12:00:00");
+const addDays = (k, d) => { const x = parseKey(k); x.setDate(x.getDate() + d); return keyOf(x); };
+const daysBetween = (a, b) => { const out = []; let k = a, g = 0; while (k <= b && g++ < 400) { out.push(k); k = addDays(k, 1); } return out; };
+const dayShort = k => parseKey(k).toLocaleDateString("en-GB", {weekday: "short", day: "numeric", month: "short"});
+const dayTiny = k => parseKey(k).toLocaleDateString("en-GB", {day: "numeric", month: "short"});
+const hour12 = hr => (hr % 12 || 12) + (hr < 12 ? " AM" : " PM");
+const clock = t => { const d = new Date(n(t) * 1000); return (d.getHours() % 12 || 12) + ":" + pad2(d.getMinutes()) + " " + (d.getHours() < 12 ? "AM" : "PM"); };
+const clock12 = d => { const h12 = d.getHours() % 12 || 12; return h12 + ":" + pad2(d.getMinutes()) + " " + (d.getHours() < 12 ? "AM" : "PM"); };
+const fmtDate = t => { if (!t) return ""; const d = new Date(t * 1000); return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) + " " + clock12(d); };
+const inr = (usd, rate) => "₹" + Math.round(usd * rate).toLocaleString();
+const fmtWhen = t => t ? dayShort(dayKey(t)) + ", " + clock(t) : "";
+const rupees = (usd, rate) => { const v = n(usd) * n(rate); return "₹" + (v >= 100 ? Math.round(v).toLocaleString() : v.toFixed(2)); };
+const canon = s => String(s || "unknown").trim().toLowerCase();
+const nice = s => String(s || "").split(" ").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+const videoName = v => String(v || "").replace(/^(reel_|SQ_)/i, "").replace(/[.]mp4$/i, "").replace(/ *[(][0-9]+[)] *$/, "").trim();
+const short = (s, k) => { s = String(s || ""); k = k || 40; return s.length > k ? s.slice(0, k - 1) + "…" : s; };
+const niceMax = v => { const p = Math.pow(10, Math.floor(Math.log10(Math.max(v, 1e-9)))); const m = v / p; return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p; };
+const loadPrices = () => { let saved = {}; try { saved = JSON.parse(localStorage.getItem(PRICE_KEY) || "{}") || {}; } catch (e) { saved = {}; } const out = {}; MODELS_IN_USE.forEach(m => { out[m] = Object.assign({}, DEFAULT_PRICES[m], saved[m] || {}); }); return out; };
+
+function wavePath(pts, top, base) {  // a smooth curve through the points, so the ups and downs read as a wave
+  if (pts.length < 2) return "";
+  const clamp = y => Math.max(top, Math.min(base, y));
+  let d = "M" + pts[0][0].toFixed(1) + "," + pts[0][1].toFixed(1);
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || p2;
+    d += " C" + (p1[0] + (p2[0] - p0[0]) / 6).toFixed(1) + "," + clamp(p1[1] + (p2[1] - p0[1]) / 6).toFixed(1) + " " +
+      (p2[0] - (p3[0] - p1[0]) / 6).toFixed(1) + "," + clamp(p2[1] - (p3[1] - p1[1]) / 6).toFixed(1) + " " + p2[0].toFixed(1) + "," + p2[1].toFixed(1);
+  }
+  return d;
+}
+
+// ---------- small pieces ----------
+const Pill = ({kind, children}) => h("span", {className: "pill " + (kind || "gray")}, children);
+const Th = ({children, right}) => h("th", {className: right ? "n" : ""}, children);
+function Stat({value, label, span}) { return h("div", {className: "c kpi s" + (span || 2)}, h("b", null, value), h("span", null, label)); }
+function BarList({items, color, empty}) {  // horizontal bars, biggest first
+  const max = Math.max(1, ...items.map(i => i.value));
+  return items.length ? h("div", {className: "blist"}, items.map((i, k) => h("div", {key: i.name, className: "brow"},
+    h("div", {className: "bname"}, i.name), h("div", {className: "btrack"}, h("div", {className: "bfill", style: {width: Math.max(2, 100 * i.value / max) + "%", background: i.color || color || COLORS[k % COLORS.length]}})), h("div", {className: "bval"}, i.label)))) : h(Empty, {text: empty});
+}
+function Section({title, sub, right, span, children}) {
+  return h("section", {className: "c s" + (span || 12)},
+    h("div", {className: "sechead"}, h("h3", null, title), right ? h("div", {className: "bar"}, right) : null),
+    sub ? h("p", {className: "note"}, sub) : null,
+    children);
+}
+function Seg({value, onChange, options}) {
+  return h("div", {className: "seg"}, options.map(([id, label]) => h("button", {key: id, className: "chip" + (value === id ? " on" : ""), onClick: () => onChange(id)}, label)));
+}
+const Empty = ({text}) => h("p", {className: "muted pad"}, text || "Nothing recorded in this range.");
+
+// ---------- the chart: a wave (smooth curves) or bars ----------
+function Chart({series, labels, kind, fmtY, height, onPick, tips, tipRows}) {
+  const [hov, setHov] = useState(null);
+  const box = useRef(null);
+  const W = 960, H = height || 250, L = 52, R = 14, T = 16, B = 30;
+  const count = labels.length;
+  const sums = labels.map((_, i) => series.reduce((t, s) => t + n(s.vals[i]), 0));
+  const rawMax = kind === "bars" ? Math.max(0, ...sums) : Math.max(0, ...series.flatMap(s => s.vals.map(n)));
+  if (!count || rawMax <= 0) return h(Empty, {text: "No data in this range."});
+  const top = niceMax(rawMax);
+  const slotW = (W - L - R) / count;
+  const x = i => kind === "bars" ? L + slotW * (i + 0.5) : L + (count < 2 ? (W - L - R) / 2 : i * (W - L - R) / (count - 1));
+  const y = v => T + (1 - n(v) / top) * (H - T - B);
+  const every = Math.max(1, Math.ceil(count / 10));
+  const fy = fmtY || fmtNum;
+  const move = (e, i) => { const r = box.current ? box.current.getBoundingClientRect() : {left: 0, top: 0}; setHov({i, px: e.clientX - r.left, py: e.clientY - r.top}); };
+  const parts = [];
+  [0, 0.25, 0.5, 0.75, 1].forEach(f => parts.push(h("g", {key: "g" + f},
+    h("line", {x1: L, x2: W - R, y1: y(top * f), y2: y(top * f), stroke: "#2f2f2f"}),
+    h("text", {x: L - 8, y: y(top * f) + 4, fill: "#9b9b9b", fontSize: 11, textAnchor: "end"}, fy(top * f)))));
+  if (kind === "bars") {
+    const bw = Math.min(slotW * 0.68, 46);
+    labels.forEach((lab, i) => {
+      let acc = 0;
+      series.forEach(s => {
+        const v = n(s.vals[i]); if (v <= 0) return;
+        const y0 = y(acc + v), y1 = y(acc); acc += v;
+        parts.push(h("rect", {key: "b" + i + s.name, x: x(i) - bw / 2, y: y0, width: bw, height: Math.max(1, y1 - y0), fill: s.color, rx: 3, style: onPick ? {cursor: "pointer"} : null, onClick: onPick ? () => onPick(i) : undefined}));
+      });
+      if (count <= 31 && sums[i] > 0) parts.push(h("text", {key: "v" + i, x: x(i), y: y(sums[i]) - 6, fill: "#cfcfcf", fontSize: 11, textAnchor: "middle"}, fy(sums[i])));
+    });
+  } else {
+    series.forEach((s, si) => {
+      const pts = s.vals.map((v, i) => [x(i), y(v)]);
+      const path = wavePath(pts, T, H - B);
+      if (!path) return;
+      if (series.length === 1 || si === 0 && s.fill) {
+        parts.push(h("defs", {key: "d" + si}, h("linearGradient", {id: "wf" + si, x1: 0, y1: 0, x2: 0, y2: 1}, h("stop", {offset: "0%", stopColor: s.color, stopOpacity: 0.5}), h("stop", {offset: "100%", stopColor: s.color, stopOpacity: 0.03}))));
+        parts.push(h("path", {key: "a" + si, d: path + " L" + x(count - 1).toFixed(1) + "," + (H - B) + " L" + x(0).toFixed(1) + "," + (H - B) + " Z", fill: "url(#wf" + si + ")"}));
+      }
+      parts.push(h("path", {key: "l" + si, d: path, fill: "none", stroke: s.color, strokeWidth: series.length > 1 ? 2 : 2.6, strokeLinecap: "round"}));
+      if (count <= 45) s.vals.forEach((v, i) => parts.push(h("circle", {key: "c" + si + "-" + i, cx: x(i), cy: y(v), r: 3.2, fill: s.color, stroke: "#191919", strokeWidth: 1.5}, h("title", null, labels[i] + " · " + s.name + " · " + fy(v)))));
+    });
+  }
+  labels.forEach((lab, i) => { if (i % every === 0) parts.push(h("text", {key: "x" + i, x: x(i), y: H - 9, fill: "#9b9b9b", fontSize: 11, textAnchor: "middle"}, lab)); });
+  labels.forEach((lab, i) => {
+    parts.push(h("rect", {key: "hit" + i, x: x(i) - slotW / 2, y: T, width: slotW, height: H - T - B, fill: hov && hov.i === i ? "rgba(255,255,255,0.05)" : "transparent", style: {cursor: onPick ? "pointer" : "default"},
+      onMouseEnter: e => move(e, i), onMouseMove: e => move(e, i), onMouseLeave: () => setHov(null), onClick: onPick ? () => onPick(i) : undefined}));
+  });
+  const rows = hov ? (tipRows ? tipRows(hov.i) : series.map(sr => ({label: sr.name, value: fy(n(sr.vals[hov.i])), color: sr.color, raw: n(sr.vals[hov.i])})).filter(r => r.raw > 0).sort((a, b) => b.raw - a.raw)) : [];
+  const total = hov && series.length > 1 && (!tipRows || tipRows.isVideos) ? fy(sums[hov.i]) : null;
+  const flip = hov && box.current && hov.px > box.current.getBoundingClientRect().width * 0.6;
+  return h("div", {className: "chartbox", ref: box},
+    h("svg", {viewBox: "0 0 " + W + " " + H, className: "chart"}, parts),
+    hov ? h("div", {className: "tip", style: {left: flip ? undefined : hov.px + 14, right: flip ? (box.current.getBoundingClientRect().width - hov.px + 14) : undefined, top: Math.max(0, hov.py - 12)}},
+      h("div", {className: "tiptitle"}, tips ? tips[hov.i] : labels[hov.i]),
+      rows.length ? rows.map((r, k) => h("div", {key: k, className: "tiprow"},
+        h("div", {className: "tipline"}, h("i", {style: {background: r.color || "#9b9b9b"}}), h("span", null, r.label), h("b", null, r.value)),
+        (r.sub || []).map((t, j) => h("div", {key: j, className: "tipsub"}, t)))) : h("div", {className: "tipsub"}, "Nothing in this slot."),
+      total ? h("div", {className: "tipline tiptotal"}, h("span", null, "Total"), h("b", null, total)) : null) : null);
+}
+const Legend = ({series}) => series.length > 1 ? h("div", {className: "legend"}, series.map(s => h("span", {key: s.name}, h("i", {style: {background: s.color}}), s.name))) : null;
+
+// ---------- the controls: dates, editor, rate ----------
+function presets() { const t = keyOf(new Date()); return [["Today", t, t], ["Yesterday", addDays(t, -1), addDays(t, -1)], ["7 days", addDays(t, -6), t], ["30 days", addDays(t, -29), t], ["All time", "", ""]]; }
+function Controls({period, setPeriod, editors, editor, setEditor, rate, setRate, onRefresh, busy}) {
+  const ps = presets();
+  return h("div", {className: "controls"},
+    h("div", {className: "bar"},
+      ps.map(([label, a, b]) => h("button", {key: label, className: "chip" + (period.from === a && period.to === b ? " on" : ""), onClick: () => setPeriod({from: a, to: b})}, label)),
+      h("label", null, "From", h("input", {type: "date", className: "dt", value: period.from, onChange: e => setPeriod({from: e.target.value, to: period.to && e.target.value > period.to ? e.target.value : period.to})})),
+      h("label", null, "To", h("input", {type: "date", className: "dt", value: period.to, onChange: e => setPeriod({from: period.from && e.target.value < period.from ? e.target.value : period.from, to: e.target.value})}))),
+    h("div", {className: "bar"},
+      h("label", null, "Editor", h("select", {className: "dt", value: editor, onChange: e => setEditor(e.target.value)}, h("option", {value: ""}, "All editors"), editors.map(e => h("option", {key: e.key, value: e.key}, e.name)))),
+      h("label", null, "₹ per $", h("input", {type: "number", step: "0.1", value: rate, onChange: e => setRate(n(e.target.value))})),
+      h("button", {className: "chip", disabled: busy, onClick: onRefresh}, busy ? "Refreshing…" : "Refresh")));
+}
+
+
+// ---------- the original numbers: tokens, cache, cost, problems, health (unchanged calculations) ----------
 const PRICES = [  // [model match, USD per million tokens: input, cached read, cache write, output] from OpenAI and Anthropic list prices
   ['gpt-6.1-sol', 2, 0.1, 2.5, 10], ['gpt-5-codex', 1.25, 0.125, 1.25, 10], ['gpt-5', 1.25, 0.125, 1.25, 10], ['o3', 2, 0.5, 2, 8],
   ['opus-5-5', 4, 0.2, 5, 20], ['opus-5', 5, 0.5, 6.25, 25], ['opus-4', 15, 1.5, 18.75, 75],
@@ -298,17 +490,6 @@ function aggregate(runs) {
   total.editors = users.size;
   return {users: [...users.values()].sort((a, b) => b.acombined - a.acombined || b.atotal - a.atotal), total};
 }
-/*__DOM__*/
-const {useState, useEffect, useRef} = React;
-const h = React.createElement;
-const TOKEN_KEY = 'zeno_usage_session';
-const fmtNum = x => Number(x || 0).toLocaleString();
-const fmtBig = x => { x = Number(x || 0); return x >= 1e9 ? (x / 1e9).toFixed(2) + 'B' : x >= 1e6 ? (x / 1e6).toFixed(1) + 'M' : x >= 1e4 ? Math.round(x / 1e3) + 'k' : fmtNum(x); };
-const pad2 = x => String(x).padStart(2, '0');
-const clock12 = d => { const h12 = d.getHours() % 12 || 12; return h12 + ':' + pad2(d.getMinutes()) + ' ' + (d.getHours() < 12 ? 'AM' : 'PM'); };
-const fmtDate = t => { if (!t) return ''; const d = new Date(t * 1000); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + clock12(d); };
-const inr = (usd, rate) => '₹' + Math.round(usd * rate).toLocaleString();
-
 function csvOf(runs) {
   const head = ['when', 'editor', 'email', 'project', 'language', 'agent', 'model', 'clips', 'video_seconds', 'agent_in', 'agent_cached_read',
     'agent_cache_write', 'agent_out', 'agent_total', 'agent_combined_total', 'gemini_in', 'gemini_out', 'gemini_total', 'est_usd'];
@@ -319,10 +500,6 @@ function csvOf(runs) {
 }
 
 function Tags({items}) { return h('span', null, [...items].map(x => h('span', {className: 'tag', key: x}, x))); }
-function Th({children, right}) { return h('th', {className: right ? 'n' : ''}, children); }
-
-const short = s => { s = String(s || ''); return s.length > 40 ? s.slice(0, 37) + '…' : s; };
-
 function TranscriptionHealth({data, cutoff}) {
   const ev = (data.transcriptions || []).filter(e => inPeriod(e, cutoff));
   const bad = ev.filter(e => e.status !== 'ok');
@@ -626,256 +803,339 @@ function EditsView({data, jobs, jobsMsg, rg, q, rate, day, setDay}) {
 }
 
 
-const GEMINI_IN_USE = ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite', 'gemini-2.5-flash'];  // keep in step with GEMINI_MODELS on the server
-const GPRICE_KEY = 'zeno_gemini_prices';  // USD per million tokens the admin types once per model; never guessed, kept in this browser only
-function loadGPrices() { try { return JSON.parse(localStorage.getItem(GPRICE_KEY) || '{}') || {}; } catch (e) { return {}; } }
-function gCost(b, prices) {  // USD of one bucket, or null when its model has no price yet
-  const p = prices[b.m];
-  if (!p || (p.i === '' && p.o === '') || (p.i == null && p.o == null)) return null;
-  return (n(b.in) * n(p.i) + n(b.out) * n(p.o)) / 1e6;
+// ---------- the numbers behind every page ----------
+function useModel(data, jobs, period, editor, rate, prices) {
+  return useMemo(() => {
+    const today = keyOf(new Date());
+    const gem = (data.gemini && data.gemini.buckets) || [];
+    const jobList = jobs || [];
+    const dates = [];
+    jobList.forEach(j => dates.push(dayKey(j.updated_at || j.created_at)));
+    gem.forEach(b => dates.push(dayKey(b.t)));
+    dates.sort();
+    const from = period.from || dates[0] || today, to = period.to || today;
+    const single = from === to;
+    let slotKeys, slotLabels;
+    if (single) { slotKeys = Array.from({length: 24}, (_, i) => i); slotLabels = slotKeys.map(hour12); }
+    else { slotKeys = daysBetween(from, to).slice(-120); slotLabels = slotKeys.map(dayTiny); }
+    const slotOf = t => { const d = new Date(n(t) * 1000), k = keyOf(d); if (k < from || k > to) return -1; return single ? d.getHours() : slotKeys.indexOf(k); };
+    const ok = name => !editor || canon(name) === editor;
+    // editors known anywhere
+    const names = {};
+    const see = (name) => { const c = canon(name); if (!names[c]) names[c] = nice(String(name || "unknown").trim()); return c; };
+    (data.keys || []).forEach(k => see(k.name));
+    jobList.forEach(j => see(j.editor_name));
+    gem.forEach(b => see(b.u));
+    // videos (a render job = one delivered video; the same video re-rendered counts once per slot)
+    const vids = {};   // editor -> slot -> Set(video)
+    const renderJobs = jobList.map(j => Object.assign({}, j, {c: see(j.editor_name), when: n(j.updated_at || j.created_at), video: videoName(j.video_name)}));
+    const renderCount = {};
+    renderJobs.forEach(j => { if (j.kind === "render") { const k = j.c + "|" + j.video; renderCount[k] = (renderCount[k] || 0) + 1; } });
+    const inJobs = renderJobs.filter(j => ok(j.c) && slotOf(j.when) >= 0);
+    const delivered = inJobs.filter(j => j.kind === "render");
+    delivered.forEach(j => { const s = slotOf(j.when); ((vids[j.c] = vids[j.c] || {})[s] = (vids[j.c][s] || new Set())).add(j.video); });
+    const videoList = (c, s) => (vids[c] && vids[c][s]) ? [...vids[c][s]] : [];
+    const slotTips = slotKeys.map(k => single ? hour12(k) + " on " + dayShort(from) : dayShort(k));
+    const videoSlots = c => slotKeys.map((_, s) => (vids[c] && vids[c][s]) ? vids[c][s].size : 0);
+    const perEditor = {};
+    const ed = c => perEditor[c] || (perEditor[c] = {c, name: names[c] || nice(c), videos: new Set(), days: new Set(), failed: 0, blocked: 0, checked: 0, calls: 0, bad: 0, tin: 0, tout: 0, usd: 0, unpriced: 0, models: {}, peak: 0, last: 0});
+    delivered.forEach(j => { const e = ed(j.c); e.videos.add(j.video); e.days.add(dayKey(j.when)); });
+    inJobs.forEach(j => { const e = ed(j.c); if (j.kind === "failed") e.failed += 1; else if (j.kind === "blocked") e.blocked += 1; else if (j.kind !== "render") e.checked += 1; });
+    // gemini
+    const gb = gem.filter(b => ok(canon(b.u)) && slotOf(b.t) >= 0);
+    const gslots = slotKeys.map(() => ({calls: 0, bad: 0, tin: 0, tout: 0, usd: 0, byModel: {}}));
+    const gmodels = {}, gdays = {};
+    const price = m => { const p = prices[m]; return p && (p.i !== "" || p.o !== "") ? p : null; };
+    let gcalls = 0, gbad = 0, gtin = 0, gtout = 0, gusd = 0, gunpriced = 0;
+    gb.forEach(b => {
+      const c = see(b.u), e = ed(c), m = b.m || "unknown", p = price(m);
+      const cost = p ? (n(b.in) * n(p.i) + n(b.out) * n(p.o)) / 1e6 : null;
+      e.calls += n(b.n); e.bad += n(b.bad); e.tin += n(b.in); e.tout += n(b.out); e.models[m] = (e.models[m] || 0) + n(b.n);
+      const gm = gmodels[m] || (gmodels[m] = {m, calls: 0, bad: 0, tin: 0, tout: 0, usd: 0, unpriced: 0}); gm.calls += n(b.n); gm.bad += n(b.bad); gm.tin += n(b.in); gm.tout += n(b.out);
+      const s = gslots[slotOf(b.t)]; s.calls += n(b.n); s.bad += n(b.bad); s.tin += n(b.in); s.tout += n(b.out); s.byModel[m] = (s.byModel[m] || 0) + n(b.n);
+      const dk = dayKey(b.t), gd = gdays[dk] || (gdays[dk] = {day: dk, calls: 0, bad: 0, tin: 0, tout: 0, usd: 0, unpriced: 0, byModel: {}}); gd.calls += n(b.n); gd.bad += n(b.bad); gd.tin += n(b.in); gd.tout += n(b.out); gd.byModel[m] = (gd.byModel[m] || 0) + n(b.n);
+      if (cost == null) { e.unpriced += n(b.n); gm.unpriced += n(b.n); gd.unpriced += n(b.n); gunpriced += n(b.n); } else { e.usd += cost; gm.usd += cost; gd.usd += cost; s.usd += cost; gusd += cost; }
+      gcalls += n(b.n); gbad += n(b.bad); gtin += n(b.in); gtout += n(b.out);
+    });
+    ((data.gemini && data.gemini.users) || []).forEach(u => { const c = canon(u.name); if (!editor || c === editor) { const e = ed(see(u.name)); e.peak = Math.max(e.peak, n(u.peak_rpm)); e.last = Math.max(e.last, n(u.last)); } });
+    // versions and agents
+    const latest = data.latest_version || "";
+    const keysBy = {};
+    (data.keys || []).forEach(k => {
+      const c = canon(k.name), cur = keysBy[c];
+      if (!cur) keysBy[c] = {c, name: names[c], email: k.email, version: k.zeno_version || "", seen: n(k.version_seen_at), used: n(k.last_used_at), platform: k.client_platform || "", requests: n(k.requests), revoked: !!k.revoked_at};
+      else {
+        if (verCmp(k.zeno_version, cur.version) > 0 || (!cur.version && k.zeno_version)) { cur.version = k.zeno_version; cur.seen = n(k.version_seen_at); cur.platform = k.client_platform || cur.platform; }
+        cur.used = Math.max(cur.used, n(k.last_used_at)); cur.requests += n(k.requests);
+      }
+    });
+    const agents = {};
+    (data.runs || []).forEach(r => { if (slotOf(r.created_at) < 0) return; const c = canon(r.user_email ? String(r.user_email).split("@")[0] : r.editor_name); const nm = canon(r.editor_name); const key = names[nm] ? nm : c; const a = agents[key] || (agents[key] = {}); const label = (r.agent_name || "agent") + (r.agent_model ? " / " + r.agent_model : ""); a[label] = (a[label] || 0) + 1; });
+    return {from, to, single, slotKeys, slotLabels, slotOf, names, ok, delivered, inJobs, renderJobs, renderCount, videoSlots, videoList, slotTips, perEditor, ed, gslots, gmodels, gdays, gcalls, gbad, gtin, gtout, gusd, gunpriced, latest, keysBy, agents, price, today};
+  }, [data, jobs, period.from, period.to, editor, rate, prices]);
 }
-function wavePath(pts, top, base) {  // a smooth curve through the points, so the ups and downs read as a wave
-  if (pts.length < 2) return '';
-  const clamp = y => Math.max(top, Math.min(base, y));
-  let d = 'M' + pts[0][0].toFixed(1) + ',' + pts[0][1].toFixed(1);
-  for (let i = 0; i < pts.length - 1; i++) {
-    const p0 = pts[i - 1] || pts[i], p1 = pts[i], p2 = pts[i + 1], p3 = pts[i + 2] || p2;
-    d += ' C' + (p1[0] + (p2[0] - p0[0]) / 6).toFixed(1) + ',' + clamp(p1[1] + (p2[1] - p0[1]) / 6).toFixed(1) + ' ' +
-      (p2[0] - (p3[0] - p1[0]) / 6).toFixed(1) + ',' + clamp(p2[1] - (p3[1] - p1[1]) / 6).toFixed(1) + ' ' + p2[0].toFixed(1) + ',' + p2[1].toFixed(1);
-  }
-  return d;
-}
-function geminiAgg(g, cutoff, prices) {
-  const bs = ((g && g.buckets) || []).filter(b => inPeriod({created_at: b.t}, cutoff));
-  const users = {};
-  ((g && g.users) || []).forEach(u => { users[u.name] = {name: u.name, calls: 0, bad: 0, tin: 0, tout: 0, usd: 0, unpriced: 0, models: {}, peak: n(u.peak_rpm), last: n(u.last)}; });
-  const days = {};
-  let usd = 0, unpriced = 0;
-  bs.forEach(b => {
-    const u = users[b.u] || (users[b.u] = {name: b.u, calls: 0, bad: 0, tin: 0, tout: 0, usd: 0, unpriced: 0, models: {}, peak: 0, last: 0});
-    u.calls += n(b.n); u.bad += n(b.bad); u.tin += n(b.in); u.tout += n(b.out);
-    const mk = b.m || 'unknown'; u.models[mk] = (u.models[mk] || 0) + n(b.n);
-    const c = gCost(b, prices);
-    const dk = dayKey(b.t);
-    const d = days[dk] || (days[dk] = {day: dk, calls: 0, bad: 0, tin: 0, tout: 0, usd: 0, unpriced: 0});
-    d.calls += n(b.n); d.bad += n(b.bad); d.tin += n(b.in); d.tout += n(b.out);
-    if (c == null) { u.unpriced += n(b.n); d.unpriced += n(b.n); unpriced += n(b.n); } else { u.usd += c; d.usd += c; usd += c; }
+const videoTipRows = (m, cs) => { const f = i => cs.map((c, k) => ({label: m.names[c] || c, color: COLORS[k % COLORS.length], count: m.videoList(c, i).length})).filter(r => r.count)
+  .map(r => ({label: r.label, color: r.color, value: r.count + (r.count === 1 ? " video" : " videos")})); f.isVideos = true; return f; };
+const editorList = m => Object.keys(m.names).sort((a, b) => (m.names[a] < m.names[b] ? -1 : 1)).map(k => ({key: k, name: m.names[k]}));
+
+// ---------- pages ----------
+
+// ---------- the coding agent (Claude Code, Codex, Antigravity): its own tokens, never mixed with Gemini ----------
+const AGENT_COLORS = ["#7fb2ff", "#5fc3c8", "#d9a441"];
+function AgentCard({m, runs, rate, onPick}) {
+  const [metric, setMetric] = useState("tokens");
+  const tot = aggregate(runs).total;
+  const calls = runs.reduce((t, r) => t + n(((r.job_report || {}).agent || {}).turns), 0);
+  const withCalls = runs.some(r => ((r.job_report || {}).agent || {}).turns != null);
+  const slots = m.slotKeys.map(() => ({fresh: 0, cw: 0, out: 0, reread: 0, calls: 0, usd: 0}));
+  runs.forEach(r => {
+    const s = m.slotOf(n(r.created_at)); if (s < 0) return;
+    const cw = cacheWriteTokens(r), x = slots[s], c = costUsd(r);
+    x.cw += cw; x.fresh += Math.max(0, n(r.agent_in_tokens) - cw); x.out += n(r.agent_out_tokens); x.reread += n(r.agent_cached_tokens);
+    x.calls += n(((r.job_report || {}).agent || {}).turns); x.usd += c === null ? 0 : c * rate;
   });
-  return {bs, users: Object.values(users).filter(u => u.calls > 0).sort((a, b) => b.calls - a.calls), days: Object.values(days).sort((a, b) => (a.day < b.day ? 1 : -1)), usd, unpriced};
-}
-function waveSeries(bs, cutoff, now, metric, prices) {  // one value per hour (short periods) or per day, zeros included so the wave dips
-  const first = bs.length ? n(bs[0].t) : now;
-  const from = n(cutoff.from) > 0 ? n(cutoff.from) : first;
-  const to = n(cutoff.to) > 0 ? n(cutoff.to) : now;
-  const hourly = (to - from) <= 2 * 86400;
-  const step = hourly ? 3600 : 86400;
-  const keyOf = t => hourly ? Math.floor(n(t) / 3600) : dayKey(t);
-  const vals = {}, bad = {};
-  bs.forEach(b => {
-    const k = keyOf(b.t);
-    const v = metric === 'calls' ? n(b.n) : metric === 'tokens' ? n(b.in) + n(b.out) : (gCost(b, prices) || 0);
-    vals[k] = (vals[k] || 0) + v; bad[k] = (bad[k] || 0) + n(b.bad);
-  });
-  const pts = [];
-  for (let t = Math.floor(from / step) * step; t <= to; t += step) {
-    const k = keyOf(t);
-    pts.push({t, v: vals[k] || 0, bad: bad[k] || 0});
-  }
-  return {pts: pts.slice(-96), hourly};
-}
-function WaveChart({series, metric}) {
-  const W = 900, H = 230, L = 46, R = 12, T = 14, B = 28;
-  const pts = series.pts;
-  const max = Math.max(1, ...pts.map(p => p.v));
-  const x = i => L + (pts.length < 2 ? 0 : i * (W - L - R) / (pts.length - 1));
-  const y = v => T + (1 - v / max) * (H - T - B);
-  const line = pts.map((p, i) => [x(i), y(p.v)]);
-  const path = wavePath(line, T, H - B);
-  const area = path ? path + ' L' + x(pts.length - 1).toFixed(1) + ',' + (H - B) + ' L' + x(0).toFixed(1) + ',' + (H - B) + ' Z' : '';
-  const badLine = metric === 'calls' ? wavePath(pts.map((p, i) => [x(i), y(p.bad)]), T, H - B) : '';
-  const every = Math.max(1, Math.ceil(pts.length / 8));
-  const lab = t => { const d = new Date(t * 1000); return series.hourly ? pad2(d.getHours()) + ':00' : dayLabel(dayKey(t), true); };
-  const fmtY = v => metric === 'spend' ? '$' + v.toFixed(2) : fmtNum(Math.round(v));
-  return h('svg', {viewBox: '0 0 ' + W + ' ' + H, style: {width: '100%', maxHeight: 280}},
-    h('defs', null, h('linearGradient', {id: 'wavefill', x1: 0, y1: 0, x2: 0, y2: 1},
-      h('stop', {offset: '0%', stopColor: '#7fb2ff', stopOpacity: 0.55}), h('stop', {offset: '100%', stopColor: '#7fb2ff', stopOpacity: 0.03}))),
-    [0, 0.5, 1].map(f => h('g', {key: f},
-      h('line', {x1: L, x2: W - R, y1: y(max * f), y2: y(max * f), stroke: '#2f2f2f'}),
-      h('text', {x: L - 6, y: y(max * f) + 4, fill: '#9b9b9b', fontSize: 11, textAnchor: 'end'}, fmtY(max * f)))),
-    area ? h('path', {d: area, fill: 'url(#wavefill)'}) : null,
-    path ? h('path', {d: path, fill: 'none', stroke: '#7fb2ff', strokeWidth: 2.5}) : null,
-    badLine ? h('path', {d: badLine, fill: 'none', stroke: '#d4574b', strokeWidth: 1.8}) : null,
-    pts.map((p, i) => i % every === 0 ? h('text', {key: 'x' + i, x: x(i), y: H - 8, fill: '#9b9b9b', fontSize: 11, textAnchor: 'middle'}, lab(p.t)) : null));
-}
-function GeminiUsage({data, cutoff, rate}) {
-  const [prices, setPrices] = React.useState(loadGPrices());
-  const [metric, setMetric] = React.useState('calls');
-  const setPrice = (m, k, v) => {
-    const next = Object.assign({}, prices, {[m]: Object.assign({}, prices[m] || {}, {[k]: v})});
-    setPrices(next);
-    try { localStorage.setItem(GPRICE_KEY, JSON.stringify(next)); } catch (e) {}
-  };
-  const g = data.gemini || {};
-  const ag = geminiAgg(g, cutoff, prices);
-  const seen = [...new Set(((g.buckets) || []).map(b => b.m || 'unknown'))].sort();
-  const models = GEMINI_IN_USE;  // only the models Zeno uses today get a price row
-  const older = seen.filter(m => !GEMINI_IN_USE.includes(m));
-  const series = waveSeries(ag.bs, cutoff, data.now, metric, prices);
-  const calls = ag.users.reduce((t, u) => t + u.calls, 0), bad = ag.users.reduce((t, u) => t + u.bad, 0);
-  const tin = ag.users.reduce((t, u) => t + u.tin, 0), tout = ag.users.reduce((t, u) => t + u.tout, 0);
-  const peak = Math.max(0, ...ag.users.map(u => u.peak));
-  const spend = ag.unpriced && !ag.usd ? 'Set prices' : inr(ag.usd, rate) + (ag.unpriced ? ' *' : '');
-  const stat = (v, label) => h('div', {className: 'stat', key: label}, h('b', null, v), h('span', null, label));
-  const Btn = ({id, label}) => h('button', {className: 'chip' + (metric === id ? ' on' : ''), onClick: () => setMetric(id)}, label);
-  return h('div', null,
-    h('div', {className: 'card'},
-      h('h1', null, 'Gemini'),
-      h('p', {className: 'sub'}, 'Who is calling Gemini, which model answered, how busy each editor is and the estimated spend. Numbers only, never audio or text.'),
-      h('div', {className: 'stats'}, stat(fmtNum(calls), 'calls'), stat(calls ? Math.round(100 * (calls - bad) / calls) + '%' : '100%', 'answered fully'),
-        stat(fmtNum(tin), 'tokens in'), stat(fmtNum(tout), 'tokens out'), stat(peak + ' / min', 'busiest minute'), stat(spend, 'estimated spend')),
-      h('h2', null, 'Prices (USD per million tokens)'),
-      h('p', {className: 'note'}, 'Type each model\\'s list price once. Spend is shown only for models with a price, and the prices stay in this browser.'),
-      h('div', {className: 'scroll'}, h('table', null,
-        h('thead', null, h('tr', null, h(Th, null, 'Model'), h(Th, {right: true}, 'Input $ / 1M'), h(Th, {right: true}, 'Output $ / 1M'))),
-        h('tbody', null, seen.length ? models.map(m => h('tr', {key: m}, h('td', null, h('b', null, m)),
-          ['i', 'o'].map(k => h('td', {className: 'n', key: k}, h('input', {type: 'number', step: '0.01', className: 'dt', style: {width: 90},
-            value: (prices[m] && prices[m][k] != null) ? prices[m][k] : '', onChange: e => setPrice(m, k, e.target.value)})))))
-          : h('tr', null, h('td', {colSpan: 3}, 'No Gemini calls recorded yet'))))),
-      older.length ? h('p', {className: 'note'}, 'Older records also hold calls from models Zeno no longer uses (' + older.join(', ') + '). They are in the totals but have no price, so they are left out of the spend.') : null,
-      h('h2', null, 'Ups and downs'),
-      h('div', {className: 'bar'}, h(Btn, {id: 'calls', label: 'Calls'}), h(Btn, {id: 'tokens', label: 'Tokens'}), h(Btn, {id: 'spend', label: 'Spend (USD)'}),
-        h('span', {className: 'muted'}, series.hourly ? 'per hour' : 'per day', metric === 'calls' ? ' · red = calls that failed' : '')),
-      h(WaveChart, {series, metric}),
-      h('h2', null, 'By editor'),
-      h('div', {className: 'scroll'}, h('table', null,
-        h('thead', null, h('tr', null, h(Th, null, 'Editor'), h(Th, {right: true}, 'Calls'), h(Th, null, 'Models used'), h(Th, {right: true}, 'Busiest minute'),
-          h(Th, {right: true}, 'Tokens in'), h(Th, {right: true}, 'Tokens out'), h(Th, {right: true}, 'Failed'), h(Th, {right: true}, 'Est. spend'), h(Th, null, 'Last call'))),
-        h('tbody', null, ag.users.length ? ag.users.map(u => h('tr', {key: u.name},
-          h('td', null, h('b', null, u.name)), h('td', {className: 'n'}, fmtNum(u.calls)),
-          h('td', null, Object.keys(u.models).map(m => m + ' ' + u.models[m]).join(' · ')),
-          h('td', {className: 'n'}, u.peak + ' / min'), h('td', {className: 'n'}, fmtNum(u.tin)), h('td', {className: 'n'}, fmtNum(u.tout)),
-          h('td', {className: 'n'}, u.bad ? h('b', null, fmtNum(u.bad)) : '0'),
-          h('td', {className: 'n'}, (!u.usd && u.unpriced) ? 'No price' : inr(u.usd, rate) + (u.unpriced ? ' *' : '')),
-          h('td', {className: 'muted'}, fmtDate(u.last))))
-          : h('tr', null, h('td', {colSpan: 9}, 'No Gemini calls in this period'))))),
-      h('h2', null, 'By day'),
-      h('div', {className: 'scroll'}, h('table', null,
-        h('thead', null, h('tr', null, h(Th, null, 'Day'), h(Th, {right: true}, 'Calls'), h(Th, {right: true}, 'Failed'), h(Th, {right: true}, 'Tokens in'), h(Th, {right: true}, 'Tokens out'), h(Th, {right: true}, 'Est. spend'))),
-        h('tbody', null, ag.days.map(d => h('tr', {key: d.day}, h('td', null, h('b', null, dayLabel(d.day))), h('td', {className: 'n'}, fmtNum(d.calls)),
-          h('td', {className: 'n'}, fmtNum(d.bad)), h('td', {className: 'n'}, fmtNum(d.tin)), h('td', {className: 'n'}, fmtNum(d.tout)),
-          h('td', {className: 'n'}, (!d.usd && d.unpriced) ? 'No price' : inr(d.usd, rate) + (d.unpriced ? ' *' : ''))))))),
-      ag.unpriced ? h('p', {className: 'foot'}, '* ' + fmtNum(ag.unpriced) + ' call(s) use a model with no price set, so they are not in the spend.') : null));
-}
-const TABS = [['edits', 'Video edits'], ['daily', 'Daily'], ['videos', 'Renders'], ['editors', 'Editors'], ['problems', 'Problems'], ['gemini', 'Gemini'], ['health', 'Health'], ['notes', 'How it is recorded']];
-function Dashboard({data, period, setPeriod, q, setQ, rate, setRate, showAll, setShowAll, tab, setTab, health, jobs, jobsMsg, cf, setCf, ct, setCt, day, setDay}) {
-  const cutoff = periodCutoff(period, data.now, cf, ct);
-  const runs = data.runs.filter(r => inPeriod(r, cutoff) && matches(r, q)).sort((a, b) => n(b.created_at) - n(a.created_at));
-  const vers = versionRows(data.keys);
-  const cur = TABS.some(t => t[0] === tab) ? tab : 'edits';
-  return h('div', null,
-    h('div', {className: 'tabs'}, TABS.map(([id, label]) => h('button', {key: id, className: 'tab' + (cur === id ? ' on' : ''), onClick: () => setTab(id)}, label))),
-    h('div', {className: 'bar'},
-      [['today', 'Today'], ['7', '7 days'], ['30', '30 days'], ['all', 'All time'], ['custom', 'Custom']].map(([d, label]) =>
-        h('button', {key: d, className: 'chip' + (period === d ? ' on' : ''), onClick: () => setPeriod(d)}, label)),
-      period === 'custom' ? [h('label', {key: 'f'}, 'From', h('input', {type: 'datetime-local', className: 'dt', value: cf, onChange: e => setCf(e.target.value)})), h('label', {key: 't'}, 'To', h('input', {type: 'datetime-local', className: 'dt', value: ct, onChange: e => setCt(e.target.value)}))] : null,
-      h('input', {className: 'grow', placeholder: 'Search an editor, project or language', value: q, onChange: e => setQ(e.target.value)}),
-      h('label', null, '₹ per $', h('input', {type: 'number', step: '0.1', value: rate, onChange: e => setRate(Number(e.target.value) || 0)})),
-      h('button', {className: 'chip', onClick: () => {
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(new Blob([csvOf(runs)], {type: 'text/csv'}));
-        a.download = 'zeno-usage.csv'; a.click();
-      }}, 'Download CSV')),
-    cur === 'edits' ? h(EditsView, {data, jobs, jobsMsg, rg: cutoff, q, rate, day, setDay})
-      : cur === 'daily' ? h(Daily, {runs, rate})
-      : cur === 'videos' ? h(Videos, {runs, rate, showAll, setShowAll, jobs, data})
-      : cur === 'editors' ? h(Editors, {runs, rate, vers})
-      : cur === 'problems' ? h(Problems, {data, runs, cutoff})
-      : cur === 'gemini' ? h(GeminiUsage, {data, cutoff, rate})
-      : cur === 'health' ? h(Health, {health, vers})
-      : cur === 'notes' ? h(Notes, {runs, data})
-      : h(EditsView, {data, jobs, jobsMsg, rg: cutoff, q, rate, day, setDay}),
-    h('p', {className: 'foot'},
-      'Input includes cache write. Re-read = cache read: the chat sent again on every step (cheaper, but it counts toward the plan limit). ' +
-      'Cost is an estimate from list prices (USD per million tokens: ' + PRICES.map(p => p[0] + ' ' + p[1] + '/' + p[2] + '/' + p[3] + '/' + p[4]).join(', ') + ' for in / cached read / cache write / out). ' +
-      'Numbers are what each editor\\'s Zeno reported after a job; tokens per job are an approximation of what the provider billed. Times are in your local time.'));
+  const series = metric === "tokens" ? [{name: "Agent input (new)", color: AGENT_COLORS[0], vals: slots.map(x => x.fresh)}, {name: "Cache write", color: AGENT_COLORS[1], vals: slots.map(x => x.cw)}, {name: "Agent output", color: AGENT_COLORS[2], vals: slots.map(x => x.out)}]
+    : metric === "reread" ? [{name: "Re-read (cache read)", color: AGENT_COLORS[1], vals: slots.map(x => x.reread)}]
+    : metric === "calls" ? [{name: "Agent calls", color: AGENT_COLORS[0], vals: slots.map(x => x.calls)}]
+    : [{name: "Agent cost (₹)", color: AGENT_COLORS[2], vals: slots.map(x => x.usd)}];
+  const fmtY = v => metric === "cost" ? "₹" + (v >= 100 ? Math.round(v).toLocaleString() : v.toFixed(v >= 10 ? 0 : 1)) : fmtBig(v);
+  const mini = (v, label) => h("div", {className: "mini", key: label}, h("b", null, v), h("span", null, label));
+  return h(Section, {title: "Coding agent tokens " + (m.single ? "by hour" : "per day") + " (Claude Code, Codex, Antigravity)", span: 8,
+    right: h(Seg, {value: metric, onChange: setMetric, options: [["tokens", "Input / output"], ["reread", "Re-read (cache)"], ["calls", "Calls"], ["cost", "Cost ₹"]]})},
+    h("div", {className: "minis"}, mini(fmtBig(tot.ain), "Agent input"), mini(fmtBig(tot.cwrite), "of which cache write"), mini(fmtBig(tot.cached), "Re-read (cache read)"), mini(fmtBig(tot.aout), "Agent output"),
+      mini(withCalls ? fmtNum(calls) : "–", "Agent calls"), mini(tot.usd || !tot.unpriced ? inr(tot.usd, rate) + (tot.unpriced ? " *" : "") : "–", "Est. agent cost")),
+    h(Chart, {series, labels: m.slotLabels, kind: "bars", fmtY, height: 220, onPick, tips: m.slotTips, tipRows: i => { const x = slots[i]; return [
+      {label: "Agent input (new)", color: AGENT_COLORS[0], value: fmtNum(x.fresh)}, {label: "Cache write", color: AGENT_COLORS[1], value: fmtNum(x.cw)}, {label: "Agent output", color: AGENT_COLORS[2], value: fmtNum(x.out)},
+      {label: "Re-read (cache read)", color: "#9aa5b1", value: fmtNum(x.reread)}, {label: "Agent calls", color: "#9aa5b1", value: withCalls ? fmtNum(x.calls) : "–"}, {label: "Estimated cost", color: "#9aa5b1", value: "₹" + (x.usd >= 100 ? Math.round(x.usd).toLocaleString() : x.usd.toFixed(2))}]; }}), h(Legend, {series}));
 }
 
+function OverviewPage({m, rate, setTab, jobs, setPeriod, runs}) {
+  const [split, setSplit] = useState("total");
+  const drill = i => { if (!m.single && setPeriod) setPeriod({from: m.slotKeys[i], to: m.slotKeys[i]}); };
+  const rows = Object.values(m.perEditor).filter(e => m.ok(e.c)).sort((a, b) => b.videos.size - a.videos.size || b.calls - a.calls);
+  const active = rows.filter(e => e.videos.size > 0);
+  const totalVideos = new Set(m.delivered.map(j => j.c + "|" + j.video)).size;
+  const failed = m.inJobs.filter(j => j.kind === "failed" || j.kind === "blocked").length;
+  const perDay = m.slotKeys.map((_, i) => 0);
+  const seen = m.slotKeys.map(() => new Set());
+  m.delivered.forEach(j => { const s = m.slotOf(j.when); seen[s].add(j.c + "|" + j.video); });
+  seen.forEach((set, i) => { perDay[i] = set.size; });
+  const spanDays = Math.max(1, m.single ? 1 : m.slotKeys.length);
+  const status = (c) => { const k = m.keysBy[c]; if (!k || !k.version) return h(Pill, {kind: "gray"}, "Unknown"); return verCmp(k.version, m.latest) >= 0 || !m.latest ? h(Pill, {kind: "ok"}, "Up to date") : h(Pill, {kind: "amber"}, "Behind " + k.version); };
+  const byEditor = active.map((e, i) => ({name: e.name, value: e.videos.size, label: fmtNum(e.videos.size), color: COLORS[i % COLORS.length]}));
+  const gmods = [...MODELS_IN_USE, ...Object.keys(m.gmodels).filter(x => !MODELS_IN_USE.includes(x))].filter(x => m.gmodels[x]);
+  const gseries = gmods.map((mm, i) => ({name: mm, color: COLORS[i % COLORS.length], vals: m.gslots.map(x => x.byModel[mm] || 0)}));
+  const bymodel = Object.values(m.gmodels).sort((a, b) => b.usd - a.usd || b.calls - a.calls).map((x, i) => ({name: x.m, value: x.usd || x.calls, label: x.unpriced && !x.usd ? fmtNum(x.calls) + " calls" : rupees(x.usd, rate), color: COLORS[(i + 2) % COLORS.length]}));
+  return h("div", {className: "dash"},
+    h(Stat, {value: fmtNum(totalVideos), label: "Videos delivered"}), h(Stat, {value: fmtNum(active.length), label: "Editors who delivered"}),
+    h(Stat, {value: active.length ? (totalVideos / active.length / spanDays).toFixed(1) : "0", label: "Videos per editor per day"}),
+    h(Stat, {value: fmtNum(failed), label: "Failed or blocked jobs"}), h(Stat, {value: fmtNum(m.gcalls), label: "Gemini calls"}),
+    h(Stat, {value: m.gunpriced && !m.gusd ? "Set prices" : rupees(m.gusd, rate), label: "Gemini spend"}),
+    h(Section, {title: "Videos " + (m.single ? "by hour" : "per day"), span: 8, right: h(Seg, {value: split, onChange: setSplit, options: [["total", "Total"], ["editor", "By editor"]]})},
+      jobs === null ? h(Empty, {text: "Loading…"}) : h("div", null,
+        h(Chart, {series: split === "editor" ? active.slice(0, 8).map((e, i) => ({name: e.name, color: COLORS[i % COLORS.length], vals: m.videoSlots(e.c)})) : [{name: "Videos", color: COLORS[0], vals: perDay}], labels: m.slotLabels, kind: "bars", height: 240, onPick: drill, tips: m.slotTips, tipRows: videoTipRows(m, active.slice(0, 8).map(e => e.c))}),
+        split === "editor" ? h(Legend, {series: active.slice(0, 8).map((e, i) => ({name: e.name, color: COLORS[i % COLORS.length]}))}) : null,
+        !m.single ? h("p", {className: "note"}, "Click a bar to see that day hour by hour.") : null)),
+    h(Section, {title: "Videos by editor", span: 4}, jobs === null ? h(Empty, {text: "Loading…"}) : h(BarList, {items: byEditor, empty: "No videos in this range."})),
+    h(AgentCard, {m, runs: runs || [], rate, onPick: drill}),
+    h(Section, {title: "Gemini (transcription) spend by model", span: 4}, h(BarList, {items: bymodel, empty: "No Gemini calls in this range."})),
+    h(Section, {title: "Editors"},
+      rows.length ? h("div", {className: "scroll"}, h("table", null,
+        h("thead", null, h("tr", null, h(Th, null, "Editor"), h(Th, {right: true}, "Videos"), h(Th, {right: true}, "Days active"), h(Th, {right: true}, "Avg / day"), h(Th, {right: true}, "Failed / blocked"), h(Th, {right: true}, "Gemini calls"), h(Th, {right: true}, "Gemini spend"), h(Th, null, "Version"))),
+        h("tbody", null, rows.map(e => h("tr", {key: e.c},
+          h("td", null, h("b", null, e.name)), h("td", {className: "n"}, fmtNum(e.videos.size)), h("td", {className: "n"}, fmtNum(e.days.size)),
+          h("td", {className: "n"}, e.days.size ? (e.videos.size / e.days.size).toFixed(1) : "0"), h("td", {className: "n"}, (e.failed + e.blocked) ? h("b", null, fmtNum(e.failed + e.blocked)) : "0"),
+          h("td", {className: "n"}, fmtNum(e.calls)), h("td", {className: "n"}, e.unpriced && !e.usd ? "—" : rupees(e.usd, rate) + (e.unpriced ? " *" : "")), h("td", null, status(e.c))))))) : h(Empty)));
+}
+
+function VideosPage({m, jobs, setPeriod}) {
+  const [pick, setPick] = useState(null);
+  if (jobs === null) return h(Empty, {text: "Loading the job log…"});
+  const eds = Object.values(m.perEditor).filter(e => m.ok(e.c) && e.videos.size > 0).sort((a, b) => b.videos.size - a.videos.size);
+  const series = eds.slice(0, 8).map((e, i) => ({name: e.name, color: COLORS[i % COLORS.length], vals: m.videoSlots(e.c)}));
+  const max = Math.max(1, ...eds.flatMap(e => m.videoSlots(e.c)));
+  const picked = pick ? m.delivered.filter(j => j.c === pick.c && m.slotOf(j.when) === pick.s).sort((a, b) => a.when - b.when) : [];
+  return h("div", {className: "dash"},
+    h(Section, {title: "Videos by editor"},
+      h(Chart, {series, labels: m.slotLabels, kind: "bars", tips: m.slotTips, tipRows: videoTipRows(m, eds.slice(0, 8).map(e => e.c)), onPick: i => { if (!m.single && setPeriod) setPeriod({from: m.slotKeys[i], to: m.slotKeys[i]}); }}), h(Legend, {series})),
+    h(Section, {title: "Day by day (click a number for the videos)"},
+      eds.length ? h("div", {className: "scroll"}, h("table", {className: "grid"},
+        h("thead", null, h("tr", null, h(Th, null, "Editor"), m.slotLabels.map((l, i) => h(Th, {right: true, key: i}, l)), h(Th, {right: true}, "Total"))),
+        h("tbody", null, eds.map(e => { const vals = m.videoSlots(e.c); return h("tr", {key: e.c},
+          h("td", null, h("b", null, e.name)),
+          vals.map((v, s) => h("td", {key: s, className: "n cell" + (pick && pick.c === e.c && pick.s === s ? " sel" : ""), style: v ? {background: "rgba(127,178,255," + (0.12 + 0.5 * v / max).toFixed(2) + ")", cursor: "pointer"} : null, onClick: v ? () => setPick({c: e.c, s}) : undefined}, v || "")),
+          h("td", {className: "n"}, h("b", null, fmtNum(e.videos.size)))); })))) : h(Empty)),
+    pick ? h(Section, {title: (m.names[pick.c] || pick.c) + " · " + m.slotLabels[pick.s], right: h("button", {className: "chip", onClick: () => setPick(null)}, "Close")},
+      h("div", {className: "scroll"}, h("table", null, h("thead", null, h("tr", null, h(Th, null, "When"), h(Th, null, "Video"), h(Th, null, "Zeno"))),
+        h("tbody", null, picked.map(j => h("tr", {key: j.id}, h("td", {className: "muted"}, fmtWhen(j.when)), h("td", null, short(j.video, 90)), h("td", {className: "muted"}, j.zeno_version || ""))))))) : null);
+}
+
+function GeminiPage({m, rate, prices, setPrices, setPeriod}) {
+  const [metric, setMetric] = useState("calls");
+  const kind = "bars";
+  const setPrice = (mod, k, v) => { const next = Object.assign({}, prices, {[mod]: Object.assign({}, prices[mod], {[k]: v})}); setPrices(next); try { localStorage.setItem(PRICE_KEY, JSON.stringify(next)); } catch (e) {} };
+  const gm = Object.values(m.gmodels).sort((a, b) => b.calls - a.calls);
+  const older = gm.filter(x => !MODELS_IN_USE.includes(x.m)).map(x => x.m);
+  const val = s => metric === "calls" ? s.calls : metric === "tokens" ? s.tin + s.tout : s.usd * rate;
+  const fmtY = v => metric === "spend" ? "₹" + (v >= 100 ? Math.round(v).toLocaleString() : v.toFixed(v >= 10 ? 0 : 1)) : fmtBig(v);
+  const modelSeries = [...MODELS_IN_USE, ...older].filter(mm => m.gmodels[mm]);
+  let series;
+  if (metric === "calls") series = modelSeries.map((mm, i) => ({name: mm, color: COLORS[i % COLORS.length], vals: m.gslots.map(s => s.byModel[mm] || 0)}));
+  else series = [{name: metric === "calls" ? "Calls" : metric === "tokens" ? "Tokens" : "Spend (₹)", color: COLORS[0], vals: m.gslots.map(val)}];
+  const days = Object.values(m.gdays).sort((a, b) => (a.day < b.day ? 1 : -1));
+  const eds = Object.values(m.perEditor).filter(e => m.ok(e.c) && e.calls > 0).sort((a, b) => b.calls - a.calls);
+  const spend = (usd, unpriced) => unpriced && !usd ? "No price" : rupees(usd, rate) + (unpriced ? " *" : "");
+  const peakAll = Math.max(0, ...Object.values(m.perEditor).filter(e => m.ok(e.c)).map(e => e.peak));
+  return h("div", {className: "dash"},
+    h(React.Fragment, null, h(Stat, {value: fmtNum(m.gcalls), label: "calls"}), h(Stat, {value: m.gcalls ? Math.round(100 * (m.gcalls - m.gbad) / m.gcalls) + "%" : "100%", label: "answered fully"}),
+      h(Stat, {value: fmtBig(m.gtin), label: "tokens in"}), h(Stat, {value: fmtBig(m.gtout), label: "tokens out"}), h(Stat, {value: m.gunpriced && !m.gusd ? "Set prices" : rupees(m.gusd, rate), label: "estimated spend"}), h(Stat, {value: peakAll + " / min", label: "busiest minute"})),
+    h(Section, {title: "Usage " + (m.single ? "by hour" : "per day") + (metric === "calls" ? " by model" : ""),
+      right: [h(Seg, {key: "m", value: metric, onChange: setMetric, options: [["calls", "Calls"], ["tokens", "Tokens"], ["spend", "Spend ₹"]]})]},
+      h(Chart, {series, labels: m.slotLabels, kind: "bars", fmtY, tips: m.slotTips, tipRows: i => { const x = m.gslots[i]; const rows = modelSeries.filter(mm => x.byModel[mm]).map((mm, k) => ({label: mm, color: COLORS[k % COLORS.length], value: fmtNum(x.byModel[mm]) + " calls"}));
+      return rows.concat([{label: "Failed calls", color: "#d4574b", value: fmtNum(x.bad)}, {label: "Tokens in / out", color: "#9aa5b1", value: fmtBig(x.tin) + " / " + fmtBig(x.tout)}, {label: "Spend", color: "#9aa5b1", value: x.usd ? rupees(x.usd, rate) : "—"}]); },
+      onPick: i => { if (!m.single && setPeriod) setPeriod({from: m.slotKeys[i], to: m.slotKeys[i]}); }}), h(Legend, {series})),
+    h(Section, {title: "Models and prices (USD per million tokens, audio input)"},
+      h("div", {className: "scroll"}, h("table", null,
+        h("thead", null, h("tr", null, h(Th, null, "Model"), h(Th, {right: true}, "Input $ / 1M"), h(Th, {right: true}, "Output $ / 1M"), h(Th, {right: true}, "Input ₹ / 1M"), h(Th, {right: true}, "Output ₹ / 1M"), h(Th, {right: true}, "Calls"), h(Th, {right: true}, "Share"), h(Th, {right: true}, "Tokens in"), h(Th, {right: true}, "Tokens out"), h(Th, {right: true}, "Spend"))),
+        h("tbody", null, MODELS_IN_USE.map(mm => { const x = m.gmodels[mm] || {calls: 0, tin: 0, tout: 0, usd: 0, unpriced: 0}; const p = prices[mm] || {};
+          return h("tr", {key: mm}, h("td", null, h("b", null, mm)),
+            ["i", "o"].map(k => h("td", {className: "n", key: k}, h("input", {type: "number", step: "0.01", className: "dt", style: {width: 84}, value: p[k] == null ? "" : p[k], onChange: e => setPrice(mm, k, e.target.value)}))),
+            h("td", {className: "n"}, p.i === "" || p.i == null ? "—" : "₹" + (n(p.i) * rate).toFixed(2)), h("td", {className: "n"}, p.o === "" || p.o == null ? "—" : "₹" + (n(p.o) * rate).toFixed(2)),
+            h("td", {className: "n"}, fmtNum(x.calls)), h("td", {className: "n"}, m.gcalls ? Math.round(100 * x.calls / m.gcalls) + "%" : "0%"), h("td", {className: "n"}, fmtBig(x.tin)), h("td", {className: "n"}, fmtBig(x.tout)), h("td", {className: "n"}, spend(x.usd, x.unpriced))); })))),
+      older.length ? h("p", {className: "note"}, "Older records also hold calls from models Zeno no longer uses (" + older.join(", ") + "). They are in the totals but have no price, so they are left out of the spend (*).") : null),
+    h(Section, {title: "By editor"},
+      eds.length ? h("div", {className: "scroll"}, h("table", null,
+        h("thead", null, h("tr", null, h(Th, null, "Editor"), h(Th, {right: true}, "Calls"), h(Th, null, "Models used"), h(Th, {right: true}, "Busiest minute"), h(Th, {right: true}, "Tokens in"), h(Th, {right: true}, "Tokens out"), h(Th, {right: true}, "Failed"), h(Th, {right: true}, "Spend"), h(Th, null, "Last call"))),
+        h("tbody", null, eds.map(e => h("tr", {key: e.c}, h("td", null, h("b", null, e.name)), h("td", {className: "n"}, fmtNum(e.calls)),
+          h("td", null, Object.keys(e.models).map(mm => h("span", {className: "tag", key: mm}, mm + " " + e.models[mm]))),
+          h("td", {className: "n"}, e.peak + " / min"), h("td", {className: "n"}, fmtBig(e.tin)), h("td", {className: "n"}, fmtBig(e.tout)), h("td", {className: "n"}, e.bad ? h("b", null, fmtNum(e.bad)) : "0"), h("td", {className: "n"}, spend(e.usd, e.unpriced)), h("td", {className: "muted"}, fmtWhen(e.last))))))) : h(Empty)),
+    h(Section, {title: "By day"},
+      days.length ? h("div", {className: "scroll"}, h("table", null,
+        h("thead", null, h("tr", null, h(Th, null, "Day"), modelSeries.map(mm => h(Th, {right: true, key: mm}, mm)), h(Th, {right: true}, "Calls"), h(Th, {right: true}, "Failed"), h(Th, {right: true}, "Tokens"), h(Th, {right: true}, "Spend"))),
+        h("tbody", null, days.map(d => h("tr", {key: d.day}, h("td", null, h("b", null, dayShort(d.day))), modelSeries.map(mm => h("td", {className: "n", key: mm}, d.byModel[mm] ? fmtNum(d.byModel[mm]) : "")),
+          h("td", {className: "n"}, fmtNum(d.calls)), h("td", {className: "n"}, d.bad ? fmtNum(d.bad) : "0"), h("td", {className: "n"}, fmtBig(d.tin + d.tout)), h("td", {className: "n"}, spend(d.usd, d.unpriced))))))) : h(Empty)));
+}
+
+function EditorsPage({m}) {
+  const rows = Object.keys(m.names).filter(c => m.ok(c)).map(c => {
+    const k = m.keysBy[c] || {}, e = m.perEditor[c];
+    const behind = k.version && m.latest && verCmp(k.version, m.latest) < 0;
+    return {c, name: m.names[c], email: k.email || "", version: k.version || "", seen: k.seen || 0, used: k.used || 0, platform: k.platform || "", behind, videos: e ? e.videos.size : 0, gemini: e ? e.models : {}, agents: m.agents[c] || {}};
+  }).sort((a, b) => (b.behind - a.behind) || (b.used - a.used));
+  const upTo = rows.filter(r => r.version && !r.behind).length, behind = rows.filter(r => r.behind).length, unknown = rows.filter(r => !r.version).length;
+  return h("div", {className: "dash"},
+    h(React.Fragment, null, h(Stat, {span: 3, value: m.latest || "—", label: "Latest published version"}), h(Stat, {span: 3, value: fmtNum(upTo), label: "Editors up to date"}), h(Stat, {span: 3, value: fmtNum(behind), label: "Editors behind"}), h(Stat, {span: 3, value: fmtNum(unknown), label: "Version unknown"})),
+    h(Section, {title: "Editors, updates and models"},
+      rows.length ? h("div", {className: "scroll"}, h("table", null,
+        h("thead", null, h("tr", null, h(Th, null, "Editor"), h(Th, null, "Email"), h(Th, null, "Zeno version"), h(Th, null, "Update"), h(Th, null, "Last used"), h(Th, null, "Computer"), h(Th, {right: true}, "Videos"), h(Th, null, "Coding agent / model"), h(Th, null, "Gemini models"))),
+        h("tbody", null, rows.map(r => h("tr", {key: r.c},
+          h("td", null, h("b", null, r.name)), h("td", {className: "mail"}, r.email), h("td", null, r.version || "—"),
+          h("td", null, !r.version ? h(Pill, {kind: "gray"}, "Unknown") : r.behind ? h(Pill, {kind: "amber"}, "Not updated (latest " + m.latest + ")") : h(Pill, {kind: "ok"}, "Received " + m.latest)),
+          h("td", {className: "muted"}, r.used ? fmtWhen(r.used) : ""), h("td", {className: "muted"}, r.platform), h("td", {className: "n"}, fmtNum(r.videos)),
+          h("td", null, Object.keys(r.agents).map(a => h("span", {className: "tag", key: a}, a + " ×" + r.agents[a]))),
+          h("td", null, Object.keys(r.gemini).map(g => h("span", {className: "tag", key: g}, g + " " + r.gemini[g])))))))) : h(Empty)));
+}
+
+// ---------- sign in and the page ----------
 function SignIn({message, onToken}) {
   const box = useRef(null);
-  const [note, setNote] = useState(message || 'Use your company Google account.');
+  const [note, setNote] = useState(message || "Use your company Google account.");
   useEffect(() => {
     let dead = false;
     (async () => {
       try {
-        const cfg = await (await fetch('/api/auth/config')).json();
-        if (!cfg.google_client_id) { setNote('Google sign-in is not set up on this server.'); return; }
+        const cfg = await (await fetch("/api/auth/config")).json();
+        if (!cfg.google_client_id) { setNote("Google sign-in is not set up on this server."); return; }
         if (!(window.google && google.accounts && google.accounts.id)) {
-          await new Promise((res, rej) => { const s = document.createElement('script'); s.src = 'https://accounts.google.com/gsi/client'; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+          await new Promise((res, rej) => { const s = document.createElement("script"); s.src = "https://accounts.google.com/gsi/client"; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
         }
         if (dead) return;
         google.accounts.id.initialize({client_id: cfg.google_client_id, callback: resp => onToken(resp.credential)});
-        google.accounts.id.renderButton(box.current, {theme: 'filled_blue', size: 'large', text: 'signin_with'});
-      } catch (e) { setNote('Could not start Google sign-in: ' + e.message); }
+        google.accounts.id.renderButton(box.current, {theme: "filled_blue", size: "large", text: "signin_with"});
+      } catch (e) { setNote("Could not start Google sign-in: " + e.message); }
     })();
     return () => { dead = true; };
   }, []);
-  return h('div', {className: 'signin'}, h('h1', null, 'Sign in to see the usage log'), h('p', {className: 'sub'}, note), h('div', {ref: box, style: {display: 'inline-block'}}));
+  return h("div", {className: "signin"}, h("h1", null, "Sign in to see the usage log"), h("p", {className: "sub"}, note), h("div", {ref: box, style: {display: "inline-block"}}));
+}
+
+const Wrap = ({children}) => h("div", {className: "dash"}, h("section", {className: "c s12 legacy"}, children));
+function Dashboard({data, jobs, jobsMsg, tab, setTab, period, setPeriod, editor, setEditor, rate, setRate, onRefresh, busy, health}) {
+  const [prices, setPrices] = useState(loadPrices());
+  const [showAll, setShowAll] = useState(false);
+  const [day, setDay] = useState("");
+  const [q, setQ] = useState("");
+  const m = useModel(data, jobs, period, editor, rate, prices);
+  const cur = TABS.some(t => t[0] === tab) ? tab : "overview";
+  const cutoff = {from: period.from ? new Date(period.from + "T00:00:00").getTime() / 1000 : 0, to: period.to ? new Date(period.to + "T23:59:59").getTime() / 1000 : 0};
+  const runs = (data.runs || []).filter(r => inPeriod(r, cutoff) && (!editor || canon(r.editor_name) === editor || canon(String(r.user_email || "").split("@")[0]) === editor)).sort((a, b) => n(b.created_at) - n(a.created_at));
+  const rrRuns = runs.filter(r => matches(r, q));
+  const vers = versionRows(data.keys || []);
+  const download = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csvOf(runs)], {type: "text/csv"})); a.download = "zeno-usage.csv"; a.click(); };
+  return h("div", null,
+    h("div", {className: "tabs"}, TABS.map(([id, label]) => h("button", {key: id, className: "tab" + (cur === id ? " on" : ""), onClick: () => setTab(id)}, label))),
+    h(Controls, {period, setPeriod, editors: editorList(m), editor, setEditor, rate, setRate, onRefresh, busy}),
+    jobsMsg ? h("p", {className: "note"}, jobsMsg) : null,
+    cur === "overview" ? h(OverviewPage, {m, rate, setTab, jobs, setPeriod, runs})
+      : cur === "videos" ? h("div", null, h(VideosPage, {m, jobs, setPeriod}), jobs === null ? null : h("div", {style: {height: 14}}), jobs === null ? null : h(Wrap, null, h(EditsView, {data, jobs, jobsMsg, rg: cutoff, q: "", rate, day, setDay})))
+      : cur === "renders" ? h("div", null,
+          h("div", {className: "bar", style: {marginTop: 4}},
+            h("input", {className: "grow", placeholder: "Search an editor, project or language", value: q, onChange: e => setQ(e.target.value)}),
+            h("button", {className: "chip", onClick: download}, "Download CSV")),
+          h(Videos, {runs: rrRuns, rate, showAll, setShowAll, jobs, data}))
+      : cur === "gemini" ? h(GeminiPage, {m, rate, prices, setPrices, setPeriod})
+      : cur === "tokens" ? h(Wrap, null, h("div", {className: "bar"}, h("button", {className: "chip", onClick: download}, "Download CSV")), h(Editors, {runs, rate, vers}), h(Daily, {runs, rate}))
+      : cur === "editors" ? h(EditorsPage, {m})
+      : h("div", null, h(Wrap, null, h(Health, {health, vers})), h("div", {style: {height: 14}}), h(Wrap, null, h(Problems, {data, runs, cutoff})), h("div", {style: {height: 14}}), h(Wrap, null, h(Notes, {runs, data}))),
+    h("p", {className: "foot"}, "Local time. A video counts once per day however often it was re-rendered. * = some calls use a model with no price. Costs are estimates from list prices."));
 }
 
 function App() {
-  const read = k => { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } };
+  const read = k => { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } };
   const [token, setToken] = useState(read(TOKEN_KEY));
   const [data, setData] = useState(null);
-  const [health, setHealth] = useState(null);
-  const [msg, setMsg] = useState('');
-  const [period, setPeriod] = useState('7');
   const [jobs, setJobs] = useState(null);
-  const [jobsMsg, setJobsMsg] = useState('');
-  const [cf, setCf] = useState('');
-  const [ct, setCt] = useState('');
-  const [day, setDay] = useState('');
-  const [tab, setTabState] = useState(() => { const hsh = (location.hash || '').replace('#', ''); if (hsh) return hsh; try { return localStorage.getItem('zeno_tab') || 'edits'; } catch (e) { return 'edits'; } });
-  const setTab = t => { setTabState(t); try { localStorage.setItem('zeno_tab', t); } catch (e) {} };
-  const [q, setQ] = useState('');
-  const [showAll, setShowAll] = useState(false);
-  const [rate, setRate] = useState(() => { try { return Number(localStorage.getItem('zeno_rate')) || 94.8; } catch (e) { return 94.8; } });
-  useEffect(() => { try { localStorage.setItem('zeno_rate', String(rate)); } catch (e) {} }, [rate]);
-  useEffect(() => { fetch('/health').then(r => r.json()).then(setHealth).catch(() => setHealth({ok: false})); }, []);
+  const [jobsMsg, setJobsMsg] = useState("");
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [health, setHealth] = useState(null);
+  const [reload, setReload] = useState(0);
+  const [tab, setTabState] = useState(() => { const hsh = (location.hash || "").replace("#", ""); return TABS.some(t => t[0] === hsh) ? hsh : "overview"; });  // opens on Overview unless the link names a tab
+  const setTab = t => { setTabState(t); try { location.hash = t; } catch (e) {} };
+  const [period, setPeriod] = useState(() => { const p = presets()[2]; return {from: p[1], to: p[2]}; });
+  const [editor, setEditor] = useState("");
+  const [rate, setRate] = useState(() => { try { return Number(localStorage.getItem("zeno_rate")) || 94.8; } catch (e) { return 94.8; } });
+  useEffect(() => { try { localStorage.setItem("zeno_rate", String(rate)); } catch (e) {} }, [rate]);
+  useEffect(() => { fetch("/health").then(r => r.json()).then(setHealth).catch(() => setHealth({ok: false})); }, []);
   useEffect(() => {
     if (!token) { setData(null); return; }
-    const hdr = {headers: {Authorization: 'Bearer ' + token}};
-    const jobsReq = fetch('/api/jobs', hdr);   // asked at the same time as the usage numbers
-    fetch('/api/usage', hdr).then(async r => {
+    const hdr = {headers: {Authorization: "Bearer " + token}};
+    setBusy(true);
+    const jobsReq = fetch("/api/jobs", hdr);   // asked at the same time as the numbers
+    fetch("/api/usage" + (reload ? "?fresh=1" : ""), hdr).then(async r => {
       if (r.status === 401 || r.status === 403) {
         try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
-        setMsg(r.status === 403 ? 'That account is not allowed. Use your company Google account.' : 'Please sign in again.');
-        setToken(''); return;
+        setMsg(r.status === 403 ? "That account is not allowed. Use your company Google account." : "Please sign in again.");
+        setToken(""); setBusy(false); return;
       }
-      if (!r.ok) throw new Error('Could not load (' + r.status + ').');
-      setData(await r.json()); setMsg('');
-      jobsReq.then(async j => {
-        if (j.ok) setJobs((await j.json()).jobs || []); else setJobsMsg('The job log is not available on this server yet (status ' + j.status + ').');
-      }).catch(e => setJobsMsg('Could not load the job log: ' + e.message));
-    }).catch(e => setMsg(e.message));
-  }, [token]);
+      if (!r.ok) throw new Error("Could not load (" + r.status + ").");
+      setData(await r.json()); setMsg(""); setBusy(false);
+      jobsReq.then(async j => { if (j.ok) { setJobs((await j.json()).jobs || []); setJobsMsg(""); } else setJobsMsg("The job log is not available on this server yet (status " + j.status + ")."); })
+        .catch(e => setJobsMsg("Could not load the job log: " + e.message));
+    }).catch(e => { setMsg(e.message); setBusy(false); });
+  }, [token, reload]);
   const onToken = async t => {  // trade the one-hour Google sign-in for a 30-day session
     let keep = t;
-    try { const r = await fetch('/api/usage/session', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({credential: t})}); if (r.ok) keep = (await r.json()).token || t; } catch (e) {}
+    try { const r = await fetch("/api/usage/session", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({credential: t})}); if (r.ok) keep = (await r.json()).token || t; } catch (e) {}
     try { localStorage.setItem(TOKEN_KEY, keep); } catch (e) {}
     setToken(keep);
   };
-  return h('main', null,
-    h('div', {className: 'top'},
-      h('div', {className: 'brand'}, 'Zeno Video AI'),
-      h('span', {className: 'sp'}),
-      data ? h('span', {className: 'muted', style: {fontSize: 13}}, 'Updated ' + fmtDate(data.now)) : null,
-      h('a', {className: 'chip', href: '/'}, 'Zeno home')),
-    h('h1', null, 'Usage'),
-    h('p', {className: 'sub'}, 'Video edits per editor, how many jobs each took, and the tokens they used.'),
-    data ? h(Dashboard, {data, period, setPeriod, q, setQ, rate, setRate, showAll, setShowAll, tab, setTab, health, jobs, jobsMsg, cf, setCf, ct, setCt, day, setDay})
-         : token ? h('div', {className: 'card'}, h('h1', null, 'Loading…'), h('p', {className: 'sub'}, msg))
-                 : h(SignIn, {message: msg, onToken}));
+  return h("main", null,
+    h("div", {className: "top"}, h("div", {className: "brand"}, "Zeno · Usage"), h("span", {className: "sp"}),
+      data ? h("span", {className: "muted"}, "Updated " + fmtWhen(data.now)) : null, h("a", {className: "chip", href: "/"}, "Zeno home")),
+    data ? h(Dashboard, {data, jobs, jobsMsg, health, tab, setTab, period, setPeriod, editor, setEditor, rate, setRate, busy, onRefresh: () => setReload(reload + 1)})
+         : token ? h("div", {className: "card"}, h("h2", null, "Loading…"), h("p", {className: "sub"}, msg)) : h(SignIn, {message: msg, onToken}));
 }
-if (typeof document !== 'undefined' && document.getElementById('root')) ReactDOM.createRoot(document.getElementById('root')).render(h(App));
+if (typeof document !== "undefined" && document.getElementById("root")) ReactDOM.createRoot(document.getElementById("root")).render(h(App));
 </script></body></html>
 """.replace("__STYLE__", NOTION_STYLE)
