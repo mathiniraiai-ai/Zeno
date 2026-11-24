@@ -1719,19 +1719,39 @@ def main() -> None:
     }
     strobe_styles = {"flash", "vignette", "kn20228", "w42", "strobe"}
 
+    def _mark_target_idx(m_obj: Dict[str, Any]) -> Optional[int]:
+        raw_si = m_obj.get("seg_index")
+        sid_m = str(m_obj.get("segment") or "")
+        if raw_si is not None:
+            try:
+                si = int(raw_si)
+                if 0 <= si < len(segs) and (not sid_m or str(segs[si].get("id") or "") == sid_m):
+                    return si
+            except (TypeError, ValueError):
+                pass
+        for k_s in range(len(segs) - 1, -1, -1):
+            if str(segs[k_s].get("id") or "") == sid_m:
+                return k_s
+        return None
+
     all_marks: List[Dict[str, Any]] = []
     seen_marks = set()
     for m in plan.get("marks", []) or []:
         if not isinstance(m, dict):
             continue
-        sid = str(m.get("segment") or "")
-        if sid not in seg_start:
+        t_idx = _mark_target_idx(m)
+        if t_idx is None:
             continue
-        mt = _normalize_mark_type(m.get("type") or m.get("kind") or "right")
-        m_at = round(float(m.get("at", 0.0) or 0.0), 3)
-        seen_marks.add((sid, mt, m_at))
-        all_marks.append(m)
-    for s in segs:
+        m_copy = dict(m)
+        m_copy["seg_index"] = t_idx
+        mt = _normalize_mark_type(m_copy.get("type") or m_copy.get("kind") or "right")
+        m_at = round(float(m_copy.get("at", 0.0) or 0.0), 2)
+        st_k = str(m_copy.get("style") or m_copy.get("pack") or default_pack).strip().lower()
+        m_key = (t_idx, mt, m_at, st_k)
+        if m_key not in seen_marks:
+            seen_marks.add(m_key)
+            all_marks.append(m_copy)
+    for i_seg, s in enumerate(segs):
         sid = str(s.get("id") or "")
         if sid not in seg_start:
             continue
@@ -1740,16 +1760,21 @@ def main() -> None:
                 continue
             m_copy = dict(im)
             m_copy.setdefault("segment", sid)
+            m_copy["seg_index"] = i_seg
             mt = _normalize_mark_type(m_copy.get("type") or m_copy.get("kind") or "right")
-            m_at = round(float(m_copy.get("at", 0.0) or 0.0), 3)
-            key = (str(m_copy["segment"]), mt, m_at)
+            m_at = round(float(m_copy.get("at", 0.0) or 0.0), 2)
+            st_k = str(m_copy.get("style") or m_copy.get("pack") or default_pack).strip().lower()
+            key = (i_seg, mt, m_at, st_k)
             if key not in seen_marks:
                 seen_marks.add(key)
                 all_marks.append(m_copy)
 
     for k, m in enumerate(all_marks):
         mtype = _normalize_mark_type(m.get("type") or m.get("kind") or "right")
-        t = max(0.0, seg_start[m["segment"]] + float(m.get("at", 0.0) or 0.0))
+        m_idx = m.get("seg_index")
+        m_seg_start = starts[m_idx] if (m_idx is not None and 0 <= m_idx < len(starts)) else seg_start[m["segment"]]
+        m_target_seg = segs[m_idx] if (m_idx is not None and 0 <= m_idx < len(segs)) else seg_by_id.get(m["segment"])
+        t = max(0.0, m_seg_start + float(m.get("at", 0.0) or 0.0))
         dur = max(0.08, float(m.get("duration") if m.get("duration") is not None else 0.56))
         style_key = str(m.get("style") or m.get("pack") or default_pack).strip()
         png = resolve_mark_asset(mtype, style=style_key)
@@ -1805,7 +1830,7 @@ def main() -> None:
         else:
             inputs += ["-loop", "1", "-framerate", str(fps), "-t", f"{dur:.3f}", "-i", png]
             size = even(min(W, H) * float(m.get("size", 0.22)))
-            target_seg = seg_by_id.get(m["segment"])
+            target_seg = m_target_seg
             if layouts is not None and hasattr(layouts, "place_mark_for_segment"):
                 x, y = layouts.place_mark_for_segment(m, target_seg, W, H, size)
             else:
@@ -1846,7 +1871,7 @@ def main() -> None:
                 if mtype == "wrong"
                 else plan_tuning.get("right_sfx_gain_db", 0.5)
             )
-            seg_for_mk = seg_by_id.get(m["segment"])
+            seg_for_mk = m_target_seg
             seg_has_speech = not (
                 seg_for_mk is not None
                 and (
@@ -1855,9 +1880,9 @@ def main() -> None:
                 )
             )
             min_sfx_t = (
-                max(0.0, seg_start[m["segment"]] + float(m.get("at", 0.0) or 0.0))
+                max(0.0, m_seg_start + float(m.get("at", 0.0) or 0.0))
                 if seg_has_speech
-                else max(0.0, seg_start[m["segment"]])
+                else max(0.0, m_seg_start)
             )
             if sfx_path and sfx_path.is_file():
                 gain_db = _calibrate_sfx_gain_db(
@@ -1886,8 +1911,10 @@ def main() -> None:
     whoosh_gain = float(plan_tuning.get("whoosh_sfx_gain_db", -0.5))
     for e in plan.get("sfx", []):
         seg_id = e["segment"]
+        e_idx = e.get("seg_index")
+        e_seg_start = starts[e_idx] if (e_idx is not None and 0 <= e_idx < len(starts) and str(segs[e_idx].get("id") or "") == seg_id) else seg_start[seg_id]
         at_rel = float(e.get("at", 0.0))
-        t_raw = seg_start[seg_id] + at_rel
+        t_raw = e_seg_start + at_rel
         sfx_path = _redirect_broken_sfx(resolve_sfx_asset(e["file"], pack=sfx_pack))
         if sfx_path.is_file():
             nm_low = sfx_path.name.lower()
@@ -1899,7 +1926,7 @@ def main() -> None:
                 default_gain_db=whoosh_gain if is_tr_whoosh else None,
             )
             t_play = t_raw
-            if is_tr_whoosh and seg_start[seg_id] > 0.01 and abs(at_rel) <= 0.05:
+            if is_tr_whoosh and e_seg_start > 0.01 and abs(at_rel) <= 0.05:
                 pk_s = float(_sfx_audio_stats(sfx_path).get("peak_sec", 0.10))
                 t_play = max(0.0, t_raw - pk_s)
                 explicit_tr_times.append(t_raw)
@@ -2104,9 +2131,11 @@ def main() -> None:
     master_audio_fc = (
         f"[0:a:0]{dlg_ln_chain}[dlg_ln];"
         f"[dlg_ln][0:a:1]amix=inputs=2:weights=1 1:normalize=0:dropout_transition=0:duration=first,"
-        f"aresample=192000,alimiter=limit=0.80:attack=3:release=40:level=false:latency=true,"
+        f"aresample=192000,alimiter=limit=0.76:attack=5:release=50:asc=true:level=false:latency=true,"
         f"aresample=48000,aformat=channel_layouts=stereo[aout]"
     )
+    plan["_plan_dir"] = str(plan_path.parent)
+    plan["_plan_path"] = str(plan_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Stage 3b: Bilingual Flashcards (9:16 placement on clean `mix` BEFORE subtitles so captions dodge cards)

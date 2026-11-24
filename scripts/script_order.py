@@ -2501,6 +2501,20 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
         line_has_wrong_initial = {
             lid for lid, mks in line_has_explicit_mark.items() if "wrong" in mks
         }
+        sid_counts = Counter(str(sg.get("id") or "") for sg in segs)
+        last_idx_for_sid = {str(sg.get("id") or ""): k for k, sg in enumerate(segs)}
+
+        def _mark_belongs_to_idx(m_obj: Any, seg_sid: str, seg_k: int) -> bool:
+            if not isinstance(m_obj, dict) or str(m_obj.get("segment") or "") != seg_sid:
+                return False
+            raw_si = m_obj.get("seg_index")
+            if raw_si is not None:
+                try:
+                    return int(raw_si) == seg_k
+                except (TypeError, ValueError):
+                    pass
+            return sid_counts.get(seg_sid, 0) <= 1 or last_idx_for_sid.get(seg_sid) == seg_k
+
         for idx, seg in enumerate(segs):
             sid = str(seg.get("id", ""))
             st = float(seg["start"])
@@ -2545,7 +2559,7 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
             header_banners = [b for b in b_list if _is_header_banner_text(b.get("text") or b.get("phrase"))]
             phrase_banners = [b for b in b_list if not _is_header_banner_text(b.get("text") or b.get("phrase"))]
 
-            plan_seg_marks = [m for m in marks if isinstance(m, dict) and str(m.get("segment") or "") == sid]
+            plan_seg_marks = [m for m in marks if _mark_belongs_to_idx(m, sid, idx)]
             inline_seg_marks = [m for m in seg["marks"] if isinstance(m, dict)] if isinstance(seg.get("marks"), list) else []
             seg_marks = plan_seg_marks + inline_seg_marks
             wrong_marks = [m for m in seg_marks if _norm_mark_kind(m.get("type")) == "wrong"]
@@ -2808,6 +2822,7 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
                     new_m = {
                         "type": "wrong",
                         "segment": sid,
+                        "seg_index": idx,
                         "at": fallback_anchor_at if matched_end is None else beat_at,
                         "duration": beat_dur,
                         "style": wrong_style,
@@ -2864,6 +2879,7 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
                     new_rm: Dict[str, Any] = {
                         "type": "right",
                         "segment": sid,
+                        "seg_index": idx,
                         "at": beat_at,
                         "duration": beat_dur,
                     }
@@ -3049,6 +3065,28 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
                 elif existing_hold > 0.0 and not seg.get("hold_src"):
                     seg["hold_tail"] = 0.0
                     changed += 1
+
+        if isinstance(plan.get("marks"), list):
+            dedup_marks: List[Dict[str, Any]] = []
+            seen_mkeys: set = set()
+            for m_item in plan["marks"]:
+                if not isinstance(m_item, dict):
+                    continue
+                raw_si = m_item.get("seg_index")
+                si_k = int(raw_si) if raw_si is not None else None
+                mkey = (
+                    str(m_item.get("segment") or "").strip(),
+                    si_k,
+                    _norm_mark_kind(m_item.get("type")) or str(m_item.get("type") or "wrong").strip().lower(),
+                    round(float(m_item.get("at", 0.0) or 0.0), 2),
+                    str(m_item.get("style") or "").strip().lower(),
+                )
+                if mkey not in seen_mkeys:
+                    seen_mkeys.add(mkey)
+                    dedup_marks.append(m_item)
+            if len(dedup_marks) != len(plan["marks"]):
+                changed += len(plan["marks"]) - len(dedup_marks)
+                plan["marks"] = dedup_marks
 
         return changed
     finally:
@@ -4456,7 +4494,7 @@ def snap_cuts(plan: Dict[str, Any]) -> int:
     from prepare import words_in_silence
 
     moved = 0
-    for s in plan.get("segments", []):
+    for seg_i, s in enumerate(plan.get("segments", [])):
         if not isinstance(s, dict) or "start" not in s or "end" not in s:
             continue
         if _segment_is_muted(s) or _segment_is_beat(s):
@@ -4535,8 +4573,11 @@ def snap_cuts(plan: Dict[str, Any]) -> int:
                         break
                     if new != round(t, 2) and (local_db is None or min_db < local_db - 2.0):
                         if (key == "start" and new < other - 0.05) or (key == "end" and new > other + 0.05):
+                            old_v = float(s[key])
                             s[key] = new
                             moved += 1
+                            if key == "start":
+                                _shift_seg_relative_cues(s, round(new - old_v, 4), plan=plan, seg_idx=seg_i)
                     snapped = True
                     break
             if snapped:
@@ -4563,8 +4604,10 @@ def snap_cuts(plan: Dict[str, Any]) -> int:
                         if new <= round(t, 2) and new < other - 0.05:
                             if first_live_start is None or new <= round(first_live_start - 0.04, 2) or new < round(t, 2):
                                 if new != round(t, 2):
+                                    old_v = float(s[key])
                                     s[key] = new
                                     moved += 1
+                                    _shift_seg_relative_cues(s, round(new - old_v, 4), plan=plan, seg_idx=seg_i)
                     break
                 if key == "end" and dist_b <= EDGE_GRAZE_MAX_SEC:
                     next_start = float(ws[idx_w + 1]["start"]) if idx_w + 1 < len(ws) else dur_clip
@@ -4675,7 +4718,7 @@ def protect_tails(plan: Dict[str, Any]) -> int:
 
     moved = 0
     cache: Dict[str, List[Tuple[float, float]]] = {}
-    for s in plan.get("segments", []):
+    for seg_i, s in enumerate(plan.get("segments", [])):
         if not isinstance(s, dict) or "start" not in s or "end" not in s:
             continue
         if _segment_is_muted(s) or _segment_is_beat(s):
@@ -4818,17 +4861,39 @@ def protect_tails(plan: Dict[str, Any]) -> int:
                     max_start_guard = max(limit, w_start - 0.04)
                     target = round(max(min(onset - JOIN_MIN_HEAD_CUSHION_SEC, max_start_guard), limit), 2)
                     if target < st - 0.01 and float(s["end"]) - target > 0.1:
+                        delta_s = round(target - st, 4)
                         s["start"] = target
+                        _shift_seg_relative_cues(s, delta_s, plan=plan, seg_idx=seg_i)
                         moved += 1
                 elif st > w_start - 0.04 and limit <= w_start - 0.04:
                     target = round(max(limit, w_start - 0.04), 2)
                     if target < st - 0.01 and float(s["end"]) - target > 0.1:
+                        delta_s = round(target - st, 4)
                         s["start"] = target
+                        _shift_seg_relative_cues(s, delta_s, plan=plan, seg_idx=seg_i)
                         moved += 1
     return moved
 
 
-def _shift_seg_relative_cues(seg: Dict[str, Any], delta_start: float, plan: Optional[Dict[str, Any]] = None) -> None:
+def _item_matches_segment(it: Dict[str, Any], sid: str, seg_idx: Optional[int] = None) -> bool:
+    """Return True when a top-level plan cue belongs to `(sid, seg_idx)`, honoring explicit `seg_index`."""
+    if not isinstance(it, dict):
+        return False
+    raw_si = it.get("seg_index")
+    if seg_idx is not None and raw_si is not None:
+        try:
+            return int(raw_si) == int(seg_idx)
+        except (TypeError, ValueError):
+            pass
+    return bool(sid) and str(it.get("segment") or "") == sid
+
+
+def _shift_seg_relative_cues(
+    seg: Dict[str, Any],
+    delta_start: float,
+    plan: Optional[Dict[str, Any]] = None,
+    seg_idx: Optional[int] = None,
+) -> None:
     """Shift segment-relative `at` / `@t` / `audio_end` / `zoom_at` timestamps when `seg['start']` advances by `+delta_start` seconds."""
     if abs(delta_start) < 1e-6:
         return
@@ -4879,7 +4944,7 @@ def _shift_seg_relative_cues(seg: Dict[str, Any], delta_start: float, plan: Opti
             ):
                 try:
                     new_dur = round(max(0.10, float(it_nxt["at"]) - float(it_cur["at"])), 3)
-                    it_cur["duration"] = min(round(orig_cur_dur, 3), new_dur)
+                    it_cur["duration"] = new_dur if delta_start < 0 else min(round(orig_cur_dur, 3), new_dur)
                 except (TypeError, ValueError):
                     pass
     if plan is not None and sid:
@@ -4887,7 +4952,7 @@ def _shift_seg_relative_cues(seg: Dict[str, Any], delta_start: float, plan: Opti
             items = plan.get(key)
             if isinstance(items, list):
                 for it in items:
-                    if isinstance(it, dict) and str(it.get("segment") or "") == sid and it.get("at") is not None:
+                    if _item_matches_segment(it, sid, seg_idx=seg_idx) and it.get("at") is not None:
                         try:
                             orig_at = float(it["at"])
                             it["at"] = 0.0 if orig_at <= 0.05 else round(max(0.0, orig_at - delta_start), 3)
@@ -4918,13 +4983,13 @@ def _shift_seg_relative_cues(seg: Dict[str, Any], delta_start: float, plan: Opti
         seg["zoom"] = re.sub(r"@(\d+(?:\.\d+)?)", _repl, zoom_val)
 
 
-def _seg_marks_list(seg: Dict[str, Any], plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _seg_marks_list(seg: Dict[str, Any], plan: Dict[str, Any], seg_idx: Optional[int] = None) -> List[Dict[str, Any]]:
     sid = str(seg.get("id") or "")
     out: List[Dict[str, Any]] = []
     if isinstance(seg.get("marks"), list):
         out.extend(m for m in seg["marks"] if isinstance(m, dict))
     if sid and isinstance(plan.get("marks"), list):
-        out.extend(m for m in plan["marks"] if isinstance(m, dict) and str(m.get("segment") or "") == sid)
+        out.extend(m for m in plan["marks"] if _item_matches_segment(m, sid, seg_idx=seg_idx))
     return out
 
 
@@ -5022,14 +5087,14 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
             "word_max_start": word_max_start,
         }
 
-    def _can_trim_tail(seg: Dict[str, Any], st: float, en: float) -> Tuple[bool, float]:
+    def _can_trim_tail(seg: Dict[str, Any], st: float, en: float, seg_idx: Optional[int] = None) -> Tuple[bool, float]:
         if _segment_hold_tail(seg) > 0.01:
             return False, en
         if seg.get("audio_end") is not None and _effective_audio_end_src(seg, st, en) < en - 0.05:
             return False, en
         seg_dur = en - st
         min_keep_end = st + 0.16
-        for m in _seg_marks_list(seg, plan):
+        for m in _seg_marks_list(seg, plan, seg_idx=seg_idx):
             m_at = float(m.get("at", 0.0) or 0.0)
             m_dur = float(m.get("duration", POST_WORD_BEAT_DURATION) or POST_WORD_BEAT_DURATION)
             if m_at + m_dur >= seg_dur - 0.25:
@@ -5046,8 +5111,8 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
                         pass
         return True, min_keep_end
 
-    def _can_trim_head(seg: Dict[str, Any]) -> bool:
-        for m in _seg_marks_list(seg, plan):
+    def _can_trim_head(seg: Dict[str, Any], seg_idx: Optional[int] = None) -> bool:
+        for m in _seg_marks_list(seg, plan, seg_idx=seg_idx):
             m_at = float(m.get("at", 1.0) or 0.0)
             if 0.05 < m_at < 0.15:
                 return False
@@ -5087,7 +5152,12 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
                     pass
         return True
 
-    def _apply_head_trim(seg: Dict[str, Any], trim_sec: float, max_start: Optional[float] = None) -> bool:
+    def _apply_head_trim(
+        seg: Dict[str, Any],
+        trim_sec: float,
+        max_start: Optional[float] = None,
+        seg_idx: Optional[int] = None,
+    ) -> bool:
         if trim_sec <= 0.01:
             return False
         cur_start = float(seg["start"])
@@ -5119,14 +5189,14 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
                         peer["idle_span"] = [ip0_new, round(ip1, 3)]
                 except (TypeError, ValueError):
                     pass
-        _shift_seg_relative_cues(seg, actual_dt, plan=plan)
+        _shift_seg_relative_cues(seg, actual_dt, plan=plan, seg_idx=seg_idx)
         return True
 
     tightened = 0
 
     # 1) Hook opening: avoid >100 ms silent lag before the very first spoken cut
     first_ac = _seg_acoustics(segs[0])
-    if first_ac is not None and _can_trim_head(segs[0]):
+    if first_ac is not None and _can_trim_head(segs[0], seg_idx=0):
         sil_head0 = max(0.0, first_ac["first_voiced"] - first_ac["st"])
         if sil_head0 > 0.10:
             safe_start0 = min(
@@ -5134,7 +5204,7 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
                 first_ac["word_max_start"],
             )
             trim0 = min(sil_head0 - 0.05, max(0.0, safe_start0 - first_ac["st"]))
-            if _apply_head_trim(segs[0], trim0, max_start=safe_start0):
+            if _apply_head_trim(segs[0], trim0, max_start=safe_start0, seg_idx=0):
                 tightened += 1
 
     # 2) Every spoken-to-spoken inter-sentence join (and head-trim seg_b after beat/muted/mark-tail seg_a)
@@ -5145,7 +5215,7 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
         if ac_b is None:
             continue
 
-        can_b = _can_trim_head(seg_b)
+        can_b = _can_trim_head(seg_b, seg_idx=i + 1)
         if ac_a is None:
             if can_b:
                 sil_head_b = max(0.0, ac_b["first_voiced"] - ac_b["st"])
@@ -5155,11 +5225,11 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
                         ac_b["word_max_start"],
                     )
                     trim_b = min(max(0.0, sil_head_b - 0.045), max(0.0, safe_max_start_b - ac_b["st"]))
-                    if _apply_head_trim(seg_b, trim_b, max_start=safe_max_start_b):
+                    if _apply_head_trim(seg_b, trim_b, max_start=safe_max_start_b, seg_idx=i + 1):
                         tightened += 1
             continue
 
-        can_a, min_eff_end_a = _can_trim_tail(seg_a, ac_a["st"], ac_a["en"])
+        can_a, min_eff_end_a = _can_trim_tail(seg_a, ac_a["st"], ac_a["en"], seg_idx=i)
         if not can_a:
             if can_b:
                 sil_head_b = max(0.0, ac_b["first_voiced"] - ac_b["st"])
@@ -5169,7 +5239,7 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
                         ac_b["word_max_start"],
                     )
                     trim_b = min(max(0.0, sil_head_b - 0.045), max(0.0, safe_max_start_b - ac_b["st"]))
-                    if _apply_head_trim(seg_b, trim_b, max_start=safe_max_start_b):
+                    if _apply_head_trim(seg_b, trim_b, max_start=safe_max_start_b, seg_idx=i + 1):
                         tightened += 1
             continue
 
@@ -5228,7 +5298,7 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
         moved_pair = False
         if _apply_tail_trim(seg_a, trim_a, min_end=safe_min_end_a):
             moved_pair = True
-        if _apply_head_trim(seg_b, trim_b, max_start=safe_max_start_b):
+        if _apply_head_trim(seg_b, trim_b, max_start=safe_max_start_b, seg_idx=i + 1):
             moved_pair = True
         if moved_pair:
             tightened += 1
@@ -5236,7 +5306,7 @@ def tighten_joins(plan: Dict[str, Any]) -> int:
     # 3) Final reel ending: trim excessive trailing silence (>180 ms) down to ~110 ms if no mark/hold beat
     last_ac = _seg_acoustics(segs[-1])
     if last_ac is not None:
-        can_last, min_eff_last = _can_trim_tail(segs[-1], last_ac["st"], last_ac["en"])
+        can_last, min_eff_last = _can_trim_tail(segs[-1], last_ac["st"], last_ac["en"], seg_idx=len(segs) - 1)
         sil_tail_last = max(0.0, last_ac["en"] - last_ac["last_voiced"])
         if can_last and sil_tail_last > 0.18:
             safe_end_last = max(

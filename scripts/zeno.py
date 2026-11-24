@@ -1054,6 +1054,103 @@ def _deliver_package(plan_path: Path, name: str) -> Tuple[Path, List[str]]:
     return folder, files
 
 
+def _scan_cached_silences_pause_risks(
+    plan: Dict[str, Any],
+    work_dir: Path,
+    threshold: float = 0.48,
+) -> List[str]:
+    """Scan cached `silences.json` for long pauses inside active `[st, en_audio]` cut windows."""
+    import verify
+
+    notes: List[str] = []
+    segs = plan.get("segments") or []
+    if not segs:
+        return notes
+
+    plan_ctx = dict(plan)
+    plan_ctx.setdefault("_work_dir", str(work_dir))
+    accepted_ids = verify._read_accepted_decisions(plan_ctx)
+    all_plan_marks = plan.get("marks") or []
+
+    for i, s in enumerate(segs):
+        if not isinstance(s, dict) or "start" not in s or "end" not in s:
+            continue
+        if verify._segment_is_muted(s) or verify._segment_is_beat(s):
+            continue
+        sid = str(s.get("id") or f"S{i + 1}")
+        if sid in accepted_ids or (re.search(r"\d[a-z]+$", sid) and re.sub(r"[a-z]+$", "", sid) in accepted_ids):
+            continue
+        wdir = verify._resolve_clip_cache_dir(s.get("src", ""), plan_ctx)
+        if verify._segment_is_silent_reaction(s, wdir):
+            continue
+        sil_path = wdir / "silences.json"
+        if not sil_path.is_file():
+            continue
+        try:
+            st = float(s["start"])
+            en = float(s["end"])
+        except (TypeError, ValueError):
+            continue
+        spd = verify._segment_speed(s)
+        play_dur = verify._segment_play_duration(s)
+        eff_dur = verify._segment_duration(s)
+        en_audio = en
+        if s.get("audio_end") is not None and not isinstance(s.get("audio_end"), bool):
+            try:
+                ae_val = float(s["audio_end"])
+                if ae_val > 0.0:
+                    en_audio = min(en, st + ae_val * spd)
+            except (TypeError, ValueError):
+                pass
+
+        seg_marks = [m for m in (s.get("marks") or []) if isinstance(m, dict)]
+        for mk in all_plan_marks:
+            if not isinstance(mk, dict):
+                continue
+            raw_si = mk.get("seg_index")
+            if raw_si is not None:
+                try:
+                    if int(raw_si) == i:
+                        seg_marks.append(mk)
+                    continue
+                except (TypeError, ValueError):
+                    pass
+            if str(mk.get("segment") or "") == sid:
+                seg_marks.append(mk)
+
+        clip_mark_holds: List[Tuple[float, float]] = []
+        for mk in seg_marks:
+            m_at = float(mk.get("at", max(0.0, eff_dur - 0.60)))
+            m_dur = float(mk.get("duration", 0.56) or 0.56)
+            hold_rel_s = max(0.0, m_at - 0.15)
+            clip_hold_s = min(en, verify._seg_to_src_time(s, hold_rel_s))
+            clip_hold_e = en if (m_at + m_dur >= play_dur - 0.45) else min(en, verify._seg_to_src_time(s, m_at + m_dur + 0.35))
+            clip_mark_holds.append((clip_hold_s, clip_hold_e))
+
+        seg_thresh = (threshold / max(0.25, spd)) if spd < 1.0 else threshold
+        stem = Path(str(s.get("src", ""))).stem
+        try:
+            raw_sils = common.read_json(sil_path)
+            if not isinstance(raw_sils, list):
+                continue
+            merged: List[Dict[str, float]] = []
+            for sl in sorted(raw_sils, key=lambda x: float(x["start"])):
+                s0, s1 = float(sl["start"]), float(sl["end"])
+                if merged and s0 - merged[-1]["end"] <= 0.08:
+                    merged[-1]["end"] = max(merged[-1]["end"], s1)
+                else:
+                    merged.append({"start": s0, "end": s1})
+            for sl in merged:
+                ov_s = max(st + 0.06, sl["start"])
+                ov_e = min(en_audio - 0.06, sl["end"])
+                for rem_s, rem_e in verify._subtract_intervals(ov_s, ov_e, clip_mark_holds):
+                    if (rem_e - rem_s) > seg_thresh:
+                        notes.append(f"{sid}: {rem_e - rem_s:.2f}s pause at {rem_s:.2f}-{rem_e:.2f}s in {stem}")
+        except Exception:
+            pass
+    return notes
+
+
 def run_execute_and_deliver(
     plan_path: Path,
     name: str = "",
@@ -1103,12 +1200,18 @@ def run_execute_and_deliver(
     try:
         tight_notes = script_order.tight_report(plan)
         pause_risks = []
+        seen_pr = set()
         for ln in tight_notes:
             if "pause between" not in ln:
                 continue
             m_p = re.search(r":\s*(\d+(?:\.\d+)?)s\s+pause between", ln)
-            if m_p and float(m_p.group(1)) >= 0.48:
+            if m_p and float(m_p.group(1)) >= 0.48 and ln not in seen_pr:
+                seen_pr.add(ln)
                 pause_risks.append(ln)
+        for sln in _scan_cached_silences_pause_risks(plan, p_path.parent):
+            if sln not in seen_pr:
+                seen_pr.add(sln)
+                pause_risks.append(sln)
         if pause_risks:
             print(f"[PAUSE RISK] {len(pause_risks)} internal pause(s) >=0.48s may fail deep QC cuts check:", flush=True)
             for pr_ln in pause_risks[:4]:

@@ -644,13 +644,31 @@ def parse_edl(path_or_text: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
     speakers: Dict[str, Any] = {}
     segments: List[Dict[str, Any]] = []
     marks: List[Dict[str, Any]] = []
+    seen_marks: set = set()
     sfx_list: List[Dict[str, Any]] = []
     seen_sfx: set = set()
     src_dir: str = ""
 
-    def _append_sfx_dedup(item: Dict[str, Any]) -> None:
+    def _append_mark_dedup(item: Dict[str, Any]) -> None:
+        raw_si = item.get("seg_index")
+        si_norm = int(raw_si) if raw_si is not None else None
         key = (
             str(item.get("segment") or "").strip(),
+            si_norm,
+            str(item.get("type") or "wrong").strip().lower(),
+            round(float(item.get("at", 0.0) or 0.0), 2),
+            str(item.get("style") or "").strip().lower(),
+        )
+        if key not in seen_marks:
+            seen_marks.add(key)
+            marks.append(item)
+
+    def _append_sfx_dedup(item: Dict[str, Any]) -> None:
+        raw_si = item.get("seg_index")
+        si_norm = int(raw_si) if raw_si is not None else None
+        key = (
+            str(item.get("segment") or "").strip(),
+            si_norm,
             str(item.get("file") or "").strip().lower(),
             round(float(item.get("at", 0.0) or 0.0), 2),
         )
@@ -947,7 +965,7 @@ def parse_edl(path_or_text: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
                         elif mk == "style":
                             m_entry_s["style"] = mv
                 if m_entry_s["segment"]:
-                    marks.append(m_entry_s)
+                    _append_mark_dedup(m_entry_s)
             continue
 
         # 3. Segment Line or Pipe-Delimited Table Row (`# MARKS:`, `# SFX:`, `# SEGMENTS:`)
@@ -986,7 +1004,7 @@ def parse_edl(path_or_text: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
                 if len(pcols) >= 8 and pcols[7]:
                     gv_m = float(_unquote(pcols[7]).lower().rstrip("db").strip())
                     m_row["sfx_gain_db"] = int(gv_m) if gv_m.is_integer() else gv_m
-                marks.append(m_row)
+                _append_mark_dedup(m_row)
                 continue
 
             if (
@@ -1259,7 +1277,8 @@ def parse_edl(path_or_text: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
                             m_entry["style"] = mv
                     elif mp_u in ("center", "top-right", "top-left", "top-center", "bottom-right", "bottom-left"):
                         m_entry["position"] = mp_u
-                marks.append(m_entry)
+                m_entry["seg_index"] = len(segments)
+                _append_mark_dedup(m_entry)
 
             elif tok_low.startswith("chat:"):
                 rest_c = tok[5:]
@@ -1290,6 +1309,7 @@ def parse_edl(path_or_text: Union[str, Path, Dict[str, Any]]) -> Dict[str, Any]:
                 if len(s_parts) >= 3 and s_parts[2]:
                     gv = float(_unquote(s_parts[2]).lower().rstrip("db").strip())
                     s_item["gain_db"] = int(gv) if gv.is_integer() else gv
+                s_item["seg_index"] = len(segments)
                 _append_sfx_dedup(s_item)
 
             elif tok_low.startswith(("banner:", "stop:")):
@@ -1585,15 +1605,113 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
     if lines:
         lines.append("")
 
-    marks_by_seg: Dict[str, List[Dict[str, Any]]] = {}
-    for m in plan_dict.get("marks") or []:
-        sid = str(m.get("segment") or "")
-        marks_by_seg.setdefault(sid, []).append(m)
+    seg_indices_by_sid: Dict[str, List[int]] = {}
+    seg_play_durs: List[float] = []
+    for idx_s, sg in enumerate(segs):
+        sid_s = str(sg.get("id") or f"S{idx_s + 1}")
+        seg_indices_by_sid.setdefault(sid_s, []).append(idx_s)
+        try:
+            spd_s = max(0.25, float(sg.get("speed") or 1.0))
+        except (TypeError, ValueError):
+            spd_s = 1.0
+        try:
+            base_d = max(0.0, (float(sg.get("end", 0.0)) - float(sg.get("start", 0.0))) / spd_s)
+        except (TypeError, ValueError):
+            base_d = 0.0
+        try:
+            hold_d = max(0.0, float(sg.get("hold_tail") if sg.get("hold_tail") is not None else (sg.get("hold") or 0.0)))
+        except (TypeError, ValueError):
+            hold_d = 0.0
+        seg_play_durs.append(base_d + hold_d)
 
-    sfx_by_seg: Dict[str, List[Dict[str, Any]]] = {}
+    def _pick_target_seg_idx(item: Dict[str, Any], sid: str, *, prefer_first: bool = False) -> Optional[int]:
+        raw_si = item.get("seg_index")
+        if raw_si is not None:
+            try:
+                si = int(raw_si)
+                if 0 <= si < len(segs):
+                    sg_sid = str(segs[si].get("id") or f"S{si + 1}")
+                    if not sid or sg_sid == sid:
+                        return si
+            except (TypeError, ValueError):
+                pass
+        idxs = seg_indices_by_sid.get(sid, [])
+        if not idxs:
+            return None
+        if len(idxs) == 1:
+            return idxs[0]
+        try:
+            at_v = float(item.get("at", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            at_v = 0.0
+        if prefer_first and at_v <= 0.10:
+            return idxs[0]
+        matching = [k for k in idxs if -0.05 <= at_v <= seg_play_durs[k] + 0.12]
+        if matching:
+            return matching[0] if prefer_first else matching[-1]
+        return idxs[0] if prefer_first else idxs[-1]
+
+    marks_by_idx: Dict[int, List[Dict[str, Any]]] = {}
+    seen_fmt_marks: set = set()
+    for m in plan_dict.get("marks") or []:
+        if not isinstance(m, dict):
+            continue
+        sid = str(m.get("segment") or "")
+        t_idx = _pick_target_seg_idx(m, sid, prefer_first=False)
+        if t_idx is None:
+            continue
+        m_key = (
+            t_idx,
+            str(m.get("type") or "wrong").strip().lower(),
+            round(float(m.get("at", 0.0) or 0.0), 2),
+            str(m.get("style") or "").strip().lower(),
+        )
+        if m_key not in seen_fmt_marks:
+            seen_fmt_marks.add(m_key)
+            marks_by_idx.setdefault(t_idx, []).append(m)
+    for i_sg, sg in enumerate(segs):
+        for m in sg.get("marks") or []:
+            if not isinstance(m, dict):
+                continue
+            m_key = (
+                i_sg,
+                str(m.get("type") or "wrong").strip().lower(),
+                round(float(m.get("at", 0.0) or 0.0), 2),
+                str(m.get("style") or "").strip().lower(),
+            )
+            if m_key not in seen_fmt_marks:
+                seen_fmt_marks.add(m_key)
+                marks_by_idx.setdefault(i_sg, []).append(m)
+
+    sfx_by_idx: Dict[int, List[Dict[str, Any]]] = {}
+    seen_fmt_sfx: set = set()
     for e in plan_dict.get("sfx") or []:
+        if not isinstance(e, dict):
+            continue
         sid = str(e.get("segment") or "")
-        sfx_by_seg.setdefault(sid, []).append(e)
+        t_idx = _pick_target_seg_idx(e, sid, prefer_first=True)
+        if t_idx is None:
+            continue
+        s_key = (
+            t_idx,
+            str(e.get("file") or "whoosh.wav").strip().lower(),
+            round(float(e.get("at", 0.0) or 0.0), 2),
+        )
+        if s_key not in seen_fmt_sfx:
+            seen_fmt_sfx.add(s_key)
+            sfx_by_idx.setdefault(t_idx, []).append(e)
+    for i_sg, sg in enumerate(segs):
+        for e in sg.get("sfx") or []:
+            if not isinstance(e, dict):
+                continue
+            s_key = (
+                i_sg,
+                str(e.get("file") or "whoosh.wav").strip().lower(),
+                round(float(e.get("at", 0.0) or 0.0), 2),
+            )
+            if s_key not in seen_fmt_sfx:
+                seen_fmt_sfx.add(s_key)
+                sfx_by_idx.setdefault(i_sg, []).append(e)
 
     def _strip_src_dir(p_str: str) -> str:
         norm = str(p_str or "").replace("\\", "/")
@@ -1857,7 +1975,7 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
                     escaped_fc = fc.strip().replace("\\", "\\\\").replace('"', '\\"')
                     toks.append(f'card:"{escaped_fc}"')
 
-        for m in marks_by_seg.get(sid, []):
+        for m in marks_by_idx.get(i, []):
             m_type = m.get("type", "wrong")
             m_at = _fmt_num(float(m.get("at", 0.0)))
             if m.get("duration") is not None and abs(float(m["duration"]) - DEFAULT_MARK_DURATION) > 1e-6:
@@ -1875,7 +1993,7 @@ def format_edl(plan_dict: Dict[str, Any]) -> str:
                 m_tok += f"@style={m['style']}"
             toks.append(m_tok)
 
-        for e in sfx_by_seg.get(sid, []):
+        for e in sfx_by_idx.get(i, []):
             ef = _quote_if_needed(str(e.get("file") or "whoosh.wav"))
             eat = _fmt_num(float(e.get("at", 0.0)))
             if e.get("gain_db") is not None:
