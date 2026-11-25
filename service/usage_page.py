@@ -293,7 +293,8 @@ const PRICES = [  // [model match, USD per million tokens: input, cached read, c
   ['opus-4-5', 5, 0.5, 6.25, 25], ['opus-4-6', 5, 0.5, 6.25, 25], ['opus-4-7', 5, 0.5, 6.25, 25], ['opus-4-8', 5, 0.5, 6.25, 25], ['opus-4-9', 5, 0.5, 6.25, 25],
   ['opus-4', 15, 1.5, 18.75, 75],
   ['sonnet-5-5', 2, 0.1, 2.5, 10], ['sonnet-5', 2, 0.2, 2.5, 10], ['sonnet-4', 3, 0.3, 3.75, 15],
-  ['haiku-5', 0.1, 0.01, 0.125, 0.5], ['haiku-4', 1, 0.1, 1.25, 5], ['fable', 10, 0.25, 12.5, 50]];
+  ['haiku-5', 0.1, 0.01, 0.125, 0.5], ['haiku-4', 1, 0.1, 1.25, 5], ['fable', 10, 0.25, 12.5, 50],
+  ['gemini-4-neon', 3, 0.15, 3.75, 15], ['gemini-4-hydrogen', 1.5, 0.075, 1.875, 7.5]];
 function normModel(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }

@@ -25,6 +25,8 @@ RATES: dict[str, tuple[float, float, float, float]] = {
     "claude-haiku-4-5": (1.0, 0.10, 1.25, 5.0),
     "haiku": (1.0, 0.10, 1.25, 5.0),
     "claude-fable": (10.0, 0.25, 12.50, 50.0),
+    "gemini-4-neon": (3.0, 0.15, 3.75, 15.0),
+    "gemini-4-hydrogen": (1.5, 0.075, 1.875, 7.5),
 }
 RATE_DATE = "2026-11-16"
 RATE_SOURCE = "https://developers.openai.com/api/docs/models/gpt-6.1-sol ; https://docs.anthropic.com/en/docs/about-claude/pricing"
@@ -53,6 +55,9 @@ _PREFIX_RATES: tuple[tuple[str, tuple[float, float, float, float]], ...] = (
     ("claude-haiku-4-5", (1.0, 0.10, 1.25, 5.0)),
     ("claude-haiku-4.5", (1.0, 0.10, 1.25, 5.0)),
     ("claude-fable", (10.0, 0.25, 12.50, 50.0)),
+    # Antigravity logs effort-suffixed names, e.g. gemini-4-neon-xhigh / gemini-4-hydrogen-high.
+    ("gemini-4-neon", (3.0, 0.15, 3.75, 15.0)),
+    ("gemini-4-hydrogen", (1.5, 0.075, 1.875, 7.5)),
 )
 
 

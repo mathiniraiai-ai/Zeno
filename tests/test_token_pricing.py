@@ -36,6 +36,12 @@ class TestTokenPricing(unittest.TestCase):
             long_ = token_cost.estimate({"token_precision": "exact", "requests": [_req(m, inp=200_000, cached=100_000, out=10_000)]})
             self.assertAlmostEqual(long_["usd"], (200_000 * 2 + 100_000 * 0.1) * 2 / 1e6 + 10_000 * 10 * 1.5 / 1e6)
 
+    def test_gemini4_and_effort_suffixed_names(self) -> None:
+        r = token_cost._resolve_rates
+        self.assertEqual(r("gemini-4-neon-xhigh"), (3.0, 0.15, 3.75, 15.0))
+        self.assertEqual(r("gemini-4-hydrogen-high"), (1.5, 0.075, 1.875, 7.5))
+        self.assertEqual(r("claude-sonnet-5-5-medium"), (2.0, 0.10, 2.50, 10.0))
+
     def test_cost_math_buckets(self) -> None:
         agent = {"token_precision": "exact",
                  "requests": [_req("claude-sonnet-5-5", inp=1_000_000, cached=2_000_000, write=1_000_000, out=500_000)]}
