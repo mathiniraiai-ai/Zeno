@@ -51,6 +51,7 @@ from common import (
     clip_work_dir,
     ffmpeg,
     ffmpeg_encode,
+    hardware_encoder,
     probe,
     read_json,
     resolve,
@@ -4093,7 +4094,8 @@ def render_segment_layout(
     args, exact, _ = build_segment_ffmpeg_args(seg, plan, W, H, fps, out, draft)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     use_hw = bool((plan or {}).get("use_hw_accel", True))
-    ffmpeg_encode(*args, draft=draft, hardware=use_hw, hw_decode=False, allow_bframes=False)
+    use_hw_dec = use_hw and (hardware_encoder() == "h264_nvenc")
+    ffmpeg_encode(*args, draft=draft, hardware=use_hw, hw_decode=use_hw_dec, allow_bframes=False)
     return exact
 
 

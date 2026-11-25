@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 import time
 import unicodedata
 from difflib import SequenceMatcher
@@ -1329,28 +1330,32 @@ EditFlowAcousticPipeline = ZenoAcousticPipeline
 ScriptCutAcousticPipeline = ZenoAcousticPipeline
 
 _shared_pipeline: Optional[ZenoAcousticPipeline] = None
+_PIPELINE_LOCK = threading.Lock()
 
 
 def get_shared_pipeline(device: Optional[str] = None) -> ZenoAcousticPipeline:
     """Return the shared singleton `ZenoAcousticPipeline` instance."""
     global _shared_pipeline
-    if _shared_pipeline is None:
-        _shared_pipeline = ZenoAcousticPipeline(device=device)
-    return _shared_pipeline
+    with _PIPELINE_LOCK:
+        if _shared_pipeline is None:
+            _shared_pipeline = ZenoAcousticPipeline(device=device)
+        return _shared_pipeline
 
 
 def reset_shared_pipeline() -> None:
     """Reset the shared pipeline singleton (e.g., to reinitialize on CPU after a GPU error)."""
     global _shared_pipeline
-    if _shared_pipeline is not None:
-        try:
-            _shared_pipeline.unload_model()
-        except Exception:
-            pass
-    _shared_pipeline = None
+    with _PIPELINE_LOCK:
+        if _shared_pipeline is not None:
+            try:
+                _shared_pipeline.unload_model()
+            except Exception:
+                pass
+        _shared_pipeline = None
 
 
 def unload_shared_pipeline() -> None:
     """Unload the shared acoustic model weights if already instantiated (no-op when never loaded)."""
-    if _shared_pipeline is not None:
-        _shared_pipeline.unload_model()
+    with _PIPELINE_LOCK:
+        if _shared_pipeline is not None:
+            _shared_pipeline.unload_model()

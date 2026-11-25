@@ -137,7 +137,7 @@ def load_dotenv(dotenv_path: Optional[Path | str] = None, override: bool = False
 load_dotenv()
 
 # CPU & Thermal Governor: prevent OpenMP / Accelerate / OpenBLAS / PyTorch / FFmpeg from spawning unbounded threads
-_DEFAULT_THREADS = min(max(4, os.cpu_count() or 4), 8)
+_DEFAULT_THREADS = min(max(4, os.cpu_count() or 4), 12)
 ZENO_MAX_THREADS = max(1, int(os.environ.get("ZENO_MAX_THREADS", str(_DEFAULT_THREADS)) or _DEFAULT_THREADS))
 for _thr_var in (
     "OMP_NUM_THREADS",
@@ -1058,6 +1058,18 @@ def gpu_report() -> Dict[str, str]:
             hint = "NVIDIA GPU detected with CPU PyTorch build; install CUDA PyTorch to enable GPU alignment"
         elif os.environ.get("ZENO_DEVICE", "auto").lower() == "cpu":
             hint = "ZENO_DEVICE=cpu forces CPU execution"
+        if device == "cpu" and IS_MAC and not hint:
+            try:
+                rosetta = subprocess.run(
+                    ["sysctl", "-n", "sysctl.proc_translated"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                ).stdout.strip()
+                if rosetta == "1":
+                    hint = "Running x64/Rosetta build on Apple Silicon — install the Zeno arm64 DMG to enable Apple MPS GPU (2-3x faster)"
+            except Exception:
+                pass
     except Exception:
         pass
     return {"device": device, "name": name, "encoder": hardware_encoder() or "libx264", "hint": hint}
@@ -1071,8 +1083,19 @@ _HW_CANDIDATES = {
 }
 
 
-def _probe_hw_encoder(cand: str, nvenc_presets: tuple[str, str] = ("p5", "p3")) -> bool:
-    v_args = hw_video_args(cand, crf=18, draft=False, bitrate_kbps=12000, nvenc_presets=nvenc_presets)
+def _probe_hw_encoder(
+    cand: str,
+    nvenc_presets: tuple[str, str] = ("p5", "p3"),
+    vt_prio_speed: bool = False,
+) -> bool:
+    v_args = hw_video_args(
+        cand,
+        crf=12 if vt_prio_speed else 18,
+        draft=False,
+        bitrate_kbps=12000,
+        nvenc_presets=nvenc_presets,
+        vt_prio_speed=vt_prio_speed,
+    )
     cmd = [
         str(FFMPEG),
         "-hide_banner",
@@ -1122,6 +1145,11 @@ def hardware_encoder() -> str:
                     if name:
                         break
                 elif _probe_hw_encoder(cand):
+                    if cand == "h264_videotoolbox":
+                        try:
+                            _HW_ENCODER["vt_prio_speed"] = bool(_probe_hw_encoder(cand, vt_prio_speed=True))
+                        except Exception:
+                            _HW_ENCODER["vt_prio_speed"] = False
                     name = cand
                     break
             except Exception:
@@ -1147,11 +1175,15 @@ def hw_video_args(
     nvenc_presets: Optional[tuple[str, str]] = None,
     allow_bframes: bool = True,
     gop: Optional[int] = None,
+    vt_prio_speed: Optional[bool] = None,
 ) -> list:
     """FFmpeg encoder flags matching `libx264 -crf <crf>` quality on the given hardware encoder."""
     q = 28 if draft else (14 if crf <= 14 else 19)
     if name == "h264_videotoolbox":
         vt = ["-c:v", name, "-b:v", "8M" if draft else (f"{bitrate_kbps}k" if bitrate_kbps else "16M"), "-allow_sw", "1"]
+        use_prio = _HW_ENCODER.get("vt_prio_speed", False) if vt_prio_speed is None else bool(vt_prio_speed)
+        if use_prio and (draft or crf <= 14):
+            vt.extend(["-prio_speed", "1"])
         if not allow_bframes:
             vt.extend(["-bf", "0"])
         if gop is not None:
@@ -1159,6 +1191,7 @@ def hw_video_args(
         return vt
     if name == "h264_nvenc":
         p_main, p_draft = nvenc_presets or _HW_ENCODER.get("nvenc_presets", ("p5", "p3"))
+        is_intermediate = (not draft) and crf <= 14
         if bitrate_kbps and not draft and bitrate_kbps > 20000:
             q_eff = min(q, 15)
             nv_cap: list = []
@@ -1170,7 +1203,7 @@ def hw_video_args(
         else:
             q_eff = q
             nv_cap = []
-        nv = ["-c:v", name, "-preset", p_draft if draft else p_main, "-rc", "vbr", "-cq", str(q_eff), "-b:v", "0"] + nv_cap
+        nv = ["-c:v", name, "-preset", p_draft if (draft or is_intermediate) else p_main, "-rc", "vbr", "-cq", str(q_eff), "-b:v", "0"] + nv_cap
         if not allow_bframes:
             nv.extend(["-bf", "0"])
         if gop is not None:

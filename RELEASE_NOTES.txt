@@ -1,1 +1,1 @@
-Zeno v3.0.6: 2-3x faster editing (full multi-thread CPU, parallel clip prep, parallel segment rendering & parallel sequential-decode Deep QC), Stop Saying fixes (peer duration loop fix, phrase-spanning banners without clip extension), and clean per-video Download folder replacement
+Zeno v3.0.7: M2/M5 & RTX 3060+ GPU turbo (thread-safe MPS/CUDA alignment lock without per-chunk GPU stalls, fast NVENC p3 + NVDEC decode & VideoToolbox prio_speed intermediate renders, GPU-encoded scrolling pages, 12-thread & 6-worker M5 scaling, and Rosetta arm64 warning)

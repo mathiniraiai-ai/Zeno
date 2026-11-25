@@ -1580,7 +1580,14 @@ def _main_with_queue(_render_q_stack: contextlib.ExitStack) -> None:
             return str(out_f), float(dur_val)
 
         tasks = list(unique_uncached.values())
-        max_auto = min(4, max(2, (os.cpu_count() or 4) // 2))
+        enc_name = common.hardware_encoder() or ""
+        cpu_n = os.cpu_count() or 4
+        if enc_name == "h264_nvenc":
+            max_auto = min(3, max(2, cpu_n // 2))
+        elif enc_name == "h264_videotoolbox":
+            max_auto = min(6, max(2, cpu_n // 2))
+        else:
+            max_auto = min(4, max(2, cpu_n // 2))
         seg_workers = max(1, min(int(os.environ.get("ZENO_RENDER_WORKERS", str(max_auto)) or str(max_auto)), len(tasks)))
         if cool_mode:
             seg_workers = 1

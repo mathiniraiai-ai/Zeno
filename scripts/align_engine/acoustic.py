@@ -11,6 +11,7 @@ import platform
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -310,6 +311,7 @@ class AcousticModel:
 
     def __init__(self, device: Optional[str] = None, use_fp16: Optional[bool] = None):
         self.torch_model = None
+        self._infer_lock = threading.RLock()
         self.device = device or _pick_device()
         self.thermal_profile = detect_thermal_profile(self.device)
         self._use_omniasr = True
@@ -459,7 +461,7 @@ class AcousticModel:
             or "mps" in str(self.device)
         ):
             try:
-                torch.set_num_threads(4)
+                torch.set_num_threads(min(max(4, os.cpu_count() or 4), 12))
             except Exception:
                 pass
 
@@ -477,92 +479,95 @@ class AcousticModel:
             time.sleep(5.0)
 
     def _ensure_model_loaded(self) -> None:
-        if self.torch_model is not None:
-            return
-        self._apply_thread_cap()
+        with self._infer_lock:
+            if self.torch_model is not None:
+                return
+            self._apply_thread_cap()
 
-        Wav2Vec2ForCTC = _ensure_ml_packages_imported()
+            Wav2Vec2ForCTC = _ensure_ml_packages_imported()
 
-        local_dir = self._ensure_local_omniasr_dir()
-        self._hf_source = local_dir
-        self._hf_load_kwargs = {"local_files_only": True}
+            local_dir = self._ensure_local_omniasr_dir()
+            self._hf_source = local_dir
+            self._hf_load_kwargs = {"local_files_only": True}
 
-        dtype_label = "fp16" if self.use_fp16 else "fp32"
-        print(
-            f"[Zeno Aligner] Loading {self._model_label} "
-            f"(Apache 2.0, {dtype_label}, device: {self.device}, thermal_guard: sensor)..."
-        )
-        model = Wav2Vec2ForCTC.from_pretrained(
-            self._hf_source,
-            low_cpu_mem_usage=True,
-            **self._hf_load_kwargs,
-        )
-
-        # Refresh vocab/config from the resolved model directory if needed, keeping bundled fallback.
-        self._init_omniasr_metadata()
-        if not self.dictionary:
-            from transformers import Wav2Vec2CTCTokenizer  # type: ignore[import-not-found]
-
-            tok = Wav2Vec2CTCTokenizer.from_pretrained(self._hf_source, **self._hf_load_kwargs)
-            self.dictionary = {str(k): int(v) for k, v in tok.get_vocab().items()}
-
-        pad_id = getattr(model.config, "pad_token_id", 0)
-        self.blank_id = int(pad_id) if pad_id is not None else 0
-
-        try:
-            self.torch_model = model.to(device=torch.device(self.device), dtype=self._torch_dtype)
-        except Exception as move_err:
+            dtype_label = "fp16" if self.use_fp16 else "fp32"
             print(
-                f"[Zeno Aligner] Device '{self.device}' ({dtype_label}) load failed ({move_err}); "
-                "falling back to CPU fp32.",
+                f"[Zeno Aligner] Loading {self._model_label} "
+                f"(Apache 2.0, {dtype_label}, device: {self.device}, thermal_guard: sensor)..."
+            )
+            model = Wav2Vec2ForCTC.from_pretrained(
+                self._hf_source,
+                low_cpu_mem_usage=True,
+                **self._hf_load_kwargs,
+            )
+
+            # Refresh vocab/config from the resolved model directory if needed, keeping bundled fallback.
+            self._init_omniasr_metadata()
+            if not self.dictionary:
+                from transformers import Wav2Vec2CTCTokenizer  # type: ignore[import-not-found]
+
+                tok = Wav2Vec2CTCTokenizer.from_pretrained(self._hf_source, **self._hf_load_kwargs)
+                self.dictionary = {str(k): int(v) for k, v in tok.get_vocab().items()}
+
+            pad_id = getattr(model.config, "pad_token_id", 0)
+            self.blank_id = int(pad_id) if pad_id is not None else 0
+
+            try:
+                self.torch_model = model.to(device=torch.device(self.device), dtype=self._torch_dtype)
+            except Exception as move_err:
+                print(
+                    f"[Zeno Aligner] Device '{self.device}' ({dtype_label}) load failed ({move_err}); "
+                    "falling back to CPU fp32.",
+                    file=sys.stderr,
+                )
+                self.device = "cpu"
+                self.use_fp16 = False
+                self._torch_dtype = torch.float32
+                self.thermal_profile = "cpu_safe"
+                self._apply_thread_cap()
+                self.torch_model = model.to(device=torch.device("cpu"), dtype=torch.float32)
+
+            self.torch_model.eval()
+            print(
+                f"[Zeno Aligner] Acoustic model ready "
+                f"(vocab size: {len(self.dictionary)}, blank_id: {self.blank_id})."
+            )
+
+    def unload_model(self) -> None:
+        """Unload PyTorch weights and release cached memory back to the OS."""
+        with self._infer_lock:
+            if self.torch_model is not None:
+                del self.torch_model
+                self.torch_model = None
+                _free_gpu_cache(self.device)
+                gc.collect()
+                try:
+                    libc = ctypes.CDLL("libc.so.6")
+                    libc.malloc_trim(0)
+                except Exception:
+                    pass
+                print("[Zeno Aligner] Alignment model unloaded.")
+
+    def _fallback_to_cpu_fp32(self, reason: str) -> None:
+        """Relocate loaded weights to CPU float32 after a GPU/MPS error or non-finite logits."""
+        with self._infer_lock:
+            if self.torch_model is None:
+                return
+            if self.device == "cpu" and self._torch_dtype == torch.float32:
+                return
+            print(
+                f"[Zeno Aligner] Device '{self.device}' ({self._torch_dtype}) failed ({reason}); "
+                "falling back to CPU float32.",
                 file=sys.stderr,
             )
+            _free_gpu_cache(self.device)
             self.device = "cpu"
             self.use_fp16 = False
             self._torch_dtype = torch.float32
             self.thermal_profile = "cpu_safe"
             self._apply_thread_cap()
-            self.torch_model = model.to(device=torch.device("cpu"), dtype=torch.float32)
-
-        self.torch_model.eval()
-        print(
-            f"[Zeno Aligner] Acoustic model ready "
-            f"(vocab size: {len(self.dictionary)}, blank_id: {self.blank_id})."
-        )
-
-    def unload_model(self) -> None:
-        """Unload PyTorch weights and release cached memory back to the OS."""
-        if self.torch_model is not None:
-            del self.torch_model
-            self.torch_model = None
-            _free_gpu_cache(self.device)
-            gc.collect()
-            try:
-                libc = ctypes.CDLL("libc.so.6")
-                libc.malloc_trim(0)
-            except Exception:
-                pass
-            print("[Zeno Aligner] Alignment model unloaded.")
-
-    def _fallback_to_cpu_fp32(self, reason: str) -> None:
-        """Relocate loaded weights to CPU float32 after a GPU/MPS error or non-finite logits."""
-        if self.torch_model is None:
-            return
-        if self.device == "cpu" and self._torch_dtype == torch.float32:
-            return
-        print(
-            f"[Zeno Aligner] Device '{self.device}' ({self._torch_dtype}) failed ({reason}); "
-            "falling back to CPU float32.",
-            file=sys.stderr,
-        )
-        _free_gpu_cache(self.device)
-        self.device = "cpu"
-        self.use_fp16 = False
-        self._torch_dtype = torch.float32
-        self.thermal_profile = "cpu_safe"
-        self._apply_thread_cap()
-        self.torch_model = self.torch_model.to(device=torch.device("cpu"), dtype=torch.float32)
-        self.torch_model.eval()
+            self.torch_model = self.torch_model.to(device=torch.device("cpu"), dtype=torch.float32)
+            self.torch_model.eval()
 
     def _forward_chunk(self, norm_chunk: np.ndarray) -> np.ndarray:
         """Run one normalized float32 audio chunk through omniASR-CTC -> `[T, V]` log_probs."""
@@ -571,35 +576,35 @@ class AcousticModel:
         if 0 < chunk.size < 400:
             chunk = np.pad(chunk, (0, 400 - chunk.size), mode="constant")
 
-        def _run_on_current_device() -> np.ndarray:
-            dev = next(self.torch_model.parameters()).device
-            dtype = next(self.torch_model.parameters()).dtype
-            tensor_wave = torch.from_numpy(chunk).unsqueeze(0).to(device=dev, dtype=dtype)
-            outputs = None
-            logits = None
+        with self._infer_lock:
+            def _run_on_current_device() -> np.ndarray:
+                dev = next(self.torch_model.parameters()).device
+                dtype = next(self.torch_model.parameters()).dtype
+                tensor_wave = torch.from_numpy(chunk).unsqueeze(0).to(device=dev, dtype=dtype)
+                outputs = None
+                logits = None
+                try:
+                    with torch.inference_mode():
+                        outputs = self.torch_model(input_values=tensor_wave)
+                        logits = outputs.logits
+                        if not bool(torch.isfinite(logits).all().item()):
+                            raise RuntimeError("Non-finite logits detected in omniASR forward pass")
+                        log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)[0].cpu().numpy()
+                finally:
+                    del tensor_wave, outputs, logits
+
+                log_probs = np.asarray(log_probs, dtype=np.float32)
+                if not np.all(np.isfinite(log_probs)):
+                    raise RuntimeError("Non-finite log_probs detected after softmax")
+                return log_probs
+
             try:
-                with torch.inference_mode():
-                    outputs = self.torch_model(input_values=tensor_wave)
-                    logits = outputs.logits
-                    if not bool(torch.isfinite(logits).all().item()):
-                        raise RuntimeError("Non-finite logits detected in omniASR forward pass")
-                    log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)[0].cpu().numpy()
-            finally:
-                del tensor_wave, outputs, logits
-                _free_gpu_cache(dev)
-
-            log_probs = np.asarray(log_probs, dtype=np.float32)
-            if not np.all(np.isfinite(log_probs)):
-                raise RuntimeError("Non-finite log_probs detected after softmax")
-            return log_probs
-
-        try:
-            return _run_on_current_device()
-        except Exception as exc:
-            if self.device != "cpu" or self._torch_dtype != torch.float32:
-                self._fallback_to_cpu_fp32(str(exc))
                 return _run_on_current_device()
-            raise
+            except Exception as exc:
+                if self.device != "cpu" or self._torch_dtype != torch.float32:
+                    self._fallback_to_cpu_fp32(str(exc))
+                    return _run_on_current_device()
+                raise
 
     def _extract_emissions_from_waveform(self, raw_waveform: np.ndarray) -> Tuple[np.ndarray, float, float]:
         """Normalize `raw_waveform`, run single-pass or 30s-chunked inference, and return `(log_probs, dur, tpf)`."""

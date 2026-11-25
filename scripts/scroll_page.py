@@ -25,6 +25,15 @@ if str(_HERE) not in sys.path:
 import subtitles
 from common import FFMPEG
 
+try:
+    from common import hardware_encoder, hw_video_args
+except ImportError:  # pragma: no cover
+    def hardware_encoder() -> str:
+        return ""
+
+    def hw_video_args(name: str, **_kwargs: Any) -> List[str]:
+        return ["-c:v", name]
+
 SUB_DIR = _HERE.parent / "subtitles"
 
 DEFAULTS: Dict[str, Any] = {
@@ -245,6 +254,29 @@ def scroll_positions(
     return scrolls, active
 
 
+def _page_video_encode_args(draft: bool, use_hw: bool = True) -> List[str]:
+    """Build GPU-accelerated (or fallback libx264) encoding flags for `#page scroll`."""
+    crf = 20 if draft else 14
+    if use_hw:
+        enc = hardware_encoder()
+        if enc:
+            return [
+                *hw_video_args(enc, crf=crf, draft=draft, allow_bframes=False, gop=30),
+                "-pix_fmt",
+                "yuv420p",
+            ]
+    return [
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast" if draft else "superfast",
+        "-crf",
+        str(crf),
+        "-pix_fmt",
+        "yuv420p",
+    ]
+
+
 def build_page_video(
     paras: List[Dict[str, Any]],
     cfg: Dict[str, Any],
@@ -287,61 +319,71 @@ def build_page_video(
     divider[:] = np.array(accent, dtype=np.uint8)
 
     out = out_dir / "page.mkv"
-    cmd = [
-        str(FFMPEG), "-v", "error", "-y",
-        "-f", "rawvideo", "-pix_fmt", "bgr24",
-        "-s", f"{w_px}x{bar_h + div_h + page_h}", "-r", str(fps),
-        "-i", "-",
-        "-c:v", "libx264",
-        "-preset", "ultrafast" if draft else "veryfast",
-        "-crf", "20" if draft else "14",
-        "-pix_fmt", "yuv420p",
-        str(out),
-    ]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     n_frames = len(scrolls)
     x0, x1 = int(w_px * 0.115), int(w_px * 0.885)
-    try:
-        for f in range(n_frames):
-            s = int(round(scrolls[f]))
-            page = np.empty((page_h, w_px, 3), dtype=np.uint16)
-            page[:] = bg
-            page8 = page.astype(np.uint8)
-            k = active[f]
-            if k >= 0:
-                b = flat_boxes[k]
-                by = b["y"] - s
-                padx, pady = int(b["h"] * 0.12), int(b["h"] * 0.06)
-                cv2.rectangle(page8, (b["x"] - padx, by + pady), (b["x"] + b["w"] + padx, by + b["h"] - pady), hi, -1, cv2.LINE_AA)
-            page = page8.astype(np.uint16)
-            page = premult[s:s + page_h] + (page * inv[s:s + page_h]) // 255
-            if ramp16 is not None:
-                page = bg + ((page.astype(np.int32) - bg) * ramp16) // 256
-            page = page.astype(np.uint8)
-            if div_h:
-                page = np.vstack([divider, page])
-            if bar_h:
-                bar = np.empty((bar_h, w_px, 3), dtype=np.uint8)
-                bar[:] = bg.astype(np.uint8)
-                cy = bar_h // 2
-                prog = x0 + int((x1 - x0) * min(1.0, f / max(1.0, n_frames - 1.0)))
-                cv2.line(bar, (x0, cy), (x1, cy), track, max(2, bar_h // 22), cv2.LINE_AA)
-                cv2.line(bar, (x0, cy), (prog, cy), accent, max(3, bar_h // 16), cv2.LINE_AA)
-                cv2.circle(bar, (prog, cy), max(5, bar_h // 9), accent, -1, cv2.LINE_AA)
-                ch = max(8, bar_h // 6)
-                cx = int(w_px * 0.055)
-                chevron = np.array([[cx + ch // 2, cy - ch], [cx - ch // 2, cy], [cx + ch // 2, cy + ch]], np.int32)
-                cv2.polylines(bar, [chevron], False, accent, max(3, bar_h // 18), cv2.LINE_AA)
-                frame = np.vstack([bar, page])
-            else:
-                frame = page
-            proc.stdin.write(frame.tobytes())
-    finally:
-        if proc.stdin:
-            proc.stdin.close()
-        err = proc.stderr.read().decode("utf-8", "ignore") if proc.stderr else ""
-        proc.wait()
-    if proc.returncode != 0 or not out.is_file():
+
+    def _encode_page(enc_args: List[str]) -> Tuple[int, str]:
+        cmd = [
+            str(FFMPEG), "-v", "error", "-y",
+            "-f", "rawvideo", "-pix_fmt", "bgr24",
+            "-s", f"{w_px}x{bar_h + div_h + page_h}", "-r", str(fps),
+            "-i", "-",
+            *enc_args,
+            str(out),
+        ]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        err_text = ""
+        try:
+            for f in range(n_frames):
+                s = int(round(scrolls[f]))
+                page = np.empty((page_h, w_px, 3), dtype=np.uint16)
+                page[:] = bg
+                page8 = page.astype(np.uint8)
+                k = active[f]
+                if k >= 0:
+                    b = flat_boxes[k]
+                    by = b["y"] - s
+                    padx, pady = int(b["h"] * 0.12), int(b["h"] * 0.06)
+                    cv2.rectangle(page8, (b["x"] - padx, by + pady), (b["x"] + b["w"] + padx, by + b["h"] - pady), hi, -1, cv2.LINE_AA)
+                page = page8.astype(np.uint16)
+                page = premult[s:s + page_h] + (page * inv[s:s + page_h]) // 255
+                if ramp16 is not None:
+                    page = bg + ((page.astype(np.int32) - bg) * ramp16) // 256
+                page = page.astype(np.uint8)
+                if div_h:
+                    page = np.vstack([divider, page])
+                if bar_h:
+                    bar = np.empty((bar_h, w_px, 3), dtype=np.uint8)
+                    bar[:] = bg.astype(np.uint8)
+                    cy = bar_h // 2
+                    prog = x0 + int((x1 - x0) * min(1.0, f / max(1.0, n_frames - 1.0)))
+                    cv2.line(bar, (x0, cy), (x1, cy), track, max(2, bar_h // 22), cv2.LINE_AA)
+                    cv2.line(bar, (x0, cy), (prog, cy), accent, max(3, bar_h // 16), cv2.LINE_AA)
+                    cv2.circle(bar, (prog, cy), max(5, bar_h // 9), accent, -1, cv2.LINE_AA)
+                    ch = max(8, bar_h // 6)
+                    cx = int(w_px * 0.055)
+                    chevron = np.array([[cx + ch // 2, cy - ch], [cx - ch // 2, cy], [cx + ch // 2, cy + ch]], np.int32)
+                    cv2.polylines(bar, [chevron], False, accent, max(3, bar_h // 18), cv2.LINE_AA)
+                    frame = np.vstack([bar, page])
+                else:
+                    frame = page
+                if proc.stdin:
+                    proc.stdin.write(frame.tobytes())
+        finally:
+            if proc.stdin:
+                proc.stdin.close()
+            err_text = proc.stderr.read().decode("utf-8", "ignore") if proc.stderr else ""
+            proc.wait()
+        return proc.returncode or 0, err_text
+
+    hw_args = _page_video_encode_args(draft, use_hw=True)
+    rc, err = _encode_page(hw_args)
+    if (rc != 0 or not out.is_file()) and "libx264" not in hw_args:
+        last_line = (err.strip().splitlines() or ["encode error"])[-1][:180]
+        print(f"  [GPU Encoder] page scroll fallback to CPU libx264 ({last_line})", flush=True)
+        out.unlink(missing_ok=True)
+        rc, err = _encode_page(_page_video_encode_args(draft, use_hw=False))
+    if rc != 0 or not out.is_file():
         raise RuntimeError(f"Scrolling page video encode failed: {err[-300:]}")
     (out_dir / "page_meta.json").write_text(
         json.dumps({
