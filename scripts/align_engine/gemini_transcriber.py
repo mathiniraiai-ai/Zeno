@@ -762,6 +762,18 @@ class GeminiTranscriber:
         url = self.cloud_url.rstrip("/") + "/v1/transcribe"
         headers = {"Authorization": f"Bearer {self.cloud_token}"} if self.cloud_token else {}
         headers.update(zeno_client_headers())
+        try:
+            job_key = os.environ.get("ZENO_ACTIVE_JOB_KEY", "").strip()
+            if job_key:
+                headers["X-Zeno-Job-Key"] = job_key[:80]
+            wav_p = Path(wav_path)
+            headers["X-Zeno-Clip-Name"] = wav_p.parent.name[:120]
+            if os.environ.get("ZENO_RETRY_INCOMPLETE") or os.environ.get("ZENO_RETRY_CLIPS"):
+                headers["X-Zeno-Is-Retry"] = "1"
+            import zeno_tracker as _zt
+            headers["X-Zeno-Machine-Id"] = _zt.get_machine_id()
+        except Exception:
+            pass
         form_data = {
             "language_hint": language_hint or "auto",
             "target_script_lines": json.dumps(list(target_script_lines or [])[:40], ensure_ascii=False),
@@ -774,6 +786,10 @@ class GeminiTranscriber:
             except (TypeError, ValueError):
                 pass
         audio_bytes = _pad_short_wav(Path(wav_path).read_bytes())
+        try:
+            headers["X-Zeno-Clip-Hash"] = hashlib.sha256(audio_bytes).hexdigest()[:16]
+        except Exception:
+            pass
         resp = None
         last_net_exc: Optional[BaseException] = None
         transient_net_errors = (

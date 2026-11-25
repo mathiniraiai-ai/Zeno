@@ -494,28 +494,57 @@ def ensure_latest_update(
         q = f"?sha256={urllib.parse.quote(sha256)}" if sha256 else ""
         req = urllib.request.Request(
             f"{cloud_url}/v1/update-bundle{q}",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token}", **zeno_client_headers()},
         )
         try:
             if not quiet:
                 print(f"  [Auto-Update] Downloading Zeno v{chk.get('latest_version')} ({chk.get('size_mb', 0)} MB) from Zeno Cloud...")
             with urllib.request.urlopen(req, timeout=max(30.0, timeout_sec)) as resp:
                 blob = resp.read()
-            applied = apply_bundle_bytes(
-                blob=blob,
-                expected_sha256=sha256,
-                version=str(chk.get("latest_version") or ""),
-                sha=str(chk.get("sha") or ""),
-            )
+            os.environ["ZENO_SKIP_CLEANUP_RECEIPT"] = "1"
+            try:
+                applied = apply_bundle_bytes(
+                    blob=blob,
+                    expected_sha256=sha256,
+                    version=str(chk.get("latest_version") or ""),
+                    sha=str(chk.get("sha") or ""),
+                )
+            finally:
+                os.environ.pop("ZENO_SKIP_CLEANUP_RECEIPT", None)
             update_ok = bool(applied.get("ok"))
             updated = bool(applied.get("updated"))
             after_ver = str(applied.get("version") or get_local_version())
             msg = str(applied.get("message") or "")
+            try:
+                import zeno_tracker as _zt
+                _zt.record_update_receipt(
+                    before_version=before_ver,
+                    after_version=after_ver,
+                    bundle_sha256=str(applied.get("bundle_sha256") or sha256),
+                    status="installed" if updated else "failed",
+                    files_updated=int(applied.get("files_updated") or 0),
+                    error_message="" if updated else msg,
+                    sync_flush=True,
+                )
+            except BaseException:
+                pass
             # Refresh cached version check immediately so UI flips to "Up to date"
             check_cloud_update(force=True, timeout_sec=6.0)
         except Exception as exc:
             update_ok = False
             msg = f"Download failed ({type(exc).__name__}: {exc})"
+            try:
+                import zeno_tracker as _zt
+                _zt.record_update_receipt(
+                    before_version=before_ver,
+                    after_version=str(chk.get("latest_version") or ""),
+                    bundle_sha256=sha256,
+                    status="failed",
+                    error_message=msg,
+                    sync_flush=True,
+                )
+            except BaseException:
+                pass
 
     iso_now = dt.datetime.now().isoformat(timespec="seconds")
     result = {

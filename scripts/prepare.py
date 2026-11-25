@@ -2563,6 +2563,21 @@ def main() -> None:
     clip_entries = discover_clips(args.clips)
     if not clip_entries:
         raise SystemExit("No input clips or cached work/S* directories found.")
+    try:
+        import zeno_tracker as _zt
+        if not _zt.get_active_job_key(WORK / project_name):
+            _zt.open_job(
+                WORK / project_name,
+                notion_name=str(args.name or meta.get("title") or project_name),
+                script_source=str(script_path),
+                clip_paths=[c[1] for c in clip_entries],
+                language=lang,
+                is_retry=bool(os.environ.get("ZENO_RETRY_INCOMPLETE") or os.environ.get("ZENO_RETRY_CLIPS")),
+            )
+        else:
+            os.environ["ZENO_ACTIVE_JOB_KEY"] = _zt.get_active_job_key(WORK / project_name)
+    except BaseException:
+        pass
 
     clips_data: List[Dict[str, Any]] = []
     quota_breaker_tripped = False
@@ -2866,6 +2881,17 @@ def main() -> None:
     print(f"  Every word, pause, face: {proj_dir / 'facts.md'}")
     print(f"  Clip pictures          : {len(sheets)} sheet(s) in {proj_dir}")
     print(f"  Plan to write          : {(proj_dir / 'plan.edl').as_posix()}")
+    try:
+        import zeno_tracker as _zt
+        _zt.record_inspect_done(
+            proj_dir,
+            notion_name=str(args.name or meta.get("title") or project_name),
+            script_source=str(script_path),
+            clips_data=clips_data,
+            language=lang,
+        )
+    except BaseException:
+        pass
 
 
 if __name__ == "__main__":

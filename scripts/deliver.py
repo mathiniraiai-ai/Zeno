@@ -415,6 +415,20 @@ def deliver_to_downloads(plan_path: Path, name: str = "", *, notify: bool = True
         except Exception as exc:  # noqa: BLE001
             notif_res = {"notified": False, "reason": f"error:{type(exc).__name__}"}
 
+    try:
+        import zeno_tracker as _zt
+        _vid_sec = sum(max(0.0, float(s.get("end", 0.0)) - float(s.get("start", 0.0))) for s in (plan.get("segments") or []))
+        _zt.record_delivered(
+            work_dir,
+            p_path,
+            plan,
+            folder=dest_dir,
+            files=sorted_filenames,
+            video_seconds=_vid_sec,
+        )
+    except BaseException:
+        pass
+
     return {
         "folder": str(dest_dir),
         "files": sorted_filenames,

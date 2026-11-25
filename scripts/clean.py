@@ -904,6 +904,22 @@ def cleanup_after_update(
             (work / ".last_cleanup_state.json").write_text(json.dumps(res, indent=2) + "\n", encoding="utf-8")
         except OSError:
             pass
+        if root_path.resolve() == ROOT.resolve() and os.environ.get("ZENO_SKIP_CLEANUP_RECEIPT") != "1":
+            try:
+                import zeno_tracker as _zt
+                _rel_st = {}
+                _rel_f = work / ".cloud_release_state.json"
+                if _rel_f.is_file():
+                    _rel_st = json.loads(_rel_f.read_text(encoding="utf-8", errors="replace"))
+                _zt.record_update_receipt(
+                    before_version=str(resolved_prev or ""),
+                    after_version=str(version or ""),
+                    bundle_sha256=str((_rel_st or {}).get("bundle_sha256") or ""),
+                    status="installed",
+                    sync_flush=True,
+                )
+            except BaseException:
+                pass
         return res
     except Exception as exc:   # noqa: BLE001
         return {

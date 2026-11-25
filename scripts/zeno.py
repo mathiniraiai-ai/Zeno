@@ -228,6 +228,18 @@ def _archive_call(fn_name: str, *args: Any, **kwargs: Any) -> Any:
     return None
 
 
+def _tracker_call(fn_name: str, *args: Any, **kwargs: Any) -> Any:
+    try:
+        import zeno_tracker
+
+        fn = getattr(zeno_tracker, fn_name, None)
+        if callable(fn):
+            return fn(*args, **kwargs)
+    except BaseException:
+        pass
+    return None
+
+
 MAX_EDIT_WINDOW_SEC = 4 * 3600
 
 
@@ -385,13 +397,13 @@ def _resolve_output_mp4(plan_path: Path, plan: Dict[str, Any], folder: Optional[
     return telemetry_out, archive_out
 
 
-def _finalize_execute_telemetry(plan_path: Path, plan: Dict[str, Any], video_seconds: float, telemetry_out: Path) -> None:
+def _finalize_execute_telemetry(plan_path: Path, plan: Dict[str, Any], video_seconds: float, telemetry_out: Path) -> Optional[Dict[str, Any]]:
     """Fail-open job telemetry finalization on execute success, with session fallback."""
     try:
         import token_tracker
 
         if hasattr(token_tracker, "finalize_job_telemetry"):
-            token_tracker.finalize_job_telemetry(
+            return token_tracker.finalize_job_telemetry(
                 plan_path=plan_path,
                 plan=plan,
                 video_seconds=video_seconds,
@@ -399,10 +411,10 @@ def _finalize_execute_telemetry(plan_path: Path, plan: Dict[str, Any], video_sec
                 sync_cloud=True,
                 completed_at=time.time(),
             )
-            return
     except Exception:
         pass
     _capture_token_session(plan_path.parent)
+    return None
 
 
 def _infer_video_name(plan: Dict[str, Any], plan_path: Path, explicit_name: str = "") -> str:
@@ -658,6 +670,15 @@ def run_inspect(
     work_dir = WORK / project_name
     common.stamp_job_owner(work_dir)
     is_retry = bool(os.environ.get("ZENO_RETRY_INCOMPLETE") or os.environ.get("ZENO_RETRY_CLIPS"))
+    _tracker_call(
+        "open_job",
+        work_dir,
+        notion_name=name or project_name,
+        script_source=str(script_path),
+        clip_paths=clips,
+        language=lang,
+        is_retry=is_retry,
+    )
     if not is_retry:
         try:
             import inspect as _inspect
@@ -731,7 +752,8 @@ def run_inspect(
         if rc != 0:
             tracker.stop_heartbeat(final_state="error", final_detail=f"prepare.py exited with {rc}")
             _archive_call("event", work_dir, "failed", stage="inspect", rc=rc)
-            _archive_call("archive_blocked", "inspect", f"prepare.py exited with code {rc}", script_arg=str(script_path), inputs=[str(c) for c in clips])
+            _archive_call("archive_blocked", "inspect", f"prepare.py exited with code {rc}", script_arg=str(script_path), inputs=[str(c) for c in clips], extra={"project": project_name, "video_name": name or project_name})
+            _tracker_call("record_stage", work_dir, "job_error", stage="inspect", notion_name=name or project_name, script_source=str(script_path), error_message=f"prepare.py exited with code {rc}")
             raise RuntimeError(f"prepare.py failed with exit code {rc}")
 
         plan_path = found_edl[-1] if (found_edl and found_edl[-1].is_file()) else (work_dir / "plan.edl")
@@ -1193,6 +1215,16 @@ def run_execute_and_deliver(
             kind="blocked",
             extra={"error": blocked},
         )
+        _tracker_call(
+            "record_stage",
+            p_path.parent,
+            "job_blocked",
+            stage="plan_gate",
+            notion_name=_infer_video_name(plan, p_path, name),
+            script_source=str(plan.get("script") or ""),
+            error_category="qc_plan_block",
+            error_message=blocked[:1000],
+        )
         return 2, None, reason
 
     import script_order
@@ -1269,6 +1301,15 @@ def run_execute_and_deliver(
                 kind="failed",
                 extra={"error": reason, "rc": rc},
             )
+            _tracker_call(
+                "record_stage",
+                p_path.parent,
+                "job_error",
+                stage="render",
+                notion_name=_infer_video_name(plan, p_path, name),
+                script_source=str(plan.get("script") or ""),
+                error_message=reason,
+            )
             return rc, None, reason
 
         folder, files = _deliver_package(p_path, name)
@@ -1290,6 +1331,15 @@ def run_execute_and_deliver(
             kind="failed",
             extra={"error": reason},
         )
+        _tracker_call(
+            "record_stage",
+            p_path.parent,
+            "job_error",
+            stage="execute",
+            notion_name=_infer_video_name(plan, p_path, name),
+            script_source=str(plan.get("script") or ""),
+            error_message=reason,
+        )
         raise
     finally:
         if not completed:
@@ -1302,7 +1352,7 @@ def run_execute_and_deliver(
 
     vid_sec = sum(max(0.0, _segment_duration(s)) for s in plan.get("segments", []))
     telemetry_out, archive_out = _resolve_output_mp4(p_path, plan, folder=folder)
-    _finalize_execute_telemetry(p_path, plan, vid_sec, telemetry_out)
+    fin_rec = _finalize_execute_telemetry(p_path, plan, vid_sec, telemetry_out)
     _archive_call("event", p_path.parent, "render", video_seconds=round(vid_sec, 2), output=str(archive_out))
     _archive_call(
         "archive_job",
@@ -1311,6 +1361,16 @@ def run_execute_and_deliver(
         video_seconds=vid_sec,
         output_mp4=archive_out,
         kind="render",
+    )
+    _tracker_call(
+        "record_delivered",
+        p_path.parent,
+        p_path,
+        plan,
+        folder=folder,
+        files=files,
+        video_seconds=vid_sec,
+        token_record=fin_rec,
     )
     return 0, folder, ""
 
@@ -1707,6 +1767,15 @@ def main() -> None:
             fb_plan = None
         _archive_call("event", fb_dir, "feedback", text=args.feedback)
         _archive_call("archive_job", plan_p, plan=fb_plan, kind="feedback")
+        _tracker_call(
+            "record_stage",
+            fb_dir,
+            "user_feedback",
+            stage="feedback",
+            notion_name=_infer_video_name(fb_plan or {}, plan_p),
+            script_source=str((fb_plan or {}).get("script") or ""),
+            prompt_text=args.feedback,
+        )
         print(f"[FEEDBACK] Saved revision note for {fb_dir.name}")
         sys.exit(0)
 
@@ -1727,10 +1796,22 @@ def main() -> None:
 
     if args.check_plan:
         p_path = common.resolve(args.check_plan)
-        msg = order_gate(load_edl(p_path), p_path)
+        chk_plan = load_edl(p_path)
+        msg = order_gate(chk_plan, p_path)
         _archive_call("snapshot_plan", p_path, "check", note=msg or "pass")
         _archive_call("event", p_path.parent, "check", passed=not bool(msg))
         _archive_call("send_in_background", p_path, "checking")
+        _tracker_call(
+            "record_stage",
+            p_path.parent,
+            "stage_check",
+            stage="checking",
+            notion_name=_infer_video_name(chk_plan, p_path),
+            script_source=str(chk_plan.get("script") or ""),
+            passed=not bool(msg),
+            error_category="qc_plan_block" if msg else "",
+            error_message=msg[:800] if msg else "",
+        )
         print(msg or "[PLAN PASS] Every line present, once, in script order; no cut inside a word; voices match.")
         sys.exit(2 if msg else 0)
 
@@ -1769,17 +1850,20 @@ def main() -> None:
         common.job_begin(identity=json.dumps([eff_script, eff_name, eff_inputs], ensure_ascii=False))
         ok_sys, sys_reason = run_system_preflight(skip=args.skip_preflight)
         if not ok_sys:
-            _archive_call("archive_blocked", "preflight", sys_reason, script_arg=eff_script, inputs=eff_inputs)
+            _archive_call("archive_blocked", "preflight", sys_reason, script_arg=eff_script, inputs=eff_inputs, extra={"video_name": eff_name})
+            _tracker_call("record_stage", None, "job_blocked", stage="preflight", notion_name=eff_name, script_source=eff_script, error_category="input_script", error_message=sys_reason)
             print(f"\n[BLOCKED] Live system check failed: {sys_reason}", flush=True)
             sys.exit(2)
         try:
             script_path, inp_err = validate_job_inputs(eff_inputs, eff_script, skip=args.skip_preflight)
         except Exception as exc:
-            _archive_call("archive_blocked", "inputs", str(exc), script_arg=eff_script, inputs=eff_inputs)
+            _archive_call("archive_blocked", "inputs", str(exc), script_arg=eff_script, inputs=eff_inputs, extra={"video_name": eff_name})
+            _tracker_call("record_stage", None, "job_blocked", stage="inputs", notion_name=eff_name, script_source=eff_script, error_category="input_script", error_message=str(exc))
             print(f"\n[BLOCKED] Script error: {exc}", flush=True)
             sys.exit(2)
         if inp_err:
-            _archive_call("archive_blocked", "inputs", inp_err, script_arg=eff_script, inputs=eff_inputs)
+            _archive_call("archive_blocked", "inputs", inp_err, script_arg=eff_script, inputs=eff_inputs, extra={"video_name": eff_name})
+            _tracker_call("record_stage", None, "job_blocked", stage="inputs", notion_name=eff_name, script_source=eff_script, error_category="input_script", error_message=inp_err)
             print(f"\n[BLOCKED] Input validation failed: {inp_err}", flush=True)
             sys.exit(2)
         print("\n[GATE PASSED] System and inputs verified. Starting Zeno.", flush=True)

@@ -146,7 +146,7 @@ const COLORS = ["#7fb2ff", "#3d9a6b", "#d9a441", "#d4574b", "#b48ead", "#5fc3c8"
 const MODELS_IN_USE = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"];  // keep in step with GEMINI_MODELS on the server
 // USD per million tokens, audio-input rate (Zeno sends audio) and output rate, from Google's Gemini API price list (23 Nov 2026). Editable on the Gemini page.
 const DEFAULT_PRICES = {"gemini-3.1-flash-lite": {i: 0.5, o: 1.5}, "gemini-3.5-flash-lite": {i: 0.3, o: 2.5}, "gemini-2.5-flash": {i: 1, o: 2.5}};
-const TABS = [["overview", "Overview"], ["videos", "Videos"], ["renders", "Renders"], ["gemini", "Gemini"], ["tokens", "Tokens and cost"], ["editors", "Editors"], ["health", "Health"]];
+const TABS = [["overview", "Overview"], ["tracker", "Tracker & Errors"], ["videos", "Videos"], ["renders", "Renders"], ["gemini", "Gemini"], ["tokens", "Tokens and cost"], ["editors", "Editors"], ["health", "Health"]];
 
 const fmtNum = x => n(x).toLocaleString();
 const fmtBig = x => { x = n(x); return x >= 1e9 ? (x / 1e9).toFixed(2) + "B" : x >= 1e6 ? (x / 1e6).toFixed(1) + "M" : x >= 1e4 ? Math.round(x / 1e3) + "k" : fmtNum(x); };
@@ -1040,6 +1040,136 @@ function EditorsPage({m}) {
           h("td", null, Object.keys(r.gemini).map(g => h("span", {className: "tag", key: g}, g + " " + r.gemini[g])))))))) : h(Empty)));
 }
 
+function TrackerPage({track, trackMsg, token, editor}) {
+  const [errCat, setErrCat] = useState("");
+  const [pickKey, setPickKey] = useState("");
+  const [detail, setDetail] = useState(null);
+  const [detailBusy, setDetailBusy] = useState(false);
+
+  const openJob = async (jobKey) => {
+    setPickKey(jobKey);
+    setDetail(null);
+    if (!jobKey || !token) return;
+    setDetailBusy(true);
+    try {
+      const r = await fetch("/v2/track/jobs/" + encodeURIComponent(jobKey), {headers: {Authorization: "Bearer " + token}});
+      if (r.ok) setDetail((await r.json()).job || null);
+    } catch (e) {}
+    setDetailBusy(false);
+  };
+
+  if (track === null) return h(Empty, {text: trackMsg || "Loading unified v2 tracker…"});
+  const edFilter = canon(editor);
+  const allJobs = (track.jobs || []).filter(j => !editor || canon(j.editor_name) === edFilter || canon(j.editor_email) === edFilter || canon(String(j.editor_email || "").split("@")[0]) === edFilter);
+  const eds = (track.editors || []).filter(e => !editor || canon(e.editor_name) === edFilter || canon(e.editor_email) === edFilter || canon(String(e.editor_email || "").split("@")[0]) === edFilter);
+  const fleet = (track.fleet && track.fleet.editors) || [];
+  const t = track.totals || {};
+  const cats = track.error_categories || {};
+  const catNames = {
+    input_script: "Input / Script",
+    gemini_transcription: "Gemini / Transcription",
+    qc_plan_block: "QC / Plan Block",
+    render_system: "Render / System",
+    stuck_abandoned: "Stuck (>30m)"
+  };
+  const statusPill = s => {
+    if (s === "done") return h(Pill, {kind: "ok"}, "DONE");
+    if (s === "rendered") return h(Pill, {kind: "ok2"}, "RENDERED");
+    if (s === "stuck") return h(Pill, {kind: "red"}, "STUCK");
+    if (s === "failed" || s === "blocked") return h(Pill, {kind: "red"}, s.toUpperCase());
+    return h(Pill, {kind: "amber"}, (s || "OPEN").toUpperCase());
+  };
+  const fmtDur = sec => { sec = Math.round(n(sec)); if (!sec) return "–"; const m = Math.floor(sec / 60), s = sec % 60; return m ? (m + "m " + s + "s") : (s + "s"); };
+  const errJobs = allJobs.filter(j => (j.is_stuck || j.error_count > 0 || j.block_count > 0 || j.last_error_message) && (!errCat || j.last_error_category === errCat));
+  const latestV = (track.fleet && track.fleet.latest_version) || "";
+
+  return h("div", {className: "dash"},
+    h(Stat, {value: fmtNum(t.done || 0), label: "Videos done (1 row = 1 video)"}),
+    h(Stat, {value: fmtNum(t.first_pass_done || 0), label: "1st-shot done"}),
+    h(Stat, {value: fmtNum(t.revisions || 0), label: "Revisions (post-render)"}),
+    h(Stat, {value: fmtNum(t.in_progress || 0), label: "Open / in progress"}),
+    h(Stat, {value: fmtNum(t.stuck || 0), label: "Stuck (>30m idle)"}),
+    h(Stat, {value: fmtNum(t.gemini_retries || 0), label: "Gemini retries"}),
+    h(Stat, {value: fmtNum(t.errors || 0), label: "Errors & blocks"}),
+    h(Stat, {value: fmtNum(t.verified_updated || 0), label: "Verified updated" + (latestV ? " (" + latestV + ")" : "")}),
+
+    h(Section, {
+      title: "Errors & stuck radar (" + (track.start_date || "") + (track.end_date && track.end_date !== track.start_date ? " to " + track.end_date : "") + ")",
+      sub: "5 non-technical categories. Click a category pill to filter.",
+      right: h(Seg, {value: errCat, onChange: setErrCat, options: [["", "All"], ...Object.keys(catNames).map(k => [k, catNames[k] + " (" + n(cats[k]) + ")"])]})
+    },
+      errJobs.length ? h("div", {className: "scroll"}, h("table", null,
+        h("thead", null, h("tr", null, h(Th, null, "Editor"), h(Th, null, "Video"), h(Th, null, "Category"), h(Th, null, "Stage"), h(Th, null, "Why / Error"), h(Th, null, "Last activity"))),
+        h("tbody", null, errJobs.slice(0, 50).map(j => h("tr", {key: j.job_key, style: {cursor: "pointer"}, onClick: () => openJob(j.job_key)},
+          h("td", null, h("b", null, j.editor_name)),
+          h("td", {title: j.notion_name}, short(j.notion_name, 55)),
+          h("td", null, h(Pill, {kind: j.is_stuck ? "red" : "amber"}, catNames[j.last_error_category] || j.last_error_category || "Error")),
+          h("td", null, j.last_stage || "—"),
+          h("td", {style: {whiteSpace: "normal", maxWidth: 420}}, j.last_error_message || "—"),
+          h("td", {className: "muted"}, fmtWhen(j.last_event_at)))))))
+      : h(Empty, {text: "No errors or stuck jobs in this range."})),
+
+    h(Section, {title: "Editors (unified by email)", span: 12},
+      eds.length ? h("div", {className: "scroll"}, h("table", null,
+        h("thead", null, h("tr", null, h(Th, null, "Editor"), h(Th, {right: true}, "Opened"), h(Th, {right: true}, "Done"), h(Th, {right: true}, "1st-shot"), h(Th, {right: true}, "Revisions"), h(Th, {right: true}, "Stuck"), h(Th, {right: true}, "Unique clips"), h(Th, {right: true}, "Gemini retries"), h(Th, {right: true}, "Prompts"), h(Th, {right: true}, "Agent tokens"), h(Th, {right: true}, "Gemini tokens"), h(Th, null, "Verified version"))),
+        h("tbody", null, eds.map(e => h("tr", {key: e.editor_email},
+          h("td", null, h("b", null, e.editor_name), h("div", {className: "muted", style: {fontSize: 12}}, e.editor_email)),
+          h("td", {className: "n"}, fmtNum(e.opened)), h("td", {className: "n"}, h("b", null, fmtNum(e.done))),
+          h("td", {className: "n"}, fmtNum(e.first_pass_done)), h("td", {className: "n"}, fmtNum(e.revisions)),
+          h("td", {className: "n"}, e.stuck ? h(Pill, {kind: "red"}, fmtNum(e.stuck)) : "0"),
+          h("td", {className: "n"}, fmtNum(e.unique_clips)), h("td", {className: "n"}, fmtNum(e.gemini_retries)),
+          h("td", {className: "n"}, fmtNum(e.prompts)), h("td", {className: "n"}, fmtBig(e.agent_total_tokens)),
+          h("td", {className: "n"}, fmtBig(e.gemini_total_tokens)),
+          h("td", null, e.verified_version ? h(Pill, {kind: latestV && verCmp(e.verified_version, latestV) < 0 ? "amber" : "ok"}, "v" + e.verified_version + (e.platform ? " · " + e.platform : "")) : h(Pill, {kind: "gray"}, e.zeno_version ? "v" + e.zeno_version + " (unverified)" : "—")))))))
+      : h(Empty, {text: "No tracked editor jobs in this range yet."})),
+
+    h(Section, {title: "Tracked video jobs (click a row for prompts, revisions & timeline)", span: 12},
+      allJobs.length ? h("div", {className: "scroll"}, h("table", null,
+        h("thead", null, h("tr", null, h(Th, null, "Video (Notion name)"), h(Th, null, "Editor"), h(Th, null, "Status"), h(Th, {right: true}, "Clips (+retry)"), h(Th, {right: true}, "Prompts"), h(Th, {right: true}, "Revisions"), h(Th, {right: true}, "Duration"), h(Th, {right: true}, "Agent tokens"), h(Th, {right: true}, "Gemini tokens"), h(Th, null, "Last error"))),
+        h("tbody", null, allJobs.slice(0, 200).map(j => h("tr", {key: j.job_key, style: {cursor: "pointer"}, onClick: () => openJob(j.job_key)},
+          h("td", {title: j.notion_name}, h("b", null, short(j.notion_name, 56))),
+          h("td", null, j.editor_name),
+          h("td", null, statusPill(j.status)),
+          h("td", {className: "n"}, fmtNum(j.unique_clips_count) + (j.gemini_retry_calls ? " (+" + j.gemini_retry_calls + ")" : "")),
+          h("td", {className: "n"}, fmtNum(j.user_prompt_count)),
+          h("td", {className: "n"}, j.revision_count ? h(Pill, {kind: "amber"}, j.revision_count + " rev") : "1st try"),
+          h("td", {className: "n muted"}, fmtDur(j.total_duration_sec)),
+          h("td", {className: "n"}, fmtBig(j.agent_total_tokens)),
+          h("td", {className: "n"}, fmtBig(j.gemini_in_tokens + j.gemini_out_tokens)),
+          h("td", {className: "muted", style: {maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis"}}, j.last_error_message || "—"))))))
+      : h(Empty, {text: "No v2 tracked videos in this period yet."})),
+
+    pickKey ? h(Section, {title: "Job detail · " + ((detail && detail.notion_name) || pickKey), span: 12,
+      right: h("button", {className: "chip", onClick: () => { setPickKey(""); setDetail(null); }}, "Close")},
+      detailBusy ? h(Empty, {text: "Loading job timeline…"}) : detail ? h("div", null,
+        h("p", {className: "note"}, "Editor: " + detail.editor_name + " (" + detail.editor_email + ") · Machine: " + (detail.machine_id || "—") + " · Version: " + (detail.zeno_version || "—") + " · Output: " + (detail.output_folder || "—")),
+        (detail.user_prompts && detail.user_prompts.length) ? h("div", {style: {marginBottom: 12}}, h("b", null, "User prompts (" + detail.user_prompts.length + "):"),
+          detail.user_prompts.map((p, idx) => h("div", {key: idx, className: "note", style: {margin: "4px 0 0 8px", color: "#ebebeb"}}, "• [" + clock(p.at) + "] " + p.text))) : null,
+        (detail.revisions && detail.revisions.length) ? h("div", {style: {marginBottom: 12}}, h("b", null, "Post-render revisions (" + detail.revisions.length + "):"),
+          detail.revisions.map((rv, idx) => h("div", {key: idx, className: "note", style: {margin: "4px 0 0 8px", color: "#e9c46a"}}, "• Rev #" + rv.revision + " at " + fmtWhen(rv.at) + " — " + (rv.reason || "re-render")))) : null,
+        h("div", {className: "scroll"}, h("table", null,
+          h("thead", null, h("tr", null, h(Th, null, "Time"), h(Th, null, "Event"), h(Th, null, "Stage"), h(Th, null, "Error / Detail"))),
+          h("tbody", null, (detail.events || []).map(ev => h("tr", {key: ev.event_id},
+            h("td", {className: "muted"}, fmtWhen(ev.client_ts)),
+            h("td", null, h("span", {className: "tag"}, ev.event_type)),
+            h("td", null, ev.stage || "—"),
+            h("td", {style: {whiteSpace: "normal"}}, ev.error_message || (ev.payload && (ev.payload.clip_name || ev.payload.detail || ev.payload.output_folder)) || "—"))))))) : h(Empty, {text: "Job details unavailable."})) : null,
+
+    h(Section, {title: "Verified OTA fleet status", span: 12},
+      fleet.length ? h("div", {className: "scroll"}, h("table", null,
+        h("thead", null, h("tr", null, h(Th, null, "Editor"), h(Th, null, "Verified install"), h(Th, null, "Last seen version"), h(Th, null, "OS / Platform"), h(Th, {right: true}, "Machines"), h(Th, {right: true}, "Outbox pending"), h(Th, null, "Update status"), h(Th, null, "Last seen"))),
+        h("tbody", null, fleet.map(f => h("tr", {key: f.editor_email},
+          h("td", null, h("b", null, f.editor_name), h("div", {className: "muted", style: {fontSize: 12}}, f.editor_email)),
+          h("td", null, f.verified_version ? h(Pill, {kind: latestV && verCmp(f.verified_version, latestV) < 0 ? "amber" : "ok"}, "v" + f.verified_version) : h(Pill, {kind: "gray"}, "Not yet")),
+          h("td", null, f.zeno_version ? "v" + f.zeno_version : "—"),
+          h("td", {className: "muted"}, f.platform || "—"),
+          h("td", {className: "n"}, fmtNum((f.machines || []).length || 1)),
+          h("td", {className: "n"}, f.pending_outbox ? h(Pill, {kind: "amber"}, fmtNum(f.pending_outbox)) : "0"),
+          h("td", null, f.last_update_status === "failed" ? h(Pill, {kind: "red"}, "Failed: " + (f.last_update_error || "error")) : (f.last_update_status === "installed" ? h(Pill, {kind: "ok"}, "Verified") : "—")),
+          h("td", {className: "muted"}, fmtWhen(f.last_seen_at)))))))
+      : h(Empty, {text: "No fleet machines registered yet."})));
+}
+
 // ---------- sign in and the page ----------
 function SignIn({message, onToken}) {
   const box = useRef(null);
@@ -1064,7 +1194,7 @@ function SignIn({message, onToken}) {
 }
 
 const Wrap = ({children}) => h("div", {className: "dash"}, h("section", {className: "c s12 legacy"}, children));
-function Dashboard({data, jobs, jobsMsg, tab, setTab, period, setPeriod, editor, setEditor, rate, setRate, onRefresh, busy, health}) {
+function Dashboard({data, jobs, jobsMsg, track, trackMsg, token, tab, setTab, period, setPeriod, editor, setEditor, rate, setRate, onRefresh, busy, health}) {
   const [prices, setPrices] = useState(loadPrices());
   const [showAll, setShowAll] = useState(false);
   const [day, setDay] = useState("");
@@ -1094,6 +1224,7 @@ function Dashboard({data, jobs, jobsMsg, tab, setTab, period, setPeriod, editor,
     h(Controls, {period, setPeriod, editors: editorList(m), editor, setEditor, rate, setRate, onRefresh, busy, includeDev, setIncludeDev, devCount}),
     jobsMsg ? h("p", {className: "note"}, jobsMsg) : null,
     cur === "overview" ? h(OverviewPage, {m, rate, setTab, jobs, setPeriod, runs: cleanRuns})
+      : cur === "tracker" ? h(TrackerPage, {track, trackMsg, token, editor})
       : cur === "videos" ? h("div", null, h(VideosPage, {m, jobs, setPeriod}), jobs === null ? null : h("div", {style: {height: 14}}), jobs === null ? null : h(Wrap, null, h(EditsView, {data, jobs, jobsMsg, rg: cutoff, q: "", rate, day, setDay})))
       : cur === "renders" ? h("div", null,
           h("div", {className: "bar", style: {marginTop: 4}},
@@ -1113,6 +1244,8 @@ function App() {
   const [data, setData] = useState(null);
   const [jobs, setJobs] = useState(null);
   const [jobsMsg, setJobsMsg] = useState("");
+  const [track, setTrack] = useState(null);
+  const [trackMsg, setTrackMsg] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const [health, setHealth] = useState(null);
@@ -1141,6 +1274,16 @@ function App() {
         .catch(e => setJobsMsg("Could not load the job log: " + e.message));
     }).catch(e => { setMsg(e.message); setBusy(false); });
   }, [token, reload]);
+  useEffect(() => {
+    if (!token) { setTrack(null); return; }
+    const hdr = {headers: {Authorization: "Bearer " + token}};
+    const toDay = period.to || keyOf(new Date());
+    const fromDay = period.from || "2026-10-01";
+    const span = Math.max(1, Math.min(365, Math.round((parseKey(toDay) - parseKey(fromDay)) / 86400000) + 1));
+    fetch("/v2/track/summary?date=" + encodeURIComponent(toDay) + "&days=" + span, hdr)
+      .then(async r => { if (r.ok) { setTrack(await r.json()); setTrackMsg(""); } else setTrackMsg("Tracker unavailable (status " + r.status + ")."); })
+      .catch(e => setTrackMsg("Could not load tracker: " + e.message));
+  }, [token, reload, period.from, period.to]);
   const onToken = async t => {  // trade the one-hour Google sign-in for a 30-day session
     let keep = t;
     try { const r = await fetch("/api/usage/session", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({credential: t})}); if (r.ok) keep = (await r.json()).token || t; } catch (e) {}
@@ -1150,7 +1293,7 @@ function App() {
   return h("main", null,
     h("div", {className: "top"}, h("div", {className: "brand"}, "Zeno · Usage"), h("span", {className: "sp"}),
       data ? h("span", {className: "muted"}, "Updated " + fmtWhen(data.now)) : null, h("a", {className: "chip", href: "/"}, "Zeno home")),
-    data ? h(Dashboard, {data, jobs, jobsMsg, health, tab, setTab, period, setPeriod, editor, setEditor, rate, setRate, busy, onRefresh: () => setReload(reload + 1)})
+    data ? h(Dashboard, {data, jobs, jobsMsg, track, trackMsg, token, health, tab, setTab, period, setPeriod, editor, setEditor, rate, setRate, busy, onRefresh: () => setReload(reload + 1)})
          : token ? h("div", {className: "card"}, h("h2", null, "Loading…"), h("p", {className: "sub"}, msg)) : h(SignIn, {message: msg, onToken}));
 }
 if (typeof document !== "undefined" && document.getElementById("root")) ReactDOM.createRoot(document.getElementById("root")).render(h(App));

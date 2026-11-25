@@ -552,8 +552,13 @@ async function checkCloudUpdateNative(auth, root, force = false) {
     return { ...cachedCloudInfo, current_version: curVer, available: computeUpdateAvailable(curVer, root, cachedCloudInfo) };
   }
   const cloudUrl = String(auth.cloud_url || process.env.ZENO_CLOUD_URL || DEFAULT_CLOUD_URL).replace(/\/+$/, '');
+  const clientHeaders = {
+    Authorization: `Bearer ${auth.token}`,
+    'X-Zeno-Version': curVer,
+    'X-Zeno-Platform': `${process.platform} ${process.arch}`,
+  };
   try {
-    const resp = await fetch(`${cloudUrl}/v1/version`, { headers: { Authorization: `Bearer ${auth.token}` } });
+    const resp = await fetch(`${cloudUrl}/v1/version`, { headers: clientHeaders });
     if (!resp.ok) return base;
     const d = await resp.json();
     if (!d || !d.has_release) return base;
@@ -602,13 +607,18 @@ async function applyCloudUpdateNative(auth, targetRoot) {
   if (!auth || !auth.token) return { ok: false, text: 'Please sign in with Google first.' };
   const cloudUrl = String(auth.cloud_url || process.env.ZENO_CLOUD_URL || DEFAULT_CLOUD_URL).replace(/\/+$/, '');
   const dest = targetRoot || path.join(os.homedir(), 'Documents', 'Zeno');
+  const dlHeaders = {
+    Authorization: `Bearer ${auth.token}`,
+    'X-Zeno-Version': localVersion(dest),
+    'X-Zeno-Platform': `${process.platform} ${process.arch}`,
+  };
   let oldReqSha = '';
   try {
     const rq = path.join(dest, 'requirements.txt');
     if (fs.existsSync(rq)) oldReqSha = crypto.createHash('sha256').update(fs.readFileSync(rq)).digest('hex');
   } catch (e) { /* ignore */ }
 
-  const resp = await fetch(`${cloudUrl}/v1/update-bundle`, { headers: { Authorization: `Bearer ${auth.token}` } });
+  const resp = await fetch(`${cloudUrl}/v1/update-bundle`, { headers: dlHeaders });
   if (!resp.ok) {
     if (resp.status === 404) return { ok: false, text: 'No release bundle published on Zeno Cloud yet.' };
     return { ok: false, text: `Zeno Cloud returned HTTP ${resp.status}.` };
@@ -634,7 +644,7 @@ async function applyCloudUpdateNative(auth, targetRoot) {
     appliedNotesVer = String(cachedCloudInfo.latest_version || installedVer).trim();
   } else {
     try {
-      const vResp = await fetch(`${cloudUrl}/v1/version`, { headers: { Authorization: `Bearer ${auth.token}` } });
+      const vResp = await fetch(`${cloudUrl}/v1/version`, { headers: dlHeaders });
       if (vResp.ok) {
         const vd = await vResp.json();
         if (vd && vd.has_release && vd.notes) {

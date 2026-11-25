@@ -453,42 +453,54 @@ def _cloud() -> Optional[Dict[str, str]]:
     return {"url": url.rstrip("/"), "token": token} if url and token else None
 
 
-def _post(record: Dict[str, Any], timeout: float = 20.0) -> bool:
+def _post(record: Dict[str, Any], timeout: float = 20.0) -> str:
+    """Return 'ok', 'rejected' (permanent 4xx), or 'retry' (network/5xx)."""
     cloud = _cloud()
     if cloud is None:
-        return False
+        return "retry"
     body = json.dumps(record, ensure_ascii=False).encode("utf-8")
     headers = {"Authorization": f"Bearer {cloud['token']}", "Content-Type": "application/json",
                "X-Zeno-Version": _version(), "X-Zeno-Platform": f"{platform.system()} {platform.machine()}"}
     try:
         import httpx
-        return httpx.post(cloud["url"] + "/v1/jobs", headers=headers, content=body, timeout=timeout).status_code == 200
+        r = httpx.post(cloud["url"] + "/v1/jobs", headers=headers, content=body, timeout=timeout)
+        if r.status_code == 200:
+            return "ok"
+        return "rejected" if r.status_code in (400, 413, 422) else "retry"
     except ImportError:
         pass
     except Exception:
-        return False
+        return "retry"
     try:
+        import urllib.error
         import urllib.request
         req = urllib.request.Request(cloud["url"] + "/v1/jobs", data=body, headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=timeout) as resp:   # noqa: S310  (the URL is the team's own server)
-            return resp.status == 200
+            return "ok" if resp.status == 200 else "retry"
+    except urllib.error.HTTPError as he:
+        return "rejected" if he.code in (400, 413, 422) else "retry"
     except Exception:
-        return False
+        return "retry"
 
 
 def flush_outbox(limit: int = 5) -> int:
     """Send records that could not be sent earlier (a few per job, oldest first). Returns how many went."""
     sent = 0
     try:
+        rej_dir = OUTBOX / "_rejected"
         for f in sorted(OUTBOX.glob("*.json"))[:limit]:
             try:
                 rec = json.loads(f.read_text(encoding="utf-8"))
             except Exception:
                 f.unlink(missing_ok=True)
                 continue
-            if _post(rec):
+            res = _post(rec)
+            if res == "ok":
                 f.unlink(missing_ok=True)
                 sent += 1
+            elif res == "rejected":
+                rej_dir.mkdir(parents=True, exist_ok=True)
+                f.replace(rej_dir / f.name)
             else:
                 break
     except Exception:
@@ -501,7 +513,7 @@ def send(record: Dict[str, Any]) -> bool:
     try:
         OUTBOX.mkdir(parents=True, exist_ok=True)
         flush_outbox()
-        if _post(record):
+        if _post(record) == "ok":
             (OUTBOX / f"{record['job_uid']}.json").unlink(missing_ok=True)
             return True
         (OUTBOX / f"{record['job_uid']}.json").write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
@@ -555,11 +567,23 @@ def archive_blocked(stage: str, reason: str, script_arg: str = "", inputs: Optio
             script_label = _al.redact(str(script_arg))[:300]
         except Exception:
             script_label = str(script_arg)[:300]
+        proj_guess = ""
+        try:
+            import re as _re
+            m_gdoc = _re.search(r"docs\.google\.com/document/d/([A-Za-z0-9_-]+)", str(script_arg or ""))
+            if m_gdoc:
+                tm = _re.search(r"[?&#]tab=t\.([A-Za-z0-9_-]+)", str(script_arg or ""))
+                proj_guess = f"gdoc_{m_gdoc.group(1)}_t_{tm.group(1) if tm else '0'}"
+            elif script_arg:
+                proj_guess = Path(str(script_arg)).stem[:80]
+        except Exception:
+            pass
+        vname_guess = str((extra or {}).get("video_name") or (extra or {}).get("notion_name") or "")[:200]
         record = {
             "job_uid": "blocked_" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24],
             "kind": "blocked",
-            "project": "",
-            "video_name": "",
+            "project": str((extra or {}).get("project") or proj_guess)[:160],
+            "video_name": vname_guess,
             "zeno_version": _version(),
             "platform": f"{platform.system()} {platform.machine()}",
             "sent_at": round(time.time(), 1),

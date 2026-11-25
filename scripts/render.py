@@ -2339,6 +2339,21 @@ def main() -> None:
         )
         print(f"Done (1:1 Square): {sq_out}")
 
+    try:
+        import zeno_tracker as _zt
+        _vid_sec = sum(max(0.0, float(s.get("end", 0.0)) - float(s.get("start", 0.0))) for s in (plan.get("segments") or []))
+        _zt.record_rendered(
+            plan_path.parent,
+            plan_path,
+            plan,
+            output_mp4=out_path,
+            video_seconds=_vid_sec,
+            has_square=bool(a.square or plan.get("square") or (plan.get("canvas") or {}).get("square")),
+            has_premiere=not getattr(a, "no_premiere", False),
+        )
+    except BaseException:
+        pass
+
     # 6) Optional post-render Deep QC verification
     if a.verify and verify is not None and hasattr(verify, "run_verification"):
         print()
@@ -2367,6 +2382,18 @@ def main() -> None:
                 encoding="utf-8",
             )
         except Exception:
+            pass
+        try:
+            import zeno_tracker as _zt
+            _zt.record_stage(
+                plan_path.parent,
+                "qc_passed" if ok else "qc_failed",
+                stage="qc",
+                error_category="" if ok else "qc_plan_block",
+                error_message="" if ok else (_buf.getvalue()[-800:] or "Deep QC verification failed"),
+                passed=bool(ok),
+            )
+        except BaseException:
             pass
         if not ok:
             sys.exit(1)

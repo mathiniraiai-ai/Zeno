@@ -52,6 +52,7 @@ from pydantic import BaseModel
 
 from keystore import KeyStore
 from prompt import build_transcribe_prompt
+from tracker_api import build_tracker_router
 from ui import ADMIN_PAGE, SIGNUP_PAGE
 from usage_page import USAGE_PAGE
 
@@ -947,6 +948,7 @@ def health() -> Dict[str, Any]:
         "signup_code_required": bool(os.getenv("ZENO_SIGNUP_CODE")),
         "email_domain": domains[0] if domains else "gosupernova.live",
         "admin_enabled": bool(os.getenv("ZENO_ADMIN_PASSWORD") or client_id or _admin_emails()),
+        "tracker_v2": True,
     }
 
 
@@ -1158,6 +1160,11 @@ def transcribe(
     check_rate(name)
     client_version, client_platform = _client_version(request)
     _note_version(key_id, name, client_version, client_platform, "transcribe")
+    trk_job_key = re.sub(r"[^0-9A-Za-z._-]", "", str(request.headers.get("x-zeno-job-key") or ""))[:80]
+    trk_clip_hash = re.sub(r"[^0-9A-Za-z._-]", "", str(request.headers.get("x-zeno-clip-hash") or ""))[:64]
+    trk_clip_name = str(request.headers.get("x-zeno-clip-name") or "")[:120]
+    trk_is_retry = str(request.headers.get("x-zeno-is-retry") or "").strip().lower() in ("1", "true", "yes")
+    trk_mid = re.sub(r"[^0-9A-Za-z._-]", "", str(request.headers.get("x-zeno-machine-id") or ""))[:80]
     limit = int(float(os.getenv("ZENO_MAX_UPLOAD_MB", "25")) * 1024 * 1024)
     declared = int(request.headers.get("content-length") or 0)
     if declared > limit + 4096:
@@ -1223,6 +1230,17 @@ def transcribe(
             _log_transcription(key_id, name, status="failed", http_status=exc.status_code, failed_models="; ".join(trace), audio_seconds=duration,
                                size=len(audio), seconds=time.time() - started, reason=(trace[-1].split(": ", 1)[-1] if trace else str(exc.detail)),
                                zeno_version=client_version)
+            if trk_job_key or trk_clip_hash:
+                try:
+                    em = store().get_key_email(key_id) if key_id is not None else ""
+                    store().record_transcribe_for_job(
+                        key_id, name, em, trk_job_key, trk_clip_hash, trk_clip_name, trk_is_retry,
+                        status="failed", audio_seconds=duration,
+                        reason=(trace[-1].split(": ", 1)[-1] if trace else str(exc.detail)),
+                        version=client_version, platform=client_platform, machine_id=trk_mid,
+                    )
+                except Exception:
+                    log.exception("could not link failed transcription to video job")
             raise
         if result.get("words") and not result.get("warning"):   # an incomplete transcript is never cached
             try:
@@ -1243,6 +1261,18 @@ def transcribe(
                        failed_models="; ".join(trace), words=len(result.get("words") or []), audio_seconds=duration, size=len(audio),
                        seconds=time.time() - started, in_tokens=in_tok, out_tokens=out_tok, cached=bool(result.get("cached")),
                        reason=str(result.get("warning") or ""), zeno_version=client_version)
+    if trk_job_key or trk_clip_hash:
+        try:
+            em = store().get_key_email(key_id) if key_id is not None else ""
+            tr_st = ("wrong_script" if result.get("foreign_script_words") else "incomplete") if result.get("warning") else "ok"
+            store().record_transcribe_for_job(
+                key_id, name, em, trk_job_key, trk_clip_hash, trk_clip_name, trk_is_retry,
+                status=tr_st, in_tokens=in_tok, out_tokens=out_tok, audio_seconds=duration,
+                reason=str(result.get("warning") or ""), version=client_version,
+                platform=client_platform, machine_id=trk_mid,
+            )
+        except Exception:
+            log.exception("could not link transcription to video job")
     log.info("user=%s bytes=%d status=200 model=%s words=%d in_tok=%d out_tok=%d seconds=%.1f%s", name, len(audio), result.get("model_used"), len(result.get("words") or []), in_tok, out_tok, time.time() - started, " WARNING=" + result["warning"] if result.get("warning") else "")
     return result
 
@@ -2152,3 +2182,15 @@ def list_published_releases(
 ) -> JSONResponse:
     _check_release_publisher(authorization, x_admin_password)
     return JSONResponse({"releases": store().list_releases(limit=25)}, headers=NO_STORE)
+
+
+app.include_router(
+    build_tracker_router(
+        store_fn=store,
+        authenticate_fn=authenticate,
+        check_rate_fn=check_rate,
+        check_viewer_fn=_check_viewer,
+        client_version_fn=_client_version,
+        note_version_fn=_note_version,
+    )
+)

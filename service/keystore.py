@@ -326,6 +326,116 @@ class KeyStore:
             except Exception:
                 pass
 
+        # Unified FastAPI video tracker tables (v3.0.3): one canonical row per video job, immutable completion date,
+        # idempotent event log, per-machine fleet state, and verified post-install OTA update receipts.
+        self._run(f"""CREATE TABLE IF NOT EXISTS zeno_video_jobs (
+            id {rule_pk},
+            job_key TEXT NOT NULL UNIQUE,
+            editor_email TEXT NOT NULL DEFAULT '',
+            editor_name TEXT NOT NULL DEFAULT '',
+            machine_id TEXT NOT NULL DEFAULT '',
+            notion_name TEXT NOT NULL DEFAULT '',
+            canonical_name TEXT NOT NULL DEFAULT '',
+            script_source TEXT NOT NULL DEFAULT '',
+            script_id TEXT NOT NULL DEFAULT '',
+            footage_path TEXT NOT NULL DEFAULT '',
+            project_name TEXT NOT NULL DEFAULT '',
+            language TEXT NOT NULL DEFAULT 'auto',
+            zeno_version TEXT NOT NULL DEFAULT '',
+            client_platform TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'open',
+            last_stage TEXT NOT NULL DEFAULT 'open',
+            opened_at {real} NOT NULL,
+            first_rendered_at {real},
+            first_completed_at {real},
+            first_completed_date TEXT NOT NULL DEFAULT '',
+            last_event_at {real} NOT NULL,
+            total_duration_sec {real} NOT NULL DEFAULT 0,
+            unique_clips_count INTEGER NOT NULL DEFAULT 0,
+            seen_clip_hashes_json TEXT NOT NULL DEFAULT '[]',
+            gemini_calls INTEGER NOT NULL DEFAULT 0,
+            gemini_retry_calls INTEGER NOT NULL DEFAULT 0,
+            gemini_in_tokens INTEGER NOT NULL DEFAULT 0,
+            gemini_out_tokens INTEGER NOT NULL DEFAULT 0,
+            gemini_retry_in_tokens INTEGER NOT NULL DEFAULT 0,
+            gemini_retry_out_tokens INTEGER NOT NULL DEFAULT 0,
+            gemini_audio_seconds {real} NOT NULL DEFAULT 0,
+            agent_name TEXT NOT NULL DEFAULT '',
+            agent_model TEXT NOT NULL DEFAULT '',
+            agent_calls INTEGER NOT NULL DEFAULT 0,
+            agent_in_tokens INTEGER NOT NULL DEFAULT 0,
+            agent_cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+            agent_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            agent_out_tokens INTEGER NOT NULL DEFAULT 0,
+            agent_total_tokens INTEGER NOT NULL DEFAULT 0,
+            user_prompt_count INTEGER NOT NULL DEFAULT 0,
+            user_prompts_json TEXT NOT NULL DEFAULT '[]',
+            render_count INTEGER NOT NULL DEFAULT 0,
+            revision_count INTEGER NOT NULL DEFAULT 0,
+            revisions_json TEXT NOT NULL DEFAULT '[]',
+            output_folder TEXT NOT NULL DEFAULT '',
+            output_files_json TEXT NOT NULL DEFAULT '[]',
+            error_count INTEGER NOT NULL DEFAULT 0,
+            block_count INTEGER NOT NULL DEFAULT 0,
+            last_error_category TEXT NOT NULL DEFAULT '',
+            last_error_message TEXT NOT NULL DEFAULT '',
+            last_error_at {real})""")
+        self._run(f"""CREATE TABLE IF NOT EXISTS zeno_track_events (
+            id {rule_pk},
+            event_id TEXT NOT NULL UNIQUE,
+            job_key TEXT NOT NULL DEFAULT '',
+            event_type TEXT NOT NULL,
+            editor_email TEXT NOT NULL DEFAULT '',
+            editor_name TEXT NOT NULL DEFAULT '',
+            machine_id TEXT NOT NULL DEFAULT '',
+            stage TEXT NOT NULL DEFAULT '',
+            error_category TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL DEFAULT '{{}}',
+            client_ts {real} NOT NULL,
+            created_at {real} NOT NULL)""")
+        self._run(f"""CREATE TABLE IF NOT EXISTS zeno_client_machines (
+            editor_email TEXT NOT NULL,
+            machine_id TEXT NOT NULL,
+            editor_name TEXT NOT NULL DEFAULT '',
+            platform TEXT NOT NULL DEFAULT '',
+            zeno_version TEXT NOT NULL DEFAULT '',
+            verified_version TEXT NOT NULL DEFAULT '',
+            bundle_sha256 TEXT NOT NULL DEFAULT '',
+            auth_source TEXT NOT NULL DEFAULT '',
+            pending_outbox INTEGER NOT NULL DEFAULT 0,
+            last_update_status TEXT NOT NULL DEFAULT '',
+            last_update_error TEXT NOT NULL DEFAULT '',
+            last_seen_at {real} NOT NULL,
+            PRIMARY KEY (editor_email, machine_id))""")
+        self._run(f"""CREATE TABLE IF NOT EXISTS zeno_update_receipts (
+            id {rule_pk},
+            event_id TEXT NOT NULL UNIQUE,
+            editor_email TEXT NOT NULL DEFAULT '',
+            editor_name TEXT NOT NULL DEFAULT '',
+            machine_id TEXT NOT NULL DEFAULT '',
+            before_version TEXT NOT NULL DEFAULT '',
+            after_version TEXT NOT NULL DEFAULT '',
+            bundle_sha256 TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'installed',
+            platform TEXT NOT NULL DEFAULT '',
+            files_updated INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT NOT NULL DEFAULT '',
+            created_at {real} NOT NULL)""")
+        for idx_sql in (
+            "CREATE INDEX IF NOT EXISTS zeno_vjobs_ed_last ON zeno_video_jobs (editor_email, last_event_at)",
+            "CREATE INDEX IF NOT EXISTS zeno_vjobs_done_day ON zeno_video_jobs (first_completed_date)",
+            "CREATE INDEX IF NOT EXISTS zeno_vjobs_ed_cname ON zeno_video_jobs (editor_email, canonical_name)",
+            "CREATE INDEX IF NOT EXISTS zeno_vjobs_ed_sid ON zeno_video_jobs (editor_email, script_id)",
+            "CREATE INDEX IF NOT EXISTS zeno_tev_job_ts ON zeno_track_events (job_key, client_ts)",
+            "CREATE INDEX IF NOT EXISTS zeno_tev_created ON zeno_track_events (created_at)",
+            "CREATE INDEX IF NOT EXISTS zeno_tev_err ON zeno_track_events (error_category)",
+        ):
+            try:
+                self._run(idx_sql)
+            except Exception:
+                pass
+
     # -- operations --------------------------------------------------------------------------
     def create(self, name: str, email: str) -> str:
         """Make a key for this person and return it. It is shown once and never stored in readable form."""
@@ -878,16 +988,18 @@ class KeyStore:
         version = str(version or "").strip()[:40]
         if key_id is None or not version:
             return
-        row = self._run("SELECT zeno_version, name FROM zeno_keys WHERE id = %s", (key_id,), "one")
+        row = self._run("SELECT zeno_version, name, client_platform FROM zeno_keys WHERE id = %s", (key_id,), "one")
         if not row:
             return
         now = time.time()
+        clean_plat = (platform or "").strip()[:80]
+        eff_plat = clean_plat or str(row[2] or "")[:80]
         self._run("UPDATE zeno_keys SET zeno_version = %s, version_seen_at = %s, client_platform = %s WHERE id = %s",
-                  (version, now, (platform or "")[:80] or "", key_id))
+                  (version, now, eff_plat, key_id))
         if str(row[0] or "") != version:
             self._run("""INSERT INTO zeno_version_events (key_id, editor_name, version, source, platform, created_at)
                          VALUES (%s, %s, %s, %s, %s, %s)""",
-                      (key_id, (editor_name or str(row[1] or ""))[:120], version, source[:60], (platform or "")[:80], now))
+                      (key_id, (editor_name or str(row[1] or ""))[:120], version, source[:60], eff_plat, now))
 
     def version_events(self, limit: int = 500) -> List[Dict[str, Any]]:
         rows = self._run("""SELECT key_id, editor_name, version, source, platform, created_at FROM zeno_version_events
@@ -1451,3 +1563,1194 @@ class KeyStore:
         if before:
             self._run("UPDATE zeno_keys SET revoked_at = %s WHERE id = %s", (time.time(), key_id))
         return bool(before)
+
+    # -- unified FastAPI v2 tracker ---------------------------------------------------------
+    @staticmethod
+    def canonical_notion_name(raw: str) -> str:
+        s = str(raw or "").strip()
+        if not s:
+            return ""
+        s = re.sub(r"^(?:reel_|SQ_)", "", s, flags=re.I)
+        s = re.sub(r"\.(?:mp4|mov|m4v|edl|txt|json)$", "", s, flags=re.I)
+        s = re.sub(r"\s*\(\d+\)\s*$", "", s).strip()
+        low = re.sub(r"\s+", " ", s).strip().lower()
+        if not low or low.startswith("gdoc_"):
+            return ""
+        if re.match(r"^[a-z0-9_-]+_(?:clean|fixed|script|draft)$", low):
+            return ""
+        return low
+
+    @staticmethod
+    def extract_script_id(raw: str) -> str:
+        s = str(raw or "").strip()
+        if not s:
+            return ""
+        m = re.search(r"docs\.google\.com/document/d/([A-Za-z0-9_-]+)", s)
+        if m:
+            doc_id = m.group(1)
+            tm = re.search(r"[?&#]tab=t\.([A-Za-z0-9_-]+)", s)
+            tab_id = tm.group(1) if tm else "0"
+            return f"gdoc:{doc_id}:{tab_id}"
+        m2 = re.match(r"^gdoc_([A-Za-z0-9_-]+?)_t_([A-Za-z0-9_-]+)$", s)
+        if m2:
+            return f"gdoc:{m2.group(1)}:{m2.group(2)}"
+        m3 = re.match(r"^gdoc_([A-Za-z0-9_-]+)$", s)
+        if m3:
+            return f"gdoc:{m3.group(1)}:0"
+        base = os.path.basename(s.replace("\\", "/")).strip().lower()
+        if base:
+            return "file:" + hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
+        return ""
+
+    @staticmethod
+    def classify_error(category_hint: str = "", stage: str = "", message: str = "") -> str:
+        hint = str(category_hint or "").strip().lower()
+        if hint in ("input_script", "gemini_transcription", "qc_plan_block", "render_system", "stuck_abandoned"):
+            return hint
+        st = str(stage or "").strip().lower()
+        msg = str(message or "").strip().lower()
+        if any(w in msg for w in ("transcrib", "gemini", "quota", "429", "503", "audio upload", "incomplete clip", "omniasr")):
+            return "gemini_transcription"
+        if any(w in st for w in ("transcrib",)):
+            return "gemini_transcription"
+        if any(w in msg for w in ("script", "gdoc", "google doc", "no video clips", "not found", "missing clip", "input validation", "no sound")):
+            return "input_script"
+        if st in ("inputs", "preflight"):
+            return "input_script" if "ffmpeg" not in msg else "render_system"
+        if any(w in msg for w in ("wrong voice", "order", "cuts fail", "verify", "qc", "plan gate", "plan_check", "missing line", "speaker", "headroom", "pause")):
+            return "qc_plan_block"
+        if st in ("check", "checking", "plan_gate", "qc", "verify"):
+            return "qc_plan_block"
+        if any(w in msg for w in ("stuck", "abandoned", "timeout")):
+            return "stuck_abandoned"
+        if any(w in msg for w in ("ffmpeg", "nvenc", "videotoolbox", "cuda", "disk", "memory", "render.py", "deliver")):
+            return "render_system"
+        if st in ("render", "deliver", "system"):
+            return "render_system"
+        return "render_system"
+
+    @staticmethod
+    def ist_day(ts: float, tz_offset: int = 19800) -> str:
+        return datetime.fromtimestamp(float(ts), timezone(timedelta(seconds=tz_offset))).strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _jload(raw: Any, default: Any) -> Any:
+        if isinstance(raw, type(default)):
+            return raw
+        try:
+            val = json.loads(raw) if raw else default
+            return val if isinstance(val, type(default)) else default
+        except Exception:
+            return default
+
+    def upsert_machine_heartbeat(
+        self,
+        editor_email: str,
+        editor_name: str,
+        machine_id: str,
+        platform: str = "",
+        zeno_version: str = "",
+        verified_version: str = "",
+        bundle_sha256: str = "",
+        auth_source: str = "",
+        pending_outbox: Optional[int] = None,
+        last_update_status: str = "",
+        last_update_error: str = "",
+        seen_at: Optional[float] = None,
+    ) -> None:
+        email = (editor_email or editor_name or "unknown").strip().lower()[:120]
+        mid = (machine_id or "default").strip()[:80]
+        now = float(seen_at or time.time())
+        row = self._run(
+            "SELECT editor_name, platform, zeno_version, verified_version, bundle_sha256, auth_source, "
+            "pending_outbox, last_update_status, last_update_error "
+            "FROM zeno_client_machines WHERE editor_email = %s AND machine_id = %s",
+            (email, mid),
+            "one",
+        )
+        if not row:
+            self._run(
+                """INSERT INTO zeno_client_machines
+                   (editor_email, machine_id, editor_name, platform, zeno_version, verified_version,
+                    bundle_sha256, auth_source, pending_outbox, last_update_status, last_update_error, last_seen_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    email, mid, (editor_name or "")[:120], (platform or "").strip()[:80],
+                    (zeno_version or "").strip()[:40], (verified_version or "").strip()[:40],
+                    (bundle_sha256 or "").strip()[:80], (auth_source or "").strip()[:40],
+                    int(pending_outbox or 0), (last_update_status or "").strip()[:40],
+                    (last_update_error or "").strip()[:500], now,
+                ),
+            )
+            return
+        self._run(
+            """UPDATE zeno_client_machines SET
+               editor_name = %s, platform = %s, zeno_version = %s, verified_version = %s,
+               bundle_sha256 = %s, auth_source = %s, pending_outbox = %s,
+               last_update_status = %s, last_update_error = %s, last_seen_at = %s
+               WHERE editor_email = %s AND machine_id = %s""",
+            (
+                (editor_name or row[0] or "")[:120],
+                (platform or "").strip()[:80] or str(row[1] or ""),
+                (zeno_version or "").strip()[:40] or str(row[2] or ""),
+                (verified_version or "").strip()[:40] or str(row[3] or ""),
+                (bundle_sha256 or "").strip()[:80] or str(row[4] or ""),
+                (auth_source or "").strip()[:40] or str(row[5] or ""),
+                int(pending_outbox) if pending_outbox is not None else int(row[6] or 0),
+                (last_update_status or "").strip()[:40] or str(row[7] or ""),
+                (last_update_error if last_update_status else row[8] or "")[:500],
+                now,
+                email,
+                mid,
+            ),
+        )
+
+    def resolve_or_create_video_job(
+        self,
+        *,
+        editor_email: str,
+        editor_name: str,
+        machine_id: str = "",
+        job_key: str = "",
+        notion_name: str = "",
+        script_source: str = "",
+        footage_path: str = "",
+        project_name: str = "",
+        language: str = "auto",
+        zeno_version: str = "",
+        client_platform: str = "",
+        ts: Optional[float] = None,
+    ) -> str:
+        email = (editor_email or editor_name or "unknown").strip().lower()[:120]
+        now = float(ts or time.time())
+        jkey = str(job_key or "").strip()[:80]
+        cname = self.canonical_notion_name(notion_name)
+        sid = self.extract_script_id(script_source or project_name)
+        cutoff = now - 14 * 86400
+
+        matched_key = ""
+        if jkey:
+            hit = self._run("SELECT job_key FROM zeno_video_jobs WHERE job_key = %s", (jkey,), "one")
+            if hit:
+                matched_key = str(hit[0])
+        if not matched_key and cname:
+            hit = self._run(
+                "SELECT job_key FROM zeno_video_jobs WHERE editor_email = %s AND canonical_name = %s "
+                "AND last_event_at >= %s ORDER BY last_event_at DESC LIMIT 1",
+                (email, cname, cutoff),
+                "one",
+            )
+            if hit:
+                matched_key = str(hit[0])
+        if not matched_key and sid:
+            rows = self._run(
+                "SELECT job_key, canonical_name FROM zeno_video_jobs WHERE editor_email = %s AND script_id = %s "
+                "AND last_event_at >= %s ORDER BY last_event_at DESC LIMIT 5",
+                (email, sid, cutoff),
+                "all",
+            ) or []
+            for r_key, r_cname in rows:
+                if not cname or not str(r_cname or "").strip() or str(r_cname or "") == cname:
+                    matched_key = str(r_key)
+                    break
+
+        if matched_key:
+            cur = self._run(
+                "SELECT editor_name, machine_id, notion_name, canonical_name, script_source, script_id, "
+                "footage_path, project_name, language, zeno_version, client_platform "
+                "FROM zeno_video_jobs WHERE job_key = %s",
+                (matched_key,),
+                "one",
+            )
+            if cur:
+                new_notion = str(notion_name or "").strip()[:240]
+                eff_notion = new_notion if (new_notion and (cname or not cur[2])) else str(cur[2] or new_notion)
+                eff_cname = cname or str(cur[3] or "")
+                self._run(
+                    """UPDATE zeno_video_jobs SET
+                       editor_name = %s, machine_id = %s, notion_name = %s, canonical_name = %s,
+                       script_source = %s, script_id = %s, footage_path = %s, project_name = %s,
+                       language = %s, zeno_version = %s, client_platform = %s
+                       WHERE job_key = %s""",
+                    (
+                        (editor_name or cur[0] or "")[:120],
+                        (machine_id or cur[1] or "")[:80],
+                        eff_notion,
+                        eff_cname[:240],
+                        (script_source or cur[4] or "")[:400],
+                        (sid or cur[5] or "")[:120],
+                        (footage_path or cur[6] or "")[:400],
+                        (project_name or cur[7] or "")[:160],
+                        (language if language and language != "auto" else (cur[8] or "auto"))[:24],
+                        (zeno_version or cur[9] or "")[:40],
+                        (client_platform or cur[10] or "")[:80],
+                        matched_key,
+                    ),
+                )
+            return matched_key
+
+        if not jkey:
+            seed = f"{email}|{sid}|{cname}|{project_name}|{round(now, 3)}"
+            jkey = "vj_" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:20]
+        clean_notion = str(notion_name or "").strip()[:240]
+        self._run(
+            """INSERT INTO zeno_video_jobs
+               (job_key, editor_email, editor_name, machine_id, notion_name, canonical_name,
+                script_source, script_id, footage_path, project_name, language, zeno_version,
+                client_platform, status, last_stage, opened_at, last_event_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'open', 'open', %s, %s)""",
+            (
+                jkey, email, (editor_name or "")[:120], (machine_id or "")[:80], clean_notion,
+                cname[:240], (script_source or "")[:400], sid[:120], (footage_path or "")[:400],
+                (project_name or "")[:160], (language or "auto")[:24], (zeno_version or "")[:40],
+                (client_platform or "")[:80], now, now,
+            ),
+        )
+        return jkey
+
+    def _merge_prompts(self, existing_raw: str, incoming: Any, fallback_ts: float) -> List[Dict[str, Any]]:
+        cur = self._jload(existing_raw, [])
+        out: List[Dict[str, Any]] = []
+        seen = set()
+        for item in cur:
+            if not isinstance(item, dict):
+                continue
+            txt = " ".join(str(item.get("text") or "").split())[:2000]
+            if not txt:
+                continue
+            at = round(float(item.get("at") or 0), 1)
+            sig = (at, txt.lower())
+            if sig not in seen:
+                seen.add(sig)
+                out.append({"at": at, "text": txt, "source": str(item.get("source") or "prompt")[:32]})
+        if isinstance(incoming, str):
+            incoming = [{"at": fallback_ts, "text": incoming, "source": "editor"}]
+        elif isinstance(incoming, dict):
+            incoming = [incoming]
+        if isinstance(incoming, list):
+            for item in incoming:
+                if isinstance(item, str):
+                    txt, at, src = " ".join(item.split())[:2000], round(float(fallback_ts), 1), "editor"
+                elif isinstance(item, dict):
+                    txt = " ".join(str(item.get("text") or "").split())[:2000]
+                    at = round(float(item.get("at") or fallback_ts), 1)
+                    src = str(item.get("source") or "prompt")[:32]
+                else:
+                    continue
+                if not txt:
+                    continue
+                sig = (at, txt.lower())
+                if sig not in seen:
+                    seen.add(sig)
+                    out.append({"at": at, "text": txt, "source": src})
+        out.sort(key=lambda r: float(r.get("at") or 0))
+        return out[-120:]
+
+    def ingest_track_event(
+        self,
+        key_id: Optional[int],
+        editor_name: str,
+        editor_email: str,
+        event: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(event, dict):
+            return {"event_id": "", "status": "rejected", "reason": "event must be an object"}
+        event_type = str(event.get("event_type") or event.get("type") or "").strip()[:60]
+        if not event_type:
+            return {"event_id": str(event.get("event_id") or ""), "status": "rejected", "reason": "missing event_type"}
+
+        now = time.time()
+        try:
+            client_ts = float(event.get("ts") or event.get("client_ts") or now)
+            if client_ts <= 0:
+                client_ts = now
+        except (TypeError, ValueError):
+            client_ts = now
+
+        email = str(editor_email or event.get("editor_email") or editor_name or "unknown").strip().lower()[:120]
+        ed_name = str(editor_name or event.get("editor_name") or email.split("@")[0]).strip()[:120]
+        machine_id = str(event.get("machine_id") or "default").strip()[:80]
+        platform = str(event.get("platform") or event.get("client_platform") or "").strip()[:80]
+        ver = str(event.get("zeno_version") or "").strip()[:40]
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        merged_ev = {**payload, **event}
+
+        event_id = str(event.get("event_id") or "").strip()[:120]
+        if not event_id:
+            raw_sig = json.dumps({"t": event_type, "e": email, "ts": round(client_ts, 3), "k": merged_ev.get("job_key", ""), "p": payload}, sort_keys=True, ensure_ascii=False)
+            event_id = "ev_" + hashlib.sha256(raw_sig.encode("utf-8")).hexdigest()[:24]
+
+        dup = self._run("SELECT job_key FROM zeno_track_events WHERE event_id = %s", (event_id,), "one")
+        if dup:
+            return {"event_id": event_id, "status": "duplicate", "job_key": str(dup[0] or "")}
+
+        if event_type in ("update_installed", "update_failed"):
+            status_str = "installed" if event_type == "update_installed" else "failed"
+            before_v = str(merged_ev.get("before_version") or "")[:40]
+            after_v = str(merged_ev.get("after_version") or ver or "")[:40]
+            sha_v = str(merged_ev.get("bundle_sha256") or "")[:80]
+            files_upd = int(merged_ev.get("files_updated") or 0)
+            err_msg = str(merged_ev.get("error_message") or merged_ev.get("reason") or "")[:500]
+            self._run(
+                """INSERT INTO zeno_update_receipts
+                   (event_id, editor_email, editor_name, machine_id, before_version, after_version,
+                    bundle_sha256, status, platform, files_updated, error_message, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (event_id) DO NOTHING""",
+                (event_id, email, ed_name, machine_id, before_v, after_v, sha_v, status_str, platform, files_upd, err_msg, client_ts),
+            )
+            self.upsert_machine_heartbeat(
+                email, ed_name, machine_id, platform=platform,
+                zeno_version=after_v or ver,
+                verified_version=after_v if status_str == "installed" else "",
+                bundle_sha256=sha_v if status_str == "installed" else "",
+                pending_outbox=merged_ev.get("pending_outbox"),
+                last_update_status=status_str,
+                last_update_error=err_msg,
+                seen_at=client_ts,
+            )
+            if status_str == "installed" and after_v and key_id is not None:
+                try:
+                    self.note_version(key_id, after_v, platform=platform, source="verified install", editor_name=ed_name)
+                except Exception:
+                    pass
+            self._run(
+                """INSERT INTO zeno_track_events
+                   (event_id, job_key, event_type, editor_email, editor_name, machine_id, stage,
+                    error_category, error_message, payload_json, client_ts, created_at)
+                   VALUES (%s, '', %s, %s, %s, %s, 'update', %s, %s, %s, %s, %s)
+                   ON CONFLICT (event_id) DO NOTHING""",
+                (event_id, event_type, email, ed_name, machine_id,
+                 "render_system" if status_str == "failed" else "", err_msg,
+                 json.dumps(payload or {}, ensure_ascii=False)[:20000], client_ts, now),
+            )
+            return {"event_id": event_id, "status": "accepted", "job_key": ""}
+
+        if event_type == "heartbeat" and not (
+            merged_ev.get("job_key") or merged_ev.get("notion_name") or merged_ev.get("script_source") or merged_ev.get("project_name")
+        ):
+            self.upsert_machine_heartbeat(
+                email, ed_name, machine_id, platform=platform, zeno_version=ver,
+                auth_source=str(merged_ev.get("auth_source") or ""),
+                pending_outbox=merged_ev.get("pending_outbox"),
+                seen_at=client_ts,
+            )
+            self._run(
+                """INSERT INTO zeno_track_events
+                   (event_id, job_key, event_type, editor_email, editor_name, machine_id, stage,
+                    error_category, error_message, payload_json, client_ts, created_at)
+                   VALUES (%s, '', %s, %s, %s, %s, 'heartbeat', '', '', %s, %s, %s)
+                   ON CONFLICT (event_id) DO NOTHING""",
+                (event_id, event_type, email, ed_name, machine_id,
+                 json.dumps(payload or {}, ensure_ascii=False)[:10000], client_ts, now),
+            )
+            return {"event_id": event_id, "status": "accepted", "job_key": ""}
+
+        self.upsert_machine_heartbeat(
+            email, ed_name, machine_id, platform=platform, zeno_version=ver,
+            auth_source=str(merged_ev.get("auth_source") or ""),
+            pending_outbox=merged_ev.get("pending_outbox"),
+            seen_at=client_ts,
+        )
+
+        job_key = self.resolve_or_create_video_job(
+            editor_email=email,
+            editor_name=ed_name,
+            machine_id=machine_id,
+            job_key=str(merged_ev.get("job_key") or ""),
+            notion_name=str(merged_ev.get("notion_name") or merged_ev.get("video_name") or ""),
+            script_source=str(merged_ev.get("script_source") or merged_ev.get("script") or ""),
+            footage_path=str(merged_ev.get("footage_path") or ""),
+            project_name=str(merged_ev.get("project_name") or merged_ev.get("project") or ""),
+            language=str(merged_ev.get("language") or "auto"),
+            zeno_version=ver,
+            client_platform=platform,
+            ts=client_ts,
+        )
+
+        row = self._run(
+            """SELECT status, last_stage, opened_at, first_rendered_at, first_completed_at, first_completed_date,
+                      last_event_at, unique_clips_count, seen_clip_hashes_json,
+                      gemini_calls, gemini_retry_calls, gemini_in_tokens, gemini_out_tokens,
+                      gemini_retry_in_tokens, gemini_retry_out_tokens, gemini_audio_seconds,
+                      agent_name, agent_model, agent_calls, agent_in_tokens, agent_cache_write_tokens,
+                      agent_cache_read_tokens, agent_out_tokens, agent_total_tokens,
+                      user_prompt_count, user_prompts_json, render_count, revision_count, revisions_json,
+                      output_folder, output_files_json, error_count, block_count,
+                      last_error_category, last_error_message, last_error_at
+               FROM zeno_video_jobs WHERE job_key = %s""",
+            (job_key,),
+            "one",
+        )
+        (
+            cur_status, cur_stage, opened_at, first_rendered_at, first_completed_at, first_completed_date,
+            last_event_at, uniq_clips, seen_hashes_raw,
+            g_calls, g_retries, g_in, g_out, gr_in, gr_out, g_aud,
+            a_name, a_model, a_calls, a_in, a_cw, a_cr, a_out, a_tot,
+            p_cnt, prompts_raw, r_cnt, rev_cnt, revs_raw,
+            out_folder, out_files_raw, err_cnt, blk_cnt,
+            last_err_cat, last_err_msg, last_err_at,
+        ) = row
+
+        seen_hashes: List[str] = [str(x) for x in self._jload(seen_hashes_raw, []) if x]
+        seen_set = set(seen_hashes)
+        prompts = self._merge_prompts(prompts_raw, merged_ev.get("prompts") or merged_ev.get("prompt_text"), client_ts)
+        revs = self._jload(revs_raw, [])
+        out_files = self._jload(out_files_raw, [])
+
+        stage = str(merged_ev.get("stage") or cur_stage or event_type)[:40]
+        err_cat = ""
+        err_msg = ""
+
+        def _unique_clip_count(items: List[str]) -> int:
+            return len({(x[3:] if x.startswith("tx:") else x) for x in items if x})
+
+        # Merge unique clip hashes when provided
+        for ch in merged_ev.get("clip_hashes") or []:
+            cs = str(ch or "").strip()[:64]
+            if cs and cs not in seen_set:
+                seen_set.add(cs)
+                seen_hashes.append(cs)
+        if merged_ev.get("unique_clips_count") and not seen_hashes:
+            uniq_clips = max(int(uniq_clips or 0), int(merged_ev.get("unique_clips_count") or 0))
+        else:
+            uniq_clips = max(int(uniq_clips or 0), _unique_clip_count(seen_hashes))
+
+        # Apply agent token & prompt updates whenever reported (taking latest monotonic snapshot)
+        if merged_ev.get("agent_name"):
+            a_name = str(merged_ev.get("agent_name"))[:60]
+        if merged_ev.get("agent_model"):
+            a_model = str(merged_ev.get("agent_model"))[:80]
+        if merged_ev.get("agent_calls") is not None:
+            a_calls = max(int(a_calls or 0), int(merged_ev.get("agent_calls") or 0))
+        if merged_ev.get("agent_in_tokens") is not None:
+            a_in = max(int(a_in or 0), int(merged_ev.get("agent_in_tokens") or 0))
+        if merged_ev.get("agent_cache_write_tokens") is not None:
+            a_cw = max(int(a_cw or 0), int(merged_ev.get("agent_cache_write_tokens") or 0))
+        if merged_ev.get("agent_cache_read_tokens") is not None:
+            a_cr = max(int(a_cr or 0), int(merged_ev.get("agent_cache_read_tokens") or 0))
+        if merged_ev.get("agent_out_tokens") is not None:
+            a_out = max(int(a_out or 0), int(merged_ev.get("agent_out_tokens") or 0))
+        if merged_ev.get("agent_total_tokens") is not None:
+            a_tot = max(int(a_tot or 0), int(merged_ev.get("agent_total_tokens") or 0))
+        elif any(merged_ev.get(k) is not None for k in ("agent_in_tokens", "agent_cache_read_tokens", "agent_out_tokens")):
+            a_tot = max(int(a_tot or 0), int(a_in or 0) + int(a_cr or 0) + int(a_out or 0))
+
+        # Apply Gemini totals snapshot if present (from inspect_done / run_telemetry)
+        if event_type in ("inspect_done", "run_telemetry"):
+            g_in = max(int(g_in or 0), int(merged_ev.get("gemini_in_tokens") or 0))
+            g_out = max(int(g_out or 0), int(merged_ev.get("gemini_out_tokens") or 0))
+
+        if event_type in ("job_open", "inspect_start"):
+            if cur_status not in ("done", "rendered"):
+                cur_status = "open"
+            stage = merged_ev.get("stage") or "open"
+        elif event_type in ("gemini_call", "gemini_retry"):
+            ch = str(merged_ev.get("clip_hash") or "").strip()[:64]
+            tx_key = f"tx:{ch}" if ch else ""
+            in_t = int(merged_ev.get("in_tokens") or 0)
+            out_t = int(merged_ev.get("out_tokens") or 0)
+            aud_s = float(merged_ev.get("audio_seconds") or 0.0)
+            is_retry = bool(merged_ev.get("is_retry")) or event_type == "gemini_retry" or (bool(tx_key) and tx_key in seen_set)
+            g_calls = int(g_calls or 0) + 1
+            g_in = int(g_in or 0) + in_t
+            g_out = int(g_out or 0) + out_t
+            g_aud = float(g_aud or 0.0) + aud_s
+            if is_retry:
+                g_retries = int(g_retries or 0) + 1
+                gr_in = int(gr_in or 0) + in_t
+                gr_out = int(gr_out or 0) + out_t
+            if ch:
+                if ch not in seen_set:
+                    seen_set.add(ch)
+                    seen_hashes.append(ch)
+                if tx_key and tx_key not in seen_set:
+                    seen_set.add(tx_key)
+                    seen_hashes.append(tx_key)
+                uniq_clips = max(uniq_clips, _unique_clip_count(seen_hashes))
+            if cur_status not in ("done", "rendered"):
+                cur_status = "transcribing"
+            stage = "transcribe"
+            call_status = str(merged_ev.get("call_status") or merged_ev.get("status") or "ok").lower()
+            if call_status not in ("ok", "success", ""):
+                err_cnt = int(err_cnt or 0) + 1
+                err_cat = "gemini_transcription"
+                err_msg = str(merged_ev.get("error_message") or merged_ev.get("reason") or call_status)[:1000]
+                last_err_cat, last_err_msg, last_err_at = err_cat, err_msg, client_ts
+        elif event_type == "inspect_done":
+            if cur_status not in ("done", "rendered"):
+                cur_status = "editing"
+            stage = "planning"
+            for w in merged_ev.get("warnings") or []:
+                wtxt = str(w or "").strip()
+                if wtxt:
+                    err_cnt = int(err_cnt or 0) + 1
+                    err_cat = "gemini_transcription"
+                    err_msg = wtxt[:1000]
+                    last_err_cat, last_err_msg, last_err_at = err_cat, err_msg, client_ts
+        elif event_type in ("stage_check", "qc_passed"):
+            if cur_status not in ("done", "rendered"):
+                cur_status = "editing"
+            if merged_ev.get("passed") is False:
+                blk_cnt = int(blk_cnt or 0) + 1
+                err_cat = "qc_plan_block"
+                err_msg = str(merged_ev.get("error_message") or merged_ev.get("reason") or "Plan check blocked")[:1000]
+                last_err_cat, last_err_msg, last_err_at = err_cat, err_msg, client_ts
+        elif event_type in ("qc_failed", "job_error", "job_blocked"):
+            raw_msg = str(merged_ev.get("error_message") or merged_ev.get("reason") or event_type)[:1000]
+            err_cat = self.classify_error(str(merged_ev.get("error_category") or ""), stage, raw_msg)
+            err_msg = raw_msg
+            last_err_cat, last_err_msg, last_err_at = err_cat, err_msg, client_ts
+            if event_type == "job_blocked":
+                blk_cnt = int(blk_cnt or 0) + 1
+                if cur_status != "done":
+                    cur_status = "blocked"
+            else:
+                err_cnt = int(err_cnt or 0) + 1
+                if cur_status != "done":
+                    cur_status = "failed"
+        elif event_type == "video_rendered":
+            r_cnt = int(r_cnt or 0) + 1
+            if first_rendered_at is None:
+                first_rendered_at = client_ts
+            if cur_status != "done":
+                cur_status = "rendered"
+            stage = "rendered"
+        elif event_type in ("video_delivered", "job_done"):
+            if merged_ev.get("output_folder"):
+                out_folder = str(merged_ev.get("output_folder"))[:400]
+            if isinstance(merged_ev.get("output_files"), list) and merged_ev.get("output_files"):
+                out_files = [str(x)[:160] for x in merged_ev["output_files"][:30]]
+            stage = "done"
+            if first_completed_at is None:
+                cur_status = "done"
+                first_completed_at = client_ts
+                first_completed_date = self.ist_day(client_ts)
+                if r_cnt == 0:
+                    r_cnt = 1
+            else:
+                # Deduplicate back-to-back deliver.py + zeno.py completion events for the same render pass (<= 90s)
+                last_deliv_ts = float(revs[-1].get("at") if revs else first_completed_at)
+                is_explicit_rev = bool(merged_ev.get("is_revision"))
+                if is_explicit_rev or (client_ts - last_deliv_ts) > 90.0:
+                    rev_cnt = int(rev_cnt or 0) + 1
+                    r_cnt = max(int(r_cnt or 0), rev_cnt + 1)
+                    revs.append({
+                        "revision": rev_cnt + 1,
+                        "at": round(client_ts, 1),
+                        "date": self.ist_day(client_ts),
+                        "reason": str(merged_ev.get("revision_reason") or merged_ev.get("reason") or "post-render revision")[:300],
+                        "agent_total_tokens": int(a_tot or 0),
+                        "prompts": len(prompts),
+                        "output_folder": out_folder,
+                    })
+                    revs = revs[-30:]
+                cur_status = "done"
+
+        eff_opened = min(float(opened_at), client_ts)
+        eff_last = max(float(last_event_at), client_ts)
+        end_ref = float(first_completed_at) if first_completed_at is not None else eff_last
+        total_dur = round(max(0.0, end_ref - eff_opened), 2)
+        p_cnt = max(int(p_cnt or 0), len(prompts))
+
+        self._run(
+            """UPDATE zeno_video_jobs SET
+               status = %s, last_stage = %s, opened_at = %s, first_rendered_at = %s,
+               first_completed_at = %s, first_completed_date = %s, last_event_at = %s,
+               total_duration_sec = %s, unique_clips_count = %s, seen_clip_hashes_json = %s,
+               gemini_calls = %s, gemini_retry_calls = %s, gemini_in_tokens = %s, gemini_out_tokens = %s,
+               gemini_retry_in_tokens = %s, gemini_retry_out_tokens = %s, gemini_audio_seconds = %s,
+               agent_name = %s, agent_model = %s, agent_calls = %s, agent_in_tokens = %s,
+               agent_cache_write_tokens = %s, agent_cache_read_tokens = %s, agent_out_tokens = %s,
+               agent_total_tokens = %s, user_prompt_count = %s, user_prompts_json = %s,
+               render_count = %s, revision_count = %s, revisions_json = %s,
+               output_folder = %s, output_files_json = %s,
+               error_count = %s, block_count = %s, last_error_category = %s,
+               last_error_message = %s, last_error_at = %s
+               WHERE job_key = %s""",
+            (
+                cur_status, stage, eff_opened, first_rendered_at,
+                first_completed_at, first_completed_date, eff_last,
+                total_dur, uniq_clips, json.dumps(seen_hashes[:200], ensure_ascii=False),
+                int(g_calls or 0), int(g_retries or 0), int(g_in or 0), int(g_out or 0),
+                int(gr_in or 0), int(gr_out or 0), round(float(g_aud or 0.0), 2),
+                a_name, a_model, int(a_calls or 0), int(a_in or 0),
+                int(a_cw or 0), int(a_cr or 0), int(a_out or 0),
+                int(a_tot or 0), p_cnt, json.dumps(prompts, ensure_ascii=False),
+                int(r_cnt or 0), int(rev_cnt or 0), json.dumps(revs, ensure_ascii=False),
+                out_folder, json.dumps(out_files, ensure_ascii=False),
+                int(err_cnt or 0), int(blk_cnt or 0), str(last_err_cat or ""),
+                str(last_err_msg or "")[:1000], last_err_at,
+                job_key,
+            ),
+        )
+        self._run(
+            """INSERT INTO zeno_track_events
+               (event_id, job_key, event_type, editor_email, editor_name, machine_id, stage,
+                error_category, error_message, payload_json, client_ts, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (event_id) DO NOTHING""",
+            (
+                event_id, job_key, event_type, email, ed_name, machine_id, stage,
+                err_cat, err_msg[:1000], json.dumps(payload or {}, ensure_ascii=False)[:30000],
+                client_ts, now,
+            ),
+        )
+        return {"event_id": event_id, "status": "accepted", "job_key": job_key}
+
+    def record_transcribe_for_job(
+        self,
+        key_id: Optional[int],
+        editor_name: str,
+        editor_email: str,
+        job_key: str,
+        clip_hash: str,
+        clip_name: str = "",
+        is_retry: bool = False,
+        status: str = "ok",
+        in_tokens: int = 0,
+        out_tokens: int = 0,
+        audio_seconds: float = 0.0,
+        reason: str = "",
+        version: str = "",
+        platform: str = "",
+        machine_id: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        if not job_key and not clip_hash:
+            return None
+        ev_id = "tr_" + hashlib.sha256(
+            f"{job_key}|{clip_hash}|{time.time()}|{secrets.token_hex(4)}".encode("utf-8")
+        ).hexdigest()[:24]
+        return self.ingest_track_event(
+            key_id,
+            editor_name,
+            editor_email,
+            {
+                "event_id": ev_id,
+                "event_type": "gemini_retry" if is_retry else "gemini_call",
+                "job_key": job_key,
+                "machine_id": machine_id or "default",
+                "zeno_version": version,
+                "platform": platform,
+                "ts": time.time(),
+                "payload": {
+                    "clip_hash": clip_hash,
+                    "clip_name": clip_name,
+                    "is_retry": bool(is_retry),
+                    "call_status": status,
+                    "in_tokens": int(in_tokens or 0),
+                    "out_tokens": int(out_tokens or 0),
+                    "audio_seconds": float(audio_seconds or 0.0),
+                    "reason": str(reason or "")[:400],
+                },
+            },
+        )
+
+    def _window_bounds(self, date_str: str = "", days: int = 1, tz_offset: int = 19800) -> Tuple[str, str, float, float]:
+        tz = timezone(timedelta(seconds=tz_offset))
+        now_dt = datetime.now(tz)
+        if date_str:
+            try:
+                end_dt = datetime.strptime(date_str[:10], "%Y-%m-%d").replace(tzinfo=tz)
+            except Exception:
+                end_dt = now_dt
+        else:
+            end_dt = now_dt
+        end_start = end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        span = max(1, min(365, int(days or 1)))
+        start_dt = end_start - timedelta(days=span - 1)
+        end_next = end_start + timedelta(days=1)
+        return start_dt.strftime("%Y-%m-%d"), end_start.strftime("%Y-%m-%d"), start_dt.timestamp(), end_next.timestamp()
+
+    def track_summary(
+        self,
+        date_str: str = "",
+        days: int = 1,
+        editor: str = "",
+        tz_offset: int = 19800,
+        stuck_after_sec: int = 1800,
+    ) -> Dict[str, Any]:
+        start_day, end_day, lo, hi = self._window_bounds(date_str, days, tz_offset)
+        now = time.time()
+        ed_filter = (editor or "").strip().lower()
+        rows = self._run(
+            """SELECT job_key, editor_email, editor_name, machine_id, notion_name, canonical_name,
+                      script_source, script_id, project_name, language, zeno_version, client_platform,
+                      status, last_stage, opened_at, first_rendered_at, first_completed_at, first_completed_date,
+                      last_event_at, total_duration_sec, unique_clips_count, gemini_calls, gemini_retry_calls,
+                      gemini_in_tokens, gemini_out_tokens, gemini_retry_in_tokens, gemini_retry_out_tokens,
+                      gemini_audio_seconds, agent_name, agent_model, agent_calls, agent_in_tokens,
+                      agent_cache_write_tokens, agent_cache_read_tokens, agent_out_tokens, agent_total_tokens,
+                      user_prompt_count, render_count, revision_count, revisions_json,
+                      output_folder, error_count, block_count, last_error_category, last_error_message, last_error_at
+               FROM zeno_video_jobs
+               WHERE (first_completed_date >= %s AND first_completed_date <= %s)
+                  OR (opened_at >= %s AND opened_at < %s)
+                  OR (last_event_at >= %s AND last_event_at < %s)
+               ORDER BY last_event_at DESC LIMIT 2000""",
+            (start_day, end_day, lo, hi, lo, hi),
+            "all",
+        ) or []
+
+        jobs_out: List[Dict[str, Any]] = []
+        by_editor: Dict[str, Dict[str, Any]] = {}
+        err_cats: Dict[str, int] = {
+            "input_script": 0,
+            "gemini_transcription": 0,
+            "qc_plan_block": 0,
+            "render_system": 0,
+            "stuck_abandoned": 0,
+        }
+
+        for r in rows:
+            email = str(r[1] or "").lower()
+            name = str(r[2] or email.split("@")[0])
+            if ed_filter and ed_filter not in email and ed_filter not in name.lower():
+                continue
+            status = str(r[12] or "open")
+            last_ev = float(r[18] or 0.0)
+            is_stuck = status in ("open", "transcribing", "editing", "rendered") and (now - last_ev) >= float(stuck_after_sec)
+            eff_status = "stuck" if is_stuck else status
+            revs = self._jload(r[39], [])
+            done_in_window = bool(r[17] and start_day <= str(r[17]) <= end_day)
+            rev_in_window = sum(1 for rv in revs if start_day <= str(rv.get("date") or "") <= end_day)
+            job_obj = {
+                "job_key": r[0],
+                "editor_email": email,
+                "editor_name": name,
+                "machine_id": r[3],
+                "notion_name": r[4] or r[8] or r[0],
+                "canonical_name": r[5],
+                "script_source": r[6],
+                "script_id": r[7],
+                "project_name": r[8],
+                "language": r[9],
+                "zeno_version": r[10],
+                "client_platform": r[11],
+                "status": eff_status,
+                "raw_status": status,
+                "is_stuck": is_stuck,
+                "last_stage": r[13],
+                "opened_at": float(r[14] or 0.0),
+                "first_rendered_at": float(r[15]) if r[15] is not None else None,
+                "first_completed_at": float(r[16]) if r[16] is not None else None,
+                "first_completed_date": r[17] or "",
+                "done_in_window": done_in_window,
+                "revisions_in_window": rev_in_window,
+                "last_event_at": last_ev,
+                "total_duration_sec": float(r[19] or 0.0),
+                "unique_clips_count": int(r[20] or 0),
+                "gemini_calls": int(r[21] or 0),
+                "gemini_retry_calls": int(r[22] or 0),
+                "gemini_in_tokens": int(r[23] or 0),
+                "gemini_out_tokens": int(r[24] or 0),
+                "gemini_retry_in_tokens": int(r[25] or 0),
+                "gemini_retry_out_tokens": int(r[26] or 0),
+                "gemini_audio_seconds": float(r[27] or 0.0),
+                "agent_name": r[28] or "",
+                "agent_model": r[29] or "",
+                "agent_calls": int(r[30] or 0),
+                "agent_in_tokens": int(r[31] or 0),
+                "agent_cache_write_tokens": int(r[32] or 0),
+                "agent_cache_read_tokens": int(r[33] or 0),
+                "agent_out_tokens": int(r[34] or 0),
+                "agent_total_tokens": int(r[35] or 0),
+                "user_prompt_count": int(r[36] or 0),
+                "render_count": int(r[37] or 0),
+                "revision_count": int(r[38] or 0),
+                "revisions": revs,
+                "output_folder": r[40] or "",
+                "error_count": int(r[41] or 0),
+                "block_count": int(r[42] or 0),
+                "last_error_category": "stuck_abandoned" if is_stuck and not r[43] else (r[43] or ""),
+                "last_error_message": (f"No progress for {int((now - last_ev) // 60)}m at stage '{r[13]}'" if is_stuck and not r[44] else (r[44] or "")),
+                "last_error_at": float(r[45]) if r[45] is not None else (last_ev if is_stuck else None),
+            }
+            jobs_out.append(job_obj)
+
+            ed_rec = by_editor.setdefault(email, {
+                "editor_email": email,
+                "editor_name": name,
+                "opened": 0,
+                "done": 0,
+                "first_pass_done": 0,
+                "revisions": 0,
+                "stuck": 0,
+                "failed_blocked": 0,
+                "unique_clips": 0,
+                "gemini_calls": 0,
+                "gemini_retries": 0,
+                "prompts": 0,
+                "agent_total_tokens": 0,
+                "gemini_total_tokens": 0,
+            })
+            ed_rec["opened"] += 1
+            if done_in_window:
+                ed_rec["done"] += 1
+                if int(r[38] or 0) == 0:
+                    ed_rec["first_pass_done"] += 1
+            ed_rec["revisions"] += rev_in_window
+            if is_stuck:
+                ed_rec["stuck"] += 1
+                err_cats["stuck_abandoned"] += 1
+            if eff_status in ("failed", "blocked"):
+                ed_rec["failed_blocked"] += 1
+            ed_rec["unique_clips"] += job_obj["unique_clips_count"]
+            ed_rec["gemini_calls"] += job_obj["gemini_calls"]
+            ed_rec["gemini_retries"] += job_obj["gemini_retry_calls"]
+            ed_rec["prompts"] += job_obj["user_prompt_count"]
+            ed_rec["agent_total_tokens"] += job_obj["agent_total_tokens"]
+            ed_rec["gemini_total_tokens"] += job_obj["gemini_in_tokens"] + job_obj["gemini_out_tokens"]
+
+        err_rows = self._run(
+            """SELECT category_val, COUNT(*) FROM (
+                   SELECT error_category AS category_val FROM zeno_track_events
+                   WHERE error_category <> '' AND client_ts >= %s AND client_ts < %s
+               ) sub GROUP BY category_val""",
+            (lo, hi),
+            "all",
+        ) or []
+        for cat, cnt in err_rows:
+            c_key = str(cat or "")
+            if c_key in err_cats:
+                err_cats[c_key] += int(cnt or 0)
+
+        fleet = self.track_fleet(tz_offset=tz_offset)
+        machines_by_email = {m["editor_email"]: m for m in fleet.get("editors", [])}
+        for ed_email, ed_rec in by_editor.items():
+            m_info = machines_by_email.get(ed_email) or {}
+            ed_rec["verified_version"] = m_info.get("verified_version") or ""
+            ed_rec["zeno_version"] = m_info.get("zeno_version") or ""
+            ed_rec["platform"] = m_info.get("platform") or ""
+
+        totals = {
+            "opened": len(jobs_out),
+            "done": sum(1 for j in jobs_out if j["done_in_window"]),
+            "first_pass_done": sum(1 for j in jobs_out if j["done_in_window"] and j["revision_count"] == 0),
+            "revisions": sum(j["revisions_in_window"] for j in jobs_out),
+            "in_progress": sum(1 for j in jobs_out if j["status"] in ("open", "transcribing", "editing", "rendered")),
+            "stuck": sum(1 for j in jobs_out if j["is_stuck"]),
+            "failed_blocked": sum(1 for j in jobs_out if j["status"] in ("failed", "blocked")),
+            "unique_clips": sum(j["unique_clips_count"] for j in jobs_out),
+            "gemini_calls": sum(j["gemini_calls"] for j in jobs_out),
+            "gemini_retries": sum(j["gemini_retry_calls"] for j in jobs_out),
+            "prompts": sum(j["user_prompt_count"] for j in jobs_out),
+            "errors": sum(err_cats.values()),
+            "verified_updated": fleet.get("verified_up_to_date", 0),
+            "latest_version": fleet.get("latest_version", ""),
+        }
+        return {
+            "ok": True,
+            "start_date": start_day,
+            "end_date": end_day,
+            "now": now,
+            "totals": totals,
+            "error_categories": err_cats,
+            "editors": sorted(by_editor.values(), key=lambda x: (-x["done"], -x["opened"], x["editor_name"])),
+            "jobs": jobs_out,
+            "fleet": fleet,
+        }
+
+    def track_job_detail(self, job_key: str) -> Optional[Dict[str, Any]]:
+        row = self._run(
+            """SELECT job_key, editor_email, editor_name, machine_id, notion_name, canonical_name,
+                      script_source, script_id, footage_path, project_name, language, zeno_version, client_platform,
+                      status, last_stage, opened_at, first_rendered_at, first_completed_at, first_completed_date,
+                      last_event_at, total_duration_sec, unique_clips_count, seen_clip_hashes_json,
+                      gemini_calls, gemini_retry_calls, gemini_in_tokens, gemini_out_tokens,
+                      gemini_retry_in_tokens, gemini_retry_out_tokens, gemini_audio_seconds,
+                      agent_name, agent_model, agent_calls, agent_in_tokens, agent_cache_write_tokens,
+                      agent_cache_read_tokens, agent_out_tokens, agent_total_tokens,
+                      user_prompt_count, user_prompts_json, render_count, revision_count, revisions_json,
+                      output_folder, output_files_json, error_count, block_count,
+                      last_error_category, last_error_message, last_error_at
+               FROM zeno_video_jobs WHERE job_key = %s""",
+            (str(job_key or "").strip(),),
+            "one",
+        )
+        if not row:
+            return None
+        evs = self._run(
+            """SELECT event_id, event_type, stage, error_category, error_message, payload_json, client_ts, created_at
+               FROM zeno_track_events WHERE job_key = %s ORDER BY client_ts ASC, id ASC LIMIT 500""",
+            (str(job_key or "").strip(),),
+            "all",
+        ) or []
+        return {
+            "job_key": row[0],
+            "editor_email": row[1],
+            "editor_name": row[2],
+            "machine_id": row[3],
+            "notion_name": row[4] or row[9] or row[0],
+            "canonical_name": row[5],
+            "script_source": row[6],
+            "script_id": row[7],
+            "footage_path": row[8],
+            "project_name": row[9],
+            "language": row[10],
+            "zeno_version": row[11],
+            "client_platform": row[12],
+            "status": row[13],
+            "last_stage": row[14],
+            "opened_at": float(row[15] or 0.0),
+            "first_rendered_at": float(row[16]) if row[16] is not None else None,
+            "first_completed_at": float(row[17]) if row[17] is not None else None,
+            "first_completed_date": row[18] or "",
+            "last_event_at": float(row[19] or 0.0),
+            "total_duration_sec": float(row[20] or 0.0),
+            "unique_clips_count": int(row[21] or 0),
+            "seen_clip_hashes": sorted({(x[3:] if str(x).startswith("tx:") else str(x)) for x in self._jload(row[22], []) if x}),
+            "gemini_calls": int(row[23] or 0),
+            "gemini_retry_calls": int(row[24] or 0),
+            "gemini_in_tokens": int(row[25] or 0),
+            "gemini_out_tokens": int(row[26] or 0),
+            "gemini_retry_in_tokens": int(row[27] or 0),
+            "gemini_retry_out_tokens": int(row[28] or 0),
+            "gemini_audio_seconds": float(row[29] or 0.0),
+            "agent_name": row[30] or "",
+            "agent_model": row[31] or "",
+            "agent_calls": int(row[32] or 0),
+            "agent_in_tokens": int(row[33] or 0),
+            "agent_cache_write_tokens": int(row[34] or 0),
+            "agent_cache_read_tokens": int(row[35] or 0),
+            "agent_out_tokens": int(row[36] or 0),
+            "agent_total_tokens": int(row[37] or 0),
+            "user_prompt_count": int(row[38] or 0),
+            "user_prompts": self._jload(row[39], []),
+            "render_count": int(row[40] or 0),
+            "revision_count": int(row[41] or 0),
+            "revisions": self._jload(row[42], []),
+            "output_folder": row[43] or "",
+            "output_files": self._jload(row[44], []),
+            "error_count": int(row[45] or 0),
+            "block_count": int(row[46] or 0),
+            "last_error_category": row[47] or "",
+            "last_error_message": row[48] or "",
+            "last_error_at": float(row[49]) if row[49] is not None else None,
+            "events": [
+                {
+                    "event_id": e[0],
+                    "event_type": e[1],
+                    "stage": e[2],
+                    "error_category": e[3],
+                    "error_message": e[4],
+                    "payload": self._jload(e[5], {}),
+                    "client_ts": float(e[6] or 0.0),
+                    "created_at": float(e[7] or 0.0),
+                }
+                for e in evs
+            ],
+        }
+
+    def track_errors(
+        self,
+        date_str: str = "",
+        days: int = 1,
+        category: str = "",
+        editor: str = "",
+        tz_offset: int = 19800,
+        stuck_after_sec: int = 1800,
+    ) -> Dict[str, Any]:
+        start_day, end_day, lo, hi = self._window_bounds(date_str, days, tz_offset)
+        now = time.time()
+        cat_filter = (category or "").strip().lower()
+        ed_filter = (editor or "").strip().lower()
+
+        ev_rows = self._run(
+            """SELECT e.event_id, e.job_key, e.event_type, e.editor_email, e.editor_name,
+                      e.stage, e.error_category, e.error_message, e.client_ts, j.notion_name
+               FROM zeno_track_events e
+               LEFT JOIN zeno_video_jobs j ON j.job_key = e.job_key
+               WHERE e.error_category <> '' AND e.client_ts >= %s AND e.client_ts < %s
+               ORDER BY e.client_ts DESC LIMIT 500""",
+            (lo, hi),
+            "all",
+        ) or []
+        items: List[Dict[str, Any]] = []
+        counts: Dict[str, int] = {
+            "input_script": 0,
+            "gemini_transcription": 0,
+            "qc_plan_block": 0,
+            "render_system": 0,
+            "stuck_abandoned": 0,
+        }
+        for eid, jkey, etype, email, ed_name, stage, ecat, emsg, cts, notion_name in ev_rows:
+            if ed_filter and ed_filter not in str(email or "").lower() and ed_filter not in str(ed_name or "").lower():
+                continue
+            if cat_filter and cat_filter != str(ecat or "").lower():
+                continue
+            if ecat in counts:
+                counts[ecat] += 1
+            items.append({
+                "kind": etype,
+                "event_id": eid,
+                "job_key": jkey or "",
+                "notion_name": notion_name or jkey or "",
+                "editor_email": email,
+                "editor_name": ed_name,
+                "stage": stage,
+                "category": ecat,
+                "message": emsg,
+                "ts": float(cts or 0.0),
+            })
+
+        stuck_rows = self._run(
+            """SELECT job_key, editor_email, editor_name, notion_name, last_stage, last_event_at, last_error_message
+               FROM zeno_video_jobs
+               WHERE status IN ('open', 'transcribing', 'editing', 'rendered')
+                 AND last_event_at >= %s AND last_event_at < %s AND (%s - last_event_at) >= %s
+               ORDER BY last_event_at DESC LIMIT 200""",
+            (lo, hi, now, float(stuck_after_sec)),
+            "all",
+        ) or []
+        for jkey, email, ed_name, notion_name, lstage, lev, lemsg in stuck_rows:
+            if ed_filter and ed_filter not in str(email or "").lower() and ed_filter not in str(ed_name or "").lower():
+                continue
+            if cat_filter and cat_filter != "stuck_abandoned":
+                continue
+            counts["stuck_abandoned"] += 1
+            mins = int(max(0, (now - float(lev or now)) // 60))
+            items.append({
+                "kind": "stuck",
+                "event_id": "",
+                "job_key": jkey,
+                "notion_name": notion_name or jkey,
+                "editor_email": email,
+                "editor_name": ed_name,
+                "stage": lstage,
+                "category": "stuck_abandoned",
+                "message": f"Stuck for {mins}m at stage '{lstage}'" + (f" ({lemsg})" if lemsg else ""),
+                "ts": float(lev or 0.0),
+            })
+
+        items.sort(key=lambda x: -float(x.get("ts") or 0.0))
+        return {
+            "ok": True,
+            "start_date": start_day,
+            "end_date": end_day,
+            "counts": counts,
+            "items": items,
+        }
+
+    def track_fleet(self, tz_offset: int = 19800) -> Dict[str, Any]:
+        latest_meta = self.latest_release_meta() or {}
+        latest_ver = str(latest_meta.get("version") or "")
+        latest_sha = str(latest_meta.get("bundle_sha256") or "")
+
+        def _vtuple(v: str) -> Tuple[int, int, int]:
+            nums = [int(x) for x in re.findall(r"\d+", v or "")[:3]]
+            while len(nums) < 3:
+                nums.append(0)
+            return (nums[0], nums[1], nums[2])
+
+        machines = self._run(
+            """SELECT editor_email, machine_id, editor_name, platform, zeno_version, verified_version,
+                      bundle_sha256, auth_source, pending_outbox, last_update_status, last_update_error, last_seen_at
+               FROM zeno_client_machines ORDER BY last_seen_at DESC""",
+            (),
+            "all",
+        ) or []
+        by_ed: Dict[str, Dict[str, Any]] = {}
+        for r in machines:
+            em = str(r[0] or "").lower()
+            cur = by_ed.setdefault(em, {
+                "editor_email": em,
+                "editor_name": str(r[2] or em.split("@")[0]),
+                "platform": str(r[3] or ""),
+                "zeno_version": str(r[4] or ""),
+                "verified_version": str(r[5] or ""),
+                "bundle_sha256": str(r[6] or ""),
+                "pending_outbox": 0,
+                "last_update_status": str(r[9] or ""),
+                "last_update_error": str(r[10] or ""),
+                "last_seen_at": float(r[11] or 0.0),
+                "machines": [],
+            })
+            cur["machines"].append({
+                "machine_id": r[1],
+                "platform": r[3] or "",
+                "zeno_version": r[4] or "",
+                "verified_version": r[5] or "",
+                "bundle_sha256": r[6] or "",
+                "auth_source": r[7] or "",
+                "pending_outbox": int(r[8] or 0),
+                "last_update_status": r[9] or "",
+                "last_update_error": r[10] or "",
+                "last_seen_at": float(r[11] or 0.0),
+            })
+            cur["pending_outbox"] += int(r[8] or 0)
+            if float(r[11] or 0.0) >= cur["last_seen_at"]:
+                cur["last_seen_at"] = float(r[11] or 0.0)
+                if r[3]:
+                    cur["platform"] = str(r[3])
+                if r[9]:
+                    cur["last_update_status"] = str(r[9])
+                    cur["last_update_error"] = str(r[10] or "")
+            if _vtuple(str(r[4] or "")) > _vtuple(cur["zeno_version"]):
+                cur["zeno_version"] = str(r[4] or "")
+            if _vtuple(str(r[5] or "")) > _vtuple(cur["verified_version"]):
+                cur["verified_version"] = str(r[5] or "")
+                cur["bundle_sha256"] = str(r[6] or "")
+
+        # Merge legacy key metadata so editors who haven't updated yet still show up once by email
+        for k in self.list():
+            if k.get("revoked_at"):
+                continue
+            em = str(k.get("email") or "").strip().lower()
+            if not em:
+                continue
+            cur = by_ed.setdefault(em, {
+                "editor_email": em,
+                "editor_name": str(k.get("name") or em.split("@")[0]),
+                "platform": str(k.get("client_platform") or ""),
+                "zeno_version": str(k.get("zeno_version") or ""),
+                "verified_version": "",
+                "bundle_sha256": "",
+                "pending_outbox": 0,
+                "last_update_status": "",
+                "last_update_error": "",
+                "last_seen_at": float(k.get("last_used_at") or k.get("version_seen_at") or 0.0),
+                "machines": [],
+            })
+            if not cur["platform"] and k.get("client_platform"):
+                cur["platform"] = str(k.get("client_platform"))
+            if _vtuple(str(k.get("zeno_version") or "")) > _vtuple(cur["zeno_version"]):
+                cur["zeno_version"] = str(k.get("zeno_version") or "")
+            cur["last_seen_at"] = max(cur["last_seen_at"], float(k.get("last_used_at") or 0.0))
+
+        receipts = self._run(
+            """SELECT event_id, editor_email, editor_name, machine_id, before_version, after_version,
+                      bundle_sha256, status, platform, files_updated, error_message, created_at
+               FROM zeno_update_receipts ORDER BY created_at DESC LIMIT 100""",
+            (),
+            "all",
+        ) or []
+        editors_list = sorted(by_ed.values(), key=lambda x: -float(x.get("last_seen_at") or 0.0))
+        verified_up = sum(
+            1 for e in editors_list
+            if latest_ver and e.get("verified_version") and _vtuple(e["verified_version"]) >= _vtuple(latest_ver)
+        )
+        return {
+            "ok": True,
+            "latest_version": latest_ver,
+            "latest_sha256": latest_sha,
+            "verified_up_to_date": verified_up,
+            "editors": editors_list,
+            "receipts": [
+                {
+                    "event_id": r[0],
+                    "editor_email": r[1],
+                    "editor_name": r[2],
+                    "machine_id": r[3],
+                    "before_version": r[4],
+                    "after_version": r[5],
+                    "bundle_sha256": r[6],
+                    "status": r[7],
+                    "platform": r[8],
+                    "files_updated": int(r[9] or 0),
+                    "error_message": r[10],
+                    "created_at": float(r[11] or 0.0),
+                }
+                for r in receipts
+            ],
+        }
