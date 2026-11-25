@@ -2388,10 +2388,7 @@ def common_unique_output(name: str) -> Path:
         s = re.sub(r"^(?:reel|sq)[\s_-]+", "", str(name or "").strip(), flags=re.IGNORECASE).strip() or str(name or "").strip()
         clean_name = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " ", s).strip().strip(".")
         clean_name = re.sub(r"\s+", " ", clean_name)[:180].strip() or "Zeno Edit"
-    folder, n = base_dir / clean_name, 2
-    while folder.is_dir() and any(f.suffix.lower() in (".mp4", ".prproj") for f in folder.iterdir()):
-        folder = base_dir / f"{clean_name} ({n})"
-        n += 1
+    folder = base_dir / clean_name
     return folder / f"reel_{folder.name}.mp4"
 
 
@@ -2597,13 +2594,25 @@ def _main_with_queue(_prep_q_stack: Any) -> None:
     _s2_stack = contextlib.ExitStack()
     _prep_q_stack.callback(_s2_stack.close)
     _s2_stack.enter_context(_stage_slot("stage2_transcribe", project_dir=_q_proj, video_name=_q_vname))
-    clips_data: List[Dict[str, Any]] = []
+    import concurrent.futures
+    import threading as _threading
+
+    _quota_evt = _threading.Event()
+    _quota_lock = _threading.Lock()
     quota_breaker_tripped = False
     quota_breaker_clip = ""
     quota_breaker_reason = ""
-    for stem, src_str, wdir in clip_entries:
+    prep_workers = max(1, min(int(os.environ.get("ZENO_PREP_WORKERS", "3") or "3"), len(clip_entries)))
+
+    def _prepare_one_clip(item: Tuple[str, str, Path]) -> Dict[str, Any]:
+        nonlocal quota_breaker_tripped, quota_breaker_clip, quota_breaker_reason
+        stem, src_str, wdir = item
         transcript_path = wdir / "gemini_transcript.json"
         before = transcript_path.stat().st_mtime_ns if transcript_path.exists() else None
+        skip_now = _quota_evt.is_set()
+        with _quota_lock:
+            qb_clip = quota_breaker_clip
+            qb_reason = quota_breaker_reason
         info, hq_words, base_words = ensure_clip_transcribed(
             stem,
             src_str,
@@ -2611,33 +2620,36 @@ def _main_with_queue(_prep_q_stack: Any) -> None:
             lang=lang,
             script_path=script_path,
             clean_raw_json=args.clean_raw_json,
-            skip_remote_transcription=quota_breaker_tripped,
+            skip_remote_transcription=skip_now,
             skip_reason=(
-                f"skipped by quota circuit-breaker after {quota_breaker_clip}"
-                + (f" ({quota_breaker_reason[:120]})" if quota_breaker_reason else "")
+                f"skipped by quota circuit-breaker after {qb_clip}"
+                + (f" ({qb_reason[:120]})" if qb_reason else "")
             )
-            if quota_breaker_tripped
+            if skip_now
             else "",
         )
-        if not quota_breaker_tripped and not hq_words:
+        if not hq_words:
             t_status = str((info or {}).get("_transcript_status") or "").strip().lower()
             t_err = str((info or {}).get("_transcript_error") or "").strip()
             if t_status in ("quota_exceeded", "cloud_failed") or _is_quota_error_text(t_err):
-                quota_breaker_tripped = True
-                quota_breaker_clip = stem
-                quota_breaker_reason = t_err or t_status or "quota_exceeded"
-                print(
-                    f"  [circuit-breaker] stopping further uncached Gemini uploads after {stem} "
-                    f"({t_status or 'quota_exceeded'}); already-cached clips will still be loaded.",
-                    file=sys.stderr,
-                )
+                with _quota_lock:
+                    if not _quota_evt.is_set():
+                        quota_breaker_tripped = True
+                        quota_breaker_clip = stem
+                        quota_breaker_reason = t_err or t_status or "quota_exceeded"
+                        _quota_evt.set()
+                        print(
+                            f"  [circuit-breaker] stopping further uncached Gemini uploads after {stem} "
+                            f"({t_status or 'quota_exceeded'}); already-cached clips will still be loaded.",
+                            file=sys.stderr,
+                        )
         wav_path = wdir / "audio16k.wav"
         rms_env = compute_10ms_rms_envelope(wav_path)
         macro_sil, micro_dips = detect_two_tier_silences(wav_path, rms_env, cached_silences_path=wdir / "silences.json")
         if hq_words and wav_path.is_file() and clip_has_no_sound(wav_path, rms_env):
             print(f"  [{stem}] no sound in this clip: ignoring {len(hq_words)} transcribed words")
             hq_words, base_words = [], []
-        clips_data.append({
+        return {
             "stem": stem,
             "transcription_reused": (before == transcript_path.stat().st_mtime_ns) if transcript_path.exists() else True,
             "src": src_str,
@@ -2649,7 +2661,13 @@ def _main_with_queue(_prep_q_stack: Any) -> None:
             "macro_silences": macro_sil,
             "micro_dips": micro_dips,
             "anomalies": [],
-        })
+        }
+
+    if prep_workers > 1 and len(clip_entries) > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=prep_workers) as pool:
+            clips_data = list(pool.map(_prepare_one_clip, clip_entries))
+    else:
+        clips_data = [_prepare_one_clip(item) for item in clip_entries]
 
     if align_engine is not None and hasattr(align_engine, "unload_shared_pipeline"):
         try:

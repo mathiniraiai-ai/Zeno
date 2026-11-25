@@ -137,7 +137,8 @@ def load_dotenv(dotenv_path: Optional[Path | str] = None, override: bool = False
 load_dotenv()
 
 # CPU & Thermal Governor: prevent OpenMP / Accelerate / OpenBLAS / PyTorch / FFmpeg from spawning unbounded threads
-ZENO_MAX_THREADS = max(1, int(os.environ.get("ZENO_MAX_THREADS", "4") or "4"))
+_DEFAULT_THREADS = min(max(4, os.cpu_count() or 4), 8)
+ZENO_MAX_THREADS = max(1, int(os.environ.get("ZENO_MAX_THREADS", str(_DEFAULT_THREADS)) or _DEFAULT_THREADS))
 for _thr_var in (
     "OMP_NUM_THREADS",
     "MKL_NUM_THREADS",
@@ -701,7 +702,14 @@ def _uses_hw_or_copy_encoder(str_args: List[str]) -> bool:
 def ffmpeg(*args, timeout: float = 180):
     str_args = [str(a) for a in args]
     hw_or_copy = _uses_hw_or_copy_encoder(str_args)
-    t_cap = str(min(int(ZENO_MAX_THREADS), 2)) if (IS_MAC or not hw_or_copy) else str(int(ZENO_MAX_THREADS))
+    cool_mode = os.environ.get("ZENO_COOL", "0").strip().lower() in ("1", "on", "true", "yes")
+    env_thr = os.environ.get("ZENO_FFMPEG_THREADS", "").strip()
+    if env_thr.isdigit() and int(env_thr) >= 1:
+        t_cap = str(int(env_thr))
+    elif cool_mode:
+        t_cap = str(min(int(ZENO_MAX_THREADS), 2))
+    else:
+        t_cap = str(int(ZENO_MAX_THREADS))
     base = [
         FFMPEG,
         "-hide_banner",
@@ -713,14 +721,14 @@ def ffmpeg(*args, timeout: float = 180):
     ]
     if "-threads" not in str_args and len(args) >= 2:
         if hw_or_copy:
-            return run([*base, "-threads", t_cap, *args], low_priority=True, timeout=timeout)
-        return run([*base, "-threads", t_cap, *args[:-1], "-threads", t_cap, args[-1]], low_priority=True, timeout=timeout)
-    return run([*base, *args], low_priority=True, timeout=timeout)
+            return run([*base, "-threads", t_cap, *args], low_priority=cool_mode, timeout=timeout)
+        return run([*base, "-threads", t_cap, *args[:-1], "-threads", t_cap, args[-1]], low_priority=cool_mode, timeout=timeout)
+    return run([*base, *args], low_priority=cool_mode, timeout=timeout)
 
 
 def run_cool() -> None:
-    """Run the editing job at background/utility QoS priority so laptops stay cool and quiet (`ZENO_COOL=0` disables)."""
-    if os.environ.get("ZENO_COOL", "1").strip().lower() in ("0", "off", "false", "no") or os.environ.get("_ZENO_COOL"):
+    """Run the editing job at background/utility QoS priority only when `ZENO_COOL=1` is enabled."""
+    if os.environ.get("ZENO_COOL", "0").strip().lower() in ("0", "off", "false", "no") or os.environ.get("_ZENO_COOL"):
         return
     if not sys.argv or not Path(sys.argv[0]).is_file():
         return
@@ -828,8 +836,8 @@ def resolve_output_dir(
 
 
 def unique_job_output(name: str) -> Path:
-    """`~/Downloads/Zeno Outs/<name>/reel_<name>.mp4` (or `<name> (2)` if `<name>` already holds a finished render)."""
-    folder = output_dir_for_name(name, unique=True)
+    """`~/Downloads/Zeno Outs/<name>/reel_<name>.mp4` (always one separate folder per video, replacing on re-delivery)."""
+    folder = output_dir_for_name(name, unique=False)
     return folder / f"reel_{folder.name}.mp4"
 
 

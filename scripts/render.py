@@ -1207,7 +1207,7 @@ def render_segment(seg: Dict[str, Any], W: int, H: int, fps: int, out: Path, dra
             "-map", "[aout]",
             "-frames:v", str(frames),
             "-c:v", "libx264",
-            "-preset", "ultrafast" if draft else "veryfast",
+            "-preset", "ultrafast" if draft else "superfast",
             "-crf", "12",
             "-c:a", "pcm_s16le",
             out,
@@ -1225,7 +1225,7 @@ def render_segment(seg: Dict[str, Any], W: int, H: int, fps: int, out: Path, dra
             "-af", ",".join(af),
             "-frames:v", str(frames),
             "-c:v", "libx264",
-            "-preset", "ultrafast" if draft else "veryfast",
+            "-preset", "ultrafast" if draft else "superfast",
             "-crf", "12",
             "-c:a", "pcm_s16le",
             out,
@@ -1523,10 +1523,12 @@ def _main_with_queue(_render_q_stack: contextlib.ExitStack) -> None:
             for ln in lock_lines:
                 print("  " + ln)
 
-    files: List[Path] = []
-    durs: List[float] = []
+    import concurrent.futures
+
+    cool_mode = os.environ.get("ZENO_COOL", "0").strip().lower() in ("1", "on", "true", "yes")
+    seg_specs: List[Tuple[int, Dict[str, Any], str, Path, float]] = []
+    unique_uncached: Dict[str, Tuple[int, Dict[str, Any], Path]] = {}
     for i, s in enumerate(segs):
-        thermal_pause()
         s.setdefault("id", f"S{i + 1}")
         lay = s.get("layout", "single")
         if layouts is not None and hasattr(layouts, "build_segment_cache_key"):
@@ -1558,21 +1560,59 @@ def _main_with_queue(_render_q_stack: contextlib.ExitStack) -> None:
                 key_items.extend([lay, s.get("peer"), s.get("chat"), s.get("slot")])
             cache_hex = hashlib.md5(json.dumps(key_items, sort_keys=True).encode()).hexdigest()[:16]
         f = cache / f"{cache_hex}.mkv"
-
         if offline_matched is not None and not f.exists():
             f = offline_matched[i]
+        expected_dur = max(1, round(max(0.08, segment_duration(s)) * fps)) / float(fps)
+        seg_specs.append((i, s, lay, f, expected_dur))
+        if not f.exists() and str(f) not in unique_uncached:
+            unique_uncached[str(f)] = (i, s, f)
 
-        if f.exists():
-            durs.append(max(1, round(max(0.08, segment_duration(s)) * fps)) / float(fps))
-            _say(
-                "render",
-                f"Cut {s['id']} ready (from cache): {Path(str(s['src'])).name} {float(s['start']):.2f}-{float(s['end']):.2f}, {lay}",
-                cut=s["id"],
-                i=i + 1,
-                n=len(segs),
-            )
+    rendered_durs: Dict[str, float] = {}
+    if unique_uncached:
+        def _render_one_seg(item: Tuple[int, Dict[str, Any], Path]) -> Tuple[str, float]:
+            if cool_mode:
+                thermal_pause()
+            _idx_s, seg_obj, out_f = item
+            if layouts is not None and hasattr(layouts, "render_segment_layout"):
+                dur_val = layouts.render_segment_layout(seg_obj, plan, W, H, fps, out_f, a.draft)
+            else:
+                dur_val = render_segment(seg_obj, W, H, fps, out_f, a.draft)
+            return str(out_f), float(dur_val)
+
+        tasks = list(unique_uncached.values())
+        max_auto = min(4, max(2, (os.cpu_count() or 4) // 2))
+        seg_workers = max(1, min(int(os.environ.get("ZENO_RENDER_WORKERS", str(max_auto)) or str(max_auto)), len(tasks)))
+        if cool_mode:
+            seg_workers = 1
+        if seg_workers > 1 and len(tasks) > 1:
+            for _idx_s, seg_obj, _out_f in tasks:
+                lay_lbl = seg_obj.get("layout", "single")
+                print(f"  segment {seg_obj['id']}: {seg_obj['src']} {float(seg_obj['start']):.2f}-{float(seg_obj['end']):.2f} ({lay_lbl})")
+            prev_ff_thr = os.environ.get("ZENO_FFMPEG_THREADS")
+            per_w_thr = max(2, int(getattr(common, "ZENO_MAX_THREADS", 4)) // seg_workers)
+            os.environ["ZENO_FFMPEG_THREADS"] = str(per_w_thr)
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=seg_workers) as pool:
+                    for out_key, dur_val in pool.map(_render_one_seg, tasks):
+                        rendered_durs[out_key] = dur_val
+            finally:
+                if prev_ff_thr is None:
+                    os.environ.pop("ZENO_FFMPEG_THREADS", None)
+                else:
+                    os.environ["ZENO_FFMPEG_THREADS"] = prev_ff_thr
         else:
-            print(f"  segment {s['id']}: {s['src']} {float(s['start']):.2f}-{float(s['end']):.2f} ({lay})")
+            for item in tasks:
+                _idx_s, seg_obj, _out_f = item
+                lay_lbl = seg_obj.get("layout", "single")
+                print(f"  segment {seg_obj['id']}: {seg_obj['src']} {float(seg_obj['start']):.2f}-{float(seg_obj['end']):.2f} ({lay_lbl})")
+                out_key, dur_val = _render_one_seg(item)
+                rendered_durs[out_key] = dur_val
+
+    files: List[Path] = []
+    durs: List[float] = []
+    for i, s, lay, f, expected_dur in seg_specs:
+        if str(f) in rendered_durs:
+            durs.append(rendered_durs[str(f)])
             _say(
                 "render",
                 f"Cutting {s['id']}: {Path(str(s['src'])).name} {float(s['start']):.2f}-{float(s['end']):.2f}, {lay}",
@@ -1580,10 +1620,15 @@ def _main_with_queue(_render_q_stack: contextlib.ExitStack) -> None:
                 i=i + 1,
                 n=len(segs),
             )
-            if layouts is not None and hasattr(layouts, "render_segment_layout"):
-                durs.append(layouts.render_segment_layout(s, plan, W, H, fps, f, a.draft))
-            else:
-                durs.append(render_segment(s, W, H, fps, f, a.draft))
+        else:
+            durs.append(expected_dur)
+            _say(
+                "render",
+                f"Cut {s['id']} ready (from cache): {Path(str(s['src'])).name} {float(s['start']):.2f}-{float(s['end']):.2f}, {lay}",
+                cut=s["id"],
+                i=i + 1,
+                n=len(segs),
+            )
         files.append(f)
 
     # 2) Output timeline (Zero-Audio-Loss physical transitions: video uses tpad+S-curve motion; audio uses 0.00s-drift joins)

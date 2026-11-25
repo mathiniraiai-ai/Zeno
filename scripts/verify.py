@@ -2117,7 +2117,7 @@ def check_picture_timeline(
         play_dur = _segment_play_duration(seg)
         play_dur_q = round(play_dur * fps) / fps
         eff_dur = max(1, round(_segment_duration(seg) * fps)) / fps
-        seg_cache_dir = plan_path.parent / "_segments"
+        seg_cache_dir = (Path(plan_dir) / "_segments") if plan_dir is not None else (WORK / "_segments")
         f = seg_cache_dir / f"{layouts.build_segment_cache_key(seg, plan, W, H, fps, False)}.mkv"
         if not f.is_file():
             f = seg_cache_dir / f"{layouts.build_segment_cache_key(seg, plan, W, H, fps, True)}.mkv"
@@ -2260,7 +2260,40 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
         result["note"] = "video could not be opened"
         return result
     fps = float((plan.get("canvas") or {}).get("fps") or 30)
+    _real_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    _use_fast_step = hasattr(cap, "grab") and _real_fps > 1.0
+    vid_fps = _real_fps if _real_fps > 1.0 else fps
     W, H = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    _cur_fidx = -1
+    _last_fr: Any = None
+    _max_grab = max(24, int(round(vid_fps * 3.0)))
+
+    def _read_at(t_sec: float) -> Tuple[bool, Any]:
+        nonlocal _cur_fidx, _last_fr
+        if not _use_fast_step:
+            cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, float(t_sec)) * 1000.0)
+            return cap.read()
+        target_idx = max(0, int(round(max(0.0, float(t_sec)) * vid_fps)))
+        if target_idx == _cur_fidx and _last_fr is not None:
+            return True, _last_fr
+        if _cur_fidx < target_idx <= _cur_fidx + _max_grab:
+            for _ in range(target_idx - _cur_fidx - 1):
+                if not cap.grab():
+                    break
+                _cur_fidx += 1
+            ok_r, fr_r = cap.read()
+            if ok_r and fr_r is not None:
+                _cur_fidx += 1
+                _last_fr = fr_r
+                return True, fr_r
+        cap.set(cv2.CAP_PROP_POS_FRAMES, target_idx)
+        ok_s, fr_s = cap.read()
+        if ok_s and fr_s is not None:
+            _cur_fidx = target_idx
+            _last_fr = fr_s
+            return True, fr_s
+        return False, None
     marks_by_seg: Dict[str, List[Tuple[float, float]]] = {}
     for m in plan.get("marks", []):
         marks_by_seg.setdefault(str(m.get("segment")), []).append(
@@ -2325,8 +2358,7 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
                 t_probe = t0 + dt_seam
                 if t_probe < 0.0:
                     continue
-                cap.set(cv2.CAP_PROP_POS_MSEC, t_probe * 1000.0)
-                ok_seam, fr_seam = cap.read()
+                ok_seam, fr_seam = _read_at(t_probe)
                 if ok_seam and fr_seam is not None:
                     result["frames"] += 1
                     gray_seam = cv2.cvtColor(fr_seam, cv2.COLOR_BGR2GRAY)
@@ -2357,6 +2389,7 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
         frozen_reported = False
 
         t = 0.2
+        sample_idx = 0
         while t < dur - 0.2:
             in_transition = (d_in > 0.0 and t <= d_in + 0.05) or (d_out > 0.0 and t >= dur - d_out - 0.05)
             in_mark = any(a - 0.05 <= t <= b for a, b in marks_by_seg.get(sid, []))
@@ -2366,8 +2399,7 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
                 for fz in explicit_freezes
             )
             if not in_transition and not in_mark:
-                cap.set(cv2.CAP_PROP_POS_MSEC, (t0 + t) * 1000.0)
-                ok, frame = cap.read()
+                ok, frame = _read_at(t0 + t)
                 if ok:
                     result["frames"] += 1
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -2407,89 +2439,93 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
                                 run_anchor_gray = gray
                         prev_gray = gray
 
-                    panel_faces: Dict[str, List[Dict[str, Any]]] = {}
-                    for name, (x0, y0, x1, y1) in panels:
-                        seen[name] += 1
-                        faces = vision_tracker.prominent_faces(vision_tracker.detect_faces_in_frame(frame[y0:y1, x0:x1]))
-                        panel_faces[name] = faces or []
-                        if result["frames"] % 6 == 1 and name in ("frame", "left", "top"):
-                            try:
-                                import vision_scan
+                    banner_active = any(b["t0"] <= t <= b["t1"] for b in boxes)
+                    run_faces = (sample_idx == 0) or (sample_idx % 2 == 0) or banner_active
+                    if run_faces:
+                        panel_faces: Dict[str, List[Dict[str, Any]]] = {}
+                        for name, (x0, y0, x1, y1) in panels:
+                            seen[name] += 1
+                            faces = vision_tracker.prominent_faces(vision_tracker.detect_faces_in_frame(frame[y0:y1, x0:x1]))
+                            panel_faces[name] = faces or []
+                            if result["frames"] % 6 == 1 and name in ("frame", "left", "top"):
+                                try:
+                                    import vision_scan
 
-                                vision_scan.record(f"final video {sid}", t0 + t, frame, faces, result["frames"], 0, 0.0)
-                            except Exception:
-                                pass
-                        if not faces:
-                            missing[name].append(round(t0 + t, 1))
-                        else:
-                            for f in faces:
-                                ex, ey = f.get("eye_center_norm", [0.5, 0.38])
-                                if ex <= 0.015 or ex >= 0.985 or ey <= 0.015 or ey >= 0.96:
-                                    lbl = f"{sid} ({name})" if name != "frame" else sid
-                                    result["face_crop"].append(f"{lbl} at {t0 + t:.1f}s: eyeline near crop edge ({ex:.2f},{ey:.2f})")
-                            for b in boxes:
-                                if b["t0"] <= t <= b["t1"]:
-                                    for f in faces:
-                                        canvas_bbox = _panel_bbox_to_canvas_norm(
-                                            f["bbox_norm"], (x0, y0, x1, y1), W, H
-                                        )
-                                        if box_overlap_share(canvas_bbox, (b["x0"], b["y0"], b["x1"], b["y1"]), W, H) > BANNER_FACE_OVERLAP:
-                                            lbl = f"{sid} ({name})" if name != "frame" else sid
-                                            result["banner_on_face"].append(f"{lbl} at {t0 + t:.1f}s: '{b['text']}' covers a face")
+                                    vision_scan.record(f"final video {sid}", t0 + t, frame, faces, result["frames"], 0, 0.0)
+                                except Exception:
+                                    pass
+                            if not faces:
+                                missing[name].append(round(t0 + t, 1))
+                            else:
+                                for f in faces:
+                                    ex, ey = f.get("eye_center_norm", [0.5, 0.38])
+                                    if ex <= 0.015 or ex >= 0.985 or ey <= 0.015 or ey >= 0.96:
+                                        lbl = f"{sid} ({name})" if name != "frame" else sid
+                                        result["face_crop"].append(f"{lbl} at {t0 + t:.1f}s: eyeline near crop edge ({ex:.2f},{ey:.2f})")
+                                for b in boxes:
+                                    if b["t0"] <= t <= b["t1"]:
+                                        for f in faces:
+                                            canvas_bbox = _panel_bbox_to_canvas_norm(
+                                                f["bbox_norm"], (x0, y0, x1, y1), W, H
+                                            )
+                                            if box_overlap_share(canvas_bbox, (b["x0"], b["y0"], b["x1"], b["y1"]), W, H) > BANNER_FACE_OVERLAP:
+                                                lbl = f"{sid} ({name})" if name != "frame" else sid
+                                                result["banner_on_face"].append(f"{lbl} at {t0 + t:.1f}s: '{b['text']}' covers a face")
 
-                    def _primary_panel_face(flist: List[Dict[str, Any]], min_fh: float) -> Optional[Dict[str, Any]]:
-                        cands = []
-                        for f_obj in flist:
-                            if not isinstance(f_obj, dict) or not f_obj.get("bbox_norm"):
-                                continue
-                            if float(f_obj.get("confidence", 1.0)) <= 0.5:
-                                continue
-                            bb = f_obj["bbox_norm"]
-                            fh = float(bb[3]) - float(bb[1])
-                            if fh >= min_fh:
-                                cands.append((fh, f_obj))
-                        return max(cands, key=lambda x: x[0])[1] if cands else None
+                        def _primary_panel_face(flist: List[Dict[str, Any]], min_fh: float) -> Optional[Dict[str, Any]]:
+                            cands = []
+                            for f_obj in flist:
+                                if not isinstance(f_obj, dict) or not f_obj.get("bbox_norm"):
+                                    continue
+                                if float(f_obj.get("confidence", 1.0)) <= 0.5:
+                                    continue
+                                bb = f_obj["bbox_norm"]
+                                fh = float(bb[3]) - float(bb[1])
+                                if fh >= min_fh:
+                                    cands.append((fh, f_obj))
+                            return max(cands, key=lambda x: x[0])[1] if cands else None
 
-                    if lay_norm == "split_h":
-                        f_l = _primary_panel_face(panel_faces.get("left", []), 0.10)
-                        f_r = _primary_panel_face(panel_faces.get("right", []), 0.10)
-                        if f_l is not None and f_r is not None:
-                            fh_l = float(f_l["bbox_norm"][3]) - float(f_l["bbox_norm"][1])
-                            fh_r = float(f_r["bbox_norm"][3]) - float(f_r["bbox_norm"][1])
-                            ratio_lr = max(fh_l, fh_r) / max(1e-4, min(fh_l, fh_r))
-                            ey_l = float((f_l.get("eye_center_norm") or [0.5, 0.5 * (float(f_l["bbox_norm"][1]) + float(f_l["bbox_norm"][3]))])[1])
-                            ey_r = float((f_r.get("eye_center_norm") or [0.5, 0.5 * (float(f_r["bbox_norm"][1]) + float(f_r["bbox_norm"][3]))])[1])
-                            ey_diff = abs(ey_l - ey_r)
-                            ratio_fail_thr = 1.55 if ey_diff <= 0.035 else 1.38
-                            if ratio_lr > ratio_fail_thr or ((not has_asym_offset_y) and ey_diff > 0.08):
-                                split_h_bad.append(
-                                    f"{sid} at {t0 + t:.1f}s: split_h alignment mismatch "
-                                    f"(fh L={fh_l:.2f}/R={fh_r:.2f} ratio={ratio_lr:.2f}, ey L={ey_l:.2f}/R={ey_r:.2f})"
-                                )
-                            elif ratio_lr > 1.38:
-                                split_h_warn.append(
-                                    f"{sid} at {t0 + t:.1f}s: split_h scale warning "
-                                    f"(fh L={fh_l:.2f}/R={fh_r:.2f} ratio={ratio_lr:.2f}, ey L={ey_l:.2f}/R={ey_r:.2f})"
-                                )
-                    elif lay_norm == "split_v":
-                        f_t = _primary_panel_face(panel_faces.get("top", []), 0.14)
-                        f_b = _primary_panel_face(panel_faces.get("bottom", []), 0.14)
-                        if f_t is not None and f_b is not None:
-                            bb_t, bb_b = f_t["bbox_norm"], f_b["bbox_norm"]
-                            fh_t = float(bb_t[3]) - float(bb_t[1])
-                            fh_b = float(bb_b[3]) - float(bb_b[1])
-                            ratio_tb = max(fh_t, fh_b) / max(1e-4, min(fh_t, fh_b))
-                            cx_t = 0.5 * (float(bb_t[0]) + float(bb_t[2]))
-                            cx_b = 0.5 * (float(bb_b[0]) + float(bb_b[2]))
-                            if ratio_tb > 1.38 or abs(cx_t - cx_b) > 0.10:
-                                split_v_bad.append(
-                                    f"{sid} at {t0 + t:.1f}s: split_v alignment warning "
-                                    f"(cx T={cx_t:.2f}/B={cx_b:.2f}, fh T={fh_t:.2f}/B={fh_b:.2f} ratio={ratio_tb:.2f})"
-                                )
+                        if lay_norm == "split_h":
+                            f_l = _primary_panel_face(panel_faces.get("left", []), 0.10)
+                            f_r = _primary_panel_face(panel_faces.get("right", []), 0.10)
+                            if f_l is not None and f_r is not None:
+                                fh_l = float(f_l["bbox_norm"][3]) - float(f_l["bbox_norm"][1])
+                                fh_r = float(f_r["bbox_norm"][3]) - float(f_r["bbox_norm"][1])
+                                ratio_lr = max(fh_l, fh_r) / max(1e-4, min(fh_l, fh_r))
+                                ey_l = float((f_l.get("eye_center_norm") or [0.5, 0.5 * (float(f_l["bbox_norm"][1]) + float(f_l["bbox_norm"][3]))])[1])
+                                ey_r = float((f_r.get("eye_center_norm") or [0.5, 0.5 * (float(f_r["bbox_norm"][1]) + float(f_r["bbox_norm"][3]))])[1])
+                                ey_diff = abs(ey_l - ey_r)
+                                ratio_fail_thr = 1.55 if ey_diff <= 0.035 else 1.38
+                                if ratio_lr > ratio_fail_thr or ((not has_asym_offset_y) and ey_diff > 0.08):
+                                    split_h_bad.append(
+                                        f"{sid} at {t0 + t:.1f}s: split_h alignment mismatch "
+                                        f"(fh L={fh_l:.2f}/R={fh_r:.2f} ratio={ratio_lr:.2f}, ey L={ey_l:.2f}/R={ey_r:.2f})"
+                                    )
+                                elif ratio_lr > 1.38:
+                                    split_h_warn.append(
+                                        f"{sid} at {t0 + t:.1f}s: split_h scale warning "
+                                        f"(fh L={fh_l:.2f}/R={fh_r:.2f} ratio={ratio_lr:.2f}, ey L={ey_l:.2f}/R={ey_r:.2f})"
+                                    )
+                        elif lay_norm == "split_v":
+                            f_t = _primary_panel_face(panel_faces.get("top", []), 0.14)
+                            f_b = _primary_panel_face(panel_faces.get("bottom", []), 0.14)
+                            if f_t is not None and f_b is not None:
+                                bb_t, bb_b = f_t["bbox_norm"], f_b["bbox_norm"]
+                                fh_t = float(bb_t[3]) - float(bb_t[1])
+                                fh_b = float(bb_b[3]) - float(bb_b[1])
+                                ratio_tb = max(fh_t, fh_b) / max(1e-4, min(fh_t, fh_b))
+                                cx_t = 0.5 * (float(bb_t[0]) + float(bb_t[2]))
+                                cx_b = 0.5 * (float(bb_b[0]) + float(bb_b[2]))
+                                if ratio_tb > 1.38 or abs(cx_t - cx_b) > 0.10:
+                                    split_v_bad.append(
+                                        f"{sid} at {t0 + t:.1f}s: split_v alignment warning "
+                                        f"(cx T={cx_t:.2f}/B={cx_b:.2f}, fh T={fh_t:.2f}/B={fh_b:.2f} ratio={ratio_tb:.2f})"
+                                    )
             else:
                 prev_gray = None
                 run_anchor_gray = None
                 frozen_run = 0
+            sample_idx += 1
             t += FRAME_STEP_SEC
         if len(split_h_bad) >= 2:
             result["split_alignment"].append(split_h_bad[0])
@@ -3881,10 +3917,8 @@ def run_verification(
         eff_target_lufs = float(base_loud) + float(gain_raw or 0.0)
     else:
         eff_target_lufs = float(target_lufs)
-    audio_ok, i_lufs, tp_db = check_loudness(out_mp4, target_lufs=eff_target_lufs)
 
     plan["_plan_dir"] = str(p_file.parent)
-    cuts_ok, clipped_w, long_pauses, jc_masked, b_clicks = check_cuts_and_pauses(plan, mp4_path=out_mp4)
 
     if not script_path:
         side = p_file.parent / "plan.json"
@@ -3893,67 +3927,103 @@ def run_verification(
         except Exception:
             script_path = None
     resolved_script = resolve(script_path) if script_path else None
-    script_ok, cov_lines, tot_lines, b_dups = check_script_coverage(plan, script_path=resolved_script)
-
     sheet_path = p_file.parent / "marks_contact_sheet.jpg"
-    marks_ok, m_pass, m_tot, m_details, sheet_kb = verify_marks_and_build_contact_sheet(
-        out_mp4, plan, seg_start, exp_w, exp_h, sheet_path
-    )
-    split_hook_ok, split_hook_summary = check_split_and_hook_rules(plan)
-    subs_ok, subs_summary = check_subtitles_srt(plan, out_mp4)
-    if subs_ok and not is_subs_enabled(plan):
-        # Scroll-page (`#page scroll`) and banner-only edits still render text PNGs that need tofu/Pango QC
-        page_meta_cands = [p_file.parent / "_page" / "page_meta.json", WORK / "_page" / "page_meta.json"]
-        for pmc in page_meta_cands:
-            if pmc.is_file():
-                try:
-                    pm = read_json(pmc)
-                    if isinstance(pm, dict) and pm.get("pango_warnings"):
-                        pw = pm["pango_warnings"]
-                        subs_ok = False
-                        subs_summary = f"Pango font warning during scroll page render: {pw[0] if isinstance(pw, list) else pw}"
-                        break
-                except Exception:
-                    pass
-        if subs_ok:
-            bad_page_png = _scan_pngs_for_tofu(
-                _gather_work_pngs(plan, out_mp4, ("_page", "_scroll_page"), include_banners=True),
-                max_check=16,
-            )
-            if bad_page_png is not None:
-                bp, bqc = bad_page_png
-                subs_ok = False
-                subs_summary = f"detected {bqc['tofu_count']} hollow tofu box(es) in {bp.name}"
-        if subs_ok and plan.get("page"):
-            page_texts = _extract_plan_banner_texts(plan) + [
-                str(s.get("text") or "") for s in (plan.get("segments") or []) if isinstance(s, dict)
-            ]
-            page_indic = _collect_indic_probe_text(page_texts, max_words=12)
-            if page_indic:
-                try:
-                    import subtitles as _subs
-                    if _subs.available():
-                        p_ok, p_det = _subs.probe_text_render(page_indic, style_id=2)
-                        if not p_ok:
-                            subs_ok = False
-                            subs_summary = f"Indic scroll-page font check failed: {p_det}"
-                except Exception as exc:  # noqa: BLE001
-                    subs_ok = False
-                    subs_summary = f"Indic scroll-page font check error: {exc}"
-    cards_ok, cards_summary = check_flashcards(plan, out_mp4, is_square=False, plan_dir=p_file.parent)
-    pic_ok, pic_bad, pic_n = check_picture_timeline(plan, out_mp4, plan_dir=p_file.parent)
     sq_mp4 = square_job_output(out_mp4)
     has_square = sq_mp4.is_file() and sq_mp4.resolve() != out_mp4.resolve()
-    sq_ok, sq_summary = (
-        check_square_output(sq_mp4, plan=plan, plan_dir=p_file.parent) if has_square else (True, "")
-    )
-    review = build_review_sheet(
-        plan,
-        out_mp4,
-        p_file.parent / "review_sheet.jpg",
-        sq_path=sq_mp4 if has_square else None,
-    )
-    frames = check_frames(plan, out_mp4)
+
+    def _task_audio() -> Tuple[bool, float, float]:
+        return check_loudness(out_mp4, target_lufs=eff_target_lufs)
+
+    def _task_cuts_script() -> Tuple[Tuple[bool, int, int, int, int], Tuple[bool, int, int, int]]:
+        cuts_res = check_cuts_and_pauses(plan, mp4_path=out_mp4)
+        script_res = check_script_coverage(plan, script_path=resolved_script)
+        return cuts_res, script_res
+
+    def _task_marks_review() -> Tuple[Tuple[bool, int, int, List[str], int], Any]:
+        mk_res = verify_marks_and_build_contact_sheet(
+            out_mp4, plan, seg_start, exp_w, exp_h, sheet_path
+        )
+        rev_res = build_review_sheet(
+            plan,
+            out_mp4,
+            p_file.parent / "review_sheet.jpg",
+            sq_path=sq_mp4 if has_square else None,
+        )
+        return mk_res, rev_res
+
+    def _task_vision_and_subs() -> Dict[str, Any]:
+        # Keep YuNet (vision_tracker) + OpenCV vision checks serialized on one worker thread
+        split_hook_res = check_split_and_hook_rules(plan)
+        subs_ok_v, subs_sum_v = check_subtitles_srt(plan, out_mp4)
+        if subs_ok_v and not is_subs_enabled(plan):
+            page_meta_cands = [p_file.parent / "_page" / "page_meta.json", WORK / "_page" / "page_meta.json"]
+            for pmc in page_meta_cands:
+                if pmc.is_file():
+                    try:
+                        pm = read_json(pmc)
+                        if isinstance(pm, dict) and pm.get("pango_warnings"):
+                            pw = pm["pango_warnings"]
+                            subs_ok_v = False
+                            subs_sum_v = f"Pango font warning during scroll page render: {pw[0] if isinstance(pw, list) else pw}"
+                            break
+                    except Exception:
+                        pass
+            if subs_ok_v:
+                bad_page_png = _scan_pngs_for_tofu(
+                    _gather_work_pngs(plan, out_mp4, ("_page", "_scroll_page"), include_banners=True),
+                    max_check=16,
+                )
+                if bad_page_png is not None:
+                    bp, bqc = bad_page_png
+                    subs_ok_v = False
+                    subs_sum_v = f"detected {bqc['tofu_count']} hollow tofu box(es) in {bp.name}"
+            if subs_ok_v and plan.get("page"):
+                page_texts = _extract_plan_banner_texts(plan) + [
+                    str(s.get("text") or "") for s in (plan.get("segments") or []) if isinstance(s, dict)
+                ]
+                page_indic = _collect_indic_probe_text(page_texts, max_words=12)
+                if page_indic:
+                    try:
+                        import subtitles as _subs
+                        if _subs.available():
+                            p_ok, p_det = _subs.probe_text_render(page_indic, style_id=2)
+                            if not p_ok:
+                                subs_ok_v = False
+                                subs_sum_v = f"Indic scroll-page font check failed: {p_det}"
+                    except Exception as exc:  # noqa: BLE001
+                        subs_ok_v = False
+                        subs_sum_v = f"Indic scroll-page font check error: {exc}"
+        cards_res = check_flashcards(plan, out_mp4, is_square=False, plan_dir=p_file.parent)
+        pic_res = check_picture_timeline(plan, out_mp4, plan_dir=p_file.parent)
+        sq_res = check_square_output(sq_mp4, plan=plan, plan_dir=p_file.parent) if has_square else (True, "")
+        frames_res = check_frames(plan, out_mp4)
+        return {
+            "split_hook": split_hook_res,
+            "subs": (subs_ok_v, subs_sum_v),
+            "cards": cards_res,
+            "pic": pic_res,
+            "sq": sq_res,
+            "frames": frames_res,
+        }
+
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as _vpool:
+        f_aud = _vpool.submit(_task_audio)
+        f_cuts = _vpool.submit(_task_cuts_script)
+        f_mk = _vpool.submit(_task_marks_review)
+        f_vis = _vpool.submit(_task_vision_and_subs)
+        audio_ok, i_lufs, tp_db = f_aud.result()
+        (cuts_ok, clipped_w, long_pauses, jc_masked, b_clicks), (script_ok, cov_lines, tot_lines, b_dups) = f_cuts.result()
+        (marks_ok, m_pass, m_tot, m_details, sheet_kb), review = f_mk.result()
+        vis_out = f_vis.result()
+
+    split_hook_ok, split_hook_summary = vis_out["split_hook"]
+    subs_ok, subs_summary = vis_out["subs"]
+    cards_ok, cards_summary = vis_out["cards"]
+    pic_ok, pic_bad, pic_n = vis_out["pic"]
+    sq_ok, sq_summary = vis_out["sq"]
+    frames = vis_out["frames"]
     alt_proj_dir = WORK / out_mp4.stem
     if alt_proj_dir.is_dir() and alt_proj_dir.resolve() != p_file.parent.resolve() and sheet_path.is_file():
         (alt_proj_dir / "marks_contact_sheet.jpg").write_bytes(sheet_path.read_bytes())

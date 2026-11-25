@@ -10,25 +10,28 @@ each helper returns an empty list and callers fall back to energy-only silence b
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
 _MODEL = None
 _MODEL_FAILED = False
+_VAD_LOCK = threading.Lock()
 
 
 def _model():
     global _MODEL, _MODEL_FAILED
-    if _MODEL is not None or _MODEL_FAILED:
-        return _MODEL
-    try:
-        from silero_vad import load_silero_vad
+    with _VAD_LOCK:
+        if _MODEL is not None or _MODEL_FAILED:
+            return _MODEL
+        try:
+            from silero_vad import load_silero_vad
 
-        _MODEL = load_silero_vad(onnx=False)
-    except Exception:
-        _MODEL_FAILED = True
-    return _MODEL
+            _MODEL = load_silero_vad(onnx=False)
+        except Exception:
+            _MODEL_FAILED = True
+        return _MODEL
 
 
 def available() -> bool:
@@ -45,15 +48,16 @@ def speech_spans(waveform: np.ndarray, sample_rate: int = 16000) -> List[Tuple[f
         import torch
         from silero_vad import get_speech_timestamps
 
-        timestamps = get_speech_timestamps(
-            torch.from_numpy(np.asarray(waveform, dtype=np.float32)),
-            model,
-            threshold=0.35,
-            sampling_rate=sample_rate,
-            return_seconds=True,
-            min_silence_duration_ms=260,
-            speech_pad_ms=80,
-        )
+        with _VAD_LOCK:
+            timestamps = get_speech_timestamps(
+                torch.from_numpy(np.asarray(waveform, dtype=np.float32)),
+                model,
+                threshold=0.35,
+                sampling_rate=sample_rate,
+                return_seconds=True,
+                min_silence_duration_ms=260,
+                speech_pad_ms=80,
+            )
         return [(round(float(t["start"]), 3), round(float(t["end"]), 3)) for t in timestamps]
     except Exception:
         return []

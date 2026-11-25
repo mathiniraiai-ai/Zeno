@@ -1,1 +1,1 @@
-Zeno v3.0.5: 5-stage cross-chat FIFO pipeline queue, per-project isolated render scratch (_segments/mix.mkv), 30m OTA check, clean QC error reporting, and Windows prompt capture
+Zeno v3.0.6: 2-3x faster editing (full multi-thread CPU, parallel clip prep, parallel segment rendering & parallel sequential-decode Deep QC), Stop Saying fixes (peer duration loop fix, phrase-spanning banners without clip extension), and clean per-video Download folder replacement

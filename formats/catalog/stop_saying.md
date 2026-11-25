@@ -14,6 +14,7 @@ Header line 1 of `script_analysis.md`: `Format: stop_saying (1.4 Stop Saying / N
 ## Layouts, Stacked Banners & Split Rules
 - **Hook & Struck Phrases (`layout=single`)**:
   - Preserve calibrated post-word `0.48s` beat + ~30%-reduced hollow outer vignette (`#mark_pack vignette`, live non-frozen visuals, no dialogue overlap): scripted `wrong`/`strike_text` lines auto-attach outer vignette + strip slash + buzzer (`sn_wrong.wav`) over live non-frozen video (manual `mark:wrong@t/0.48@style=vignette` optional; never freeze).
+  - For explicit phrase-spanning Stop Saying banners, place `banner:"Phrase"@0.0/<line_dur>` (covering the spoken phrase within `[0, line_dur]`) to keep the struck phrase visible while spoken, suppress bottom captions automatically across that span, and avoid artificial tail holds.
   - On multi-phrase single-cut hooks, stack `banner:"Phrase 1"` (auto-staggers without `@t`, or pass `@t` for exact onset); keep `z=1.0` across banner stacks and moving shots.
 - **Bridge, Return & CTA (`layout=single`)**:
   - Keep sentences complete (`start - 0.05s` to `end + 0.06-0.10s` via `pauses:`); never cut `<0.45s` breaths/commas (trim dead-air `>=0.50s`, `>=0.55s` in splits). Steady cuts may use `z=zoom_in[:1.08]` (`1.0->1.06`) or `z=sudden_in:1.08@t` (or `1.08` punch-in at real `>=0.45s` pause without slicing audio; `z=1.0` if camera moves).

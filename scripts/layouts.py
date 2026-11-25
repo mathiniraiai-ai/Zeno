@@ -1958,6 +1958,7 @@ def _build_strikethrough_png(
 # Split Panel Lock: Stationary Background Registration & Colour Consistency
 # ---------------------------------------------------------------------------
 _SPLIT_LOCK_CACHE: Dict[str, Dict[str, Any]] = {}
+_CACHE_LOCK = threading.Lock()
 
 
 def _split_peer_time(peer: Dict[str, Any]) -> float:
@@ -2694,9 +2695,10 @@ def split_panel_lock(seg: Dict[str, Any], plan: Optional[Dict[str, Any]], W: int
                 default=str,
             ).encode("utf-8")
         ).hexdigest()
-        if key not in _SPLIT_LOCK_CACHE:
-            _SPLIT_LOCK_CACHE[key] = _compute_split_locks(plan, W, H)
-        plan_locks = _SPLIT_LOCK_CACHE[key]
+        with _CACHE_LOCK:
+            if key not in _SPLIT_LOCK_CACHE:
+                _SPLIT_LOCK_CACHE[key] = _compute_split_locks(plan, W, H)
+            plan_locks = _SPLIT_LOCK_CACHE[key]
         return plan_locks["segs"].get(_split_seg_sig(seg))
     except Exception:
         return None
@@ -3024,13 +3026,17 @@ def _extract_peer_still_png(peer_src: Path, still_at: float) -> Path:
     sig = f"{_file_mtime_sig(peer_src)}|{still_at:.3f}"
     digest = hashlib.sha1(sig.encode("utf-8")).hexdigest()[:16]
     out_png = UI_CACHE_DIR / f"peer_still_{digest}.png"
-    if out_png.is_file() and out_png.stat().st_size > 100:
-        return out_png
+    with _CACHE_LOCK:
+        if out_png.is_file() and out_png.stat().st_size > 100:
+            return out_png
 
-    info = probe(peer_src)
-    dur = float(info.get("duration") or 5.0)
-    clamped_t = max(0.0, min(float(still_at), max(0.0, dur - 0.08)))
-    ffmpeg("-ss", f"{clamped_t:.3f}", "-i", peer_src, "-frames:v", "1", out_png)
+        info = probe(peer_src)
+        dur = float(info.get("duration") or 5.0)
+        clamped_t = max(0.0, min(float(still_at), max(0.0, dur - 0.08)))
+        tmp_png = UI_CACHE_DIR / f"peer_still_{digest}.{threading.get_ident()}.tmp.png"
+        ffmpeg("-ss", f"{clamped_t:.3f}", "-i", peer_src, "-frames:v", "1", tmp_png)
+        if tmp_png.is_file():
+            os.replace(tmp_png, out_png)
     return out_png
 
 
@@ -3078,28 +3084,29 @@ def _append_peer_video_input(
             ])
     elif peer_src.is_file() and mode != "still":
         if has_span and (float(idle_span[1]) - float(idle_span[0])) >= 0.30:
-            s0 = max(0.0, float(idle_span[0]))
-            s1 = float(idle_span[1])
+            s0 = max(0.0, min(float(idle_span[0]), max(0.0, peer_dur - 0.30)))
+            s1 = min(peer_dur, float(idle_span[1]))
             s_dur = max(0.30, s1 - s0)
         else:
             s0 = float(peer.get("start", 0.0) or 0.0) % max(0.5, peer_dur)
             s1 = peer_dur
             s_dur = max(0.30, peer_dur - s0)
 
+        avail_from_s0 = max(0.0, peer_dur - s0)
         is_dedicated_silent = (s0 <= 0.15 and abs(s1 - peer_dur) <= 0.25) or bool(
             _SILENT_CLIP_NAME_RE.search(peer_src.stem)
         )
-        if s_dur >= exact - 0.15 and (s0 + exact <= peer_dur - 0.10 or not is_dedicated_silent):
+        if s_dur >= exact - 0.02 and avail_from_s0 >= exact + 0.05:
             inputs.extend(["-ss", f"{s0:.3f}", "-t", f"{exact + 0.5:.3f}", "-i", peer_src])
         elif is_dedicated_silent:
             inputs.extend(["-stream_loop", "-1", "-ss", f"{s0:.3f}", "-i", peer_src])
-            peer_loop_filter = f"trim=0:{exact:.4f},setpts=PTS-STARTPTS"
+            peer_loop_filter = f"trim=0:{exact + 0.15:.4f},setpts=PTS-STARTPTS"
         else:
             inputs.extend(["-ss", f"{s0:.3f}", "-t", f"{s_dur:.3f}", "-i", peer_src])
             loop_frames = max(2, int(round(s_dur * fps)))
             peer_loop_filter = (
                 f"fps={fps},loop=loop=-1:size={loop_frames}:start=0,"
-                f"setpts=N/({fps}*TB),trim=0:{exact:.4f},setpts=PTS-STARTPTS"
+                f"setpts=N/({fps}*TB),trim=0:{exact + 0.15:.4f},setpts=PTS-STARTPTS"
             )
     elif peer_src.is_file():
         still_png = _extract_peer_still_png(peer_src, still_at)
@@ -3601,7 +3608,8 @@ def build_segment_ffmpeg_args(
                 )
             )
 
-            stack_order = "[live_slot][peer_slot]" if active_top else "[peer_slot][live_slot]"
+            fc.append(f"[peer_slot]tpad=stop_mode=clone:stop=4[peer_pad]")
+            stack_order = "[live_slot][peer_pad]" if active_top else "[peer_pad][live_slot]"
             fc.append(
                 f"{stack_order}vstack=inputs=2:shortest=1,"
                 f"drawbox=x=0:y={slot_h_top - 2}:w={W}:h=4:color=white@0.85:t=fill,"
@@ -3685,7 +3693,8 @@ def build_segment_ffmpeg_args(
                 )
             )
 
-            stack_order = "[live_slot][peer_slot]" if active_left else "[peer_slot][live_slot]"
+            fc.append(f"[peer_slot]tpad=stop_mode=clone:stop=4[peer_pad]")
+            stack_order = "[live_slot][peer_pad]" if active_left else "[peer_pad][live_slot]"
             dv = seg.get("divider")
             if isinstance(dv, dict):
                 dw = max(2, round(W * float(dv.get("w_frac", 0.004))))
@@ -3987,7 +3996,10 @@ def build_segment_ffmpeg_args(
                 v_curr = f"[vb{b_idx}h]"
                 continue
 
-            strike_at = min(max(b_at + 0.04, b_end - 0.12), b_at + 0.08)
+            if b_dur > 0.65:
+                strike_at = max(b_at + 0.08, min(b_end - 0.25, b_at + b_dur * 0.68))
+            else:
+                strike_at = min(max(b_at + 0.04, b_end - 0.12), b_at + 0.08)
             png_plain = render_stop_saying_banner_png(b_text, with_strike=False)
             png_struck = render_stop_saying_banner_png(b_text, with_strike=True, strike_px=7)
             in_plain = next_idx
@@ -4037,7 +4049,7 @@ def build_segment_ffmpeg_args(
         "-fps_mode", "cfr",
         "-frames:v", str(frames),
         "-c:v", "libx264",
-        "-preset", "ultrafast" if draft else "veryfast",
+        "-preset", "ultrafast" if draft else "superfast",
         "-crf", "12",
         "-pix_fmt", "yuv420p",
         "-c:a", "pcm_s16le",

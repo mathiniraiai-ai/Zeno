@@ -2734,7 +2734,16 @@ def calibrate_post_word_beats(plan: Dict[str, Any], script_path: Any, work_dir: 
                     b_at = float(b_at_raw) if b_at_raw is not None else 0.0
                     b_dur_raw = b.get("duration")
                     has_custom_dur = b_dur_raw is not None and abs(float(b_dur_raw) - beat_dur) > 0.01
-                    if matched_end is not None:
+                    b_end_explicit = (b_at + float(b_dur_raw)) if (b_at_raw is not None and b_dur_raw is not None) else 0.0
+                    spans_phrase = bool(
+                        has_custom_dur
+                        and b_at_raw is not None
+                        and 0.0 <= b_at <= beat_at + 0.08
+                        and b_end_explicit >= max(0.25, beat_at - 0.15)
+                    )
+                    if spans_phrase:
+                        pass
+                    elif matched_end is not None:
                         is_too_early = b_at_raw is None or b_at < max(0.0, beat_at - 0.08)
                         is_too_late = b_at_raw is not None and b_at > beat_at + 0.15
                         if is_too_early or is_too_late:

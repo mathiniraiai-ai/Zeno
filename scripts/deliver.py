@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -106,17 +107,28 @@ def _dedup_paths(paths: Iterable[Path]) -> List[Path]:
     return out
 
 
-def _move_deliverable(candidates: Iterable[Path], dst: Path, repo_output_dir: Path) -> Optional[Path]:
-    """Move the first existing candidate file to `dst` (or keep in place if already at `dst`),
-    and clean up any duplicate leftover copies inside `Zeno/output/`.
-    """
+def _move_deliverable(
+    candidates: Iterable[Path],
+    dst: Path,
+    repo_output_dir: Path,
+    dest_dir: Optional[Path] = None,
+) -> Optional[Path]:
+    """Move the freshest existing candidate file to `dst` and clean up duplicate copies inside `Zeno/output/`."""
     existing = [c for c in _dedup_paths(candidates) if c.is_file()]
     if not existing:
         return None
 
+    def _pick_key(p: Path) -> tuple[float, int]:
+        try:
+            mt = float(p.stat().st_mtime)
+        except OSError:
+            mt = 0.0
+        # Break ties in favor of candidates outside `dest_dir` (newer staged/repo builds)
+        outside = 1 if (dest_dir is None or not _is_inside(p, dest_dir)) else 0
+        return (mt, outside)
+
+    chosen = max(existing, key=_pick_key)
     dst_res = dst.resolve()
-    already_at_dst = next((c for c in existing if c.resolve() == dst_res), None)
-    chosen = already_at_dst if already_at_dst is not None else existing[0]
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     if chosen.resolve() != dst_res:
@@ -256,13 +268,15 @@ def deliver_to_downloads(plan_path: Path, name: str = "", *, notify: bool = True
     folder_name = _sanitize_folder_name(chosen_raw)
 
     downloads_root = _delivery_base_dir()
+    downloads_root.mkdir(parents=True, exist_ok=True)
     dest_dir = (downloads_root / folder_name).resolve()
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    stage_dir = (downloads_root / f"._zeno_stage_{os.getpid()}_{int(time.time() * 1000)}").resolve()
+    stage_dir.mkdir(parents=True, exist_ok=True)
 
     repo_output_dir = ROOT / "output"
     resolved_plan_out = common.resolve(raw_plan_out) if raw_plan_out else None
 
-    search_dirs: List[Path] = [dest_dir]
+    search_dirs: List[Path] = []
     if resolved_plan_out is not None:
         search_dirs.append(resolved_plan_out.parent)
     search_dirs.extend([
@@ -272,6 +286,7 @@ def deliver_to_downloads(plan_path: Path, name: str = "", *, notify: bool = True
         OUTPUT / folder_name,
         OUTPUT / orig_stem,
         OUTPUT,
+        dest_dir,
     ])
     search_dirs = _dedup_paths(search_dirs)
 
@@ -281,117 +296,151 @@ def deliver_to_downloads(plan_path: Path, name: str = "", *, notify: bool = True
         if s_clean and s_clean not in stems_to_check:
             stems_to_check.append(s_clean)
 
-    # 1) 9:16 Master MP4 -> reel_<FolderName>.mp4
-    reel_dst = dest_dir / f"reel_{folder_name}.mp4"
-    reel_cands: List[Path] = [reel_dst]
-    if resolved_plan_out is not None:
-        reel_cands.append(resolved_plan_out)
-    for d in search_dirs:
-        for st in stems_to_check:
-            base_st = _strip_ratio_prefix(st)
-            reel_cands.append(d / f"reel_{base_st}.mp4")
-            reel_cands.append(d / f"{st}.mp4")
-    _move_deliverable(reel_cands, reel_dst, repo_output_dir)
-
-    # 2) 1:1 Square MP4 (if rendered) -> SQ_<FolderName>.mp4
-    sq_dst = dest_dir / f"SQ_{folder_name}.mp4"
-    sq_cands: List[Path] = [sq_dst]
-    if resolved_plan_out is not None and hasattr(common, "square_job_output"):
-        sq_cands.append(Path(common.square_job_output(resolved_plan_out)))
-    for d in search_dirs:
-        for st in stems_to_check:
-            base_st = _strip_ratio_prefix(st)
-            sq_cands.append(d / f"SQ_{base_st}.mp4")
-    _move_deliverable(sq_cands, sq_dst, repo_output_dir)
-
-    # 3) Adobe Premiere Pro (.prproj & .xml) -> <FolderName>.prproj & <FolderName>.xml
-    prproj_dst = dest_dir / f"{folder_name}.prproj"
-    xml_dst = dest_dir / f"{folder_name}.xml"
-
-    def _collect_prproj_cands() -> List[Path]:
-        cands = [prproj_dst]
-        for d in [*search_dirs, work_dir]:
+    try:
+        # 1) 9:16 Master MP4 -> reel_<FolderName>.mp4
+        reel_dst = stage_dir / f"reel_{folder_name}.mp4"
+        reel_cands: List[Path] = [dest_dir / f"reel_{folder_name}.mp4"]
+        if resolved_plan_out is not None:
+            reel_cands.append(resolved_plan_out)
+        for d in search_dirs:
             for st in stems_to_check:
                 base_st = _strip_ratio_prefix(st)
-                cands.append(d / f"{base_st}.prproj")
-                cands.append(d / f"{st}.prproj")
-        return cands
+                reel_cands.append(d / f"reel_{base_st}.mp4")
+                reel_cands.append(d / f"{st}.mp4")
+        _move_deliverable(reel_cands, reel_dst, repo_output_dir, dest_dir=dest_dir)
 
-    def _collect_xml_cands() -> List[Path]:
-        cands = [xml_dst, dest_dir / f"{folder_name}.premiere.xml"]
-        for d in [*search_dirs, work_dir]:
+        # 2) 1:1 Square MP4 (if rendered) -> SQ_<FolderName>.mp4
+        sq_dst = stage_dir / f"SQ_{folder_name}.mp4"
+        sq_cands: List[Path] = [dest_dir / f"SQ_{folder_name}.mp4"]
+        if resolved_plan_out is not None and hasattr(common, "square_job_output"):
+            sq_cands.append(Path(common.square_job_output(resolved_plan_out)))
+        for d in search_dirs:
             for st in stems_to_check:
                 base_st = _strip_ratio_prefix(st)
-                cands.append(d / f"{base_st}.xml")
-                cands.append(d / f"{base_st}.premiere.xml")
-                cands.append(d / f"{st}.xml")
-                cands.append(d / f"{st}.premiere.xml")
-        return cands
+                sq_cands.append(d / f"SQ_{base_st}.mp4")
+        _move_deliverable(sq_cands, sq_dst, repo_output_dir, dest_dir=dest_dir)
 
-    if not any(p.is_file() for p in _collect_prproj_cands()) or not any(p.is_file() for p in _collect_xml_cands()):
-        _export_premiere_if_missing(plan, p_path, dest_dir, work_dir)
+        # 3) Adobe Premiere Pro (.prproj & .xml) -> <FolderName>.prproj & <FolderName>.xml
+        prproj_dst = stage_dir / f"{folder_name}.prproj"
+        xml_dst = stage_dir / f"{folder_name}.xml"
 
-    _move_deliverable(_collect_prproj_cands(), prproj_dst, repo_output_dir)
-    _move_deliverable(_collect_xml_cands(), xml_dst, repo_output_dir)
+        def _collect_prproj_cands() -> List[Path]:
+            cands = [dest_dir / f"{folder_name}.prproj"]
+            for d in [*search_dirs, work_dir]:
+                for st in stems_to_check:
+                    base_st = _strip_ratio_prefix(st)
+                    cands.append(d / f"{base_st}.prproj")
+                    cands.append(d / f"{st}.prproj")
+            return cands
 
-    # Also move optional subtitle (.srt) or timeline (.timeline.txt) sidecars out of Zeno/output/ if present
-    srt_cands: List[Path] = [dest_dir / f"{folder_name}.srt", dest_dir / f"reel_{folder_name}.srt"]
-    tl_cands: List[Path] = [dest_dir / f"reel_{folder_name}.timeline.txt"]
-    for d in search_dirs:
-        for st in stems_to_check:
-            base_st = _strip_ratio_prefix(st)
-            srt_cands.append(d / f"{base_st}.srt")
-            srt_cands.append(d / f"reel_{base_st}.srt")
-            tl_cands.append(d / f"reel_{base_st}.timeline.txt")
-            tl_cands.append(d / f"{st}.timeline.txt")
-    if any(c.is_file() for c in srt_cands):
-        _move_deliverable(srt_cands, dest_dir / f"{folder_name}.srt", repo_output_dir)
-    if any(c.is_file() for c in tl_cands):
-        _move_deliverable(tl_cands, dest_dir / f"reel_{folder_name}.timeline.txt", repo_output_dir)
+        def _collect_xml_cands() -> List[Path]:
+            cands = [dest_dir / f"{folder_name}.xml", dest_dir / f"{folder_name}.premiere.xml"]
+            for d in [*search_dirs, work_dir]:
+                for st in stems_to_check:
+                    base_st = _strip_ratio_prefix(st)
+                    cands.append(d / f"{base_st}.xml")
+                    cands.append(d / f"{base_st}.premiere.xml")
+                    cands.append(d / f"{st}.xml")
+                    cands.append(d / f"{st}.premiere.xml")
+            return cands
 
-    # 4) review_sheet.jpg -> copy alongside deliverables (or build if missing)
-    review_dst = dest_dir / "review_sheet.jpg"
-    work_review = work_dir / "review_sheet.jpg"
-    if work_review.is_file():
-        if work_review.resolve() != review_dst.resolve():
+        if not any(p.is_file() for p in _collect_prproj_cands()) or not any(p.is_file() for p in _collect_xml_cands()):
+            _export_premiere_if_missing(plan, p_path, stage_dir, work_dir)
+
+        _move_deliverable([prproj_dst, *_collect_prproj_cands()], prproj_dst, repo_output_dir, dest_dir=dest_dir)
+        _move_deliverable([xml_dst, *_collect_xml_cands()], xml_dst, repo_output_dir, dest_dir=dest_dir)
+
+        # Also move optional subtitle (.srt) or timeline (.timeline.txt) sidecars out of Zeno/output/ if present
+        srt_cands: List[Path] = [dest_dir / f"{folder_name}.srt", dest_dir / f"reel_{folder_name}.srt"]
+        tl_cands: List[Path] = [dest_dir / f"reel_{folder_name}.timeline.txt"]
+        for d in search_dirs:
+            for st in stems_to_check:
+                base_st = _strip_ratio_prefix(st)
+                srt_cands.append(d / f"{base_st}.srt")
+                srt_cands.append(d / f"reel_{base_st}.srt")
+                tl_cands.append(d / f"reel_{base_st}.timeline.txt")
+                tl_cands.append(d / f"{st}.timeline.txt")
+        if any(c.is_file() for c in srt_cands):
+            _move_deliverable(srt_cands, stage_dir / f"{folder_name}.srt", repo_output_dir, dest_dir=dest_dir)
+        if any(c.is_file() for c in tl_cands):
+            _move_deliverable(tl_cands, stage_dir / f"reel_{folder_name}.timeline.txt", repo_output_dir, dest_dir=dest_dir)
+
+        # 4) review_sheet.jpg -> copy alongside deliverables (or build if missing)
+        review_dst = stage_dir / "review_sheet.jpg"
+        work_review = work_dir / "review_sheet.jpg"
+        old_review = dest_dir / "review_sheet.jpg"
+        if work_review.is_file():
             shutil.copy2(work_review, review_dst)
-    elif not review_dst.is_file() and reel_dst.is_file():
-        try:
-            import verify
+        elif old_review.is_file():
+            shutil.copy2(old_review, review_dst)
+        elif reel_dst.is_file():
+            try:
+                import verify
 
-            built_sheet = verify.build_review_sheet(
-                plan,
-                reel_dst,
-                work_review,
-                sq_path=sq_dst if sq_dst.is_file() else None,
-            )
-            if built_sheet and built_sheet.is_file():
-                shutil.copy2(built_sheet, review_dst)
-        except Exception:
-            pass
+                built_sheet = verify.build_review_sheet(
+                    plan,
+                    reel_dst,
+                    work_review,
+                    sq_path=sq_dst if sq_dst.is_file() else None,
+                )
+                if built_sheet and built_sheet.is_file():
+                    shutil.copy2(built_sheet, review_dst)
+            except Exception:
+                pass
 
-    # 5) <FolderName>.plan.edl -> copy exact edit plan
-    edl_dst = dest_dir / f"{folder_name}.plan.edl"
-    edl_src = p_path if p_path.suffix.lower() == ".edl" else (work_dir / "plan.edl")
-    if edl_src.is_file():
-        if edl_src.resolve() != edl_dst.resolve():
+        # 5) <FolderName>.plan.edl -> copy exact edit plan
+        edl_dst = stage_dir / f"{folder_name}.plan.edl"
+        edl_src = p_path if p_path.suffix.lower() == ".edl" else (work_dir / "plan.edl")
+        if edl_src.is_file():
             shutil.copy2(edl_src, edl_dst)
-    elif edl_parser is not None and hasattr(edl_parser, "format_edl"):
-        edl_dst.write_text(edl_parser.format_edl(plan), encoding="utf-8")
-    else:
-        shutil.copy2(p_path, edl_dst)
+        elif edl_parser is not None and hasattr(edl_parser, "format_edl"):
+            edl_dst.write_text(edl_parser.format_edl(plan), encoding="utf-8")
+        else:
+            shutil.copy2(p_path, edl_dst)
 
-    # 6) <FolderName>.script.txt -> copy or extract plain NFC script text
-    script_dst = dest_dir / f"{folder_name}.script.txt"
-    script_src = _resolve_script_source(plan, work_dir)
-    if script_src is not None and script_src.is_file():
-        if script_src.resolve() != script_dst.resolve():
+        # 6) <FolderName>.script.txt -> copy or extract plain NFC script text
+        script_dst = stage_dir / f"{folder_name}.script.txt"
+        script_src = _resolve_script_source(plan, work_dir)
+        if script_src is not None and script_src.is_file():
             if script_src.suffix.lower() in (".txt", ".md"):
                 shutil.copy2(script_src, script_dst)
             elif hasattr(common, "read_script_text"):
                 script_dst.write_text(common.read_script_text(script_src), encoding="utf-8")
             else:
                 shutil.copy2(script_src, script_dst)
+
+        # Atomically replace any existing folder for this video so old/stale files never linger
+        if dest_dir.exists():
+            try:
+                shutil.rmtree(dest_dir)
+                stage_dir.rename(dest_dir)
+            except OSError:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                for old_item in list(dest_dir.iterdir()):
+                    try:
+                        if old_item.is_dir() and not old_item.is_symlink():
+                            shutil.rmtree(old_item, ignore_errors=True)
+                        else:
+                            old_item.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                for st_item in list(stage_dir.iterdir()):
+                    target_item = dest_dir / st_item.name
+                    try:
+                        os.replace(str(st_item), str(target_item))
+                    except OSError:
+                        shutil.move(str(st_item), str(target_item))
+        else:
+            try:
+                stage_dir.rename(dest_dir)
+            except OSError:
+                shutil.move(str(stage_dir), str(dest_dir))
+    finally:
+        if stage_dir.exists():
+            shutil.rmtree(stage_dir, ignore_errors=True)
+
+    # Refresh references to final destination paths for downstream reporting
+    dest_dir.mkdir(parents=True, exist_ok=True)
 
     # Clean up any emptied staging folder inside Zeno/output/
     _prune_empty_output_subdirs(search_dirs, repo_output_dir)
