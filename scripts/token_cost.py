@@ -7,6 +7,7 @@ from typing import Any
 # USD per million tokens, Standard speed: (fresh_input, cached_input, cache_write_5m, output). Verified 2026-11-16.
 # https://developers.openai.com/api/docs/models/gpt-6.1-sol ; https://docs.anthropic.com/en/docs/about-claude/pricing
 RATES: dict[str, tuple[float, float, float, float]] = {
+    "gpt-6.2-sol": (2.0, 0.1, 2.5, 10.0),
     "gpt-6.1-sol": (2.0, 0.1, 2.5, 10.0),
     "gpt-5-codex": (1.25, 0.125, 1.25, 10.0),
     "gpt-5.6": (1.25, 0.125, 1.25, 10.0),
@@ -32,6 +33,7 @@ FX_DATE = "2026-11-16"
 FX_SOURCE = "https://rbi.org.in/"
 
 _PREFIX_RATES: tuple[tuple[str, tuple[float, float, float, float]], ...] = (
+    ("gpt-6.2-sol", (2.0, 0.1, 2.5, 10.0)),
     ("gpt-6.1-sol", (2.0, 0.1, 2.5, 10.0)),
     ("gpt-5-codex", (1.25, 0.125, 1.25, 10.0)),
     ("gpt-5.6", (1.25, 0.125, 1.25, 10.0)),
@@ -105,7 +107,7 @@ def estimate(agent: dict[str, Any]) -> dict[str, Any]:
         out = int(request.get("output_tokens") or 0)
         ctx = int(request.get("context", inp) or 0)
         norm_model = str(model_raw or "").strip().lower().rsplit("/", 1)[-1]
-        is_sol = norm_model.startswith("gpt-6.1-sol")
+        is_sol = norm_model.startswith(("gpt-6.1-sol", "gpt-6.2-sol"))
         long_input = 2 if (is_sol and ctx > 272000) else 1
         long_output = 1.5 if (is_sol and ctx > 272000) else 1
         if norm_model.startswith("claude-haiku-5") and ctx > 100000:

@@ -28,6 +28,14 @@ class TestTokenPricing(unittest.TestCase):
         self.assertEqual(r("claude-opus-4-1"), (15.0, 1.50, 18.75, 75.0))
         self.assertEqual(r("claude-sonnet-4-5"), (3.0, 0.30, 3.75, 15.0))
 
+    def test_sol_models_and_long_context(self) -> None:
+        for m in ("gpt-6.1-sol", "gpt-6.2-sol"):
+            self.assertEqual(token_cost._resolve_rates(m), (2.0, 0.1, 2.5, 10.0))
+            short = token_cost.estimate({"token_precision": "exact", "requests": [_req(m, inp=100_000, cached=100_000, out=10_000)]})
+            self.assertAlmostEqual(short["usd"], 100_000 * 2 / 1e6 + 100_000 * 0.1 / 1e6 + 10_000 * 10 / 1e6)
+            long_ = token_cost.estimate({"token_precision": "exact", "requests": [_req(m, inp=200_000, cached=100_000, out=10_000)]})
+            self.assertAlmostEqual(long_["usd"], (200_000 * 2 + 100_000 * 0.1) * 2 / 1e6 + 10_000 * 10 * 1.5 / 1e6)
+
     def test_cost_math_buckets(self) -> None:
         agent = {"token_precision": "exact",
                  "requests": [_req("claude-sonnet-5-5", inp=1_000_000, cached=2_000_000, write=1_000_000, out=500_000)]}
