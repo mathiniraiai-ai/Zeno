@@ -93,16 +93,41 @@ def _bash_touches_repo_code(cmd: str, root: Optional[Path] = None) -> bool:
     return False
 
 
+def _norm_cmp_path(val: Any, force_win: bool = False) -> Tuple[str, bool]:
+    s = str(val or "").strip().replace("\\", "/")
+    is_win = force_win or bool(re.match(r"^[A-Za-z]:(?:/|$)", s)) or (os.name == "nt") or ("\\" in str(val or ""))
+    if is_win:
+        m_bash = re.match(r"^/([A-Za-z])(?:/(.*))?$", s)
+        if m_bash:
+            s = f"{m_bash.group(1)}:/{m_bash.group(2) or ''}"
+        s = s.lower()
+    while len(s) > 1 and s.endswith("/") and not re.match(r"^[A-Za-z]:/$", s):
+        s = s[:-1]
+    return s, is_win
+
+
 def _is_under_root(cwd: Any, root: Optional[Path]) -> bool:
     if not root:
         return True
     raw = str(cwd or "").strip()
     if not raw:
         return False
+    root_s = str(root)
+    is_win_any = (
+        os.name == "nt"
+        or bool(re.match(r"^[A-Za-z]:[/\\]", raw))
+        or bool(re.match(r"^[A-Za-z]:[/\\]", root_s))
+        or ("\\" in raw)
+        or ("\\" in root_s)
+    )
+    if is_win_any:
+        c_n, _ = _norm_cmp_path(raw, force_win=True)
+        r_n, _ = _norm_cmp_path(root_s, force_win=True)
+        return c_n == r_n or c_n.startswith(r_n.rstrip("/") + "/")
     try:
-        return Path(raw).resolve().is_relative_to(root.resolve())
+        return Path(raw).resolve().is_relative_to(Path(root).resolve())
     except Exception:
-        r_s = str(root.resolve()).rstrip("/\\")
+        r_s = str(Path(root).resolve()).rstrip("/\\")
         c_s = raw.rstrip("/\\")
         return c_s == r_s or c_s.startswith(r_s + os.sep) or c_s.startswith(r_s + "/")
 
@@ -187,12 +212,19 @@ def _safe_int(val: Any) -> int:
         return 0
 
 
-def _claude_lines(since: float, until: float, root: Path) -> Iterable[Dict[str, Any]]:
+def _claude_lines(since: float, until: float, root: Path, session_id: Optional[str] = None) -> Iterable[Dict[str, Any]]:
     files = [f for f in glob.glob(os.path.expanduser("~/.claude/projects/**/*.jsonl"), recursive=True)
              if _mtime(f) >= since - 60]
+    if session_id:
+        sid_clean = str(session_id).strip()
+        pinned = [f for f in files if Path(f).stem == sid_clean]
+        if pinned:
+            files = pinned
     rows = []
     for f in files:
         try:
+            file_rows: List[Dict[str, Any]] = []
+            file_under_root = not root
             for line in Path(f).read_text(encoding="utf-8", errors="ignore").splitlines():
                 if not line.strip():
                     continue
@@ -200,7 +232,13 @@ def _claude_lines(since: float, until: float, root: Path) -> Iterable[Dict[str, 
                     d = json.loads(line)
                 except Exception:
                     continue
-                if not _is_under_root(d.get("cwd"), root):
+                if root and d.get("cwd") and _is_under_root(d.get("cwd"), root):
+                    file_under_root = True
+                file_rows.append(d)
+            if not file_under_root:
+                continue
+            for d in file_rows:
+                if root and d.get("cwd") and not _is_under_root(d.get("cwd"), root):
                     continue
                 t = _epoch(d.get("timestamp"))
                 if since <= t <= until:
@@ -213,8 +251,8 @@ def _claude_lines(since: float, until: float, root: Path) -> Iterable[Dict[str, 
     return rows
 
 
-def _from_claude(since: float, until: float, root: Path) -> Optional[Dict[str, Any]]:
-    rows = _claude_lines(since, until, root)
+def _from_claude(since: float, until: float, root: Path, session_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    rows = _claude_lines(since, until, root, session_id=session_id)
     if not rows:
         return None
     prompts: List[Dict[str, Any]] = []
@@ -537,16 +575,20 @@ def _from_antigravity(since: float, until: float, root: Path) -> Optional[Dict[s
 
 
 # ---------------------------------------------------------------- entry point
-def collect(since: float, until: Optional[float] = None, root: Path = ROOT) -> Dict[str, Any]:
+def collect(since: float, until: Optional[float] = None, root: Path = ROOT, session_id: Optional[str] = None) -> Dict[str, Any]:
     """The editor-agent conversation inside [since, until]. Empty dict when nothing is found or anything fails."""
     try:
         if not since or since <= 0:
             return {}
         until = until or time.time() + 60
-        found = [c for c in (_from_claude(since, until, root), _from_antigravity(since, until, root)) if c]
-        if not found:
-            return {}
-        best = max(found, key=lambda c: len(c["prompts"]) + len(c["steps"]))
+        claude_res = _from_claude(since, until, root, session_id=session_id)
+        if session_id and claude_res and session_id in (claude_res.get("sessions") or []):
+            best = claude_res
+        else:
+            found = [c for c in (claude_res, _from_antigravity(since, until, root)) if c]
+            if not found:
+                return {}
+            best = max(found, key=lambda c: len(c["prompts"]) + len(c["steps"]))
         prompts, steps = best["prompts"], best["steps"]
         truncated = len(prompts) > MAX_PROMPTS or len(steps) > MAX_STEPS
         prompts = prompts[:5] + prompts[5:][-(MAX_PROMPTS - 5):] if len(prompts) > MAX_PROMPTS else prompts

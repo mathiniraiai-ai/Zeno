@@ -2117,7 +2117,12 @@ def check_picture_timeline(
         play_dur = _segment_play_duration(seg)
         play_dur_q = round(play_dur * fps) / fps
         eff_dur = max(1, round(_segment_duration(seg) * fps)) / fps
-        f = WORK / "_segments" / f"{layouts.build_segment_cache_key(seg, plan, W, H, fps, False)}.mkv"
+        seg_cache_dir = plan_path.parent / "_segments"
+        f = seg_cache_dir / f"{layouts.build_segment_cache_key(seg, plan, W, H, fps, False)}.mkv"
+        if not f.is_file():
+            f = seg_cache_dir / f"{layouts.build_segment_cache_key(seg, plan, W, H, fps, True)}.mkv"
+        if not f.is_file():
+            f = WORK / "_segments" / f"{layouts.build_segment_cache_key(seg, plan, W, H, fps, False)}.mkv"
         if not f.is_file():
             f = WORK / "_segments" / f"{layouts.build_segment_cache_key(seg, plan, W, H, fps, True)}.mkv"
         if f.is_file() and play_dur_q >= 0.4:

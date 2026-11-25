@@ -284,7 +284,20 @@ def _collect_prompts(proj_dir: Optional[Path], token_record: Optional[Dict[str, 
             elif (Path(proj_dir) / "job_started.json").is_file():
                 since = float(json.loads((Path(proj_dir) / "job_started.json").read_text(encoding="utf-8")).get("start") or 0.0)
             if since > 0:
-                coll = agent_log.collect(since, time.time() + 60) or {}
+                sid = ""
+                if isinstance(token_record, dict):
+                    sid = str(token_record.get("agent_session_id") or "").strip()
+                if not sid:
+                    snap_p = Path(proj_dir) / "token_telemetry.json"
+                    if snap_p.is_file():
+                        try:
+                            sid = str((json.loads(snap_p.read_text(encoding="utf-8", errors="replace")) or {}).get("agent_session_id") or "").strip()
+                        except Exception:
+                            sid = ""
+                try:
+                    coll = agent_log.collect(since, time.time() + 60, session_id=sid or None) or {}
+                except TypeError:
+                    coll = agent_log.collect(since, time.time() + 60) or {}
                 for p in coll.get("prompts") or []:
                     if isinstance(p, dict):
                         _add(p.get("at"), p.get("text"), "agent_prompt")

@@ -210,7 +210,7 @@ def _maybe_auto_update() -> None:
         try:
             import auto_updater
 
-            auto_updater.ensure_latest_update(min_interval_hours=12.0, quiet=True)
+            auto_updater.ensure_latest_update(min_interval_hours=0.5, quiet=True)
         except Exception:
             pass
     _prune_pending_ota_cleanup()
@@ -1279,6 +1279,7 @@ def run_execute_and_deliver(
         cmd.extend(["--gain-db", str(gain_db)])
 
     completed = False
+    render_start_ts = time.time()
     try:
         rc, _tail = _stream_subprocess(cmd, stage_label=f"render-{p_path.parent.name}", compact=compact, on_line=_on_render_line)
         if rc != 0:
@@ -1301,18 +1302,43 @@ def run_execute_and_deliver(
                 kind="failed",
                 extra={"error": reason, "rc": rc},
             )
-            _tracker_call(
-                "record_stage",
-                p_path.parent,
-                "job_error",
-                stage="render",
-                notion_name=_infer_video_name(plan, p_path, name),
-                script_source=str(plan.get("script") or ""),
-                error_message=reason,
-            )
+            qc_already_logged = False
+            vr_path = p_path.parent / "verify_report.json"
+            if vr_path.is_file():
+                try:
+                    if vr_path.stat().st_mtime >= render_start_ts - 1.0:
+                        vr_data = json.loads(vr_path.read_text(encoding="utf-8", errors="replace"))
+                        if isinstance(vr_data, dict) and vr_data.get("ok") is False:
+                            qc_already_logged = True
+                except Exception:
+                    pass
+            if not qc_already_logged:
+                _tracker_call(
+                    "record_stage",
+                    p_path.parent,
+                    "job_error",
+                    stage="render",
+                    notion_name=_infer_video_name(plan, p_path, name),
+                    script_source=str(plan.get("script") or ""),
+                    error_message=reason,
+                )
             return rc, None, reason
 
-        folder, files = _deliver_package(p_path, name)
+        try:
+            from stage_queue import stage_slot as _stage_slot
+        except Exception:
+            import contextlib as _ctx_lib
+            _stage_slot = _ctx_lib.nullcontext
+        prev_skip_deliv = os.environ.get("ZENO_SKIP_DELIVER_TRACK")
+        os.environ["ZENO_SKIP_DELIVER_TRACK"] = "1"
+        try:
+            with _stage_slot("stage5_mastering", project_dir=p_path.parent, video_name=_infer_video_name(plan, p_path, name)):
+                folder, files = _deliver_package(p_path, name)
+        finally:
+            if prev_skip_deliv is None:
+                os.environ.pop("ZENO_SKIP_DELIVER_TRACK", None)
+            else:
+                os.environ["ZENO_SKIP_DELIVER_TRACK"] = prev_skip_deliv
         tracker.stop_heartbeat(final_state="completed", final_detail=f"Delivered to {_pretty_path(folder)}")
         completed = True
     except Exception as exc:

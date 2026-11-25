@@ -657,6 +657,7 @@ async function applyCloudUpdateNative(auth, targetRoot) {
   const statePatch = {
     installed_version: installedVer,
     last_bundle_sha256: actualSha,
+    files_updated: count,
     last_checked_at: Date.now() / 1000,
     updated_at: Date.now() / 1000,
   };
@@ -665,6 +666,21 @@ async function applyCloudUpdateNative(auth, targetRoot) {
     statePatch.notes_version = appliedNotesVer || installedVer;
   }
   writeUpdateState(dest, statePatch);
+  try {
+    const workDir = path.join(dest, 'work');
+    fs.mkdirSync(workDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(workDir, '.cloud_release_state.json'),
+      JSON.stringify({
+        version: installedVer,
+        sha: (cachedCloudInfo && cachedCloudInfo.sha) ? String(cachedCloudInfo.sha) : '',
+        bundle_sha256: actualSha,
+        files_updated: count,
+        updated_at: new Date().toISOString(),
+      }, null, 2) + '\n',
+      'utf8'
+    );
+  } catch (e) { /* ignore */ }
   syncAuthToRoot(dest, auth);
   saveRoot(dest);
   cachedCloudInfo = null;
@@ -676,7 +692,7 @@ async function applyCloudUpdateNative(auth, targetRoot) {
     const newReqSha = fs.existsSync(rq) ? crypto.createHash('sha256').update(fs.readFileSync(rq)).digest('hex') : '';
     const cleanScript = path.join(dest, 'scripts', 'clean.py');
     if (hasVenv(dest) && fs.existsSync(cleanScript)) {
-      spawn(venvPythonPath(dest), [cleanScript, '--after-update', '--version', String(installedVer || ''), '--prev-version', String(prevVer || '')], { cwd: dest, detached: true, stdio: 'ignore' }).unref();
+      spawn(venvPythonPath(dest), [cleanScript, '--after-update', '--version', String(installedVer || ''), '--prev-version', String(prevVer || ''), '--files-updated', String(count || 0)], { cwd: dest, detached: true, stdio: 'ignore' }).unref();
     }
     if (hasVenv(dest) && fs.existsSync(gpuScript)) {
       if (oldReqSha && newReqSha && oldReqSha !== newReqSha) {

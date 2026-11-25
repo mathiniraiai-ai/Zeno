@@ -2479,6 +2479,13 @@ def _select_canvas_fps(clips_data: List[Dict[str, Any]]) -> int:
 
 
 def main() -> None:
+    import contextlib
+    with contextlib.ExitStack() as _prep_q_stack:
+        _main_with_queue(_prep_q_stack)
+
+
+def _main_with_queue(_prep_q_stack: Any) -> None:
+    import contextlib
     ap = argparse.ArgumentParser(
         description="Stages 1-3 pre-processor: footage scan, cached transcription/alignment, face tracking, line matching, clip sheets, and Director packet."
     )
@@ -2560,7 +2567,15 @@ def main() -> None:
     common_job_start(project_name)
     lang = args.lang if args.lang != "auto" else meta.get("language", "auto")
 
-    clip_entries = discover_clips(args.clips)
+    try:
+        from stage_queue import stage_slot as _stage_slot
+    except Exception:
+        _stage_slot = contextlib.nullcontext
+    _q_proj = WORK / project_name
+    _q_vname = str(args.name or meta.get("title") or project_name)
+
+    with _stage_slot("stage1_mapping", project_dir=_q_proj, video_name=_q_vname):
+        clip_entries = discover_clips(args.clips)
     if not clip_entries:
         raise SystemExit("No input clips or cached work/S* directories found.")
     try:
@@ -2579,6 +2594,9 @@ def main() -> None:
     except BaseException:
         pass
 
+    _s2_stack = contextlib.ExitStack()
+    _prep_q_stack.callback(_s2_stack.close)
+    _s2_stack.enter_context(_stage_slot("stage2_transcribe", project_dir=_q_proj, video_name=_q_vname))
     clips_data: List[Dict[str, Any]] = []
     quota_breaker_tripped = False
     quota_breaker_clip = ""
@@ -2716,6 +2734,11 @@ def main() -> None:
             file=sys.stderr,
         )
         raise SystemExit(2)
+
+    _s2_stack.close()
+    _s3_stack = contextlib.ExitStack()
+    _prep_q_stack.callback(_s3_stack.close)
+    _s3_stack.enter_context(_stage_slot("stage3_matching", project_dir=_q_proj, video_name=_q_vname))
 
     for c in clips_data:
         c["is_listening"] = clip_is_silent(c)

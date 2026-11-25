@@ -1,1 +1,2 @@
-Zeno v3.0.4: fix missing hashlib clip hash header and preserve unique clip counts on chunked retries
+Zeno v3.0.5: 5-stage cross-chat FIFO pipeline queue, per-project isolated render scratch (_segments/mix.mkv), 30m OTA check, clean QC error reporting, and Windows prompt capture
+

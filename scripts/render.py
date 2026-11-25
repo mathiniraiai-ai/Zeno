@@ -1347,7 +1347,32 @@ def _export_premiere(
     )
 
 
+def _extract_qc_failure_summary(text: str, limit: int = 900) -> str:
+    """Return concise failure/location lines from Deep QC output, stripping trailing PASS lines."""
+    raw = str(text or "").strip()
+    if not raw:
+        return "Deep QC verification failed"
+    fail_lines: List[str] = []
+    for ln in raw.splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        up = s.upper()
+        has_fail = any(tok in up for tok in ("FAIL", "BLOCKED", "ERROR", "[STROBE]", "MISMATCH", "MISSING", "SHOWS OTHER FOOTAGE", "WHERE "))
+        is_pass_only = bool(re.search(r"\bPASS\b", up)) and not has_fail
+        if has_fail or (s.startswith("[") and not is_pass_only):
+            fail_lines.append(s)
+    if fail_lines:
+        return "\n".join(fail_lines)[:limit]
+    return raw[-limit:]
+
+
 def main() -> None:
+    with contextlib.ExitStack() as _render_q_stack:
+        _main_with_queue(_render_q_stack)
+
+
+def _main_with_queue(_render_q_stack: contextlib.ExitStack) -> None:
     ap = argparse.ArgumentParser(description="Render an edit plan (.json or .edl) into the final MP4.")
     ap.add_argument("plan", help="Path to plan.json or plan.edl")
     ap.add_argument("--draft", action="store_true", help="Fast low-quality encode for checking the cut")
@@ -1461,13 +1486,24 @@ def main() -> None:
         print(f"Scrolling-text page format: picture {W}x{H} on top, page {W}x{page_geo['page_h']} below.")
 
     out_path = _default_output_path(plan, plan_path)
-    cache = WORK / "_segments"
+    _q_vname = out_path.stem.replace("reel_", "", 1) or plan_path.parent.name
+    try:
+        from stage_queue import stage_slot as _stage_slot
+    except Exception:
+        _stage_slot = contextlib.nullcontext
+    _s4_stack = contextlib.ExitStack()
+    _render_q_stack.callback(_s4_stack.close)
+    _s4_stack.enter_context(_stage_slot("stage4_editing", project_dir=plan_path.parent, video_name=_q_vname))
+
+    cache = plan_path.parent / "_segments"
     cache.mkdir(parents=True, exist_ok=True)
 
     # Check if raw source clips are offline and pre-rendered cached segments exist
     offline_matched = None
     if not first_src.is_file():
         offline_matched = _match_cached_segments_when_offline(segs, cache, fps)
+        if not offline_matched and (WORK / "_segments").is_dir():
+            offline_matched = _match_cached_segments_when_offline(segs, WORK / "_segments", fps)
 
     # 1) Each segment -> normalized intermediate (cached by exact parameters)
     if layouts is not None and hasattr(layouts, "split_lock_report") and first_src.is_file():
@@ -2080,7 +2116,7 @@ def main() -> None:
     if isinstance(raw_mg, str):
         raw_mg = re.sub(r"(?i)db$", "", raw_mg.strip())
     master_gain_db = float(raw_mg or 0.0)
-    mix = WORK / "_segments" / "mix.mkv"
+    mix = cache / "mix.mkv"
     fc.append(f"{v}null[vout]")
     subs_cfg = plan.get("subs")
     subs_enabled = (
@@ -2303,25 +2339,7 @@ def main() -> None:
     print("\n".join(lines))
     print(f"\nDone: {out_path}")
 
-    # 5b) Adobe Premiere Pro (.prproj + .xml) export
-    if not getattr(a, "no_premiere", False):
-        try:
-            pr_res = _export_premiere(
-                plan=plan,
-                plan_path=plan_path,
-                out_dir=out_path.parent,
-                work_dir=plan_path.parent,
-                fps=fps,
-                width=W,
-                height=H,
-            )
-            if pr_res:
-                print(f"Done (Premiere .prproj): {pr_res['prproj']}")
-                print(f"Done (Premiere .xml):    {pr_res['xml']}")
-        except Exception as exc:
-            print(f"[WARN] Premiere Pro export skipped: {exc}")
-
-    # 5c) 1:1 Square Meta Ads version (`SQ_<Name>.mp4`)
+    # 5b) 1:1 Square Meta Ads version (`SQ_<Name>.mp4`) — still Stage 4 Editing
     # Always stitch directly from the completed 9:16 reel (`out_path`): split into 2 layers,
     # center-crop bottom layer to 1:1 with ~7% (5–10%) Gaussian blur, and place the full 9:16
     # reel centered on top. Never generate separate 1:1 images, flashcards, timestamps, or subtitles.
@@ -2353,6 +2371,30 @@ def main() -> None:
         )
     except BaseException:
         pass
+
+    # Transition Stage 4 (Editing) -> Stage 5 (Mastering: Premiere export, Deep QC & delivery)
+    _s4_stack.close()
+    _s5_stack = contextlib.ExitStack()
+    _render_q_stack.callback(_s5_stack.close)
+    _s5_stack.enter_context(_stage_slot("stage5_mastering", project_dir=plan_path.parent, video_name=_q_vname))
+
+    # 5c) Adobe Premiere Pro (.prproj + .xml) export
+    if not getattr(a, "no_premiere", False):
+        try:
+            pr_res = _export_premiere(
+                plan=plan,
+                plan_path=plan_path,
+                out_dir=out_path.parent,
+                work_dir=plan_path.parent,
+                fps=fps,
+                width=W,
+                height=H,
+            )
+            if pr_res:
+                print(f"Done (Premiere .prproj): {pr_res['prproj']}")
+                print(f"Done (Premiere .xml):    {pr_res['xml']}")
+        except Exception as exc:
+            print(f"[WARN] Premiere Pro export skipped: {exc}")
 
     # 6) Optional post-render Deep QC verification
     if a.verify and verify is not None and hasattr(verify, "run_verification"):
@@ -2390,7 +2432,7 @@ def main() -> None:
                 "qc_passed" if ok else "qc_failed",
                 stage="qc",
                 error_category="" if ok else "qc_plan_block",
-                error_message="" if ok else (_buf.getvalue()[-800:] or "Deep QC verification failed"),
+                error_message="" if ok else _extract_qc_failure_summary(_buf.getvalue()),
                 passed=bool(ok),
             )
         except BaseException:

@@ -229,7 +229,33 @@ def cleanup_after_job(
     freed = kept = files = 0
     cutoff = time.time() - hours * 3600.0
     try:
-        if seg.is_dir():
+        if project_dir is not None:
+            p_raw = Path(project_dir)
+            if not p_raw.is_absolute() and (root_path / p_raw).is_dir():
+                p_raw = root_path / p_raw
+            pdir = p_raw.resolve()
+            proj_seg = pdir / "_segments"
+            if proj_seg.is_dir():
+                for f in list(proj_seg.iterdir()):
+                    n = size_of(f)
+                    if hours <= 0 or newest_mtime(f) < cutoff:
+                        safe_delete(f, root_path)
+                        freed += n
+                        files += 1
+                    else:
+                        kept += n
+            # Preserve any active chat's legacy global _segments; prune only items >2h old
+            legacy_cutoff = time.time() - max(hours, 2.0) * 3600.0
+            if seg.is_dir():
+                for f in list(seg.iterdir()):
+                    n = size_of(f)
+                    if newest_mtime(f) < legacy_cutoff:
+                        safe_delete(f, root_path)
+                        freed += n
+                        files += 1
+                    else:
+                        kept += n
+        elif seg.is_dir():
             for f in list(seg.iterdir()):
                 n = size_of(f)
                 if hours <= 0 or newest_mtime(f) < cutoff:
@@ -736,6 +762,7 @@ def cleanup_after_update(
     prev_version: str = "",
     clear_work: bool = False,
     home_dir: Optional[Path] = None,
+    files_updated: int = 0,
 ) -> Dict[str, Any]:
     """Run automatically whenever an OTA software update finishes installing.
 
@@ -911,10 +938,16 @@ def cleanup_after_update(
                 _rel_f = work / ".cloud_release_state.json"
                 if _rel_f.is_file():
                     _rel_st = json.loads(_rel_f.read_text(encoding="utf-8", errors="replace"))
+                _upd_st = {}
+                _upd_f = work / "_update_state.json"
+                if _upd_f.is_file():
+                    _upd_st = json.loads(_upd_f.read_text(encoding="utf-8", errors="replace"))
+                eff_files = int(files_updated or (_rel_st or {}).get("files_updated") or (_upd_st or {}).get("files_updated") or 0)
                 _zt.record_update_receipt(
                     before_version=str(resolved_prev or ""),
                     after_version=str(version or ""),
                     bundle_sha256=str((_rel_st or {}).get("bundle_sha256") or ""),
+                    files_updated=eff_files,
                     status="installed",
                     sync_flush=True,
                 )
@@ -939,6 +972,7 @@ def main() -> None:
     ap.add_argument("--project", default="", help="optional project folder path for --after-job")
     ap.add_argument("--version", default="", help="installed version tag for --after-update")
     ap.add_argument("--prev-version", default="", help="previous version tag before OTA update for --after-update")
+    ap.add_argument("--files-updated", type=int, default=0, help="count of files updated for OTA telemetry receipt")
     ap.add_argument("--clear-work", action="store_true", help="also clear old work/ project caches on --after-update (keeps work/_clips)")
     ap.add_argument("--days", type=float, default=14, help="delete heavy files of projects untouched this long (default 14)")
     ap.add_argument("--purge-days", type=float, default=90, help="delete whole projects untouched this long (default 90)")
@@ -956,6 +990,7 @@ def main() -> None:
                     version=a.version,
                     prev_version=a.prev_version,
                     clear_work=a.clear_work,
+                    files_updated=a.files_updated,
                 )
             )
         )
