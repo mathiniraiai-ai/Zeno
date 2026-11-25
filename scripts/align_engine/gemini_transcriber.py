@@ -787,6 +787,7 @@ class GeminiTranscriber:
                 pass
         audio_bytes = _pad_short_wav(Path(wav_path).read_bytes())
         try:
+            import hashlib
             headers["X-Zeno-Clip-Hash"] = hashlib.sha256(audio_bytes).hexdigest()[:16]
         except Exception:
             pass

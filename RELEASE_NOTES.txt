@@ -1,1 +1,2 @@
-Zeno v3.0.3: Unified FastAPI video tracker, verified OTA install receipts & offline-safe client outbox — tracks every edit end to end (job_open -> Gemini retries without clip double-counting -> render/deliver across zeno.py/render.py/deliver.py -> immutable completion date -> post-render revisions), adds /v2/track/* FastAPI endpoints and Tracker & Errors dashboard tab, preserves client_platform, unifies editor keys by email, and verifies OTA installs on client machines.
+Zeno v3.0.4: Populate X-Zeno-Clip-Hash on Gemini audio transcription requests and detect silent chunked retries without inflating unique clip counts.
+

@@ -365,6 +365,74 @@ class FastAPITrackerServerTests(unittest.TestCase):
         self.assertEqual(det["gemini_retry_calls"], 1)
         self.assertEqual(det["gemini_retry_in_tokens"], 500)
 
+    def test_chunked_long_clips_keep_unique_clip_count_and_detect_silent_chunk_retry(self) -> None:
+        now = time.time()
+        self._post_gzip(
+            self.key1,
+            {
+                "events": [
+                    {
+                        "event_id": "ev_chk_open",
+                        "event_type": "job_open",
+                        "job_key": "vj_chunk_1",
+                        "ts": now - 40,
+                        "payload": {
+                            "notion_name": "W48 - Long Clip Chunks",
+                            "clip_hashes": ["raw_1", "raw_2"],
+                        },
+                    },
+                    *[
+                        {
+                            "event_id": f"ev_chk_{i}",
+                            "event_type": "gemini_call",
+                            "job_key": "vj_chunk_1",
+                            "ts": now - 30 + i,
+                            "payload": {
+                                "clip_hash": f"chunk_h{i}",
+                                "is_retry": False,
+                                "in_tokens": 400,
+                                "out_tokens": 80,
+                                "audio_seconds": 15.0,
+                            },
+                        }
+                        for i in range(1, 5)
+                    ],
+                ]
+            },
+        )
+        det1 = self.client.get("/v2/track/jobs/vj_chunk_1", headers=self.admin_hdr).json()["job"]
+        self.assertEqual(det1["unique_clips_count"], 2)
+        self.assertEqual(det1["gemini_calls"], 4)
+        self.assertEqual(det1["gemini_retry_calls"], 0)
+        self.assertEqual(det1["gemini_retry_in_tokens"], 0)
+
+        # Silent duplicate chunk retry (without explicit is_retry=True) must increment retry stats, not unique clips
+        self._post_gzip(
+            self.key1,
+            {
+                "events": [
+                    {
+                        "event_id": "ev_chk_dup",
+                        "event_type": "gemini_call",
+                        "job_key": "vj_chunk_1",
+                        "ts": now - 5,
+                        "payload": {
+                            "clip_hash": "chunk_h2",
+                            "is_retry": False,
+                            "in_tokens": 400,
+                            "out_tokens": 80,
+                            "audio_seconds": 15.0,
+                        },
+                    }
+                ]
+            },
+        )
+        det2 = self.client.get("/v2/track/jobs/vj_chunk_1", headers=self.admin_hdr).json()["job"]
+        self.assertEqual(det2["unique_clips_count"], 2)
+        self.assertEqual(det2["gemini_calls"], 5)
+        self.assertEqual(det2["gemini_retry_calls"], 1)
+        self.assertEqual(det2["gemini_retry_in_tokens"], 400)
+
 
 class ClientTrackerOutboxTests(unittest.TestCase):
     def test_outbox_gzip_flush_reconcile_and_fail_open(self) -> None:

@@ -2003,7 +2003,10 @@ class KeyStore:
         err_msg = ""
 
         def _unique_clip_count(items: List[str]) -> int:
-            return len({(x[3:] if x.startswith("tx:") else x) for x in items if x})
+            raw_clips = {x for x in items if x and not x.startswith("tx:")}
+            if raw_clips:
+                return len(raw_clips)
+            return len({x[3:] for x in items if x.startswith("tx:")})
 
         # Merge unique clip hashes when provided
         for ch in merged_ev.get("clip_hashes") or []:
@@ -2060,11 +2063,8 @@ class KeyStore:
                 g_retries = int(g_retries or 0) + 1
                 gr_in = int(gr_in or 0) + in_t
                 gr_out = int(gr_out or 0) + out_t
-            if ch:
-                if ch not in seen_set:
-                    seen_set.add(ch)
-                    seen_hashes.append(ch)
-                if tx_key and tx_key not in seen_set:
+            if tx_key:
+                if tx_key not in seen_set:
                     seen_set.add(tx_key)
                     seen_hashes.append(tx_key)
                 uniq_clips = max(uniq_clips, _unique_clip_count(seen_hashes))
