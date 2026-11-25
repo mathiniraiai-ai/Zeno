@@ -12,6 +12,7 @@ RATES: dict[str, tuple[float, float, float, float]] = {
     "gpt-5.6": (1.25, 0.125, 1.25, 10.0),
     "gpt-5": (1.25, 0.125, 1.25, 10.0),
     "o3": (2.0, 0.50, 2.0, 8.0),
+    "claude-sonnet-5-5": (2.0, 0.10, 2.50, 10.0),
     "claude-sonnet-5": (2.0, 0.20, 2.50, 10.0),
     "claude-sonnet-4": (3.0, 0.30, 3.75, 15.0),
     "sonnet": (3.0, 0.30, 3.75, 15.0),
@@ -19,7 +20,7 @@ RATES: dict[str, tuple[float, float, float, float]] = {
     "claude-opus-5": (5.0, 0.50, 6.25, 25.0),
     "opus": (5.0, 0.50, 6.25, 25.0),
     "claude-opus-4": (15.0, 1.50, 18.75, 75.0),
-    "claude-haiku-5": (1.0, 0.10, 1.25, 5.0),
+    "claude-haiku-5": (0.10, 0.01, 0.125, 0.50),
     "claude-haiku-4-5": (1.0, 0.10, 1.25, 5.0),
     "haiku": (1.0, 0.10, 1.25, 5.0),
     "claude-fable": (10.0, 0.25, 12.50, 50.0),
@@ -36,13 +37,17 @@ _PREFIX_RATES: tuple[tuple[str, tuple[float, float, float, float]], ...] = (
     ("gpt-5.6", (1.25, 0.125, 1.25, 10.0)),
     ("gpt-5", (1.25, 0.125, 1.25, 10.0)),
     ("o3", (2.0, 0.50, 2.0, 8.0)),
+    ("claude-sonnet-5-5", (2.0, 0.10, 2.50, 10.0)),
+    ("claude-sonnet-5.5", (2.0, 0.10, 2.50, 10.0)),
     ("claude-sonnet-5", (2.0, 0.20, 2.50, 10.0)),
     ("claude-sonnet-4", (3.0, 0.30, 3.75, 15.0)),
     ("claude-opus-5-5", (4.0, 0.20, 5.00, 20.0)),
     ("claude-opus-5.5", (4.0, 0.20, 5.00, 20.0)),
     ("claude-opus-5", (5.0, 0.50, 6.25, 25.0)),
+    # Opus 4.5 and newer 4.x cost $5/$25 (not the $15/$75 of Opus 4 / 4.1); must precede the generic claude-opus-4 prefix.
+    *[(f"claude-opus-4{sep}{minor}", (5.0, 0.50, 6.25, 25.0)) for minor in range(5, 10) for sep in ("-", ".")],
     ("claude-opus-4", (15.0, 1.50, 18.75, 75.0)),
-    ("claude-haiku-5", (1.0, 0.10, 1.25, 5.0)),
+    ("claude-haiku-5", (0.10, 0.01, 0.125, 0.50)),
     ("claude-haiku-4-5", (1.0, 0.10, 1.25, 5.0)),
     ("claude-haiku-4.5", (1.0, 0.10, 1.25, 5.0)),
     ("claude-fable", (10.0, 0.25, 12.50, 50.0)),
@@ -103,6 +108,9 @@ def estimate(agent: dict[str, Any]) -> dict[str, Any]:
         is_sol = norm_model.startswith("gpt-6.1-sol")
         long_input = 2 if (is_sol and ctx > 272000) else 1
         long_output = 1.5 if (is_sol and ctx > 272000) else 1
+        if norm_model.startswith("claude-haiku-5") and ctx > 100000:
+            # Haiku 5 long-prompt tier (> 100K tokens): every price component is 5x the base tier.
+            long_input = long_output = 5
         speed_mult = multipliers[speed]
         buckets["input"] += fresh * rates[0] * long_input * speed_mult / 1_000_000
         buckets["cached"] += cached * rates[1] * long_input * speed_mult / 1_000_000

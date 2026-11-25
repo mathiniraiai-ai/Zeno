@@ -289,8 +289,10 @@ function Controls({period, setPeriod, editors, editor, setEditor, rate, setRate,
 // ---------- the original numbers: tokens, cache, cost, problems, health (unchanged calculations) ----------
 const PRICES = [  // [model match, USD per million tokens: input, cached read, cache write, output] from OpenAI and Anthropic list prices
   ['gpt-6.1-sol', 2, 0.1, 2.5, 10], ['gpt-5-codex', 1.25, 0.125, 1.25, 10], ['gpt-5', 1.25, 0.125, 1.25, 10], ['o3', 2, 0.5, 2, 8],
-  ['opus-5-5', 4, 0.2, 5, 20], ['opus-5', 5, 0.5, 6.25, 25], ['opus-4', 15, 1.5, 18.75, 75],
-  ['sonnet-5', 2, 0.2, 2.5, 10], ['sonnet-4', 3, 0.3, 3.75, 15],
+  ['opus-5-5', 4, 0.2, 5, 20], ['opus-5', 5, 0.5, 6.25, 25],
+  ['opus-4-5', 5, 0.5, 6.25, 25], ['opus-4-6', 5, 0.5, 6.25, 25], ['opus-4-7', 5, 0.5, 6.25, 25], ['opus-4-8', 5, 0.5, 6.25, 25], ['opus-4-9', 5, 0.5, 6.25, 25],
+  ['opus-4', 15, 1.5, 18.75, 75],
+  ['sonnet-5-5', 2, 0.1, 2.5, 10], ['sonnet-5', 2, 0.2, 2.5, 10], ['sonnet-4', 3, 0.3, 3.75, 15],
   ['haiku-5', 0.1, 0.01, 0.125, 0.5], ['haiku-4', 1, 0.1, 1.25, 5], ['fable', 10, 0.25, 12.5, 50]];
 function normModel(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
