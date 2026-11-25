@@ -1,2 +1,1 @@
-Zeno v3.0.4: Populate X-Zeno-Clip-Hash on Gemini audio transcription requests and detect silent chunked retries without inflating unique clip counts.
-
+Zeno v3.0.4: fix missing hashlib clip hash header and preserve unique clip counts on chunked retries
