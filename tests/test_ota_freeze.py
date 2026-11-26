@@ -45,6 +45,17 @@ class OtaFreezeTests(unittest.TestCase):
             self.assertEqual(self.client.get("/v1/update-bundle", headers=self.frozen).status_code, 404)
             self.assertEqual(self.client.get("/v1/update-bundle", headers=self.other).status_code, 200)
 
+    def test_frozen_editor_keeps_login_gemini_and_tracking(self) -> None:
+        # only /v1/version and /v1/update-bundle are affected: key auth, Gemini transcription and tracker work as for everyone
+        tr = self.client.post("/v1/transcribe", headers=self.frozen, content=b"not a wav")
+        self.assertNotIn(tr.status_code, (401, 403), tr.text)  # reaches the WAV check (400), same as a normal key
+        ev = self.client.post("/v2/track/events", headers=self.frozen,
+                              json={"events": [{"event_id": "e1", "event_type": "job_open", "job_key": "vj_x", "ts": 1.0, "payload": {"notion_name": "T"}}]})
+        self.assertEqual(ev.status_code, 200)
+        self.assertEqual(ev.json()["accepted"], 1)
+        hb = self.client.post("/v2/track/heartbeat", headers=self.frozen, json={"machine_id": "m1", "zeno_version": "3.0.7"})
+        self.assertEqual(hb.status_code, 200)
+
     def test_env_can_freeze_more_and_unfreeze(self) -> None:
         with mock.patch.dict(os.environ, {"ZENO_OTA_FREEZE_EMAILS": "balesh@gosupernova.live"}):
             self.assertTrue(self.svc._ota_frozen(1) or self.svc._ota_frozen(2))
