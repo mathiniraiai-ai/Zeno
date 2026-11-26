@@ -2081,12 +2081,36 @@ def _check_release_publisher(
     raise HTTPException(401, "Admin credentials or owner Zeno session required to publish updates")
 
 
+# Editors whose machines must NOT receive software updates (they keep their own version and edit their own skill files and project).
+# Only the Zeno side is blocked: /v1/version reports "no release" and /v1/update-bundle refuses. ZENO_OTA_FREEZE_EMAILS adds more
+# addresses; ZENO_OTA_UNFREEZE_EMAILS lifts the block for an address without a deploy of new code.
+OTA_FROZEN_DEFAULT = ("prashanthbirlla@gosupernova.live",)
+
+
+def _ota_frozen_emails() -> set:
+    extra = {e.strip().lower() for e in os.getenv("ZENO_OTA_FREEZE_EMAILS", "").split(",") if e.strip()}
+    lifted = {e.strip().lower() for e in os.getenv("ZENO_OTA_UNFREEZE_EMAILS", "").split(",") if e.strip()}
+    return (set(OTA_FROZEN_DEFAULT) | extra) - lifted
+
+
+def _ota_frozen(key_id: Optional[int]) -> bool:
+    if key_id is None:
+        return False
+    try:
+        email = (store().get_key_email(key_id) or "").strip().lower()
+    except Exception:
+        return False
+    return bool(email) and email in _ota_frozen_emails()
+
+
 @app.get("/v1/version")
 def get_latest_version(request: Request, authorization: Optional[str] = Header(None)) -> JSONResponse:
     """Fast metadata check for client auto-updaters and the Zeno desktop app's 'New update arrived' popup."""
     name, key_id = authenticate(authorization)
     v, plat = _client_version(request)
     _note_version(key_id, name, v, plat, "update check")
+    if _ota_frozen(key_id):
+        return JSONResponse({"ok": True, "has_release": False}, headers=NO_STORE)
     meta = store().latest_release_meta()
     if not meta:
         return JSONResponse({"ok": True, "has_release": False}, headers=NO_STORE)
@@ -2102,6 +2126,9 @@ def download_update_bundle(
     """Authenticated download of the latest Zeno OTA update ZIP bundle."""
     name, key_id = authenticate(authorization)
     check_rate(name)
+    if _ota_frozen(key_id):
+        log.info("ota_blocked user=%s (updates are frozen for this account)", name)
+        raise HTTPException(404, "No software update bundle is available for this account")
     res = store().latest_release_bundle(bundle_sha256=sha256)
     if not res:
         raise HTTPException(404, "No software update bundle has been published yet")
