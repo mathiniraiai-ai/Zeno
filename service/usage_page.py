@@ -608,7 +608,22 @@ function Videos({runs, rate, showAll, setShowAll, jobs, data}) {
     const ev = tev.filter(e => String(e.user_name || '').toLowerCase() === me && n(e.created_at) >= lo && n(e.created_at) <= hi);
     return {all: ev.length, bad: ev.filter(e => e.status !== 'ok').length, hit: ev.filter(e => n(e.cached) > 0).length};
   };
+  const vidSet = new Set(runs.map(r => who(r) + '|' + (r.project || r.id)));
+  const edMap = new Map();
+  runs.forEach(r => { const k = String(r.editor_name || who(r)); const e = edMap.get(k) || {renders: 0, vids: new Set()}; e.renders += 1; e.vids.add(r.project || r.id); edMap.set(k, e); });
+  const edRows = [...edMap.entries()].sort((x, y) => y[1].vids.size - x[1].vids.size);
+  const todayK = dayKey(Date.now() / 1000);
+  const todayRuns = runs.filter(r => dayKey(r.created_at) === todayK);
+  const todayVids = new Set(todayRuns.map(r => who(r) + '|' + (r.project || r.id)));
+  const counter = h('div', {className: 'dash'},
+    h(Stat, {value: fmtNum(vidSet.size), label: 'Videos rendered'}),
+    h(Stat, {value: fmtNum(runs.length), label: 'Renders (re-renders included)'}),
+    h(Stat, {value: fmtNum(edMap.size), label: 'Editors'}),
+    h(Stat, {value: fmtNum(todayVids.size), label: 'Videos today'}),
+    h(Stat, {value: fmtNum(runs.filter(r => ((r.job_report || {}).agent || {}).mixed_with_development).length), label: 'Mixed with dev work (still counted)'}));
+  const perEditor = h('p', {className: 'note', style: {marginTop: 8}}, edRows.length ? edRows.map(([name, e]) => h('span', {className: 'tag', key: name}, name + ': ' + e.vids.size + (e.renders !== e.vids.size ? ' videos / ' + e.renders + ' renders' : (e.vids.size === 1 ? ' video' : ' videos')))) : null);
   return h('div', null,
+    counter, perEditor,
     h('p', {className: 'sub', style: {marginTop: 14}}, 'One row per finished render, newest first. A video rendered again appears again. Zeno version * = not seen on a request near that render, so it is the newest version their key reports now. The Video edits tab counts each video once.'),
     h('div', {className: 'scroll'}, h('table', null,
       h('thead', null, h('tr', null, h(Th, null, 'When'), h(Th, null, 'Editor'), h(Th, null, 'Notion name'), h(Th, null, 'Model'), h(Th, null, 'Zeno version'), h(Th, null, 'Language'), h(Th, {right: true}, 'Clips'), h(Th, {right: true}, 'Seconds'),

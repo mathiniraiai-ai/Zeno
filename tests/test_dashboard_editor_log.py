@@ -62,3 +62,10 @@ class EditorLogTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RenderLogCounterTests(unittest.TestCase):
+    def test_render_log_has_counter(self) -> None:
+        page = usage_page.USAGE_PAGE
+        self.assertIn("'Videos rendered'", page)
+        self.assertIn("counter, perEditor", page)
