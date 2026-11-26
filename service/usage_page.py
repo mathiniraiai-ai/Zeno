@@ -1061,7 +1061,28 @@ function EditorsPage({m}) {
 // ---------- editor log: every video an editor worked on, when it started and ended, how long it took, blockers and errors ----------
 function logName(v) { return String(v || '').replace(/^(reel_|SQ_)/i, '').replace(/[.]mp4$/i, '').replace(/ *[(][0-9]+[)] *$/, '').trim(); }
 function fmtMin(m) { m = n(m); if (!m) return '–'; return m >= 60 ? Math.floor(m / 60) + 'h ' + Math.round(m % 60) + 'm' : (m < 1 ? '<1m' : Math.round(m) + 'm'); }
-function buildEditorLog(track, runs, jobs, cutoff) {
+function augmentJobs(jobs, runs, trackJobs) {
+  // The job index misses videos from editors on old Zeno versions (no job rows at all). Add one delivered-video row for each such render or tracked video so the counts never drop them.
+  const haveProj = new Set(), haveName = new Set();
+  (jobs || []).forEach(j => { const ek = canon(j.editor_name); if (j.project) haveProj.add(ek + '|' + j.project); if (j.video_name) haveName.add(ek + '|' + logName(j.video_name).toLowerCase()); });
+  const extra = [];
+  (runs || []).forEach(r => {
+    const ek = canon(r.editor_name);
+    if (r.project && haveProj.has(ek + '|' + r.project)) return;
+    const w = n(((r.job_report || {}).agent || {}).window_minutes);
+    haveProj.add(ek + '|' + (r.project || r.id));
+    extra.push({id: 'run' + r.id, editor_name: r.editor_name, project: r.project || '', video_name: r.project || ('run ' + r.id), kind: 'render', zeno_version: '', created_at: n(r.created_at) - w * 60, updated_at: n(r.created_at)});
+  });
+  (trackJobs || []).forEach(j => {
+    if (!j.first_completed_at) return;
+    const ek = canon(j.editor_name), nm = logName(j.notion_name).toLowerCase();
+    if (haveName.has(ek + '|' + nm) || (j.project_name && haveProj.has(ek + '|' + j.project_name))) return;
+    haveName.add(ek + '|' + nm);
+    extra.push({id: j.job_key, editor_name: j.editor_name, project: j.project_name || '', video_name: j.notion_name, kind: 'render', zeno_version: j.zeno_version || '', created_at: n(j.opened_at) || n(j.first_completed_at), updated_at: n(j.first_completed_at)});
+  });
+  return (jobs || []).concat(extra);
+}
+function buildEditorLog(track, runs, jobs, cutoff, tev) {
   // One row per video. The v2 tracker is the base; renders only the older recorder saw (editors on old versions) are added so no video is lost.
   const rows = [];
   const v2 = (track && track.jobs) || [];
@@ -1099,6 +1120,26 @@ function buildEditorLog(track, runs, jobs, cutoff) {
     if (t < n(cutoff.from) || (cutoff.to && t > n(cutoff.to))) return;
     blockers.push({when: t, editor: j.editor_name, ek: canon(j.editor_name), video: logName(j.video_name) || j.project || '', kind: j.kind, version: j.zeno_version || ''});
   });
+  // Gemini cross-check: every video makes a burst of transcription calls. A burst that no recorded video explains was worked on but not recorded.
+  const bursts = new Map();
+  (tev || []).slice().sort((x, y) => n(x.created_at) - n(y.created_at)).forEach(e => {
+    const t = n(e.created_at);
+    if (t < n(cutoff.from) || (cutoff.to && t > n(cutoff.to))) return;
+    const ek = canon(e.user_name), list = bursts.get(ek) || [];
+    const last = list[list.length - 1];
+    if (last && t - last.to <= 1200) { last.to = t; last.calls += 1; last.audio += n(e.audio_seconds); last.bad += e.status === 'ok' ? 0 : 1; if (e.zeno_version) last.version = e.zeno_version; }
+    else list.push({ek, editor: e.user_name, from: t, to: t, calls: 1, audio: n(e.audio_seconds), bad: e.status === 'ok' ? 0 : 1, version: e.zeno_version || ''});
+    bursts.set(ek, list);
+  });
+  const gaps = [], sessions = new Map();
+  bursts.forEach((list, ek) => {
+    sessions.set(ek, list.length);
+    list.forEach(b => {
+      const hit = rows.some(r => { if (r.ek !== ek) return false; const w = Math.max(r.active, 20) * 60; const lo = (r.start || (r.end - w)) - 600, hi = (r.start ? r.start + w : (r.end || r.last)) + 600; return b.from >= lo && b.from <= hi; });
+      if (!hit) gaps.push(b);
+    });
+  });
+  gaps.sort((x, y) => y.from - x.from);
   rows.sort((a, b) => (b.start || b.end || b.last) - (a.start || a.end || a.last));
   const per = new Map();
   rows.forEach(r => {
@@ -1113,17 +1154,21 @@ function buildEditorLog(track, runs, jobs, cutoff) {
     per.set(r.ek, e);
   });
   blockers.forEach(b => { const e = per.get(b.ek); if (e) e.blocks += 1; else per.set(b.ek, {ek: b.ek, name: b.editor, worked: 0, delivered: 0, first: 0, last: 0, active: 0, timed: 0, blocks: 1, errors: 0, revisions: 0, renders: 0, version: b.version, days: new Set()}); });
-  return {rows, blockers, editors: [...per.values()].sort((a, b) => b.delivered - a.delivered || b.worked - a.worked)};
+  const ensure = (ek, name) => { if (!per.has(ek)) per.set(ek, {ek, name, worked: 0, delivered: 0, first: 0, last: 0, active: 0, timed: 0, blocks: 0, errors: 0, revisions: 0, renders: 0, version: '', days: new Set()}); return per.get(ek); };
+  gaps.forEach(g => { ensure(g.ek, g.editor); });
+  per.forEach((e, ek) => { e.sessions = sessions.get(ek) || 0; e.unrecorded = gaps.filter(g => g.ek === ek).length; const bl = bursts.get(ek) || []; e.geminiVersion = bl.length ? bl[bl.length - 1].version : null; });
+  return {rows, blockers, gaps, editors: [...per.values()].sort((a, b) => b.delivered - a.delivered || b.worked - a.worked)};
 }
 
-function EditorLogPage({track, trackMsg, runs, jobs, cutoff, editor}) {
+function EditorLogPage({track, trackMsg, runs, jobs, cutoff, editor, tev}) {
   if (track === null) return h(Empty, {text: trackMsg || "Loading the editor log…"});
   const edF = canon(editor);
   const okE = (name, email) => !editor || canon(name) === edF || canon(String(email || "").split("@")[0]) === edF;
   const runsF = (runs || []).filter(r => okE(r.editor_name, r.user_email));
   const jobsF = (jobs || []).filter(j => okE(j.editor_name, ""));
   const trackF = Object.assign({}, track, {jobs: (track.jobs || []).filter(j => okE(j.editor_name, j.editor_email))});
-  const L = buildEditorLog(trackF, runsF, jobsF, cutoff);
+  const tevF = (tev || []).filter(e => okE(e.user_name, ""));
+  const L = buildEditorLog(trackF, runsF, jobsF, cutoff, tevF);
   const delivered = L.rows.filter(r => r.end).length;
   const timed = L.rows.filter(r => r.active);
   const avg = timed.length ? timed.reduce((a, r) => a + r.active, 0) / timed.length : 0;
@@ -1138,16 +1183,18 @@ function EditorLogPage({track, trackMsg, runs, jobs, cutoff, editor}) {
     h(Stat, {value: fmtMin(avg), label: "Avg time per video"}),
     h(Stat, {value: fmtNum(nBlocks), label: "Blockers"}),
     h(Stat, {value: fmtNum(nErr), label: "Errors"}),
+    h(Stat, {value: fmtNum(L.gaps.length), label: "Seen by Gemini, not recorded"}),
     h(Section, {title: "Per editor: count, start, end, time, blockers", span: 12, sub: "Time per video = length of the Claude Code chat for that video. Where that is unknown, it is the time from start to finish (marked elapsed)."},
       L.editors.length ? h("div", {className: "scroll"}, h("table", null,
-        h("thead", null, h("tr", null, h(Th, null, "Editor"), h(Th, {right: true}, "Delivered"), h(Th, {right: true}, "Worked on"), h(Th, null, "First start"), h(Th, null, "Last finish"), h(Th, {right: true}, "Working time"), h(Th, {right: true}, "Avg / video"), h(Th, {right: true}, "Renders"), h(Th, {right: true}, "Revisions"), h(Th, {right: true}, "Blockers"), h(Th, {right: true}, "Errors"), h(Th, null, "Version"))),
+        h("thead", null, h("tr", null, h(Th, null, "Editor"), h(Th, {right: true}, "Delivered"), h(Th, {right: true}, "Worked on"), h(Th, null, "First start"), h(Th, null, "Last finish"), h(Th, {right: true}, "Working time"), h(Th, {right: true}, "Avg / video"), h(Th, {right: true}, "Renders"), h(Th, {right: true}, "Revisions"), h(Th, {right: true}, "Blockers"), h(Th, {right: true}, "Errors"), h(Th, {right: true}, "Gemini sessions"), h(Th, null, "Version"))),
         h("tbody", null, L.editors.map(e => h("tr", {key: e.ek},
           h("td", null, h("b", null, e.name)), h("td", {className: "n"}, h("b", null, fmtNum(e.delivered))), h("td", {className: "n"}, fmtNum(e.worked)),
           h("td", {className: "muted"}, e.first ? fmtWhen(e.first) : "–"), h("td", {className: "muted"}, e.last ? fmtWhen(e.last) : "–"),
           h("td", {className: "n"}, fmtMin(e.active)), h("td", {className: "n"}, e.timed ? fmtMin(e.active / e.timed) : "–"),
           h("td", {className: "n"}, fmtNum(e.renders)), h("td", {className: "n"}, fmtNum(e.revisions)),
           h("td", {className: "n"}, e.blocks ? h(Pill, {kind: "red"}, fmtNum(e.blocks)) : "0"), h("td", {className: "n"}, e.errors ? h(Pill, {kind: "amber"}, fmtNum(e.errors)) : "0"),
-          h("td", null, e.version ? "v" + e.version : "–")))))) : h(Empty)),
+          h("td", {className: "n", title: "Bursts of Gemini transcription calls = videos the editor started. A recorded video should exist for each."}, e.unrecorded ? h(Pill, {kind: "red"}, fmtNum(e.sessions) + " · " + e.unrecorded + " not recorded") : fmtNum(e.sessions)),
+          h("td", null, e.version ? "v" + e.version : (e.geminiVersion === "" ? h(Pill, {kind: "red"}, "Old Zeno · update") : (e.geminiVersion ? "v" + e.geminiVersion : "–")))))))) : h(Empty)),
     h(Section, {title: "Every video: start, end and time", span: 12},
       L.rows.length ? h("div", {className: "scroll"}, h("table", null,
         h("thead", null, h("tr", null, h(Th, null, "Day"), h(Th, null, "Editor"), h(Th, null, "Video"), h(Th, null, "Started"), h(Th, null, "Finished"), h(Th, {right: true}, "Time"), h(Th, null, "Status"), h(Th, {right: true}, "Renders"), h(Th, {right: true}, "Revisions"), h(Th, {right: true}, "Prompts"), h(Th, {right: true}, "Problems"), h(Th, null, "Agent / model"), h(Th, {right: true}, "Tokens"), h(Th, null, "Version"))),
@@ -1161,6 +1208,13 @@ function EditorLogPage({track, trackMsg, runs, jobs, cutoff, editor}) {
             h("td", {className: "n"}, (r.errors + r.blocks) ? h(Pill, {kind: r.blocks ? "red" : "amber"}, fmtNum(r.errors + r.blocks)) : "0"),
             h("td", {className: "muted"}, r.model || "–"), h("td", {className: "n"}, fmtBig(r.tokens)), h("td", {className: "muted"}, r.version ? "v" + r.version : "–"));
         })))) : h(Empty)),
+    L.gaps.length ? h(Section, {title: "Worked on but not recorded (Gemini saw these, no video was logged)", span: 12, sub: "Almost always an editor still on an old Zeno version. The last Gemini session of the day may simply be a video still in progress."},
+      h("div", {className: "scroll"}, h("table", null,
+        h("thead", null, h("tr", null, h(Th, null, "Editor"), h(Th, null, "From"), h(Th, null, "To"), h(Th, {right: true}, "Gemini calls"), h(Th, {right: true}, "Audio"), h(Th, {right: true}, "Failed"), h(Th, null, "Zeno version seen"))),
+        h("tbody", null, L.gaps.slice(0, 200).map((g, i) => h("tr", {key: i},
+          h("td", null, h("b", null, g.editor)), h("td", {className: "muted"}, fmtWhen(g.from)), h("td", {className: "muted"}, clock(g.to)),
+          h("td", {className: "n"}, fmtNum(g.calls)), h("td", {className: "n"}, fmtMin(g.audio / 60)), h("td", {className: "n"}, g.bad ? h(Pill, {kind: "amber"}, fmtNum(g.bad)) : "0"),
+          h("td", null, g.version ? "v" + g.version : h(Pill, {kind: "red"}, "none (old Zeno)")))))))) : null,
     h(Section, {title: "Blockers and errors: what happened", span: 12},
       (trouble.length || L.blockers.length) ? h("div", {className: "scroll"}, h("table", null,
         h("thead", null, h("tr", null, h(Th, null, "When"), h(Th, null, "Editor"), h(Th, null, "Video"), h(Th, null, "Type"), h(Th, null, "What went wrong"), h(Th, null, "Version"))),
@@ -1335,7 +1389,8 @@ function Dashboard({data, jobs, jobsMsg, track, trackMsg, token, tab, setTab, pe
   const [day, setDay] = useState("");
   const [q, setQ] = useState("");
   const [includeDev, setIncludeDev] = useState(true);  // every video counts; the chip can still hide runs mixed with Zeno code work
-  const m = useModel(data, jobs, period, editor, rate, prices);
+  const jobsAug = useMemo(() => jobs === null ? null : augmentJobs(jobs, data.runs, track && track.jobs), [jobs, data, track]);
+  const m = useModel(data, jobsAug, period, editor, rate, prices);
   const cur = TABS.some(t => t[0] === tab) ? tab : "overview";
   const cutoff = {from: period.from ? new Date(period.from + "T00:00:00").getTime() / 1000 : 0, to: period.to ? new Date(period.to + "T23:59:59").getTime() / 1000 : 0};
   const runs = (data.runs || []).filter(r => inPeriod(r, cutoff) && (!editor || canon(r.editor_name) === editor || canon(String(r.user_email || "").split("@")[0]) === editor)).sort((a, b) => n(b.created_at) - n(a.created_at));
@@ -1358,10 +1413,10 @@ function Dashboard({data, jobs, jobsMsg, track, trackMsg, token, tab, setTab, pe
     h("div", {className: "tabs"}, TABS.map(([id, label]) => h("button", {key: id, className: "tab" + (cur === id ? " on" : ""), onClick: () => setTab(id)}, label))),
     h(Controls, {period, setPeriod, editors: editorList(m), editor, setEditor, rate, setRate, onRefresh, busy, includeDev, setIncludeDev, devCount}),
     jobsMsg ? h("p", {className: "note"}, jobsMsg) : null,
-    cur === "overview" ? h(OverviewPage, {m, rate, setTab, jobs, setPeriod, runs: cleanRuns})
+    cur === "overview" ? h(OverviewPage, {m, rate, setTab, jobs: jobsAug, setPeriod, runs: cleanRuns})
       : cur === "tracker" ? h(TrackerPage, {track, trackMsg, token, editor})
-      : cur === "log" ? h(EditorLogPage, {track, trackMsg, runs, jobs, cutoff, editor})
-      : cur === "videos" ? h("div", null, h(VideosPage, {m, jobs, setPeriod}), jobs === null ? null : h("div", {style: {height: 14}}), jobs === null ? null : h(Wrap, null, h(EditsView, {data, jobs, jobsMsg, rg: cutoff, q: "", rate, day, setDay})))
+      : cur === "log" ? h(EditorLogPage, {track, trackMsg, runs, jobs, cutoff, editor, tev: data.transcriptions})
+      : cur === "videos" ? h("div", null, h(VideosPage, {m, jobs: jobsAug, setPeriod}), jobs === null ? null : h("div", {style: {height: 14}}), jobs === null ? null : h(Wrap, null, h(EditsView, {data, jobs, jobsMsg, rg: cutoff, q: "", rate, day, setDay})))
       : cur === "renders" ? h("div", null,
           h("div", {className: "bar", style: {marginTop: 4}},
             h("input", {className: "grow", placeholder: "Search an editor, project or language", value: q, onChange: e => setQ(e.target.value)}),

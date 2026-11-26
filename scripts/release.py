@@ -400,6 +400,41 @@ def publish_to_cloud(
     return resp.json()
 
 
+# Files that decide HOW Zeno edits (cuts, zooms, subtitles, banners, rules and agent instructions). They may only change in a release
+# made on purpose with `--training "<reason>"`; every other release (speed, tokens, dashboard, fixes) must leave the edit pattern untouched.
+EDIT_PATTERN_PATHS: Tuple[str, ...] = (
+    "formats/",
+    "subtitles/",
+    "CLAUDE.md",
+    "AGENTS.md",
+    ".claude/",
+    ".agent/",
+    ".codex/",
+    "scripts/script_order.py",
+    "scripts/edl_parser.py",
+    "scripts/layouts.py",
+    "scripts/subtitles.py",
+    "scripts/flashcard_placer.py",
+    "scripts/edit_packet.py",
+)
+
+
+def edit_pattern_changes(base_sha: str) -> List[str]:
+    """Edit-pattern files that differ between the last published commit and the working tree (empty when unknown)."""
+    if not base_sha:
+        return []
+    names: List[str] = []
+    for cmd in (["git", "diff", "--name-only", f"{base_sha}..HEAD"], ["git", "diff", "--name-only", "HEAD"]):
+        try:
+            r = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=20.0, check=False)
+        except Exception:
+            continue
+        if r.returncode == 0:
+            names.extend(x.strip() for x in r.stdout.splitlines() if x.strip())
+    hit = sorted({n for n in names if any(n == pth or (pth.endswith("/") and n.startswith(pth)) for pth in EDIT_PATTERN_PATHS)})
+    return hit
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Publish a Zeno OTA update to the Zeno Cloud server")
     ap.add_argument("notes", nargs="?", default="", help="Release notes shown to users in the update popup")
@@ -413,12 +448,27 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="Build the release bundle locally without uploading")
     ap.add_argument("--clear-work", action="store_true", help="Instruct client updaters to also clear old work/ project caches on install (preserving work/_clips)")
     ap.add_argument("--status", action="store_true", help="Check the currently published version on Zeno Cloud")
+    ap.add_argument("--training", default="", metavar="REASON", help="Allow edit-pattern files to change in this release (only when deliberately training the edit style)")
     args = ap.parse_args()
 
     if args.status:
         st = check_live_status(args.admin_password)
         print(json.dumps(st, indent=2, ensure_ascii=False))
         return 0 if st.get("status_code") == 200 else 1
+
+    if not args.training.strip():
+        live = check_live_status(args.admin_password) if not args.dry_run else {}
+        base = str(((live or {}).get("data") or {}).get("sha") or "")
+        changed = edit_pattern_changes(base)
+        if changed:
+            print("  [Release] BLOCKED: edit-pattern files changed since the last published release (" + base + "):")
+            for name in changed:
+                print("    - " + name)
+            print("  The edit pattern may only change when you are training the edit. Revert these files, or publish on purpose with:")
+            print('    python3 scripts/release.py --training "<what you are training>" ...')
+            return 3
+    elif not args.dry_run:
+        print(f"  [Release] Edit-pattern change allowed (training): {args.training.strip()}")
 
     cur_ver = read_version()
     if args.version.strip():

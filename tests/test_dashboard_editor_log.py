@@ -69,3 +69,35 @@ class RenderLogCounterTests(unittest.TestCase):
         page = usage_page.USAGE_PAGE
         self.assertIn("'Videos rendered'", page)
         self.assertIn("counter, perEditor", page)
+
+
+class GeminiCrossCheckTests(unittest.TestCase):
+    def test_unrecorded_sessions_and_augmented_jobs(self) -> None:
+        page = usage_page.USAGE_PAGE
+        js = [s for s in re.findall(r"<script(?:\s[^>]*)?>(.*?)</script>", page, re.S) if s.strip()][0]
+        harness = HARNESS.replace(
+            "grab(/function buildEditorLog",
+            "grab(/function augmentJobs[\\s\\S]*?\\n\\}\\n/), grab(/function buildEditorLog",
+        ).replace(
+            "const L = build(fx.track, fx.runs, fx.jobs, {from: 0, to: 0});",
+            "const L = build(fx.track, fx.runs, fx.jobs, {from: 0, to: 0}, fx.tev); const A = augmentJobs(fx.jobs, fx.runs, []);",
+        ).replace(
+            "blockers: L.blockers.length}",
+            "blockers: L.blockers.length, gaps: L.gaps.length, unrec: L.editors.map(e => [e.name, e.sessions, e.unrecorded]), aug: A.length}",
+        ).replace("eval(code + ';global.build = buildEditorLog;');", "eval(code + ';global.build = buildEditorLog; global.augmentJobs = augmentJobs;');")
+        runs = [{"id": 1, "editor_name": "Madhu S", "project": "p1", "created_at": 10000, "job_report": {"agent": {"window_minutes": 30}}}]
+        # 3 Gemini bursts: one inside the recorded video window (9300-10000), two with no recorded video.
+        tev = [{"user_name": "Madhu S", "created_at": 9400, "status": "ok", "audio_seconds": 10, "zeno_version": ""},
+               {"user_name": "Madhu S", "created_at": 20000, "status": "ok", "audio_seconds": 10, "zeno_version": ""},
+               {"user_name": "Madhu S", "created_at": 30000, "status": "ok", "audio_seconds": 10, "zeno_version": ""}]
+        with tempfile.TemporaryDirectory() as tmp:
+            t = Path(tmp)
+            (t / "page.js").write_text(js, encoding="utf-8")
+            (t / "h.js").write_text(harness, encoding="utf-8")
+            (t / "fx.json").write_text(json.dumps({"track": {"jobs": []}, "runs": runs, "jobs": [], "tev": tev}), encoding="utf-8")
+            out = subprocess.run(["node", str(t / "h.js"), str(t / "page.js"), str(t / "fx.json")], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        res = json.loads(out.stdout.strip().splitlines()[-1])
+        self.assertEqual(res["gaps"], 2)
+        self.assertEqual(res["unrec"][0], ["Madhu S", 3, 2])
+        self.assertEqual(res["aug"], 1)  # the old-client render gets a delivered-video row so Overview counts it
