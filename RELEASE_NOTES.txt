@@ -1,1 +1,1 @@
-Zeno v3.0.7: M2/M5 & RTX 3060+ GPU turbo (thread-safe MPS/CUDA alignment lock without per-chunk GPU stalls, fast NVENC p3 + NVDEC decode & VideoToolbox prio_speed intermediate renders, GPU-encoded scrolling pages, 12-thread & 6-worker M5 scaling, and Rosetta arm64 warning)
+Zeno v3.0.8: corrected token/model pricing, dashboard counts every video, and a release guard so the edit pattern never changes unless training. No change to how Zeno edits.
