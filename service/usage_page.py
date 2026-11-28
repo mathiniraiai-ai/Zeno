@@ -293,7 +293,7 @@ const PRICES = [  // [model match, USD per million tokens: input, cached read, c
   ['opus-4-5', 5, 0.5, 6.25, 25], ['opus-4-6', 5, 0.5, 6.25, 25], ['opus-4-7', 5, 0.5, 6.25, 25], ['opus-4-8', 5, 0.5, 6.25, 25], ['opus-4-9', 5, 0.5, 6.25, 25],
   ['opus-4', 15, 1.5, 18.75, 75],
   ['sonnet-5-5', 2, 0.1, 2.5, 10], ['sonnet-5', 2, 0.2, 2.5, 10], ['sonnet-4', 3, 0.3, 3.75, 15],
-  ['haiku-5', 0.1, 0.01, 0.125, 0.5], ['haiku-4', 1, 0.1, 1.25, 5], ['fable', 10, 0.25, 12.5, 50],
+  ['haiku-5', 0.1, 0.01, 0.125, 0.5], ['haiku-4', 1, 0.1, 1.25, 5], ['fable-5-2', 8, 0.2, 10, 40], ['fable-5-1', 10, 0.25, 12.5, 50], ['fable-5', 10, 1, 12.5, 50], ['fable', 10, 0.25, 12.5, 50],
   ['gemini-4-neon', 3, 0.15, 3.75, 15], ['gemini-4-hydrogen', 1.5, 0.075, 1.875, 7.5]];
 function normModel(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -1100,7 +1100,7 @@ function buildEditorLog(track, runs, jobs, cutoff, tev) {
     const end = n(j.first_completed_at) || 0;
     const name = logName(j.notion_name) || j.project_name || j.job_key;
     seen.add(ek + '|' + name.toLowerCase());
-    rows.push({key: j.job_key, src: 'v2', editor: j.editor_name, ek, video: name, start, end, last: n(j.last_event_at), active: chat || (start && end ? (end - start) / 60 : 0), activeKind: chat ? 'chat' : 'elapsed', status: j.status, renders: n(j.render_count), revisions: n(j.revision_count), errors: n(j.error_count), blocks: n(j.block_count), errCat: j.last_error_category || '', errMsg: j.last_error_message || '', tokens: n(j.agent_total_tokens), model: j.agent_model || '', version: j.zeno_version || '', prompts: n(j.user_prompt_count)});
+    rows.push({key: j.job_key, src: 'v2', editor: j.editor_name, ek, video: name, start, end, last: n(j.last_event_at), active: chat || (start && end ? (end - start) / 60 : 0), activeKind: chat ? 'chat' : 'elapsed', status: j.status, renders: n(j.render_count), revisions: n(j.revision_count), errors: n(j.error_count), blocks: n(j.block_count), errCat: j.last_error_category || '', errMsg: j.last_error_message || '', tokens: n(j.agent_total_tokens), model: j.agent_model && String(j.agent_model).toLowerCase() !== 'unknown' ? j.agent_model : 'unknown', version: j.zeno_version || '', prompts: n(j.user_prompt_count)});
   });
   (runs || []).forEach(r => {
     if (usedRun.has(r.id)) return;
@@ -1278,6 +1278,8 @@ function TrackerPage({track, trackMsg, token, editor}) {
     h(Stat, {value: fmtNum(t.revisions || 0), label: "Revisions (post-render)"}),
     h(Stat, {value: fmtNum(t.in_progress || 0), label: "Open / in progress"}),
     h(Stat, {value: fmtNum(t.stuck || 0), label: "Stuck (>30m idle)"}),
+    h(Stat, {value: fmtNum(t.stalled || 0), label: "Stalled (error, >20m idle)"}),
+    h(Stat, {value: fmtNum(t.unknown_model_jobs || 0), label: "Model unknown (cost unknown)"}),
     h(Stat, {value: fmtNum(t.gemini_retries || 0), label: "Gemini retries"}),
     h(Stat, {value: fmtNum(t.errors || 0), label: "Errors & blocks"}),
     h(Stat, {value: fmtNum(t.verified_updated || 0), label: "Verified updated" + (latestV ? " (" + latestV + ")" : "")}),

@@ -1705,6 +1705,34 @@ class KeyStore:
             ),
         )
 
+    @staticmethod
+    def _folder_base(raw: Any) -> str:
+        return str(raw or "").replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].strip().lower()
+
+    def _split_new_video_key(self, ev: Dict[str, Any], event_type: str) -> Dict[str, Any]:
+        """Old clients (<=3.0.8) re-use one job key per project folder, so a second video delivered to a DIFFERENT output folder was counted
+        as a revision of the first. When a delivery names an output folder other than the one this (already completed) job delivered to,
+        move it to a derived key `<key>~<hash>` so it counts as its own video. Same folder = genuine revision, key unchanged."""
+        try:
+            jk = str(ev.get("job_key") or "").strip()
+            new_base = self._folder_base(ev.get("output_folder"))
+            if event_type not in ("video_delivered", "job_done") or not jk or not new_base or "~" in jk:
+                return ev
+            row = self._run(
+                "SELECT first_completed_at, output_folder FROM zeno_video_jobs WHERE job_key = %s", (jk,), "one")
+            if not row or row[0] is None:
+                return ev
+            old_base = self._folder_base(row[1])
+            if not old_base or old_base == new_base:
+                return ev
+            out = dict(ev)
+            out["job_key"] = f"{jk}~{hashlib.sha1(new_base.encode('utf-8')).hexdigest()[:6]}"
+            if not str(out.get("notion_name") or out.get("video_name") or "").strip():
+                out["notion_name"] = str(ev.get("output_folder")).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1][:240]
+            return out
+        except Exception:
+            return ev
+
     def resolve_or_create_video_job(
         self,
         *,
@@ -1733,7 +1761,7 @@ class KeyStore:
             hit = self._run("SELECT job_key FROM zeno_video_jobs WHERE job_key = %s", (jkey,), "one")
             if hit:
                 matched_key = str(hit[0])
-        if not matched_key and cname:
+        if not matched_key and cname and "~" not in jkey:
             hit = self._run(
                 "SELECT job_key FROM zeno_video_jobs WHERE editor_email = %s AND canonical_name = %s "
                 "AND last_event_at >= %s ORDER BY last_event_at DESC LIMIT 1",
@@ -1742,7 +1770,7 @@ class KeyStore:
             )
             if hit:
                 matched_key = str(hit[0])
-        if not matched_key and sid:
+        if not matched_key and sid and "~" not in jkey:
             rows = self._run(
                 "SELECT job_key, canonical_name FROM zeno_video_jobs WHERE editor_email = %s AND script_id = %s "
                 "AND last_event_at >= %s ORDER BY last_event_at DESC LIMIT 5",
@@ -1953,6 +1981,7 @@ class KeyStore:
             seen_at=client_ts,
         )
 
+        merged_ev = self._split_new_video_key(merged_ev, event_type)
         job_key = self.resolve_or_create_video_job(
             editor_email=email,
             editor_name=ed_name,
@@ -2020,10 +2049,13 @@ class KeyStore:
             uniq_clips = max(int(uniq_clips or 0), _unique_clip_count(seen_hashes))
 
         # Apply agent token & prompt updates whenever reported (taking latest monotonic snapshot)
-        if merged_ev.get("agent_name"):
-            a_name = str(merged_ev.get("agent_name"))[:60]
-        if merged_ev.get("agent_model"):
-            a_model = str(merged_ev.get("agent_model"))[:80]
+        # A later "unknown" must never wipe an already-detected agent/model.
+        new_agent = str(merged_ev.get("agent_name") or "").strip()
+        if new_agent and (new_agent.lower() != "unknown" or not str(a_name or "").strip()):
+            a_name = new_agent[:60]
+        new_model = str(merged_ev.get("agent_model") or "").strip()
+        if new_model and (new_model.lower() != "unknown" or not str(a_model or "").strip()):
+            a_model = new_model[:80]
         if merged_ev.get("agent_calls") is not None:
             a_calls = max(int(a_calls or 0), int(merged_ev.get("agent_calls") or 0))
         if merged_ev.get("agent_in_tokens") is not None:
@@ -2269,6 +2301,7 @@ class KeyStore:
         editor: str = "",
         tz_offset: int = 19800,
         stuck_after_sec: int = 1800,
+        stalled_after_sec: int = 1200,
     ) -> Dict[str, Any]:
         start_day, end_day, lo, hi = self._window_bounds(date_str, days, tz_offset)
         now = time.time()
@@ -2311,6 +2344,15 @@ class KeyStore:
             last_ev = float(r[18] or 0.0)
             is_stuck = status in ("open", "transcribing", "editing", "rendered") and (now - last_ev) >= float(stuck_after_sec)
             eff_status = "stuck" if is_stuck else status
+            # Stalled: the job's last event is a block/error and nothing newer arrived for >= stalled_after_sec while it is not done.
+            err_is_last = r[45] is not None and abs(float(r[45]) - last_ev) < 1.0
+            is_stalled = (
+                status != "done" and r[16] is None
+                and (status in ("failed", "blocked") or err_is_last)
+                and (now - last_ev) >= float(stalled_after_sec)
+            )
+            model_raw = str(r[29] or "").strip()
+            model_known = bool(model_raw) and model_raw.lower() != "unknown"
             revs = self._jload(r[39], [])
             done_in_window = bool(r[17] and start_day <= str(r[17]) <= end_day)
             rev_in_window = sum(1 for rv in revs if start_day <= str(rv.get("date") or "") <= end_day)
@@ -2330,6 +2372,9 @@ class KeyStore:
                 "status": eff_status,
                 "raw_status": status,
                 "is_stuck": is_stuck,
+                "is_stalled": is_stalled,
+                "agent_model_known": model_known,
+                "agent_cost_status": "estimated" if model_known else "unknown",
                 "last_stage": r[13],
                 "opened_at": float(r[14] or 0.0),
                 "first_rendered_at": float(r[15]) if r[15] is not None else None,
@@ -2376,6 +2421,7 @@ class KeyStore:
                 "first_pass_done": 0,
                 "revisions": 0,
                 "stuck": 0,
+                "stalled": 0,
                 "failed_blocked": 0,
                 "unique_clips": 0,
                 "gemini_calls": 0,
@@ -2390,6 +2436,8 @@ class KeyStore:
                 if int(r[38] or 0) == 0:
                     ed_rec["first_pass_done"] += 1
             ed_rec["revisions"] += rev_in_window
+            if is_stalled:
+                ed_rec["stalled"] += 1
             if is_stuck:
                 ed_rec["stuck"] += 1
                 err_cats["stuck_abandoned"] += 1
@@ -2430,6 +2478,8 @@ class KeyStore:
             "revisions": sum(j["revisions_in_window"] for j in jobs_out),
             "in_progress": sum(1 for j in jobs_out if j["status"] in ("open", "transcribing", "editing", "rendered")),
             "stuck": sum(1 for j in jobs_out if j["is_stuck"]),
+            "stalled": sum(1 for j in jobs_out if j["is_stalled"]),
+            "unknown_model_jobs": sum(1 for j in jobs_out if not j["agent_model_known"]),
             "failed_blocked": sum(1 for j in jobs_out if j["status"] in ("failed", "blocked")),
             "unique_clips": sum(j["unique_clips_count"] for j in jobs_out),
             "gemini_calls": sum(j["gemini_calls"] for j in jobs_out),
@@ -2447,6 +2497,8 @@ class KeyStore:
             "totals": totals,
             "error_categories": err_cats,
             "editors": sorted(by_editor.values(), key=lambda x: (-x["done"], -x["opened"], x["editor_name"])),
+            "stalled_after_sec": int(stalled_after_sec),
+            "stalled_jobs": [j["job_key"] for j in jobs_out if j["is_stalled"]],
             "jobs": jobs_out,
             "fleet": fleet,
         }

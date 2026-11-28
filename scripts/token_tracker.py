@@ -296,7 +296,83 @@ def _cand_rank(
     )
 
 
-def detect_agent_usage(
+
+_CLAUDE_ENV_KEYS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SSE_PORT")
+
+
+def _model_from_claude_transcript(session_id: str) -> str:
+    """Last assistant `message.model` of this Claude Code session (distinguishes Sonnet from Opus); '' when unreadable."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return ""
+    try:
+        files = sorted(
+            glob.glob(os.path.expanduser(f"~/.claude/projects/**/{glob.escape(sid)}.jsonl"), recursive=True),
+            key=os.path.getmtime, reverse=True,
+        )
+        if not files:
+            return ""
+        size = os.path.getsize(files[0])
+        with open(files[0], "rb") as fh:
+            if size > 400_000:
+                fh.seek(size - 400_000)
+            tail = fh.read().decode("utf-8", errors="ignore").splitlines()
+        for line in reversed(tail):
+            if '"model"' not in line:
+                continue
+            try:
+                m = (json.loads(line).get("message") or {}).get("model")
+            except Exception:
+                continue
+            m = str(m or "").strip()
+            if m and not m.startswith("<"):
+                return m
+    except Exception:
+        pass
+    return ""
+
+
+def _codex_config_model() -> str:
+    try:
+        home = Path(os.getenv("CODEX_HOME") or Path.home() / ".codex")
+        for line in (home / "config.toml").read_text(encoding="utf-8", errors="ignore").splitlines():
+            m = re.match(r"\s*model\s*=\s*[\"']([^\"']+)[\"']", line)
+            if m:
+                return m.group(1).strip()
+    except Exception:
+        pass
+    return ""
+
+
+def detect_agent_env(environ: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Cheap environment-based host detection (no transcript scan): {agent_name, agent_model, session_id, agent_detect_reason}.
+    agent_name is 'unknown' with a reason when nothing identifies the host."""
+    env = os.environ if environ is None else environ
+    forced = str(env.get("ZENO_AGENT") or "").strip()
+    model_env = str(env.get("ZENO_MODEL") or "").strip()
+    if forced and forced.lower() != "unknown":
+        return {"agent_name": forced, "agent_model": model_env or "unknown", "session_id": "", "agent_detect_reason": "env:ZENO_AGENT"}
+    hit = [k for k in _CLAUDE_ENV_KEYS if str(env.get(k) or "").strip()]
+    if hit:
+        sid = str(env.get("CLAUDE_CODE_SESSION_ID") or "").strip()
+        model = model_env or str(env.get("ANTHROPIC_MODEL") or "").strip() or (_model_from_claude_transcript(sid) if environ is None else "")
+        return {"agent_name": "Claude Code", "agent_model": model or "unknown", "session_id": sid, "agent_detect_reason": "env:" + hit[0]}
+    codex = [k for k in env if str(k).startswith("CODEX_") and str(env.get(k) or "").strip()]
+    if codex:
+        model = model_env or (_codex_config_model() if environ is None else "")
+        return {"agent_name": "Codex", "agent_model": model or "unknown", "session_id": str(env.get("CODEX_THREAD_ID") or ""),
+                "agent_detect_reason": "env:" + sorted(codex)[0]}
+    if any(str(env.get(k) or "").strip() for k in ("ANTIGRAVITY_AGENT", "ANTIGRAVITY_SESSION_ID", "GEMINI_CLI")):
+        return {"agent_name": "Antigravity", "agent_model": model_env or "unknown", "session_id": "", "agent_detect_reason": "env:antigravity"}
+    return {"agent_name": "unknown", "agent_model": model_env or "unknown", "session_id": "",
+            "agent_detect_reason": "no agent env vars (CLAUDECODE/CLAUDE_CODE_*/CODEX_*) and no matching transcript"}
+
+
+def _is_unknown(v: Any) -> bool:
+    return str(v or "").strip().lower() in ("", "unknown", "none", "n/a")
+
+
+def _detect_agent_usage_impl(
     since_epoch: Optional[float] = None,
     until_epoch: Optional[float] = None,
     session_id: Optional[str] = None,
@@ -408,7 +484,8 @@ def detect_agent_usage(
             raw_full = "\n".join(lines)
             import agent_log
             is_subagent = "/subagents/" in path_str.replace("\\", "/")
-            if not (agent_log.chat_size(path_str, ROOT) or (is_subagent and ROOT.name in raw_full)):
+            # A transcript named by this process's own CLAUDE_CODE_SESSION_ID is trusted even when Claude Code was started outside Zeno's folder.
+            if require_recent and not (agent_log.chat_size(path_str, ROOT) or (is_subagent and ROOT.name in raw_full)):
                 continue
             got = claude_window_usage(lines, cutoff, ceiling)
             if got is None:
@@ -444,6 +521,35 @@ def detect_agent_usage(
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     return candidates[0][1]
+
+
+def detect_agent_usage(
+    since_epoch: Optional[float] = None,
+    until_epoch: Optional[float] = None,
+    session_id: Optional[str] = None,
+    project_hint: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Transcript-based usage (see _detect_agent_usage_impl) with environment detection first for identity and as the fallback,
+    so a job reports agent + model even when no transcript window matches. Unresolved hosts say why in agent_detect_reason."""
+    env_info = detect_agent_env()
+    got = _detect_agent_usage_impl(since_epoch, until_epoch, session_id, project_hint)
+    if not isinstance(got, dict):
+        got = {}
+    if _is_unknown(got.get("agent_name")):
+        if not _is_unknown(env_info["agent_name"]):
+            got["agent_name"] = env_info["agent_name"]
+            got["agent_detect_reason"] = env_info["agent_detect_reason"] + "; no usable transcript window"
+        else:
+            got["agent_name"] = "unknown"
+            got["agent_detect_reason"] = env_info["agent_detect_reason"]
+    else:
+        got.setdefault("agent_detect_reason", "transcript")
+    if _is_unknown(got.get("agent_model")) and not _is_unknown(env_info["agent_model"]) and (
+        _is_unknown(got.get("agent_name")) or str(got["agent_name"]).lower() == env_info["agent_name"].lower()
+    ):
+        got["agent_model"] = env_info["agent_model"]
+    got.setdefault("agent_model", "unknown")
+    return got
 
 
 def collect_clip_telemetry(
@@ -677,6 +783,7 @@ def save_prepare_snapshot(
         "job_start_epoch": job_start_epoch,
         "prepared_at": dt.datetime.now().isoformat(timespec="seconds"),
         "agent_name": agent["agent_name"],
+        "agent_detect_reason": agent.get("agent_detect_reason", ""),
         "agent_model": agent["agent_model"],
         "agent_session_id": agent.get("session_id"),
         "clips_count": len(clip_rows),
@@ -958,6 +1065,7 @@ def finalize_job_telemetry(
         "job_start_epoch": job_start,
         "job_end_epoch": job_end,
         "agent_name": agent["agent_name"],
+        "agent_detect_reason": agent.get("agent_detect_reason", ""),
         "agent_model": agent["agent_model"],
         "agent_token_precision": agent.get("token_precision", "unavailable"),
         "agent_session_id": agent.get("session_id"),

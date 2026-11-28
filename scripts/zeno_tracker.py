@@ -145,13 +145,41 @@ def _strip_ratio(raw: str) -> str:
     return s.strip()
 
 
+JOB_META_FILE = ".zeno_job_key.meta"
+
+
+def _norm_identity(raw: str) -> str:
+    return re.sub(r"\s+", " ", _strip_ratio(raw).lower().replace("\\", "/")).strip(" /")
+
+
+def _norm_footage(raw: str) -> str:
+    return str(raw or "").strip().lower().replace("\\", "/").rstrip("/")
+
+
+def _read_job_meta(pdir: Path) -> Dict[str, str]:
+    try:
+        data = json.loads((pdir / JOB_META_FILE).read_text(encoding="utf-8", errors="replace"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def resolve_job_key(
     proj_dir: Optional[Path] = None,
     *,
     notion_name: str = "",
     script_source: str = "",
+    footage_path: str = "",
+    allow_rotate: bool = False,
     create: bool = True,
 ) -> str:
+    """Stable per-video key kept in the project folder.
+
+    A project folder is named from the Google Doc tab, so a NEW video can re-use it. When `allow_rotate` is set (job open only), a different
+    notion name or a different footage folder than the one the key was created for mints a NEW key (the old key file is replaced); the same
+    name + footage (a re-render / revision) keeps the key."""
+    new_name = _norm_identity(notion_name)
+    new_foot = _norm_footage(footage_path)
     if proj_dir is not None:
         pdir = Path(proj_dir)
         kf = pdir / JOB_KEY_FILE
@@ -159,20 +187,39 @@ def resolve_job_key(
             if kf.is_file():
                 val = kf.read_text(encoding="utf-8", errors="replace").strip()
                 if val:
-                    os.environ["ZENO_ACTIVE_JOB_KEY"] = val
-                    return val
+                    meta = _read_job_meta(pdir)
+                    old_name = _norm_identity(meta.get("notion_name", ""))
+                    old_foot = _norm_footage(meta.get("footage_path", ""))
+                    differs = bool(
+                        allow_rotate and meta and (
+                            (new_name and old_name and new_name != old_name)
+                            or (new_foot and old_foot and new_foot != old_foot)
+                        )
+                    )
+                    if not differs:
+                        if create and allow_rotate and ((new_name and not old_name) or (new_foot and not old_foot)):
+                            try:
+                                (pdir / JOB_META_FILE).write_text(json.dumps({
+                                    "notion_name": notion_name if new_name else meta.get("notion_name", ""),
+                                    "footage_path": footage_path if new_foot else meta.get("footage_path", ""),
+                                }), encoding="utf-8")
+                            except Exception:
+                                pass
+                        os.environ["ZENO_ACTIVE_JOB_KEY"] = val
+                        return val
         except Exception:
             pass
     env_key = os.environ.get("ZENO_ACTIVE_JOB_KEY", "").strip()
     if env_key and proj_dir is None:
         return env_key
-    seed = f"{get_machine_id()}|{Path(proj_dir).resolve() if proj_dir else ''}|{notion_name}|{script_source}"
+    seed = f"{get_machine_id()}|{Path(proj_dir).resolve() if proj_dir else ''}|{notion_name}|{script_source}|{footage_path}"
     key = "vj_" + hashlib.sha256(seed.encode("utf-8", "ignore")).hexdigest()[:20]
     if create and proj_dir is not None:
         try:
             pdir = Path(proj_dir)
             pdir.mkdir(parents=True, exist_ok=True)
             (pdir / JOB_KEY_FILE).write_text(key + "\n", encoding="utf-8")
+            (pdir / JOB_META_FILE).write_text(json.dumps({"notion_name": notion_name, "footage_path": footage_path}), encoding="utf-8")
         except Exception:
             pass
     if proj_dir is not None:
@@ -207,6 +254,27 @@ def _clip_hash(path_or_stem: str) -> str:
     return hashlib.sha256(p.name.lower().encode("utf-8")).hexdigest()[:16]
 
 
+_ENV_AGENT_CACHE: Dict[str, str] = {}
+
+
+def _with_env_agent(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Stamp every event with the environment-detected agent/model (never overrides values the caller already set, never sends 'unknown')."""
+    out = dict(payload or {})
+    try:
+        if not _ENV_AGENT_CACHE:
+            import token_tracker
+            _ENV_AGENT_CACHE.update(token_tracker.detect_agent_env())
+        info = _ENV_AGENT_CACHE
+        if str(info.get("agent_name", "")).lower() not in ("", "unknown") and not out.get("agent_name"):
+            out["agent_name"] = info["agent_name"]
+            if str(info.get("agent_model", "")).lower() not in ("", "unknown") and not out.get("agent_model"):
+                out["agent_model"] = info["agent_model"]
+            out.setdefault("agent_detect_reason", info.get("agent_detect_reason", ""))
+    except BaseException:
+        pass
+    return out
+
+
 def enqueue_event(
     event_type: str,
     *,
@@ -220,6 +288,7 @@ def enqueue_event(
         return ""
     now = float(ts or time.time())
     eid = str(event_id or "").strip() or f"ev_{uuid.uuid4().hex[:20]}"
+    payload = _with_env_agent(payload)
     ev = {
         "event_id": eid,
         "event_type": str(event_type).strip()[:60],
@@ -326,6 +395,7 @@ def _extract_agent_metrics(proj_dir: Optional[Path], token_record: Optional[Dict
     out: Dict[str, Any] = {}
     for src_k, dst_k in (
         ("agent_name", "agent_name"),
+        ("agent_detect_reason", "agent_detect_reason"),
         ("agent_model", "agent_model"),
         ("agent_in_tokens", "agent_in_tokens"),
         ("agent_cache_write_tokens", "agent_cache_write_tokens"),
@@ -356,8 +426,11 @@ def open_job(
     try:
         if not enabled():
             return ""
-        jkey = resolve_job_key(proj_dir, notion_name=notion_name, script_source=script_source, create=True)
         c_list = [str(c) for c in (clip_paths or []) if str(c or "").strip()]
+        jkey = resolve_job_key(
+            proj_dir, notion_name=_strip_ratio(notion_name), script_source=script_source,
+            footage_path=str(Path(c_list[0]).parent) if c_list else "", allow_rotate=True, create=True,
+        )
         hashes = [h for h in (_clip_hash(c) for c in c_list) if h]
         payload = {
             "notion_name": _strip_ratio(notion_name) or (Path(proj_dir).name if proj_dir else ""),
@@ -695,6 +768,39 @@ def record_update_receipt(
         pass
 
 
+OUTBOX_MAX_ROWS = 20000
+OUTBOX_DEAD_KEEP_SEC = 30 * 86400
+
+
+def _pending_count(db_path: Optional[Path] = None) -> int:
+    conn = _connect_db(db_path)
+    try:
+        return int(conn.execute("SELECT COUNT(*) FROM queue WHERE status='pending'").fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _maintain_outbox(conn: sqlite3.Connection) -> None:
+    """Never lose a pending event: re-queue recoverable dead letters (bad-request batches, transient server errors) at most twice,
+    and bound disk use by pruning ONLY old dead letters (and, past OUTBOX_MAX_ROWS, the oldest dead letters first) -- pending rows stay,
+    sent oldest-first."""
+    try:
+        conn.execute(
+            "UPDATE queue SET status='pending', next_retry_at=0 WHERE status='dead_letter' AND attempts < 20 AND "
+            "(last_error LIKE 'http_4%' OR last_error LIKE 'http_5%' OR last_error LIKE '%Error' OR last_error LIKE '%Exception')"
+        )
+        conn.execute("DELETE FROM queue WHERE status='dead_letter' AND created_at < ?", (time.time() - OUTBOX_DEAD_KEEP_SEC,))
+        total = int(conn.execute("SELECT COUNT(*) FROM queue").fetchone()[0])
+        if total > OUTBOX_MAX_ROWS:
+            conn.execute(
+                "DELETE FROM queue WHERE event_id IN (SELECT event_id FROM queue WHERE status='dead_letter' ORDER BY created_at ASC LIMIT ?)",
+                (total - OUTBOX_MAX_ROWS,),
+            )
+        conn.commit()
+    except Exception:
+        pass
+
+
 def flush(
     timeout: float = 8.0,
     limit: int = 50,
@@ -716,6 +822,7 @@ def flush(
         now = time.time()
         conn = _connect_db(db_path)
         try:
+            _maintain_outbox(conn)
             rows = conn.execute(
                 "SELECT event_id, payload_json, attempts FROM queue "
                 "WHERE status = 'pending' AND next_retry_at <= ? ORDER BY created_at ASC LIMIT ?",
@@ -791,11 +898,19 @@ def flush(
                     st = str((res or {}).get("status") or "accepted")
                     if st == "rejected":
                         reason = str((res or {}).get("reason") or "rejected")[:240]
-                        conn.execute(
-                            "UPDATE queue SET status='dead_letter', last_error=? WHERE event_id=?",
-                            (reason, eid),
-                        )
-                        stats["rejected"] += 1
+                        att_now = next((int(a) for e2, _p, a in rows if e2 == eid), 0) + 1
+                        if not re.search(r"(Error|Exception|Timeout)$", reason) or att_now >= 8:
+                            conn.execute(
+                                "UPDATE queue SET status='dead_letter', attempts=?, last_error=? WHERE event_id=?",
+                                (att_now + 10, reason, eid),
+                            )
+                            stats["rejected"] += 1
+                        else:
+                            # server-side failure (DB hiccup, exception): keep the event and retry with backoff
+                            conn.execute(
+                                "UPDATE queue SET attempts=?, next_retry_at=?, last_error=? WHERE event_id=?",
+                                (att_now, now + min(3600.0, 30.0 * (2 ** att_now)), reason, eid),
+                            )
                     else:
                         conn.execute("DELETE FROM queue WHERE event_id=?", (eid,))
                         if st == "duplicate":
@@ -812,10 +927,23 @@ def flush(
                             "UPDATE queue SET attempts=?, next_retry_at=?, last_error=? WHERE event_id=?",
                             (n_att, now + min(3600.0, 60.0 * (2 ** min(n_att, 6))), "http_404", eid),
                         )
+                elif len(valid_ids) > 1:
+                    # One bad event must not poison the batch: send every event alone on the next pass.
+                    split_ids = list(valid_ids)
+                    for eid in split_ids:
+                        conn.execute("UPDATE queue SET last_error=? WHERE event_id=?", (f"http_{status_code}_split", eid))
+                    conn.commit()
+                    conn.close()
+                    conn = None
+                    for _ in split_ids:
+                        sub = flush(timeout=timeout, limit=1, cloud_url=cloud_url, token=token, db_path=db_path)
+                        for k in ("sent", "accepted", "duplicates", "rejected"):
+                            stats[k] += sub.get(k, 0)
+                    return {**stats, "remaining": _pending_count(db_path)}
                 else:
                     for eid in valid_ids:
                         conn.execute(
-                            "UPDATE queue SET status='dead_letter', last_error=? WHERE event_id=?",
+                            "UPDATE queue SET status='dead_letter', attempts=attempts+10, last_error=? WHERE event_id=?",
                             (f"http_{status_code}", eid),
                         )
                     stats["rejected"] += len(valid_ids)
@@ -830,7 +958,8 @@ def flush(
             conn.commit()
             stats["remaining"] = int(conn.execute("SELECT COUNT(*) FROM queue WHERE status='pending'").fetchone()[0])
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
         return stats
     except BaseException:
         return stats

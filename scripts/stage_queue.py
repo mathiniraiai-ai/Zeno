@@ -43,6 +43,35 @@ STAGES: Dict[str, Tuple[int, str]] = {
     "stage5_mastering": (5, "Mastering — Premiere export, Deep QC & delivery"),
 }
 
+# Max seconds a ticket may stay 'running' before waiters treat it as hung.
+# Sized ~2-3x the slowest normal run of each stage on an editor PC.
+_DEFAULT_MAX_HOLD_SEC: Dict[str, float] = {
+    "stage1_mapping": 600.0,      # probing clips: seconds normally
+    "stage2_transcribe": 1500.0,  # Gemini STT of many clips, with retries
+    "stage3_matching": 600.0,     # alignment + contact sheets + packet
+    "stage4_editing": 2400.0,     # segments + 9:16 + 1:1 encode (longest)
+    "stage5_mastering": 1200.0,   # Premiere export + Deep QC + delivery
+}
+_DEFAULT_MAX_WAIT_SEC = 5400.0
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        v = float(os.environ.get(name, "").strip())
+        return v if v > 0 else default
+    except Exception:
+        return default
+
+
+def max_hold_sec(stage: str) -> float:
+    """Per-stage hold limit; ZENO_STAGE_MAX_HOLD_SEC overrides every stage."""
+    return _env_float("ZENO_STAGE_MAX_HOLD_SEC", _DEFAULT_MAX_HOLD_SEC.get(stage, 1800.0))
+
+
+def max_wait_sec() -> float:
+    return _env_float("ZENO_STAGE_MAX_WAIT_SEC", _DEFAULT_MAX_WAIT_SEC)
+
+
 _HELD_LOCK = threading.Lock()
 _HELD_STAGES: Dict[Tuple[str, str, int], int] = {}
 
@@ -196,6 +225,20 @@ def _holder_label(row: Tuple[int, int, str, str, str]) -> str:
     return f"pid {pid}"
 
 
+def _emit_queue_timing(project_dir: Optional[Path], stage: str, extra: Dict[str, Any]) -> None:
+    """One cheap tracker event per stage per video on release (never raises)."""
+    if project_dir is None:
+        return
+    try:
+        pdir = Path(project_dir)
+        if not pdir.is_dir():
+            return
+        import zeno_tracker as _zt
+        _zt.record_stage(pdir, "stage_check", stage=f"queue_{stage}"[:40], extra=extra)
+    except BaseException:
+        pass
+
+
 def _emit_queued_tracker(project_dir: Optional[Path], stage: str, pos: int, holder: str) -> None:
     if project_dir is None:
         return
@@ -208,7 +251,7 @@ def _emit_queued_tracker(project_dir: Optional[Path], stage: str, pos: int, hold
             pdir,
             "stage_check",
             stage=f"queued_{stage}",
-            detail=f"Queued #{pos} behind {holder}",
+            extra={"detail": f"Queued #{pos} behind {holder}"},
         )
     except BaseException:
         pass
@@ -270,6 +313,10 @@ def stage_slot(
     ticket_id = _run_immediate(path, _enqueue)
     stop_evt = threading.Event()
     released = False
+    t_enq = time.monotonic()
+    timing: Dict[str, Any] = {"acquired": None, "pos0": None, "forced": ""}
+    hold_limit = max_hold_sec(stage)
+    wait_limit = max_wait_sec()
 
     def _release() -> None:
         nonlocal released
@@ -292,6 +339,18 @@ def stage_slot(
             _run_immediate(path, _mark_done)
         except Exception:
             pass
+        try:
+            t_acq = timing["acquired"]
+            t_now = time.monotonic()
+            _emit_queue_timing(proj_path, stage, {
+                "queue_stage": stage,
+                "queue_wait_sec": round(((t_acq if t_acq is not None else t_now) - t_enq), 2),
+                "queue_run_sec": round((t_now - t_acq), 2) if t_acq is not None else 0.0,
+                "queue_position_initial": int(timing["pos0"] or 0),
+                "queue_forced": timing["forced"],
+            })
+        except BaseException:
+            pass
 
     atexit.register(_release)
     hb_thread: Optional[threading.Thread] = None
@@ -299,21 +358,41 @@ def stage_slot(
         last_log_ts = 0.0
         last_track_ts = 0.0
         while True:
-            def _try_acquire(conn: sqlite3.Connection) -> Tuple[bool, int, str]:
+            force = (time.monotonic() - t_enq) >= wait_limit
+
+            def _try_acquire(conn: sqlite3.Connection) -> Tuple[bool, int, str, List[str]]:
                 now = time.time()
                 _sweep_stale(conn, stage, now, stale_sec)
-                active = conn.execute(
-                    "SELECT ticket_id, pid, project, video_name, status FROM stage_tickets "
-                    "WHERE stage = ? AND status IN ('waiting', 'running') ORDER BY ticket_id ASC",
-                    (stage,),
-                ).fetchall()
+                notes: List[str] = []
+                while True:
+                    active = conn.execute(
+                        "SELECT ticket_id, pid, project, video_name, status, started_at FROM stage_tickets "
+                        "WHERE stage = ? AND status IN ('waiting', 'running') ORDER BY ticket_id ASC",
+                        (stage,),
+                    ).fetchall()
+                    if not active or int(active[0][0]) == ticket_id:
+                        break
+                    front = active[0]
+                    held = now - float(front[5]) if front[5] else 0.0
+                    if front[4] == "running" and held > hold_limit:
+                        reason = f"held {int(held)}s > max {int(hold_limit)}s (hung?)"
+                    elif force:
+                        reason = f"waiter exceeded max wait {int(wait_limit)}s"
+                    else:
+                        break
+                    conn.execute(
+                        "UPDATE stage_tickets SET status = 'abandoned', finished_at = ? "
+                        "WHERE ticket_id = ? AND status IN ('waiting', 'running')",
+                        (now, int(front[0])),
+                    )
+                    notes.append(f"{_holder_label(front[:5])} {reason}")
                 if not active or int(active[0][0]) == ticket_id:
                     conn.execute(
                         "UPDATE stage_tickets SET status = 'running', started_at = COALESCE(started_at, ?), heartbeat_at = ? "
                         "WHERE ticket_id = ?",
                         (now, now, ticket_id),
                     )
-                    return True, 0, ""
+                    return True, 0, "", notes
                 conn.execute(
                     "UPDATE stage_tickets SET heartbeat_at = ? WHERE ticket_id = ?",
                     (now, ticket_id),
@@ -323,10 +402,16 @@ def stage_slot(
                     if int(r[0]) == ticket_id:
                         pos = idx
                         break
-                return False, max(1, pos), _holder_label(active[0])
+                return False, max(1, pos), _holder_label(active[0][:5]), notes
 
-            acquired, pos, holder = _run_immediate(path, _try_acquire)
+            acquired, pos, holder, notes = _run_immediate(path, _try_acquire)
+            for note in notes:
+                timing["forced"] = note[:120]
+                print(f"[QUEUE] Stage {stage_num}/5 ({stage}): marking holder {note}; proceeding (holder not killed).", flush=True)
+            if timing["pos0"] is None:
+                timing["pos0"] = 0 if acquired else pos
             if acquired:
+                timing["acquired"] = time.monotonic()
                 break
             now_mono = time.monotonic()
             if not quiet and (last_log_ts == 0.0 or (now_mono - last_log_ts) >= 30.0):

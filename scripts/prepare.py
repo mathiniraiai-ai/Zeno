@@ -1213,6 +1213,77 @@ def _parse_script_raw(raw: str, title: str) -> Tuple[Dict[str, Any], List[Dict[s
     return meta, lines
 
 
+SILENT_SPEECH_MAX_SEC = 2.0
+SILENT_SPEECH_MAX_RATIO = 0.15
+
+
+def _is_real_speech(active_speech_sec: float, duration_sec: float) -> bool:
+    """True when VAD speech is substantial enough that 0 words means a transcription problem.
+
+    Low-voice clips (breaths/lip noise on silent listener or B-roll footage) are classified
+    as silent/no_speech instead: active < 0.8s, OR active < 2.0s and < 50% of the clip, OR active/duration < 0.15.
+    """
+    try:
+        a = float(active_speech_sec or 0.0)
+        d = float(duration_sec or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if a < 0.8:
+        return False
+    if a < SILENT_SPEECH_MAX_SEC:
+        # Short clip that is mostly speech (>=50% of its length) is still real speech.
+        return d > 0.0 and (a / d) >= 0.5
+    if d > 0.0 and (a / d) < SILENT_SPEECH_MAX_RATIO:
+        return False
+    return True
+
+
+GUARD_MAX_STOPS = 3
+GUARD_EXIT_CODE = 3
+
+
+def _guard_counter_path(proj: Optional[Path]) -> Optional[Path]:
+    return (Path(proj) / "transcription_guard.json") if proj else None
+
+
+def _guard_cooldown_secs(errors: List[str]) -> int:
+    best = 0
+    for e in errors:
+        for m in re.finditer(r"(?:cooldown|retry(?:\s+after|\s+in)?|wait)\D{0,6}(\d+)\s*s", e or "", re.I):
+            best = max(best, int(m.group(1)))
+    return best
+
+
+def _bump_guard_counter(proj: Optional[Path], sig: str) -> int:
+    """Count consecutive identical guard stops for this project (stored in the project work dir)."""
+    p = _guard_counter_path(proj)
+    if p is None:
+        return 1
+    n = 0
+    try:
+        if p.is_file():
+            d = read_json(p)
+            if isinstance(d, dict) and d.get("sig") == sig:
+                n = int(d.get("count") or 0)
+    except Exception:
+        n = 0
+    n += 1
+    try:
+        write_json(p, {"sig": sig, "count": n})
+    except Exception:
+        pass
+    return n
+
+
+def _clear_guard_counter(proj: Optional[Path]) -> None:
+    p = _guard_counter_path(proj)
+    if p is not None and p.is_file():
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
 def _is_quota_error_text(text: str) -> bool:
     """Return True when an error string indicates HTTP 429 or Gemini quota exhaustion."""
     low = str(text or "").lower()
@@ -1329,7 +1400,7 @@ def _compute_clip_transcript_meta(
 
     if override_status in ("quota_exceeded", "cloud_failed", "no_speech", "incomplete"):
         status = override_status
-    elif words_count == 0 and active_speech_sec >= 0.8:
+    elif words_count == 0 and _is_real_speech(active_speech_sec, duration_sec):
         status = "incomplete"
     elif words_count == 0:
         status = "no_speech"
@@ -1497,7 +1568,7 @@ def ensure_clip_transcribed(
             meta_status in ("incomplete", "quota_exceeded", "cloud_failed")
             or has_meta_uncov
             or bool(live_uncov)
-            or (active_speech_sec >= 0.8 and not cached_words)
+            or (_is_real_speech(active_speech_sec, float(info.get("duration") or 0.0)) and not cached_words)
             or (active_speech_sec >= 4.0 and live_cov < 0.45)
             or ev_marker.get("transcript") == "incomplete"
         )
@@ -1521,7 +1592,7 @@ def ensure_clip_transcribed(
         return info, [], []
 
     gem_cache_path = work_dir / "gemini_transcript.json"
-    if not hq_words and not base_words and active_speech_sec >= 0.8 and not skip_due_to_retry_filter:
+    if not hq_words and not base_words and _is_real_speech(active_speech_sec, float(info.get("duration") or 0.0)) and not skip_due_to_retry_filter:
         for stale_empty in (align_path, hq_path, words_path, gem_cache_path):
             if stale_empty.is_file():
                 try:
@@ -1566,7 +1637,7 @@ def ensure_clip_transcribed(
         and not no_sound
         and not skip_due_to_retry_filter
     ):
-        max_tries = 2 if active_speech_sec >= 0.8 else 1
+        max_tries = 2 if _is_real_speech(active_speech_sec, float(info.get("duration") or 0.0)) else 1
         for attempt in range(max_tries):
             if align_engine is not None and hasattr(align_engine, "transcribe_and_align_clip"):
                 align_engine_attempted = True
@@ -1609,7 +1680,7 @@ def ensure_clip_transcribed(
                                 else "cloud_failed"
                             )
                             break
-                        if res_status in ("success", "no_speech") and not hq_words and active_speech_sec < 0.8 and not res_incomplete:
+                        if res_status in ("success", "no_speech", "incomplete", "") and not hq_words and not _is_real_speech(active_speech_sec, float(info.get("duration") or 0.0)):
                             confirmed_no_speech = True
                             transcript_status = "success"
                             print(f"  [{clip_stem}] confirmed non-speech / zero spoken words (skipping redundant retries)")
@@ -1628,7 +1699,7 @@ def ensure_clip_transcribed(
                         break
                     print(f"  [WARN] align_engine fallback on {clip_stem}: {exc}")
 
-            if attempt == 0 and active_speech_sec >= 0.8 and not hq_words and not confirmed_no_speech:
+            if attempt == 0 and _is_real_speech(active_speech_sec, float(info.get("duration") or 0.0)) and not hq_words and not confirmed_no_speech:
                 print(
                     f"  [WARN] {clip_stem}: empty words returned despite {active_speech_sec:.2f}s of active speech; retrying transcription..."
                 )
@@ -1651,7 +1722,7 @@ def ensure_clip_transcribed(
                     transcript_err = f"{type(exc).__name__}: {exc}"
                     transcript_status = "quota_exceeded" if _is_quota_error_text(transcript_err) else "cloud_failed"
 
-        if not hq_words and not base_words and not confirmed_no_speech and (active_speech_sec >= 0.8 or transcript_err or res_incomplete):
+        if not hq_words and not base_words and not confirmed_no_speech and (_is_real_speech(active_speech_sec, float(info.get("duration") or 0.0)) or transcript_err or res_incomplete):
             print(
                 f"  [WARN] {clip_stem}: 0 words transcribed"
                 + (f" ({transcript_err[:120]})" if transcript_err else f" despite {active_speech_sec:.2f}s of active speech")
@@ -1716,7 +1787,7 @@ def ensure_clip_transcribed(
         meta_override = ""
         if transcript_status in ("quota_exceeded", "cloud_failed"):
             meta_override = transcript_status
-        elif no_sound or (confirmed_no_speech and active_speech_sec < 0.8):
+        elif no_sound or (confirmed_no_speech and not _is_real_speech(active_speech_sec, dur_val)):
             meta_override = "no_speech"
         elif res_incomplete:
             meta_override = "incomplete"
@@ -2711,30 +2782,42 @@ def _main_with_queue(_prep_q_stack: Any) -> None:
                         sig = [base_wav.stat().st_size, int(base_wav.stat().st_mtime)] if base_wav.is_file() else [0, 0]
                         write_json(base_wdir / "speech_spans.json", {"sig": sig, "spans": [list(sp) for sp in vo_spans]})
 
+    _GENUINE_CLOUD = ("quota_exceeded", "cloud_failed", "quota_skipped")
     failed_transcripts = [
         (c["stem"], str((c.get("info") or {}).get("_transcript_error") or "transcription failed"))
         for c in clips_data
-        if not c.get("hq_words") and (c.get("info") or {}).get("_transcript_error")
+        if not c.get("hq_words")
+        and (c.get("info") or {}).get("_transcript_error")
+        and str((c.get("info") or {}).get("_transcript_status") or "") in _GENUINE_CLOUD
     ]
+    # Zero words without a genuine cloud/quota error never blocks: the clip continues
+    # (silent/ambient, or flagged untranscribed speech) and the script-line gate decides.
+    for c in clips_data:
+        inf = c.get("info") or {}
+        if (
+            not c.get("hq_words")
+            and inf.get("_transcript_error")
+            and str(inf.get("_transcript_status") or "") not in _GENUINE_CLOUD
+        ):
+            inf["_transcript_status"] = "incomplete"
+            inf["_transcript_warning"] = "untranscribed speech: " + str(inf.pop("_transcript_error"))[:160]
+    if not failed_transcripts:
+        _clear_guard_counter(_q_proj)
     if failed_transcripts:
-        direct_failures = [
-            (c["stem"], str((c.get("info") or {}).get("_transcript_error") or "transcription failed"))
-            for c in clips_data
-            if not c.get("hq_words")
-            and (c.get("info") or {}).get("_transcript_error")
-            and str((c.get("info") or {}).get("_transcript_status") or "") != "quota_skipped"
-        ]
+        direct_failures = [f for f in failed_transcripts if f[0] not in {
+            c["stem"] for c in clips_data
+            if str((c.get("info") or {}).get("_transcript_status") or "") == "quota_skipped"
+        }]
         skipped_clips = [
             c["stem"]
             for c in clips_data
             if not c.get("hq_words")
             and str((c.get("info") or {}).get("_transcript_status") or "") == "quota_skipped"
         ]
-        cached_ok = sum(
-            1
-            for c in clips_data
-            if not (c.get("info") or {}).get("_transcript_error")
-        )
+        cached_ok = sum(1 for c in clips_data if not (c.get("info") or {}).get("_transcript_error"))
+        cd_secs = _guard_cooldown_secs([e for _, e in failed_transcripts])
+        sig = "|".join(sorted(f"{st}:{err[:60]}" for st, err in failed_transcripts))
+        stops = _bump_guard_counter(_q_proj, sig)
         print("\n[BLOCKED] Safe transcription guard stopped before cutting/planning:", file=sys.stderr)
         for fst, ferr in direct_failures:
             print(f"  - {fst}: {ferr}", file=sys.stderr)
@@ -2744,13 +2827,21 @@ def _main_with_queue(_prep_q_stack: Any) -> None:
                 f"({', '.join(skipped_clips)}) to avoid burning retries.",
                 file=sys.stderr,
             )
+        cd_txt = f" Cooldown reported: ~{cd_secs}s." if cd_secs else ""
         print(
             f"  Progress saved: {cached_ok}/{len(clips_data)} clip(s) already cached on disk "
             f"({len(failed_transcripts)} remaining). "
-            "Wait 1-2 minutes for the Gemini Free Tier quota window to reset (or check Zeno Cloud) "
-            "and re-run --inspect.",
+            f"This is a Gemini/Zeno Cloud limit, not a problem with the footage.{cd_txt} "
+            "Re-run --inspect at most 2 more times; do not loop.",
             file=sys.stderr,
         )
+        if stops >= GUARD_MAX_STOPS:
+            print(
+                f"\n[BLOCKED] Same Gemini/cloud failure stopped {stops} runs in a row. STOP re-running --inspect. "
+                "Report this to the user: the Gemini service is unavailable right now; try again later.",
+                file=sys.stderr,
+            )
+            raise SystemExit(GUARD_EXIT_CODE)
         raise SystemExit(2)
 
     _s2_stack.close()

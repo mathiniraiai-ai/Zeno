@@ -667,6 +667,7 @@ class _Gemini:
             skipped_wait: Optional[float] = None
             min_retry_after: Optional[float] = None
             transient_streak = 0
+            empty_ok: Optional[Dict[str, Any]] = None   # first valid parsed response with zero words (silent clip)
             for model in ordered_models:
                 max_tries = len(keys) if len(keys) > 1 else 1
                 if max_tries == 1:
@@ -743,6 +744,8 @@ class _Gemini:
                             data["foreign_script_words"] = len(foreign)
                             if trace is not None:
                                 trace.append(f"{model}: wrong script ({len(foreign)} word(s) not in the clip's language)")
+                        if not count(data) and empty_ok is None:
+                            empty_ok = data
                         if count(data) and (best is None or (len(foreign) < int(best.get("foreign_script_words") or 0)) or
                                             (len(foreign) == int(best.get("foreign_script_words") or 0) and count(data) > count(best))):
                             best = data
@@ -791,6 +794,13 @@ class _Gemini:
                     best["warning"] = f"incomplete: {count(best)} words for {eff_dur:.0f}s of audio"
                     best["incomplete"] = True
                 return best
+            if empty_ok is not None:
+                # A model gave a real, parseable answer with no words: the clip is silent. That beats quota/transient noise from
+                # other models, and must not be a 502 (the client would retry forever and mark the clip cloud_failed).
+                empty_ok.update({"words": [], "full_transcript": "", "incomplete": False, "no_speech": True,
+                                 "warning": "no speech detected"})
+                empty_ok.pop("foreign_script_words", None)
+                return empty_ok
             if saw_quota or (not saw_transient and (skipped_cooled or skipped_wait is not None)):
                 now_end = time.time()
                 with self.lock:
@@ -1247,6 +1257,7 @@ def transcribe(
                 store().put_cached_transcript(cache_key, result)
             except Exception:
                 log.exception("could not cache transcript")
+    no_speech = bool(result.get("no_speech"))
     result["incomplete"] = bool(result.get("warning") and str(result["warning"]).startswith("incomplete"))
     usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
     in_tok = int(usage.get("input_tokens") or 0)
@@ -1257,14 +1268,14 @@ def transcribe(
             store().record_use(key_id, duration, input_tokens=in_tok, output_tokens=out_tok, total_tokens=tot_tok)
         except Exception:
             log.exception("could not record usage")
-    _log_transcription(key_id, name, status=("wrong_script" if result.get("foreign_script_words") else "incomplete") if result.get("warning") else "ok", model=str(result.get("model_used") or ""),
+    _log_transcription(key_id, name, status="ok" if no_speech else ("wrong_script" if result.get("foreign_script_words") else "incomplete") if result.get("warning") else "ok", model=str(result.get("model_used") or ""),
                        failed_models="; ".join(trace), words=len(result.get("words") or []), audio_seconds=duration, size=len(audio),
                        seconds=time.time() - started, in_tokens=in_tok, out_tokens=out_tok, cached=bool(result.get("cached")),
                        reason=str(result.get("warning") or ""), zeno_version=client_version)
     if trk_job_key or trk_clip_hash:
         try:
             em = store().get_key_email(key_id) if key_id is not None else ""
-            tr_st = ("wrong_script" if result.get("foreign_script_words") else "incomplete") if result.get("warning") else "ok"
+            tr_st = "ok" if no_speech else ("wrong_script" if result.get("foreign_script_words") else "incomplete") if result.get("warning") else "ok"
             store().record_transcribe_for_job(
                 key_id, name, em, trk_job_key, trk_clip_hash, trk_clip_name, trk_is_retry,
                 status=tr_st, in_tokens=in_tok, out_tokens=out_tok, audio_seconds=duration,

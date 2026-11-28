@@ -4,7 +4,8 @@ from __future__ import annotations
 import os
 from typing import Any
 
-# USD per million tokens, Standard speed: (fresh_input, cached_input, cache_write_5m, output). Verified 2026-11-16.
+# USD per million tokens, Standard speed: (fresh_input, cached_input, cache_write_5m, output). Re-verified 2026-11-28 against the Anthropic, OpenAI (gpt-6.1-sol) and Gemini pages;
+# gpt-6.2-sol, gpt-5*, o3 are unverified (no page fetched). Unknown models are reported as cost unknown, never 0.
 # https://developers.openai.com/api/docs/models/gpt-6.1-sol ; https://docs.anthropic.com/en/docs/about-claude/pricing
 RATES: dict[str, tuple[float, float, float, float]] = {
     "gpt-6.2-sol": (2.0, 0.1, 2.5, 10.0),
@@ -28,8 +29,8 @@ RATES: dict[str, tuple[float, float, float, float]] = {
     "gemini-4-neon": (3.0, 0.15, 3.75, 15.0),
     "gemini-4-hydrogen": (1.5, 0.075, 1.875, 7.5),
 }
-RATE_DATE = "2026-11-16"
-RATE_SOURCE = "https://developers.openai.com/api/docs/models/gpt-6.1-sol ; https://docs.anthropic.com/en/docs/about-claude/pricing"
+RATE_DATE = "2026-11-28"
+RATE_SOURCE = "https://developers.openai.com/api/docs/models/gpt-6.1-sol ; https://platform.claude.com/docs/en/about-claude/pricing ; https://aistudio.google.com/docs/pricing"
 FX_REFERENCE = 94.1159
 FX_DATE = "2026-11-16"
 FX_SOURCE = "https://rbi.org.in/"
@@ -54,6 +55,12 @@ _PREFIX_RATES: tuple[tuple[str, tuple[float, float, float, float]], ...] = (
     ("claude-haiku-5", (0.10, 0.01, 0.125, 0.50)),
     ("claude-haiku-4-5", (1.0, 0.10, 1.25, 5.0)),
     ("claude-haiku-4.5", (1.0, 0.10, 1.25, 5.0)),
+    # Fable versions differ (Anthropic pricing page 2026-11-28); the bare "claude-fable" fallback keeps the 5.1 rate.
+    ("claude-fable-5-2", (8.0, 0.20, 10.0, 40.0)),
+    ("claude-fable-5.2", (8.0, 0.20, 10.0, 40.0)),
+    ("claude-fable-5-1", (10.0, 0.25, 12.50, 50.0)),
+    ("claude-fable-5.1", (10.0, 0.25, 12.50, 50.0)),
+    ("claude-fable-5", (10.0, 1.0, 12.50, 50.0)),
     ("claude-fable", (10.0, 0.25, 12.50, 50.0)),
     # Antigravity logs effort-suffixed names, e.g. gemini-4-neon-xhigh / gemini-4-hydrogen-high.
     ("gemini-4-neon", (3.0, 0.15, 3.75, 15.0)),
@@ -100,7 +107,7 @@ def estimate(agent: dict[str, Any]) -> dict[str, Any]:
         model_raw = request.get("model")
         rates = _resolve_rates(model_raw)
         if rates is None:
-            return {"available": False, "reason": f"No verified price for {model_raw}."}
+            return {"available": False, "cost_status": "unknown", "reason": f"No verified price for {model_raw or 'unknown model'}; cost unknown/estimated, not zero."}
         inp = int(request.get("input_tokens") or 0)
         cached = int(request.get("cached_input_tokens") or 0)
         write_raw = int(request.get("cache_write_input_tokens") or 0)

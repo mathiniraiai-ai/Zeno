@@ -328,7 +328,44 @@ def _login_command() -> str:
     return f"{py} scripts/setup.py --login"
 
 
+COOLDOWN_AUTO_WAIT_MAX_SEC = 180
+
+
+def _cooldown_seconds(text: str) -> Optional[int]:
+    m = re.search(r"cooldown[^0-9]{0,12}(\d+)\s*s", text or "", re.I)
+    return int(m.group(1)) if m else None
+
+
 def check_transcription_auth() -> List[Check]:
+    """Wrap `_check_transcription_auth_once`: wait out a short Gemini cooldown once, then re-probe."""
+    res = _check_transcription_auth_once()
+    for ok, _name, detail in res:
+        if ok:
+            continue
+        secs = _cooldown_seconds(str(detail))
+        if secs is None:
+            continue
+        if secs <= COOLDOWN_AUTO_WAIT_MAX_SEC:
+            print(f"Zeno Cloud: Gemini is cooling down (~{secs}s); waiting {secs + 2}s then re-checking once...", flush=True)
+            time.sleep(secs + 2)
+            return _check_transcription_auth_once()
+        return [
+            (
+                False if (n == _name and d == detail) else o,
+                n,
+                (
+                    f"Gemini models are in cooldown on the Zeno server for ~{secs}s (server Gemini limit, "
+                    f"not the editor's fault). Wait about {secs}s and re-run; do not retry in a loop."
+                    if (n == _name and d == detail)
+                    else d
+                ),
+            )
+            for o, n, d in res
+        ]
+    return res
+
+
+def _check_transcription_auth_once() -> List[Check]:
     """Verify Zeno Cloud session or direct Gemini API key readiness (never printing secret values)."""
     common.load_dotenv()
     info = auth_session.get_session_info()

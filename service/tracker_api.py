@@ -217,11 +217,13 @@ def build_tracker_router(
         editor: str = "",
         tz_offset: int = 19800,
         stuck_after_sec: int = 1800,
+        stalled_after_sec: int = 1200,
         authorization: Optional[str] = Header(None),
         x_admin_password: Optional[str] = Header(None),
     ) -> Dict[str, Any]:
         check_viewer_fn(authorization, x_admin_password)
         return store_fn().track_summary(
+            stalled_after_sec=stalled_after_sec,
             date_str=date,
             days=days,
             editor=editor,
