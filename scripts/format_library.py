@@ -172,9 +172,31 @@ def _has_phrase(blob: str, phrase: str) -> bool:
     return bool(re.search(left + re.escape(p) + right, blob or "", re.I))
 
 
+_SIDE_BY_SIDE_RE = re.compile(r"side[\s-]by[\s-]side", re.I)
+# Words that make "side by side" a SCREEN layout ("side by side split", "two videos side by side", "panels side by side").
+_SCREEN_LAYOUT_WORDS = frozenset({
+    "split", "screen", "screens", "panel", "panels", "pane", "panes", "window", "windows",
+    "layout", "layouts", "video", "videos", "clip", "clips",
+})
+
+
+def scrub_physical_side_by_side(text: str) -> str:
+    """Blank out "side by side" when it describes where people/objects are (fly side by side in two jets, stand side by side)
+    rather than a screen layout, so scene descriptions never trigger `split_h` or the split-screen formats.
+    Kept when 3 words either side mention a screen/layout word (split, screen, panels, windows, videos, ...)."""
+    src = str(text or "")
+
+    def _repl(m: "re.Match[str]") -> str:
+        before = re.findall(r"[a-z]+", src[: m.start()].lower())[-3:]
+        after = re.findall(r"[a-z]+", src[m.end(): m.end() + 80].lower())[:3]
+        return m.group(0) if any(w in _SCREEN_LAYOUT_WORDS for w in before + after) else " "
+
+    return _SIDE_BY_SIDE_RE.sub(_repl, src)
+
+
 def search(query: str, k: int = 3, lib_dir: Path = LIB_DIR) -> List[Dict[str, Any]]:
     """Rank layout recipes for a piece of script wording. Each result carries a numeric `score`."""
-    q = (query or "").lower().strip()
+    q = scrub_physical_side_by_side(query or "").lower().strip()
     qw = _words(q)
     hits: List[Dict[str, Any]] = []
     for r in load_recipes(lib_dir):
@@ -307,7 +329,7 @@ def detect_catalog_format(
                 extra_meta_cues.append(str(ln_obj["text"]))
 
     body_blob = " ".join([" ".join(setup_notes), " ".join(extra_meta_cues), str(script_text or "")]).lower()
-    blob = " ".join([header_blob, chars_blob, scenes_blob, body_blob]).strip()
+    blob = scrub_physical_side_by_side(" ".join([header_blob, chars_blob, scenes_blob, body_blob]).strip())
 
     # Check explicit snake_case format IDs written in header or script analysis tags
     for fid in CATALOG_FORMAT_IDS:

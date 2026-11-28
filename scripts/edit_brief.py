@@ -394,6 +394,12 @@ def _builtin_detect_format(
         return "scrolling_text"
 
     blob = _meta_blob(meta, plan, style, script_text=script_text)
+    try:
+        import format_library as _fl  # type: ignore
+
+        blob = _fl.scrub_physical_side_by_side(blob)  # "fly side by side in two jets" is not a split screen
+    except Exception:
+        pass
     if Exclude := (WRAPPER_FORMAT_IDS if exclude_wrappers else set()):
         blob = _WRAPPER_SCRUB_RE.sub(" ", blob)
 
