@@ -2245,6 +2245,8 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
         "no_face": [],
         "split_alignment": [],
         "split_alignment_warnings": [],
+        "speaker_face": [],
+        "speaker_face_warnings": [],
         "note": "",
     }
     try:
@@ -2299,6 +2301,7 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
         marks_by_seg.setdefault(str(m.get("segment")), []).append(
             (float(m.get("at", 0)), float(m.get("at", 0)) + float(m.get("duration", 0.56)) + 0.1)
         )
+    speech_cache: Dict[str, Any] = {}
     segs = plan.get("segments", [])
     t0 = 0.0
     for idx_seg, seg in enumerate(segs):
@@ -2379,6 +2382,23 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
         }.get(lay_norm, [("frame", (0, 0, W, H))])
         seen = {name: 0 for name, _ in panels}
         missing: Dict[str, List[float]] = {name: [] for name, _ in panels}
+        # Speaker-panel face continuity (split layouts only): the talking speaker's own panel must show a face.
+        panel_boxes = dict(panels)
+        sp_name = str(seg.get("speaker") or "").strip()
+        sp_slot = str(seg.get("slot") or "").strip().lower()
+        sp_panel: Optional[str] = (
+            sp_slot
+            if (
+                lay_norm in ("split_h", "split_v")
+                and not plan.get("page")
+                and sp_name
+                and sp_slot in panel_boxes
+                and not is_beat
+                and not _segment_is_muted(seg)
+            )
+            else None
+        )
+        sp_samples: List[Tuple[float, bool]] = []
         split_h_bad: List[str] = []
         split_h_warn: List[str] = []
         split_v_bad: List[str] = []
@@ -2521,12 +2541,43 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
                                         f"{sid} at {t0 + t:.1f}s: split_v alignment warning "
                                         f"(cx T={cx_t:.2f}/B={cx_b:.2f}, fh T={fh_t:.2f}/B={fh_b:.2f} ratio={ratio_tb:.2f})"
                                     )
+                    if sp_panel is not None and not in_hold_tail:
+                        if run_faces:
+                            sp_flist = panel_faces.get(sp_panel, [])
+                        else:
+                            bx0, by0, bx1, by1 = panel_boxes[sp_panel]
+                            sp_flist = vision_tracker.prominent_faces(
+                                vision_tracker.detect_faces_in_frame(frame[by0:by1, bx0:bx1])
+                            ) or []
+                        sp_samples.append((t, _speaker_face_usable(sp_flist)))
             else:
                 prev_gray = None
                 run_anchor_gray = None
                 frozen_run = 0
             sample_idx += 1
             t += FRAME_STEP_SEC
+        if sp_panel is not None:
+            # One extra probe on the cut's last frames so a faceless tail is not missed by the 0.2 s margin.
+            t_end = dur - 1.5 / max(1.0, fps)
+            in_tr_end = d_out > 0.0 and t_end >= dur - d_out - 0.05
+            in_mark_end = any(a - 0.05 <= t_end <= b for a, b in marks_by_seg.get(sid, []))
+            in_hold_end = hold_tail > 0.0 and t_end >= play_dur - 0.05
+            if (
+                sp_samples
+                and t_end > sp_samples[-1][0] + 0.12
+                and not (in_tr_end or in_mark_end or in_hold_end)
+            ):
+                ok_e, fr_e = _read_at(t0 + t_end)
+                if ok_e and fr_e is not None:
+                    bx0, by0, bx1, by1 = panel_boxes[sp_panel]
+                    fl_e = vision_tracker.prominent_faces(vision_tracker.detect_faces_in_frame(fr_e[by0:by1, bx0:bx1])) or []
+                    sp_samples.append((t_end, _speaker_face_usable(fl_e)))
+            try:
+                blk, wrn = _speaker_face_findings(seg, sp_name, sp_panel, sp_samples, t0, dur, plan, speech_cache)
+                result["speaker_face"].extend(blk)
+                result["speaker_face_warnings"].extend(wrn)
+            except Exception:
+                pass
         if len(split_h_bad) >= 2:
             result["split_alignment"].append(split_h_bad[0])
         if len(split_h_warn) >= 2:
@@ -2545,6 +2596,7 @@ def check_frames(plan: Dict[str, Any], mp4_path: Path) -> Dict[str, Any]:
         and not result["frozen"]
         and len(result["banner_on_face"]) < 2
         and not result["split_alignment"]
+        and not result["speaker_face"]
     )
     return result
 
@@ -3878,6 +3930,438 @@ def build_review_sheet(
     return out_path
 
 
+# ---------------------------------------------------------------------------
+# v3.0.9 plan/visual QC: layout-vs-format, opening dead air, final word tail.
+# (Speaker-panel face continuity lives inside `check_frames`, reusing its detections.)
+# ---------------------------------------------------------------------------
+
+_SPLIT_LAYOUTS = frozenset({"split_h", "split_v", "top_pip"})
+_LAYOUT_ALIASES = {
+    "left_right": "split_h",
+    "hstack": "split_h",
+    "side_by_side": "split_h",
+    "top_bottom": "split_v",
+    "vstack": "split_v",
+}
+LEAD_DEAD_AIR_SEC = 0.50   # project rule: trim dead air >= 0.50 s; the opening starts at first word - 0.05 s
+LEAD_CUSHION_SEC = 0.05
+FINAL_TAIL_MIN_SEC = 0.06  # project rule: keep end + 0.06-0.10 s after the final syllable
+SPEAKER_FACE_MIN_CONF = 0.70   # YuNet ghosts on jets/sky/edges score 0.5-0.6; real heads 0.90+
+SPEAKER_FACE_MIN_H = 0.12      # face height / panel height; framed split talking heads measure 0.26-0.38,
+                               # a pilot seen inside a wide jet shot measures ~0.08
+
+
+def _norm_layout(seg: Dict[str, Any]) -> str:
+    lay = str(seg.get("layout") or "single").split(":")[0].strip().lower()
+    return _LAYOUT_ALIASES.get(lay, lay)
+
+
+def _seg_line_id(seg_id: str) -> str:
+    m = re.match(r"([A-Za-z]+\d+)", str(seg_id or ""))
+    return m.group(1) if m else str(seg_id or "")
+
+
+def _clip_speech_data(src: Any, plan: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Live (non-ghost) aligned words, VAD speech spans and duration of a source clip, from its cache."""
+    out: Dict[str, Any] = {"words": [], "spans": [], "duration": None}
+    try:
+        wdir = _resolve_clip_cache_dir(src, plan)
+    except Exception:
+        return out
+    words: List[Dict[str, Any]] = []
+    for name in ("hq_words.json", "words.json"):
+        wp = wdir / name
+        if wp.is_file():
+            try:
+                raw = read_json(wp)
+                if isinstance(raw, list):
+                    words = [w for w in raw if isinstance(w, dict) and "start" in w and "end" in w]
+            except Exception:
+                words = []
+            break
+    rms: List[Tuple[float, float]] = []
+    wav = wdir / "audio16k.wav"
+    if compute_10ms_rms_envelope is not None and wav.is_file():
+        try:
+            rms = compute_10ms_rms_envelope(wav) or []
+        except Exception:
+            rms = []
+    ghost: set = set()
+    if words and rms and _words_in_silence is not None:
+        try:
+            ghost = {id(w) for w in _words_in_silence(words, rms)}
+        except Exception:
+            ghost = set()
+    out["words"] = sorted(
+        (w for w in words if not w.get("no_sound") and id(w) not in ghost),
+        key=lambda w: (float(w.get("start", 0.0)), float(w.get("end", 0.0))),
+    )
+    sp = wdir / "speech_spans.json"
+    if sp.is_file():
+        try:
+            sdata = read_json(sp)
+            raw_sp = sdata.get("spans") if isinstance(sdata, dict) else sdata
+            out["spans"] = [
+                (float(p[0]), float(p[1]))
+                for p in (raw_sp or [])
+                if isinstance(p, (list, tuple)) and len(p) >= 2 and float(p[1]) > float(p[0])
+            ]
+        except Exception:
+            pass
+    try:
+        src_p = resolve(src)
+        if src_p.is_file():
+            out["duration"] = float(probe(src_p).get("duration") or 0.0) or None
+    except Exception:
+        pass
+    if out["duration"] is None and rms:
+        out["duration"] = max(t for t, _ in rms)
+    return out
+
+
+def _words_in_cut(words: Sequence[Dict[str, Any]], st: float, en: float) -> List[Dict[str, Any]]:
+    return [w for w in words if float(w["end"]) > st + 0.04 and float(w["start"]) < en - 0.04]
+
+
+def _seg_timed_cues(seg: Dict[str, Any], plan: Dict[str, Any]) -> List[str]:
+    """Names of segment-relative timed cues that would shift if the in-point moved."""
+    cues: List[str] = []
+    for key in ("marks", "sfx", "banners", "flashcards", "freezes", "cards"):
+        if seg.get(key):
+            cues.append(key)
+    for key in ("zoom_at", "audio_end", "hold_src", "hold_span", "hold_start", "hold_tail", "hold"):
+        if seg.get(key) not in (None, "", 0, 0.0, False):
+            cues.append(key)
+    sid = str(seg.get("id") or "")
+    if any(str(m.get("segment")) == sid for m in (plan.get("marks") or []) if isinstance(m, dict)):
+        cues.append("marks")
+    return cues
+
+
+def _speaker_face_usable(faces: Sequence[Dict[str, Any]]) -> bool:
+    """A speaker panel shows a usable face: confident YuNet hit at talking-head size (not a speck in a wide shot)."""
+    for f in faces or []:
+        try:
+            bb = f.get("bbox_norm")
+            if not bb or float(f.get("confidence", 0.0)) < SPEAKER_FACE_MIN_CONF:
+                continue
+            if float(bb[3]) - float(bb[1]) >= SPEAKER_FACE_MIN_H:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _speaker_face_findings(
+    seg: Dict[str, Any],
+    speaker: str,
+    panel: str,
+    samples: Sequence[Tuple[float, bool]],
+    t0: float,
+    dur: float,
+    plan: Dict[str, Any],
+    speech_cache: Dict[str, Any],
+) -> Tuple[List[str], List[str]]:
+    """Classify faceless runs in the speaker's own split panel.
+
+    A run counts when >= 2 consecutive samples (0.25 s grid) show no usable face.
+    BLOCK only when the run sits wholly in the cut's leading lead-in (before the first word) or trailing
+    tail (after the last word + 0.06 s) and lasts >= 0.50 s: trimming the in/out point is a deterministic,
+    face-visible fix that keeps every word. Faceless runs while the speaker talks have no in-cut
+    alternative, so they are WARNINGS (another take/clip may be needed).
+    """
+    blocks: List[str] = []
+    warns: List[str] = []
+    if len(samples) < 2:
+        return blocks, warns
+    runs: List[List[float]] = []
+    cur: List[float] = []
+    for t_s, ok_s in samples:
+        if not ok_s and (not cur or t_s - cur[-1] <= FRAME_STEP_SEC + 0.13):
+            cur.append(t_s)
+            continue
+        if cur:
+            runs.append(cur)
+        cur = [t_s] if not ok_s else []
+    if cur:
+        runs.append(cur)
+    runs = [r for r in runs if len(r) >= 2]
+    if not runs:
+        return blocks, warns
+
+    sid = str(seg.get("id") or "")
+    st, en = float(seg.get("start", 0.0) or 0.0), float(seg.get("end", 0.0) or 0.0)
+    key = str(seg.get("src", ""))
+    if key not in speech_cache:
+        speech_cache[key] = _clip_speech_data(seg.get("src", ""), plan)
+    live = _words_in_cut(speech_cache[key]["words"], st, en)
+    fw = float(live[0]["start"]) if live else None
+    lw = float(live[-1]["end"]) if live else None
+    fw_rel = _src_to_seg_time(seg, fw) if fw is not None else None
+    lw_rel = _src_to_seg_time(seg, lw) if lw is not None else None
+    first_t, last_t = samples[0][0], samples[-1][0]
+    clip = Path(str(seg.get("src", ""))).name
+    timed_tail = bool(seg.get("audio_end") is not None or _segment_hold_tail(seg) > 0.01)
+    for r in runs:
+        r0 = r[0]
+        r1 = min(dur, r[-1] + FRAME_STEP_SEC)
+        length = r1 - r0
+        where = (
+            f"{sid} {panel} panel ({speaker}): no usable face for {length:.2f}s at {t0 + r0:.2f}-{t0 + r1:.2f}s "
+            f"(src {_seg_to_src_time(seg, r0):.2f}-{_seg_to_src_time(seg, r1):.2f}s of {clip})"
+        )
+        leading = r0 <= first_t + 1e-6 and fw_rel is not None and r[-1] < fw_rel - 0.02
+        trailing = (
+            r[-1] >= last_t - 1e-6 and lw_rel is not None and r0 > lw_rel + FINAL_TAIL_MIN_SEC and not timed_tail
+        )
+        if leading and length >= 0.50:
+            new_in = math.floor((fw - LEAD_CUSHION_SEC) * 100.0 + 1e-9) / 100.0
+            blocks.append(f"{where} before the first word ({fw:.2f}s); start the cut at {max(st, new_in):.2f}")
+        elif trailing and length >= 0.50:
+            new_out = math.ceil((lw + 0.08) * 100.0 - 1e-9) / 100.0
+            blocks.append(f"{where} after the last word ({lw:.2f}s); end the cut at {min(en, new_out):.2f}")
+        elif leading or trailing:
+            warns.append(f"{where} outside speech; tighten the {'in' if leading else 'out'}-point")
+        else:
+            warns.append(
+                f"{where} while {speaker} speaks; no face-visible alternative inside this cut "
+                "(use another take/clip if one exists)"
+            )
+    return blocks, warns
+
+
+def check_layout_vs_format(plan: Dict[str, Any], plan_dir: Optional[Path] = None) -> Tuple[bool, List[str], str]:
+    """Hard-block split layouts only when the DECLARED format's catalog card explicitly forbids them.
+
+    The declared format is line 1 of `script_analysis.md` (`Format: <id> (...)`, parsed by
+    `script_order.plan_edit_format`). A format forbids splits only when BOTH its registry `layouts`
+    list has no split layout AND its catalog card says "never ... split_h/split_v" (today:
+    `live_conversation`, `story_pitch`). Lines recorded as `accept <id> ...` in decisions.txt pass.
+    Returns (ok, offending ids, message).
+    """
+    pdir = Path(plan_dir) if plan_dir else (Path(str(plan["_plan_dir"])) if plan.get("_plan_dir") else None)
+    if pdir is None or not (pdir / "script_analysis.md").is_file():
+        return True, [], ""
+    try:
+        import script_order
+
+        fmt = script_order.plan_edit_format(pdir)
+    except Exception:
+        fmt = None
+    if not isinstance(fmt, dict):
+        return True, [], ""
+    allowed = {str(x).strip().lower() for x in (fmt.get("layouts") or [])}
+    if not allowed or allowed & _SPLIT_LAYOUTS:
+        return True, [], ""
+    cat_rel = str(fmt.get("catalog_file") or "")
+    cat_path = ROOT / cat_rel if cat_rel else None
+    try:
+        cat_text = cat_path.read_text(encoding="utf-8", errors="replace") if cat_path and cat_path.is_file() else ""
+    except Exception:
+        cat_text = ""
+    if not re.search(r"\bnever\b[^\n]*split_(?:h|v)", cat_text, flags=re.IGNORECASE):
+        return True, [], ""
+    plan_for_acc = dict(plan)
+    plan_for_acc.setdefault("_plan_dir", str(pdir))
+    accepted = _read_accepted_decisions(plan_for_acc)
+    bad: List[str] = []
+    for seg in plan.get("segments") or []:
+        if not isinstance(seg, dict):
+            continue
+        lay = _norm_layout(seg)
+        if lay not in _SPLIT_LAYOUTS:
+            continue
+        sid = str(seg.get("id") or "")
+        if sid in accepted or _seg_line_id(sid) in accepted:
+            continue
+        bad.append(f"{sid} {lay}")
+    if not bad:
+        return True, [], ""
+    fid = str(fmt.get("id"))
+    msg = (
+        f"[LAYOUT FAIL] Declared format `{fid}` never uses split screens ({cat_rel}: "
+        f"allowed layouts {', '.join(sorted(allowed))}), but {len(bad)} cut(s) do: {', '.join(bad)}. "
+        "Fix every listed line in one plan.edl edit: set layout=single (full-frame) and drop slot=/peer= "
+        "(keep sp=, in/out, focus). Only if the script itself explicitly asks for a split on a line, "
+        "record `accept <id> scripted split` in decisions.txt."
+    )
+    return False, bad, msg
+
+
+def leading_dead_air(plan: Dict[str, Any], speech_cache: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Measure silent/noisy lead before the first spoken word of the opening cut.
+
+    Uses aligned word starts (robust to engine/wind noise that defeats the RMS join tightener).
+    Returns None when the opening is fine or cannot be measured; otherwise a dict with
+    `seg`, `lead`, `first_word`, `new_start`, `can_trim` and `reason`.
+    """
+    segs = [s for s in (plan.get("segments") or []) if isinstance(s, dict)]
+    if not segs:
+        return None
+    seg = segs[0]
+    if _segment_is_muted(seg) or _segment_is_beat(seg) or abs(_segment_speed(seg) - 1.0) > 1e-4:
+        return None
+    try:
+        st, en = float(seg["start"]), float(seg["end"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    cache = speech_cache if speech_cache is not None else {}
+    key = str(seg.get("src", ""))
+    if key not in cache:
+        cache[key] = _clip_speech_data(seg.get("src", ""), plan)
+    data = cache[key]
+    live = _words_in_cut(data["words"], st, en)
+    if not live:
+        return None
+    fw = float(live[0]["start"])
+    lead = fw - st
+    if lead < LEAD_DEAD_AIR_SEC:
+        return None
+    new_start = math.floor((fw - LEAD_CUSHION_SEC) * 100.0 + 1e-9) / 100.0
+    # Never start after the VAD onset of the span carrying the first word.
+    for a, b in data["spans"]:
+        if a <= fw + 0.02 and b >= fw and a >= fw - 0.30:
+            new_start = min(new_start, math.floor(max(st, a - 0.01) * 100.0 + 1e-9) / 100.0)
+            break
+    info: Dict[str, Any] = {
+        "seg": seg,
+        "id": str(seg.get("id") or "S1"),
+        "lead": round(lead, 2),
+        "first_word": round(fw, 3),
+        "new_start": round(max(st, new_start), 2),
+        "can_trim": True,
+        "reason": "",
+    }
+    # Untranscribed speech before the first aligned word (VAD voiced >= 0.15 s) -> never auto-trim.
+    voiced_before = sum(
+        max(0.0, min(b, fw - 0.12) - max(a, st)) for a, b in data["spans"]
+    )
+    cues = _seg_timed_cues(seg, plan)
+    if voiced_before >= 0.15:
+        info["can_trim"] = False
+        info["reason"] = f"{voiced_before:.2f}s of voiced audio before the first aligned word (possible untranscribed speech)"
+    elif cues:
+        info["can_trim"] = False
+        info["reason"] = "timed cues on the cut (" + ", ".join(sorted(set(cues))) + ") would shift"
+    elif info["new_start"] >= en - 0.15:
+        info["can_trim"] = False
+        info["reason"] = "trim would leave too short a cut"
+    return info
+
+
+def trim_leading_dead_air(plan: Dict[str, Any], plan_path: Optional[Path] = None) -> str:
+    """Auto-trim the opening cut to first word - 0.05 s when it carries >= 0.50 s of dead air.
+
+    Only safe, deterministic cases are trimmed (spoken 1x opening cut, no timed cues, no voiced audio
+    before the first aligned word). The split `peer` listener advances by the same amount, exactly like
+    the join tightener's head trim. Writes the plan back to `plan.edl` so render and Deep QC agree.
+    Returns a one-line console note ("" when nothing changed).
+    """
+    added_dir = plan_path is not None and "_plan_dir" not in plan
+    if added_dir:
+        plan["_plan_dir"] = str(Path(plan_path).parent)
+    try:
+        info = leading_dead_air(plan)
+    finally:
+        if added_dir:
+            plan.pop("_plan_dir", None)
+    if not info:
+        return ""
+    sid = info["id"]
+    if not info["can_trim"]:
+        return (
+            f"[OPENING WARN] {sid}: {info['lead']:.2f}s before the first word ({info['first_word']:.2f}s) was not "
+            f"auto-trimmed: {info['reason']}. Start the cut at {info['new_start']:.2f} if that lead is dead air."
+        )
+    seg = info["seg"]
+    old_start = float(seg["start"])
+    dt = round(info["new_start"] - old_start, 4)
+    if dt <= 0.005:
+        return ""
+    seg["start"] = info["new_start"]
+    peer = seg.get("peer")
+    if isinstance(peer, dict):
+        if peer.get("start") is not None and peer.get("end") is not None:
+            try:
+                p_start = round(float(peer["start"]) + dt, 2)
+                if p_start < float(peer["end"]) - 0.08:
+                    peer["start"] = p_start
+            except (TypeError, ValueError):
+                pass
+        ispan = peer.get("idle_span")
+        if isinstance(ispan, (list, tuple)) and len(ispan) >= 2:
+            try:
+                ip0, ip1 = float(ispan[0]), float(ispan[1])
+                ip0_new = round(ip0 + dt, 2)
+                if ip0_new < ip1 - 0.08:
+                    peer["idle_span"] = [ip0_new, round(ip1, 3)]
+            except (TypeError, ValueError):
+                pass
+    if plan_path is not None and Path(plan_path).suffix.lower() == ".edl" and edl_parser is not None:
+        try:
+            clean_plan = {k: v for k, v in plan.items() if not str(k).startswith("_")}
+            Path(plan_path).write_text(edl_parser.format_edl(clean_plan), encoding="utf-8")
+        except Exception:
+            pass
+    return (
+        f"[SNAP] Opening dead air trimmed: {sid} in {old_start:.2f} -> {info['new_start']:.2f} "
+        f"({info['lead']:.2f}s before the first word at {info['first_word']:.2f}s)."
+    )
+
+
+def check_opening_and_tail(plan: Dict[str, Any]) -> List[str]:
+    """Warnings only: >= 0.50 s dead air before the opening word, and < 0.06 s after the final word."""
+    notes: List[str] = []
+    cache: Dict[str, Any] = {}
+    lead = leading_dead_air(plan, cache)
+    if lead:
+        notes.append(
+            f"OPENING: {lead['id']} starts {lead['lead']:.2f}s before the first word ({lead['first_word']:.2f}s); "
+            f"start the cut at {lead['new_start']:.2f}"
+            + (f" ({lead['reason']})" if lead.get("reason") else "")
+        )
+    segs = [s for s in (plan.get("segments") or []) if isinstance(s, dict)]
+    if not segs:
+        return notes
+    last = segs[-1]
+    if (
+        _segment_is_muted(last)
+        or _segment_is_beat(last)
+        or _segment_hold_tail(last) > 0.01
+        or last.get("audio_end") is not None
+        or abs(_segment_speed(last) - 1.0) > 1e-4
+    ):
+        return notes
+    try:
+        st, en = float(last["start"]), float(last["end"])
+    except (KeyError, TypeError, ValueError):
+        return notes
+    key = str(last.get("src", ""))
+    if key not in cache:
+        cache[key] = _clip_speech_data(last.get("src", ""), plan)
+    data = cache[key]
+    live = _words_in_cut(data["words"], st, en)
+    if not live:
+        return notes
+    lw = float(live[-1]["end"])
+    tail = en - lw
+    if tail >= FINAL_TAIL_MIN_SEC:
+        return notes
+    sid = str(last.get("id") or "")
+    clip_dur = data.get("duration")
+    if clip_dur and en >= float(clip_dur) - 0.03:
+        notes.append(
+            f"TAIL: {sid} final word ends {lw:.2f}s, only {max(0.0, tail):.2f}s before the end of the source clip "
+            f"({float(clip_dur):.2f}s); cannot extend past the source"
+        )
+    else:
+        notes.append(
+            f"TAIL: {sid} final word ends {lw:.2f}s, only {max(0.0, tail):.2f}s before the out-point; "
+            f"end the cut at {math.ceil((lw + 0.08) * 100.0 - 1e-9) / 100.0:.2f}"
+        )
+    return notes
+
+
 def run_verification(
     plan_path: str | Path,
     script_path: Optional[str | Path] = None,
@@ -3938,6 +4422,15 @@ def run_verification(
         cuts_res = check_cuts_and_pauses(plan, mp4_path=out_mp4)
         script_res = check_script_coverage(plan, script_path=resolved_script)
         return cuts_res, script_res
+
+    try:
+        layout_ok, _layout_bad, layout_msg = check_layout_vs_format(plan, p_file.parent)
+    except Exception:
+        layout_ok, layout_msg = True, ""
+    try:
+        edge_notes = check_opening_and_tail(plan)
+    except Exception:
+        edge_notes = []
 
     def _task_marks_review() -> Tuple[Tuple[bool, int, int, List[str], int], Any]:
         mk_res = verify_marks_and_build_contact_sheet(
@@ -4075,6 +4568,11 @@ def run_verification(
         f"({', '.join(m_details)}) -> {rel_sheet} ({sheet_kb} KB)"
     )
     print(f"[SPLIT  {'PASS' if split_hook_ok else 'FAIL'}] {split_hook_summary}")
+    if not layout_ok:
+        print(layout_msg)
+    for en_note in edge_notes:
+        tag = "[OPENING WARN]" if en_note.startswith("OPENING") else "[TAIL   WARN]"
+        print(f"{tag} {en_note.split(': ', 1)[-1]}")
     if cards_summary != "none" or not cards_ok:
         print(f"[CARDS  {'PASS' if cards_ok else 'FAIL'}] {cards_summary}")
     if is_subs_enabled(plan) or not subs_ok:
@@ -4097,6 +4595,8 @@ def run_verification(
     )
     if frames.get("lingering_banners"):
         detail += f", {len(frames['lingering_banners'])} lingering banner(s)"
+    if frames.get("speaker_face"):
+        detail += f", {len(frames['speaker_face'])} speaker panel(s) without a face"
     print(f"[FRAMES {'PASS' if frames['ok'] else 'FAIL'}] {frames['note'] or detail}")
     for kind, lines_list in (
         ("BLACK", frames["black"]),
@@ -4110,6 +4610,11 @@ def run_verification(
     ):
         for ln in lines_list[:4]:
             print(f"          {kind}: {ln}")
+    # Speaker-face findings: list EVERY offending cut so all can be fixed in one plan.edl edit.
+    for ln in frames.get("speaker_face", []):
+        print(f"          SPEAKER FACE: {ln}")
+    for ln in frames.get("speaker_face_warnings", []):
+        print(f"          SPEAKER FACE (warning): {ln}")
     try:
         import events
 
@@ -4129,6 +4634,8 @@ def run_verification(
             ev_list.append(("Subtitles", subs_ok, subs_summary))
         if has_square:
             ev_list.append(("Square 1:1", sq_ok, sq_summary))
+        if not layout_ok:
+            ev_list.append(("Layout vs format", False, layout_msg[:200]))
         for _tag, _ok, _txt in ev_list:
             events.emit("verify", f"{_tag}: {'pass' if _ok else 'FAIL'}, {_txt}", ok=bool(_ok), tag=_tag)
     except Exception:
@@ -4150,6 +4657,7 @@ def run_verification(
         and pic_ok
         and frames["ok"]
         and sq_ok
+        and layout_ok
     )
 
 

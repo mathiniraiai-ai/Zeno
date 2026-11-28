@@ -1440,6 +1440,32 @@ def _main_with_queue(_render_q_stack: contextlib.ExitStack) -> None:
         return
 
     plan_path, plan = _load_plan(a.plan)
+    if verify is not None and plan_path.suffix.lower() == ".edl":
+        # Fail fast (before any encode) when the declared format's catalog forbids split screens.
+        if a.verify and hasattr(verify, "check_layout_vs_format"):
+            try:
+                _lay_ok, _lay_bad, _lay_msg = verify.check_layout_vs_format(plan, plan_path.parent)
+            except Exception:
+                _lay_ok, _lay_msg = True, ""
+            if not _lay_ok:
+                print(_lay_msg, flush=True)
+                try:
+                    (plan_path.parent / "verify_report.json").write_text(
+                        json.dumps({"ok": False, "text": _lay_msg + "\n"}, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                except Exception:
+                    pass
+                sys.exit(1)
+        # Opening dead air hidden by engine/wind noise (RMS cannot see it): trim to first word - 0.05 s.
+        _segs0 = plan.get("segments") or []
+        if _segs0 and hasattr(verify, "trim_leading_dead_air") and resolve(_segs0[0].get("src", "")).is_file():
+            try:
+                _open_note = verify.trim_leading_dead_air(plan, plan_path)
+            except Exception:
+                _open_note = ""
+            if _open_note:
+                print(_open_note, flush=True)
     if a.preset:
         plan["preset"] = a.preset
         if a.preset not in ("auto", "hybrid"):
